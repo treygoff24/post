@@ -21,13 +21,28 @@ pub fn run(
 
 fn run_with_body<F>(
     context: &Context,
-    mut args: SendArgs,
+    args: SendArgs,
     json_output: bool,
     pretty: bool,
     read_body: F,
 ) -> AppResult<CommandResult>
 where
     F: FnOnce(Option<String>, Option<&std::path::Path>) -> AppResult<String>,
+{
+    run_with_body_and_id(context, args, json_output, pretty, read_body, new_mail_id)
+}
+
+fn run_with_body_and_id<F, G>(
+    context: &Context,
+    mut args: SendArgs,
+    json_output: bool,
+    pretty: bool,
+    read_body: F,
+    mut next_id: G,
+) -> AppResult<CommandResult>
+where
+    F: FnOnce(Option<String>, Option<&std::path::Path>) -> AppResult<String>,
+    G: FnMut(&str, u64) -> AppResult<String>,
 {
     let rooms = context.load_rooms()?;
     let sender = match args.sender {
@@ -71,31 +86,12 @@ where
         .detail("reason", "empty or whitespace-only"));
     }
 
-    let rules = context.load_rules(&rooms)?;
-    if let Some(rule) = rules.blocked.iter().find(|rule| {
-        (rule.from == "*" || rule.from == sender) && (rule.to == "*" || rule.to == args.to)
-    }) {
-        return Err(AppError::new(
-            ErrorCode::BlockedRoute,
-            format!("route {sender} -> {} is blocked: {}", args.to, rule.reason),
-            "Do not route around this block. Ask the human operator to review rules.json.",
-        )
-        .detail("input", format!("{sender} -> {}", args.to))
-        .detail("reason", rule.reason.clone())
-        .detail(
-            "rule",
-            json!({"from": rule.from, "to": rule.to, "reason": rule.reason}),
-        ));
-    }
-
     let (id_timestamp, sent) = local_timestamp()?;
     let archive = context.root.join("archive");
-    fs::create_dir_all(&archive)
-        .map_err(|error| AppError::io("create archive directory", &archive, error))?;
-    let (inbox, _) = context.mailbox_dirs(&args.to)?;
+    let mut inbox = None;
     let mut delivered = None;
     for attempt in 0..256 {
-        let id = new_mail_id(&id_timestamp, attempt)?;
+        let id = next_id(&id_timestamp, attempt)?;
         let envelope = Envelope {
             id: id.clone(),
             from: sender.clone(),
@@ -106,29 +102,37 @@ where
         };
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;
+        if inbox.is_none() {
+            ensure_route_allowed(context, &rooms, &sender, &args.to)?;
+            fs::create_dir_all(&archive)
+                .map_err(|error| AppError::io("create archive directory", &archive, error))?;
+            inbox = Some(context.mailbox_dirs(&args.to)?.0);
+        }
+        let inbox = inbox.as_ref().expect("mailbox was initialized");
         let archive_path = archive.join(format!("{id}.mail"));
         let inbox_path = inbox.join(format!("{id}.mail"));
-        match exclusive_atomic_write(&archive_path, &payload) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(AppError::io(
-                    "exclusively write archive mail",
-                    &archive_path,
-                    error,
-                ));
-            }
-        }
+        ensure_route_allowed(context, &rooms, &sender, &args.to)?;
         match exclusive_atomic_write(&inbox_path, &payload) {
-            Ok(()) => {
-                delivered = Some(envelope);
-                break;
-            }
+            Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(AppError::io(
                     "exclusively write inbox mail",
                     &inbox_path,
+                    error,
+                ));
+            }
+        }
+        match exclusive_atomic_write(&archive_path, &payload) {
+            Ok(()) => {
+                delivered = Some(envelope);
+                break;
+            }
+            Err(error) => {
+                return Err(AppError::delivered_unarchived(
+                    &id,
+                    &inbox_path,
+                    &archive_path,
                     error,
                 ));
             }
@@ -158,6 +162,31 @@ where
         )
     };
     Ok(CommandResult::committed(rendered))
+}
+
+fn ensure_route_allowed(
+    context: &Context,
+    rooms: &std::collections::BTreeMap<String, String>,
+    sender: &str,
+    recipient: &str,
+) -> AppResult<()> {
+    let rules = context.load_rules(rooms)?;
+    let Some(rule) = rules.blocked.iter().find(|rule| {
+        (rule.from == "*" || rule.from == sender) && (rule.to == "*" || rule.to == recipient)
+    }) else {
+        return Ok(());
+    };
+    Err(AppError::new(
+        ErrorCode::BlockedRoute,
+        format!("route {sender} -> {recipient} is blocked: {}", rule.reason),
+        "Do not route around this block. Ask the human operator to review rules.json.",
+    )
+    .detail("input", format!("{sender} -> {recipient}"))
+    .detail("reason", rule.reason.clone())
+    .detail(
+        "rule",
+        json!({"from": rule.from, "to": rule.to, "reason": rule.reason}),
+    ))
 }
 
 fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<String> {
@@ -197,7 +226,7 @@ fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<
 
 #[cfg(test)]
 mod tests {
-    use super::run_with_body;
+    use super::{run_with_body, run_with_body_and_id};
     use crate::cli::{MailKind, SendArgs};
     use crate::{Context, DEFAULT_ROOMS_JSON};
     use std::fs;
@@ -250,5 +279,61 @@ mod tests {
             .status()
             .expect("run recoverable test cleanup");
         assert!(cleanup.success(), "trash should clean send-order root");
+    }
+
+    #[test]
+    fn inbox_id_collision_retries_before_writing_any_archive_copy() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should follow Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("post-send-collision-{nonce}"));
+        fs::create_dir_all(&root).expect("create send-collision root");
+        fs::write(root.join("rooms.json"), DEFAULT_ROOMS_JSON).expect("write rooms config");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules config");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let (inbox, _) = context
+            .mailbox_dirs("claude-space")
+            .expect("create recipient mailbox");
+        let collision_id = "20260715-120000-aaaaaa";
+        let fresh_id = "20260715-120000-bbbbbb";
+        fs::write(inbox.join(format!("{collision_id}.mail")), "existing mail")
+            .expect("create colliding inbox mail");
+        let mut ids = [collision_id, fresh_id].into_iter();
+
+        let result = run_with_body_and_id(
+            &context,
+            SendArgs {
+                to: "claude-space".to_owned(),
+                sender: Some("collision-test".to_owned()),
+                kind: MailKind::Note,
+                subject: String::new(),
+                body: Some("new mail".to_owned()),
+                file: None,
+            },
+            false,
+            false,
+            |body, _| Ok(body.expect("inline body")),
+            |_, _| Ok(ids.next().expect("test provides two ids").to_owned()),
+        )
+        .expect("send should retry the colliding id");
+
+        assert!(result.stdout.contains(fresh_id));
+        assert_eq!(
+            fs::read_to_string(inbox.join(format!("{collision_id}.mail")))
+                .expect("read colliding inbox mail"),
+            "existing mail"
+        );
+        assert!(!root.join(format!("archive/{collision_id}.mail")).exists());
+        assert!(inbox.join(format!("{fresh_id}.mail")).is_file());
+        assert!(root.join(format!("archive/{fresh_id}.mail")).is_file());
+        let cleanup = std::process::Command::new("trash")
+            .arg(&root)
+            .status()
+            .expect("run recoverable test cleanup");
+        assert!(cleanup.success(), "trash should clean collision root");
     }
 }

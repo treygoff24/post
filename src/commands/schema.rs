@@ -9,7 +9,7 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
             "send",
             "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--body <text> | FILE | stdin]",
             "text; JSON with --json",
-            "atomically writes archive/<id>.mail then <room>/inbox/<id>.mail",
+            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail",
         ),
         command(
             "inbox",
@@ -49,7 +49,7 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
     );
     output_shapes.insert(
         "inbox".to_owned(),
-        fields(&["ok", "room", "unread", "count"]),
+        fields(&["ok", "room", "unread", "count", "skipped_unreadable"]),
     );
     output_shapes.insert(
         "read_json".to_owned(),
@@ -95,6 +95,8 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
         ("invalid_argument", 2, false),
         ("config_invalid", 78, false),
         ("io_error", 75, true),
+        ("delivered_output_failure", 70, false),
+        ("delivered_unarchived", 70, false),
     ]
     .into_iter()
     .map(|(code, exit, retryable)| ErrorSchema {
@@ -128,7 +130,7 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
             exit(2, "usage or argument error"),
             exit(65, "validation error"),
             exit(66, "message not found"),
-            exit(70, "internal invariant failure"),
+            exit(70, "non-retryable post-commit or internal failure"),
             exit(75, "retryable I/O failure"),
             exit(77, "blocked route"),
             exit(78, "invalid configuration or mail state"),

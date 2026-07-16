@@ -276,18 +276,59 @@ fn scan_mailbox_state(context: &Context, checks: &mut Vec<DoctorCheck>) {
                         false,
                         "Inspect the file and move it outside the mailbox by hand if it does not belong.",
                     ));
-                } else if let Err(error) = parse_mail(&mail_path) {
-                    checks.push(check(
-                        "state.malformed_mail",
-                        DoctorSeverity::Error,
-                        &mail_path,
-                        &error.message,
-                        false,
-                        "Restore a valid envelope/body separator or move the file aside by hand; nothing is deleted.",
-                    ));
+                } else {
+                    match parse_mail(&mail_path) {
+                        Err(error) => checks.push(check(
+                            "state.malformed_mail",
+                            DoctorSeverity::Error,
+                            &mail_path,
+                            &error.message,
+                            false,
+                            "Restore a valid envelope/body separator or move the file aside by hand; nothing is deleted.",
+                        )),
+                        Ok(_) if !is_archive => {
+                            check_archive_copy(context, &mail_path, checks)
+                        }
+                        Ok(_) => {}
+                    }
                 }
             }
         }
+    }
+}
+
+fn check_archive_copy(context: &Context, delivered: &Path, checks: &mut Vec<DoctorCheck>) {
+    let Some(filename) = delivered.file_name() else {
+        return;
+    };
+    let archive = context.root.join("archive").join(filename);
+    match fs::read(&archive) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => checks.push(check(
+            "state.archive_missing",
+            DoctorSeverity::Error,
+            &archive,
+            &format!(
+                "delivered mail '{}' has no archive copy",
+                delivered.display()
+            ),
+            false,
+            "Copy the delivered .mail file into archive with an exclusive no-replace write; do not resend it.",
+        )),
+        Ok(archive_bytes) => match fs::read(delivered) {
+            Ok(delivered_bytes) if delivered_bytes != archive_bytes => checks.push(check(
+                "state.archive_mismatch",
+                DoctorSeverity::Error,
+                &archive,
+                &format!(
+                    "archive content differs from delivered mail '{}'",
+                    delivered.display()
+                ),
+                false,
+                "Inspect both immutable copies and reconcile them by hand without deleting either one.",
+            )),
+            _ => {}
+        },
+        Err(_) => {}
     }
 }
 

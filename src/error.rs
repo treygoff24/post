@@ -17,6 +17,8 @@ pub enum ErrorCode {
     InvalidArgument,
     ConfigInvalid,
     IoError,
+    DeliveredOutputFailure,
+    DeliveredUnarchived,
 }
 
 impl ErrorCode {
@@ -31,6 +33,8 @@ impl ErrorCode {
             Self::InvalidArgument => "invalid_argument",
             Self::ConfigInvalid => "config_invalid",
             Self::IoError => "io_error",
+            Self::DeliveredOutputFailure => "delivered_output_failure",
+            Self::DeliveredUnarchived => "delivered_unarchived",
         }
     }
 }
@@ -62,6 +66,7 @@ impl AppError {
             ErrorCode::BlockedRoute => 77,
             ErrorCode::ConfigInvalid => 78,
             ErrorCode::IoError => 75,
+            ErrorCode::DeliveredOutputFailure | ErrorCode::DeliveredUnarchived => 70,
         };
         Self {
             code,
@@ -114,15 +119,34 @@ impl AppError {
 
     pub fn delivered_output_failure(source: impl std::fmt::Display) -> Self {
         let reason = source.to_string();
-        let mut error = Self::new(
-            ErrorCode::IoError,
+        Self::new(
+            ErrorCode::DeliveredOutputFailure,
             format!("mail was delivered but its receipt could not be written to stdout: {reason}"),
             "Do not resend this mail; inspect the recipient inbox or archive for the delivered message.",
         )
         .detail("operation", "write stdout after delivery")
-        .detail("reason", reason);
-        error.retryable = false;
-        error.exit_code = 70;
-        error
+        .detail("reason", reason)
+    }
+
+    pub fn delivered_unarchived(
+        id: &str,
+        inbox: &std::path::Path,
+        archive: &std::path::Path,
+        source: impl std::fmt::Display,
+    ) -> Self {
+        let reason = source.to_string();
+        Self::new(
+            ErrorCode::DeliveredUnarchived,
+            format!(
+                "mail '{id}' was delivered to '{}' but could not be archived at '{}': {reason}",
+                inbox.display(),
+                archive.display()
+            ),
+            "Do not resend this mail; run `post doctor` and reconcile the delivered and archive copies by hand.",
+        )
+        .detail("id", id)
+        .detail("inbox_path", inbox.display().to_string())
+        .detail("archive_path", archive.display().to_string())
+        .detail("reason", reason)
     }
 }

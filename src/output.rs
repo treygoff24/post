@@ -43,6 +43,7 @@ pub struct InboxOutput {
     pub room: String,
     pub unread: Vec<InboxItem>,
     pub count: usize,
+    pub skipped_unreadable: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

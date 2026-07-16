@@ -1,6 +1,6 @@
 use super::{CommandResult, Context};
 use crate::cli::InboxArgs;
-use crate::error::AppResult;
+use crate::error::{AppResult, ErrorCode};
 use crate::output::{self, InboxItem, InboxOutput};
 use crate::{mail_files, parse_mail};
 
@@ -9,9 +9,27 @@ pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<Comman
     let room = context.resolved_room(args.room, &rooms)?;
     let (inbox, _) = context.mailbox_dirs(&room)?;
     let mut unread = Vec::new();
+    let mut skipped_unreadable = 0;
     for path in mail_files(&inbox)? {
-        let Ok(mail) = parse_mail(&path) else {
-            continue;
+        let mail = match parse_mail(&path) {
+            Ok(mail) => mail,
+            Err(error) => {
+                if error.code == ErrorCode::IoError {
+                    skipped_unreadable += 1;
+                    eprintln!(
+                        "post: warning: skipped unreadable mail '{}': {}",
+                        path.display(),
+                        error.message
+                    );
+                } else {
+                    eprintln!(
+                        "post: warning: skipped malformed mail '{}': {}",
+                        path.display(),
+                        error.message
+                    );
+                }
+                continue;
+            }
         };
         unread.push(InboxItem {
             id: mail.envelope.id,
@@ -48,6 +66,7 @@ pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<Comman
         room,
         unread,
         count,
+        skipped_unreadable,
     };
     Ok(CommandResult::success(output::json(&output, pretty)?))
 }

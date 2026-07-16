@@ -10,6 +10,7 @@ use output::{BlockingRuleOutput, Envelope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -465,6 +466,16 @@ pub fn mail_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
 }
 
 pub(crate) fn exclusive_atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    exclusive_atomic_write_with(path, bytes, |temporary, parent| {
+        fs::remove_file(temporary)?;
+        File::open(parent)?.sync_all()
+    })
+}
+
+fn exclusive_atomic_write_with<F>(path: &Path, bytes: &[u8], after_commit: F) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
@@ -484,13 +495,29 @@ pub(crate) fn exclusive_atomic_write(path: &Path, bytes: &[u8]) -> std::io::Resu
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::hard_link(&temporary, path)?;
-        fs::remove_file(&temporary)?;
-        File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if let Err(source) = result {
         let _ = fs::remove_file(&temporary);
         return Err(source);
+    }
+    if let Err(error) = after_commit(&temporary, parent) {
+        eprintln!(
+            "post: warning: '{}' was committed, but temporary-file cleanup or directory sync failed: {error}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn exclusive_move(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::hard_link(source, destination)?;
+    if let Err(error) = fs::remove_file(source) {
+        eprintln!(
+            "post: warning: '{}' was committed, but removing the unread link '{}' failed: {error}",
+            destination.display(),
+            source.display()
+        );
     }
     Ok(())
 }
@@ -506,7 +533,7 @@ fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
-    let mut payload = serde_json::to_string_pretty(envelope).map_err(|error| {
+    let payload = serde_json::to_string_pretty(envelope).map_err(|error| {
         AppError::new(
             ErrorCode::IoError,
             format!(
@@ -516,9 +543,30 @@ pub fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
             "Retry the same send command; if this repeats, report `post --version`.",
         )
     })?;
+    let mut payload = ascii_escape_json(&payload);
     payload.push_str("\n---\n");
     payload.push_str(body);
     Ok(payload.into_bytes())
+}
+
+fn ascii_escape_json(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len());
+    for character in json.chars() {
+        if character.is_ascii() {
+            escaped.push(character);
+            continue;
+        }
+        let codepoint = character as u32;
+        if codepoint <= 0xffff {
+            write!(escaped, "\\u{codepoint:04x}").expect("writing to a String cannot fail");
+        } else {
+            let supplementary = codepoint - 0x1_0000;
+            let high = 0xd800 + (supplementary >> 10);
+            let low = 0xdc00 + (supplementary & 0x3ff);
+            write!(escaped, "\\u{high:04x}\\u{low:04x}").expect("writing to a String cannot fail");
+        }
+    }
+    escaped
 }
 
 pub fn local_timestamp() -> AppResult<(String, String)> {
@@ -618,11 +666,16 @@ fn levenshtein(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{exclusive_atomic_write, finish_command_result};
+    use super::{exclusive_atomic_write, exclusive_atomic_write_with, finish_command_result};
     use crate::commands::CommandResult;
     use std::fs;
     use std::io;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        fn tzset();
+    }
 
     #[test]
     fn exclusive_atomic_write_never_replaces_an_existing_mail_file() {
@@ -656,6 +709,32 @@ mod tests {
             cleanup.success(),
             "trash should clean atomic-write test root"
         );
+    }
+
+    #[test]
+    fn exclusive_atomic_write_stays_successful_after_the_commit_point() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should follow Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("post-atomic-commit-{nonce}"));
+        fs::create_dir_all(&root).expect("create atomic-write commit test root");
+        let destination = root.join("message.mail");
+
+        exclusive_atomic_write_with(&destination, b"committed mail", |_, _| {
+            Err(io::Error::other("injected post-commit cleanup failure"))
+        })
+        .expect("post-commit cleanup failure must not report publication failure");
+
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read committed mail"),
+            "committed mail"
+        );
+        let cleanup = std::process::Command::new("trash")
+            .arg(&root)
+            .status()
+            .expect("run recoverable test cleanup");
+        assert!(cleanup.success(), "trash should clean commit test root");
     }
 
     struct BrokenWriter;
@@ -700,6 +779,7 @@ mod tests {
         )
         .expect_err("broken receipt output must fail");
         assert!(!error.retryable);
+        assert_eq!(error.code, crate::error::ErrorCode::DeliveredOutputFailure);
         assert_eq!(error.exit_code, 70);
         let cleanup = std::process::Command::new("trash")
             .arg(&root)
@@ -768,5 +848,38 @@ mod tests {
             .enumerate()
             .filter(|(index, _)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 20))
             .all(|(_, byte)| byte.is_ascii_digit()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_timestamp_matches_exact_positive_and_negative_offset_fixtures() {
+        let previous_tz = std::env::var_os("TZ");
+        std::env::set_var("TZ", "Asia/Kathmandu");
+        unsafe { tzset() };
+        let kathmandu = super::format_local_timestamp(1_700_000_000);
+        std::env::set_var("TZ", "America/New_York");
+        unsafe { tzset() };
+        let new_york = super::format_local_timestamp(1_700_000_000);
+        if let Some(previous_tz) = previous_tz {
+            std::env::set_var("TZ", previous_tz);
+        } else {
+            std::env::remove_var("TZ");
+        }
+        unsafe { tzset() };
+
+        assert_eq!(
+            kathmandu.expect("format Kathmandu fixture"),
+            (
+                "20231115-035820".to_owned(),
+                "2023-11-15 03:58:20 +0545".to_owned()
+            )
+        );
+        assert_eq!(
+            new_york.expect("format New York fixture"),
+            (
+                "20231114-171320".to_owned(),
+                "2023-11-14 17:13:20 -0500".to_owned()
+            )
+        );
     }
 }
