@@ -510,16 +510,17 @@ where
     Ok(())
 }
 
-pub(crate) fn exclusive_move(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::hard_link(source, destination)?;
-    if let Err(error) = fs::remove_file(source) {
-        eprintln!(
-            "post: warning: '{}' was committed, but removing the unread link '{}' failed: {error}",
-            destination.display(),
-            source.display()
-        );
-    }
-    Ok(())
+pub(crate) enum MoveError {
+    /// The destination link was never created; nothing changed on disk.
+    Link(std::io::Error),
+    /// The destination link exists but the source link could not be removed:
+    /// the mail is now visible in both directories.
+    Unlink(std::io::Error),
+}
+
+pub(crate) fn exclusive_move(source: &Path, destination: &Path) -> Result<(), MoveError> {
+    fs::hard_link(source, destination).map_err(MoveError::Link)?;
+    fs::remove_file(source).map_err(MoveError::Unlink)
 }
 
 fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -552,7 +553,8 @@ pub fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
 fn ascii_escape_json(json: &str) -> String {
     let mut escaped = String::with_capacity(json.len());
     for character in json.chars() {
-        if character.is_ascii() {
+        // DEL is the one ASCII byte Python's ensure_ascii escaper also rewrites.
+        if character.is_ascii() && character != '\u{7f}' {
             escaped.push(character);
             continue;
         }
@@ -666,7 +668,10 @@ fn levenshtein(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{exclusive_atomic_write, exclusive_atomic_write_with, finish_command_result};
+    use super::{
+        ascii_escape_json, exclusive_atomic_write, exclusive_atomic_write_with,
+        finish_command_result,
+    };
     use crate::commands::CommandResult;
     use std::fs;
     use std::io;
@@ -675,6 +680,15 @@ mod tests {
     #[cfg(unix)]
     unsafe extern "C" {
         fn tzset();
+    }
+
+    #[test]
+    fn ascii_escape_matches_python_ensure_ascii_including_del() {
+        // python3 -c 'import json; print(json.dumps({"s": "\x7f café \U0001f600"}))'
+        assert_eq!(
+            ascii_escape_json("{\"s\": \"\u{7f} café 😀\"}"),
+            "{\"s\": \"\\u007f caf\\u00e9 \\ud83d\\ude00\"}"
+        );
     }
 
     #[test]

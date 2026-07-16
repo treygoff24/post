@@ -2,7 +2,7 @@ use super::{CommandResult, Context};
 use crate::cli::ReadArgs;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::output::{self, Framing, ReadOutput};
-use crate::{exclusive_move, mail_files, parse_mail};
+use crate::{exclusive_move, mail_files, parse_mail, MoveError};
 use serde_json::json;
 
 pub fn run(
@@ -84,28 +84,40 @@ pub fn run(
         )
     })?);
     let source = path.clone();
-    Ok(CommandResult::after_stdout(
-        rendered,
-        move || match exclusive_move(&source, &destination) {
+    Ok(CommandResult::after_stdout(rendered, move || {
+        match exclusive_move(&source, &destination) {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(AppError::new(
-                ErrorCode::IoError,
-                format!(
-                    "cannot mark mail '{}' read because '{}' already exists",
-                    mail.envelope.id,
-                    destination.display()
-                ),
-                "Run `post doctor`; resolve the duplicate without deleting either copy.",
-            )
-            .detail("input", mail.envelope.id)
-            .detail("reason", "read destination already exists")),
-            Err(error) => Err(AppError::io(
+            Err(MoveError::Link(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(AppError::new(
+                    ErrorCode::IoError,
+                    format!(
+                        "cannot mark mail '{}' read because '{}' already exists",
+                        mail.envelope.id,
+                        destination.display()
+                    ),
+                    "Run `post doctor`; resolve the duplicate without deleting either copy.",
+                )
+                .detail("input", mail.envelope.id)
+                .detail("reason", "read destination already exists"))
+            }
+            Err(MoveError::Link(error)) => Err(AppError::io(
                 "move mail from inbox to read",
                 &destination,
                 error,
             )),
-        },
-    ))
+            Err(MoveError::Unlink(error)) => Err(AppError::new(
+                ErrorCode::DeliveredOutputFailure,
+                format!(
+                    "mail '{}' was printed but could not be removed from inbox '{}': {error}; it now appears in both inbox and read",
+                    mail.envelope.id,
+                    source.display()
+                ),
+                "Do not treat the next inbox listing of this id as new mail; run `post doctor` and reconcile the duplicate links by hand.",
+            )
+            .detail("input", mail.envelope.id)
+            .detail("reason", "inbox link removal failed after read link was committed")),
+        }
+    }))
 }
 
 fn render_text(envelope: &crate::output::Envelope, body: &str) -> String {

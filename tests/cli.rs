@@ -448,6 +448,39 @@ fn read_collision_preserves_both_unread_and_read_copies() {
 }
 
 #[test]
+fn read_reports_delivered_state_when_inbox_unlink_fails() {
+    let sandbox = Sandbox::new();
+    let sent = sandbox.send_json("unlink failure", "delivered body");
+    let inbox_dir = sandbox.mail_root.join("claude-space/inbox");
+    let inbox = inbox_dir.join(format!("{}.mail", sent.envelope.id));
+    let read = sandbox
+        .mail_root
+        .join("claude-space/read")
+        .join(format!("{}.mail", sent.envelope.id));
+    fs::set_permissions(&inbox_dir, fs::Permissions::from_mode(0o500))
+        .expect("make inbox dir non-writable");
+
+    let output = sandbox.run(&[
+        "read",
+        &sent.envelope.id,
+        "--room",
+        "claude-space",
+        "--json",
+    ]);
+
+    fs::set_permissions(&inbox_dir, fs::Permissions::from_mode(0o700))
+        .expect("restore inbox dir permissions");
+    assert_eq!(output.status.code(), Some(70));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(!error.error.retryable);
+    assert!(error.error.message.contains("both inbox and read"));
+    let delivered: ReadOutput = from_stdout(&output);
+    assert_eq!(delivered.body, "delivered body");
+    assert!(inbox.exists(), "inbox link remains");
+    assert!(read.exists(), "read link was committed");
+}
+
+#[test]
 fn id_prefixes_resolve_uniquely_and_ambiguity_lists_matches() {
     let sandbox = Sandbox::new();
     assert_success(&sandbox.run(&["rooms"]));
