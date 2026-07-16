@@ -20,19 +20,17 @@ pub fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<Comma
                 suggested_fix: error.suggested_fix,
             }];
             let output = report(context, checks, fixed);
-            return Ok(CommandResult {
-                stdout: output::json(&output, pretty)?,
-                exit_code: 3,
-            });
+            let mut result = CommandResult::success(output::json(&output, pretty)?);
+            result.exit_code = 3;
+            return Ok(result);
         }
     }
     let checks = detect(context);
     let output = report(context, checks, fixed);
     let exit_code = if output.count == 0 { 0 } else { 1 };
-    Ok(CommandResult {
-        stdout: output::json(&output, pretty)?,
-        exit_code,
-    })
+    let mut result = CommandResult::success(output::json(&output, pretty)?);
+    result.exit_code = exit_code;
+    Ok(result)
 }
 
 fn report(context: &Context, checks: Vec<DoctorCheck>, fixed: Vec<String>) -> DoctorOutput {

@@ -12,6 +12,8 @@ use crate::Context;
 pub struct CommandResult {
     pub stdout: String,
     pub exit_code: i32,
+    pub delivery_committed: bool,
+    pub after_stdout: Option<Box<dyn FnOnce() -> AppResult<()>>>,
 }
 
 impl CommandResult {
@@ -19,6 +21,22 @@ impl CommandResult {
         Self {
             stdout,
             exit_code: 0,
+            delivery_committed: false,
+            after_stdout: None,
+        }
+    }
+
+    pub fn committed(stdout: String) -> Self {
+        Self {
+            delivery_committed: true,
+            ..Self::success(stdout)
+        }
+    }
+
+    pub fn after_stdout(stdout: String, action: impl FnOnce() -> AppResult<()> + 'static) -> Self {
+        Self {
+            after_stdout: Some(Box::new(action)),
+            ..Self::success(stdout)
         }
     }
 }

@@ -13,7 +13,6 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -113,11 +112,16 @@ impl Context {
 
     pub fn write_default_if_missing(&self, name: &str, contents: &str) -> AppResult<bool> {
         let path = self.root.join(name);
-        if path.exists() {
-            return Ok(false);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::io("inspect default config path", &path, error)),
         }
-        atomic_write(&path, contents.as_bytes())?;
-        Ok(true)
+        match create_new_file(&path, contents.as_bytes()) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(AppError::io("create default config file", &path, error)),
+        }
     }
 
     pub fn load_rooms(&self) -> AppResult<BTreeMap<String, String>> {
@@ -327,10 +331,9 @@ where
     };
     let pretty = cli.pretty;
     match commands::execute(cli) {
-        Ok(result) => match output::write_stdout(&result.stdout) {
-            Ok(()) => result.exit_code,
-            Err(source) => {
-                let error = AppError::io("write stdout", Path::new("<stdout>"), source);
+        Ok(result) => match finish_command_result(result, &mut std::io::stdout().lock()) {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
                 output::write_error(&error, pretty);
                 error.exit_code
             }
@@ -340,6 +343,26 @@ where
             error.exit_code
         }
     }
+}
+
+fn finish_command_result<W: Write>(
+    mut result: commands::CommandResult,
+    stdout: &mut W,
+) -> AppResult<i32> {
+    stdout
+        .write_all(result.stdout.as_bytes())
+        .and_then(|_| stdout.flush())
+        .map_err(|source| {
+            if result.delivery_committed {
+                AppError::delivered_output_failure(source)
+            } else {
+                AppError::io("write stdout", Path::new("<stdout>"), source)
+            }
+        })?;
+    if let Some(action) = result.after_stdout.take() {
+        action()?;
+    }
+    Ok(result.exit_code)
 }
 
 pub fn validate_component(value: &str) -> Result<(), String> {
@@ -441,29 +464,15 @@ pub fn mail_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
+pub(crate) fn exclusive_atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        AppError::new(
-            ErrorCode::IoError,
-            format!(
-                "cannot atomically write '{}': path has no parent",
-                path.display()
-            ),
-            "Pass a path inside an existing directory and retry.",
-        )
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| {
-            AppError::new(
-                ErrorCode::IoError,
-                format!(
-                    "cannot atomically write '{}': filename is not UTF-8",
-                    path.display()
-                ),
-                "Use a UTF-8 filename and retry.",
-            )
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename is not UTF-8")
         })?;
     let nonce = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), nonce));
@@ -474,15 +483,26 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
             .open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)?;
+        fs::hard_link(&temporary, path)?;
+        fs::remove_file(&temporary)?;
         File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if let Err(source) = result {
         let _ = fs::remove_file(&temporary);
-        return Err(AppError::io("atomically write file", path, source));
+        return Err(source);
     }
     Ok(())
+}
+
+fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    File::open(parent)?.sync_all()
 }
 
 pub fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
@@ -502,39 +522,59 @@ pub fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
 }
 
 pub fn local_timestamp() -> AppResult<(String, String)> {
-    let output = ProcessCommand::new("date")
-        .arg("+%Y%m%d-%H%M%S|%Y-%m-%d %H:%M:%S %z")
-        .output()
-        .map_err(|error| AppError::io("run local `date` command", Path::new("date"), error))?;
-    if !output.status.success() {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            AppError::new(
+                ErrorCode::IoError,
+                format!("system clock is before the Unix epoch: {error}"),
+                "Correct the system clock and retry the send command.",
+            )
+        })?
+        .as_secs();
+    format_local_timestamp(seconds)
+}
+
+fn format_local_timestamp(seconds: u64) -> AppResult<(String, String)> {
+    let seconds = libc::time_t::try_from(seconds).map_err(|_| {
+        AppError::new(
+            ErrorCode::IoError,
+            "system time cannot be represented by the local clock",
+            "Correct the system clock and retry the send command.",
+        )
+    })?;
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&seconds, &mut local) }.is_null() {
         return Err(AppError::new(
             ErrorCode::IoError,
-            format!("local `date` command failed with status {}", output.status),
-            "Ensure the system `date` command is on PATH, then retry the same send command.",
-        )
-        .detail("input", "date")
-        .detail("reason", output.status.to_string()));
+            "local time conversion failed",
+            "Correct the system timezone configuration and retry the send command.",
+        ));
     }
-    let rendered = String::from_utf8(output.stdout).map_err(|error| {
-        AppError::new(
-            ErrorCode::IoError,
-            format!("local `date` command returned non-UTF-8 output: {error}"),
-            "Use a system `date` implementation that emits UTF-8 and retry.",
-        )
-    })?;
-    let (id_time, sent) = rendered.trim().split_once('|').ok_or_else(|| {
-        AppError::new(
-            ErrorCode::IoError,
-            format!(
-                "local `date` output '{}' did not contain the expected separator",
-                rendered.trim()
-            ),
-            "Ensure the system `date` command supports '+FORMAT', then retry.",
-        )
-        .detail("input", rendered.trim())
-        .detail("reason", "missing '|' separator")
-    })?;
-    Ok((id_time.to_owned(), sent.to_owned()))
+    let offset = local.tm_gmtoff;
+    let sign = if offset < 0 { '-' } else { '+' };
+    let offset = offset.unsigned_abs();
+    let id_time = format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        local.tm_year + 1900,
+        local.tm_mon + 1,
+        local.tm_mday,
+        local.tm_hour,
+        local.tm_min,
+        local.tm_sec
+    );
+    let sent = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {sign}{:02}{:02}",
+        local.tm_year + 1900,
+        local.tm_mon + 1,
+        local.tm_mday,
+        local.tm_hour,
+        local.tm_min,
+        local.tm_sec,
+        offset / 3600,
+        (offset % 3600) / 60
+    );
+    Ok((id_time, sent))
 }
 
 pub fn new_mail_id(timestamp: &str, attempt: u64) -> AppResult<String> {
@@ -578,12 +618,14 @@ fn levenshtein(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::atomic_write;
+    use super::{exclusive_atomic_write, finish_command_result};
+    use crate::commands::CommandResult;
     use std::fs;
+    use std::io;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn atomic_write_failure_leaves_no_temporary_or_partial_file() {
+    fn exclusive_atomic_write_never_replaces_an_existing_mail_file() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("test clock should follow Unix epoch")
@@ -591,12 +633,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("post-atomic-{nonce}"));
         fs::create_dir_all(&root).expect("create atomic-write test root");
         let destination = root.join("message.mail");
-        fs::create_dir(&destination).expect("create rename-blocking destination directory");
+        fs::write(&destination, "original mail").expect("create collision fixture");
 
-        let error = atomic_write(&destination, b"partial data")
-            .expect_err("renaming a file over a directory must fail");
+        let error = exclusive_atomic_write(&destination, b"replacement")
+            .expect_err("exclusive publication must reject an existing mail file");
 
-        assert_eq!(error.code.as_str(), "io_error");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read collision fixture"),
+            "original mail"
+        );
         let entries: Vec<_> = fs::read_dir(&root)
             .expect("list atomic-write test root")
             .map(|entry| entry.expect("read test entry").file_name())
@@ -610,5 +656,117 @@ mod tests {
             cleanup.success(),
             "trash should clean atomic-write test root"
         );
+    }
+
+    struct BrokenWriter;
+
+    impl io::Write for BrokenWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "broken test pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stdout_failure_leaves_read_mail_unmoved_and_delivered_send_nonretryable() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should follow Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("post-stdout-{nonce}"));
+        fs::create_dir_all(&root).expect("create stdout test root");
+        let inbox = root.join("inbox.mail");
+        fs::write(&inbox, "mail").expect("create unread mail");
+        let read = root.join("read.mail");
+        let result = CommandResult::after_stdout("mail\n".to_owned(), move || {
+            fs::rename(&inbox, &read)
+                .map_err(|error| crate::error::AppError::io("mark read", &read, error))
+        });
+        let error = finish_command_result(result, &mut BrokenWriter)
+            .expect_err("broken stdout must stop the read rename");
+        assert!(root.join("inbox.mail").exists());
+        assert!(!root.join("read.mail").exists());
+        assert!(error.retryable);
+
+        let error = finish_command_result(
+            CommandResult::committed("receipt\n".to_owned()),
+            &mut BrokenWriter,
+        )
+        .expect_err("broken receipt output must fail");
+        assert!(!error.retryable);
+        assert_eq!(error.exit_code, 70);
+        let cleanup = std::process::Command::new("trash")
+            .arg(&root)
+            .status()
+            .expect("run recoverable test cleanup");
+        assert!(cleanup.success(), "trash should clean stdout test root");
+    }
+
+    #[test]
+    fn defaults_use_exclusive_create_and_leave_existing_or_dangling_rules_untouched() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should follow Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("post-defaults-{nonce}"));
+        fs::create_dir_all(&root).expect("create config test root");
+        let context = super::Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let rules = root.join("rules.json");
+        fs::write(&rules, "human rules").expect("write human rules");
+        assert!(!context
+            .write_default_if_missing("rules.json", "defaults")
+            .expect("existing rules must be left untouched"));
+        assert_eq!(
+            fs::read_to_string(&rules).expect("read human rules"),
+            "human rules"
+        );
+
+        fs::remove_file(&rules).expect("remove regular rules fixture");
+        std::os::unix::fs::symlink(root.join("missing-target"), &rules)
+            .expect("create dangling rules symlink");
+        assert!(!context
+            .write_default_if_missing("rules.json", "defaults")
+            .expect("dangling rules symlink must be left untouched"));
+        assert!(fs::symlink_metadata(&rules)
+            .expect("inspect dangling rules symlink")
+            .file_type()
+            .is_symlink());
+        let cleanup = std::process::Command::new("trash")
+            .arg(&root)
+            .status()
+            .expect("run recoverable test cleanup");
+        assert!(cleanup.success(), "trash should clean config test root");
+    }
+
+    #[test]
+    fn local_timestamp_keeps_reference_id_and_sent_byte_formats() {
+        let (id_time, sent) = super::local_timestamp().expect("format local timestamp");
+        assert_eq!(id_time.len(), 15);
+        assert_eq!(id_time.as_bytes()[8], b'-');
+        assert!(id_time
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || byte.is_ascii_digit()));
+        assert_eq!(sent.len(), 25);
+        assert_eq!(&sent[4..5], "-");
+        assert_eq!(&sent[7..8], "-");
+        assert_eq!(&sent[10..11], " ");
+        assert_eq!(&sent[13..14], ":");
+        assert_eq!(&sent[16..17], ":");
+        assert!(matches!(&sent[20..21], "+" | "-"));
+        assert!(sent
+            .bytes()
+            .enumerate()
+            .filter(|(index, _)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 20))
+            .all(|(_, byte)| byte.is_ascii_digit()));
     }
 }

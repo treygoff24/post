@@ -3,6 +3,20 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn nonempty_without_controls(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("value must not be empty".to_owned());
+    }
+    without_controls(value)
+}
+
+fn without_controls(value: &str) -> Result<String, String> {
+    if value.chars().any(char::is_control) {
+        return Err("value must not contain control characters".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "post",
@@ -50,7 +64,7 @@ pub struct SendArgs {
     pub to: String,
 
     /// Explicit sender identity; registered room names are reserved.
-    #[arg(long = "from", value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    #[arg(long = "from", value_name = "NAME", value_parser = nonempty_without_controls)]
     pub sender: Option<String>,
 
     /// Message register.
@@ -58,7 +72,7 @@ pub struct SendArgs {
     pub kind: MailKind,
 
     /// Optional subject.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
     /// Inline message body.

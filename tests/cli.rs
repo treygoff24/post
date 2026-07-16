@@ -591,6 +591,79 @@ fn body_can_come_from_stdin_without_a_tty_or_prompt() {
     assert_eq!(read.body, "file body");
 }
 
+#[test]
+fn inbox_skips_malformed_mail_and_rooms_only_show_recipient_rules() {
+    let sandbox = Sandbox::new();
+    let sent = sandbox.send_json("good-mail", "good body");
+    let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::write(inbox.join("garbage.mail"), "not mail").expect("write malformed mail");
+
+    let listed = sandbox.run(&["inbox", "--room", "claude-space"]);
+    assert_success(&listed);
+    let listed: InboxOutput = from_stdout(&listed);
+    assert_eq!(listed.count, 1);
+    assert_eq!(listed.unread[0].id, sent.envelope.id);
+
+    let rooms: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
+    for room in rooms.rooms {
+        if room.name == "agent-memory" {
+            assert_eq!(room.blocked.len(), 1);
+        } else {
+            assert!(
+                room.blocked.is_empty(),
+                "{} inherited an unrelated rule",
+                room.name
+            );
+        }
+    }
+}
+
+#[test]
+fn clap_rejects_control_characters_and_text_read_sanitizes_body_controls() {
+    let sandbox = Sandbox::new();
+    for args in [
+        vec![
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "bad\nfrom",
+            "--body",
+            "body",
+        ],
+        vec![
+            "send",
+            "--to",
+            "claude-space",
+            "--subject",
+            "bad\u{1b}[2Jsubject",
+            "--body",
+            "body",
+        ],
+    ] {
+        let output = sandbox.run(&args);
+        assert_eq!(output.status.code(), Some(2));
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "invalid_argument");
+        assert!(error.error.message.contains("control characters"));
+    }
+
+    let sent = sandbox.send_json("safe-text", "before\u{1b}[2J\rafter\n\tkept");
+    let output = sandbox.run(&[
+        "read",
+        &sent.envelope.id,
+        "--room",
+        "claude-space",
+        "--peek",
+    ]);
+    assert_success(&output);
+    let text = stdout(&output);
+    assert!(text.contains("READ THIS FRAMING FIRST"));
+    assert!(!text.contains('\u{1b}'));
+    assert!(!text.contains('\r'));
+    assert!(text.contains("before[2Jafter\n\tkept"));
+}
+
 fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
     let envelope = serde_json::json!({
         "id": id,

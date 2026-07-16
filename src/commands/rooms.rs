@@ -11,9 +11,7 @@ pub fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             let blocked = rules
                 .blocked
                 .iter()
-                .filter(|rule| {
-                    rule.from == "*" || rule.to == "*" || rule.from == name || rule.to == name
-                })
+                .filter(|rule| rule.to == "*" || rule.to == name)
                 .map(BlockingRuleOutput::from)
                 .collect();
             RoomOutput {

@@ -111,4 +111,18 @@ impl AppError {
         .detail("path", path.display().to_string())
         .detail("reason", reason)
     }
+
+    pub fn delivered_output_failure(source: impl std::fmt::Display) -> Self {
+        let reason = source.to_string();
+        let mut error = Self::new(
+            ErrorCode::IoError,
+            format!("mail was delivered but its receipt could not be written to stdout: {reason}"),
+            "Do not resend this mail; inspect the recipient inbox or archive for the delivered message.",
+        )
+        .detail("operation", "write stdout after delivery")
+        .detail("reason", reason);
+        error.retryable = false;
+        error.exit_code = 70;
+        error
+    }
 }

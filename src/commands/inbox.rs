@@ -10,7 +10,9 @@ pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<Comman
     let (inbox, _) = context.mailbox_dirs(&room)?;
     let mut unread = Vec::new();
     for path in mail_files(&inbox)? {
-        let mail = parse_mail(&path)?;
+        let Ok(mail) = parse_mail(&path) else {
+            continue;
+        };
         unread.push(InboxItem {
             id: mail.envelope.id,
             from: mail.envelope.from,

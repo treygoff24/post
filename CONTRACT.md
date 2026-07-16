@@ -40,7 +40,10 @@ document is silent.
   kind, subject, sent (local time, `%Y-%m-%d %H:%M:%S %z`).
 - Read mail moves to `<room>/read/<id>.mail`. Archive copy at
   `archive/<id>.mail`.
-- All writes atomic (temp file + rename, same filesystem).
+- Mail writes are atomic. New mail files are published with an exclusive final
+  create after a synced temporary write, so an existing inbox or archive file
+  is never replaced. Default config creation is exclusive and never replaces
+  existing content.
 
 ## Commands
 
@@ -62,7 +65,9 @@ results, stderr = diagnostics/errors.
   `--text`. Empty inbox = exit 0, count 0. Resolved room always in output.
 - `post read <id-or-prefix> [--room <name>] [--peek]` — prints framing banner
   + envelope + body (text default; `--json` gives `{ok, framing, envelope,
-  body}`); moves to read/ unless `--peek`. Ambiguous prefix: error listing
+  body}`); after stdout succeeds, moves to read/ unless `--peek`. Text-mode
+  body output strips control characters except tab and newline so it cannot
+  rewrite the framing banner. Ambiguous prefix: error listing
   the matches. Not found: error with `suggested_fix: post inbox --room <X>`.
 - `post rooms` — rooms with paths, each with any blocking rules that name it.
 - `post schema` — the full machine contract: commands, flags, output shapes,
