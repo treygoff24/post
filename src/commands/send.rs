@@ -232,6 +232,32 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn test_context(label: &str) -> (std::path::PathBuf, Context) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should follow Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("post-send-{label}-{nonce}"));
+        fs::create_dir_all(&root).expect("create send test root");
+        fs::write(root.join("rooms.json"), DEFAULT_ROOMS_JSON).expect("write rooms config");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules config");
+        (
+            root.clone(),
+            Context {
+                root: root.clone(),
+                home: root,
+            },
+        )
+    }
+
+    fn trash_test_root(root: &std::path::Path) {
+        let cleanup = std::process::Command::new("trash")
+            .arg(root)
+            .status()
+            .expect("run recoverable test cleanup");
+        assert!(cleanup.success(), "trash should clean send test root");
+    }
+
     #[test]
     fn body_after_rule_add_is_refused_before_any_mail_write() {
         let nonce = SystemTime::now()
@@ -335,5 +361,145 @@ mod tests {
             .status()
             .expect("run recoverable test cleanup");
         assert!(cleanup.success(), "trash should clean collision root");
+    }
+
+    #[test]
+    fn id_collision_retry_rechecks_a_new_blocking_rule() {
+        let (root, context) = test_context("collision-rule");
+        let (inbox, _) = context
+            .mailbox_dirs("claude-space")
+            .expect("create recipient mailbox");
+        let collision_id = "20260715-120000-111111";
+        let fresh_id = "20260715-120000-222222";
+        fs::write(inbox.join(format!("{collision_id}.mail")), "existing mail")
+            .expect("create colliding inbox mail");
+
+        let result = run_with_body_and_id(
+            &context,
+            SendArgs {
+                to: "claude-space".to_owned(),
+                sender: Some("rule-race".to_owned()),
+                kind: MailKind::Note,
+                subject: String::new(),
+                body: Some("new mail".to_owned()),
+                file: None,
+            },
+            false,
+            false,
+            |body, _| Ok(body.expect("inline body")),
+            |_, attempt| {
+                if attempt == 1 {
+                    fs::write(
+                        root.join("rules.json"),
+                        r#"{"blocked":[{"from":"rule-race","to":"claude-space","reason":"added after collision"}]}"#,
+                    )
+                    .expect("add blocking rule before retry");
+                }
+                Ok(if attempt == 0 { collision_id } else { fresh_id }.to_owned())
+            },
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("new blocking rule must stop the retry"),
+        };
+        assert_eq!(error.code.as_str(), "blocked_route");
+        assert_eq!(
+            fs::read_to_string(inbox.join(format!("{collision_id}.mail"))).unwrap(),
+            "existing mail"
+        );
+        assert!(!inbox.join(format!("{fresh_id}.mail")).exists());
+        assert_eq!(
+            fs::read_dir(root.join("archive"))
+                .expect("list archive")
+                .count(),
+            0
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn archive_id_collision_preserves_old_archive_and_reports_committed_delivery() {
+        let (root, context) = test_context("archive-collision");
+        let id = "20260715-120000-a1c1d1";
+        let archive = root.join("archive");
+        fs::create_dir_all(&archive).expect("create archive fixture");
+        let archive_path = archive.join(format!("{id}.mail"));
+        fs::write(&archive_path, "immutable old archive").expect("create archive collision");
+
+        let result = run_with_body_and_id(
+            &context,
+            SendArgs {
+                to: "claude-space".to_owned(),
+                sender: Some("archive-collision".to_owned()),
+                kind: MailKind::Note,
+                subject: String::new(),
+                body: Some("new delivery".to_owned()),
+                file: None,
+            },
+            false,
+            false,
+            |body, _| Ok(body.expect("inline body")),
+            |_, _| Ok(id.to_owned()),
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("archive collision must report delivered_unarchived"),
+        };
+        assert_eq!(error.code.as_str(), "delivered_unarchived");
+        assert!(!error.retryable);
+        assert_eq!(
+            fs::read_to_string(&archive_path).unwrap(),
+            "immutable old archive"
+        );
+        assert!(root.join(format!("claude-space/inbox/{id}.mail")).is_file());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn exhausting_all_message_ids_leaves_existing_mail_untouched_and_is_retryable() {
+        let (root, context) = test_context("id-exhaustion");
+        let (inbox, _) = context
+            .mailbox_dirs("claude-space")
+            .expect("create recipient mailbox");
+        let id = "20260715-120000-eeeeee";
+        let inbox_path = inbox.join(format!("{id}.mail"));
+        fs::write(&inbox_path, "existing inbox mail").expect("create collision fixture");
+
+        let result = run_with_body_and_id(
+            &context,
+            SendArgs {
+                to: "claude-space".to_owned(),
+                sender: Some("exhaustion-test".to_owned()),
+                kind: MailKind::Note,
+                subject: String::new(),
+                body: Some("new mail".to_owned()),
+                file: None,
+            },
+            false,
+            false,
+            |body, _| Ok(body.expect("inline body")),
+            |_, _| Ok(id.to_owned()),
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("256 collisions must exhaust id allocation"),
+        };
+        assert_eq!(error.code.as_str(), "io_error");
+        assert!(error.retryable);
+        assert_eq!(
+            fs::read_to_string(&inbox_path).unwrap(),
+            "existing inbox mail"
+        );
+        assert_eq!(fs::read_dir(&inbox).expect("list inbox").count(), 1);
+        assert_eq!(
+            fs::read_dir(root.join("archive"))
+                .expect("list archive")
+                .count(),
+            0
+        );
+        trash_test_root(&root);
     }
 }

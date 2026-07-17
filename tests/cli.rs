@@ -904,6 +904,315 @@ fn clap_rejects_control_characters_and_text_read_sanitizes_body_controls() {
     assert!(!text.contains('\r'));
 }
 
+#[test]
+fn invalid_rooms_and_rules_fail_closed_before_mailbox_writes() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(&sandbox.mail_root).expect("create config fixture root");
+    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked":[]}"#)
+        .expect("write valid rules fixture");
+
+    for rooms in [
+        "not json",
+        r#"{"../escape":"/tmp"}"#,
+        r#"{"claude-space":"relative/path"}"#,
+    ] {
+        fs::write(sandbox.mail_root.join("rooms.json"), rooms)
+            .expect("write invalid rooms fixture");
+        let output = sandbox.run(&["rooms"]);
+        assert_eq!(output.status.code(), Some(78), "rooms fixture: {rooms}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid");
+    }
+    assert!(!sandbox.path.join("escape").exists());
+
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        format!(
+            r#"{{"claude-space":{}}}"#,
+            serde_json::to_string(&sandbox.path).expect("serialize room path")
+        ),
+    )
+    .expect("write valid rooms fixture");
+    for rules in [
+        "not json",
+        r#"{"blocked":{}}"#,
+        r#"{"blocked":[{"from":"../impersonator","to":"claude-space","reason":"bad sender"}]}"#,
+    ] {
+        fs::write(sandbox.mail_root.join("rules.json"), rules)
+            .expect("write invalid rules fixture");
+        let output = sandbox.run(&[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "config-test",
+            "--body",
+            "must not deliver",
+        ]);
+        assert_eq!(output.status.code(), Some(78), "rules fixture: {rules}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid");
+    }
+    assert!(!sandbox.mail_root.join("claude-space/inbox").exists());
+    assert!(!sandbox.mail_root.join("archive").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reserved_senders_follow_nested_workspaces_and_real_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let outer = sandbox.path.join("workspaces/outer");
+    let inner = outer.join("nested");
+    let deeper = inner.join("project");
+    let outside = sandbox.path.join("outside");
+    fs::create_dir_all(&deeper).expect("create nested registered workspace");
+    fs::create_dir_all(&outside).expect("create outside workspace");
+    let rooms = serde_json::json!({
+        "outer": outer,
+        "inner": inner,
+    });
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        serde_json::to_vec(&rooms).expect("serialize nested rooms"),
+    )
+    .expect("write nested rooms");
+    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked":[]}"#)
+        .expect("write empty rules");
+
+    let nested = sandbox.run_in(
+        &["send", "--to", "outer", "--body", "nested inference"],
+        None,
+        &deeper,
+    );
+    assert_success(&nested);
+    assert!(stdout(&nested).contains("inner -> outer"));
+
+    let link_out = inner.join("outside-link");
+    symlink(&outside, &link_out).expect("link registered tree to outside");
+    let escaped = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "outer",
+            "--from",
+            "inner",
+            "--body",
+            "must be refused",
+        ],
+        None,
+        &link_out,
+    );
+    assert_eq!(escaped.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&escaped);
+    assert_eq!(error.error.code, "reserved_sender");
+
+    let link_in = sandbox.path.join("inside-link");
+    symlink(&inner, &link_in).expect("link outside path to registered tree");
+    let linked_inside = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "outer",
+            "--from",
+            "inner",
+            "--body",
+            "canonical target is inside",
+        ],
+        None,
+        &link_in,
+    );
+    assert_success(&linked_inside);
+    assert!(stdout(&linked_inside).contains("inner -> outer"));
+}
+
+#[test]
+fn doctor_reports_archive_bytes_that_differ_from_delivered_mail() {
+    let sandbox = Sandbox::new();
+    let sent = sandbox.send_json("archive-audit", "original body");
+    let archive = sandbox
+        .mail_root
+        .join("archive")
+        .join(format!("{}.mail", sent.envelope.id));
+    let mut changed = fs::read_to_string(&archive).expect("read archive fixture");
+    changed.push_str(" changed");
+    fs::write(&archive, changed).expect("corrupt archive fixture");
+
+    let output = sandbox.run(&["doctor"]);
+    assert_eq!(output.status.code(), Some(1));
+    let doctor: DoctorOutput = from_stdout(&output);
+    assert!(doctor
+        .checks
+        .iter()
+        .any(|check| check.id == "state.archive_mismatch"
+            && check.path == archive.display().to_string()));
+}
+
+#[test]
+fn mail_envelope_rejects_filename_id_drift_bad_ids_and_empty_identity_fields() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
+    let inbox = sandbox.mail_root.join("claude-space/inbox");
+    let fixtures = [
+        (
+            "20260715-120000-aaa001",
+            serde_json::json!({
+                "id": "20260715-120000-aaa002", "from": "fixture", "to": "claude-space",
+                "kind": "note", "subject": "", "sent": "2026-07-15 12:00:00 -0400"
+            }),
+        ),
+        (
+            "not-an-id",
+            serde_json::json!({
+                "id": "not-an-id", "from": "fixture", "to": "claude-space",
+                "kind": "note", "subject": "", "sent": "2026-07-15 12:00:00 -0400"
+            }),
+        ),
+        (
+            "20260715-120000-aaa003",
+            serde_json::json!({
+                "id": "20260715-120000-aaa003", "from": "", "to": "claude-space",
+                "kind": "note", "subject": "", "sent": "2026-07-15 12:00:00 -0400"
+            }),
+        ),
+        (
+            "20260715-120000-aaa004",
+            serde_json::json!({
+                "id": "20260715-120000-aaa004", "from": "fixture", "to": " ",
+                "kind": "note", "subject": "", "sent": "2026-07-15 12:00:00 -0400"
+            }),
+        ),
+        (
+            "20260715-120000-aaa005",
+            serde_json::json!({
+                "id": "20260715-120000-aaa005", "from": "fixture", "to": "claude-space",
+                "kind": "note", "subject": "", "sent": ""
+            }),
+        ),
+    ];
+    for (filename_id, envelope) in fixtures {
+        write_custom_mail(&inbox, filename_id, &envelope, "body");
+        let output = sandbox.run(&[
+            "read",
+            filename_id,
+            "--room",
+            "claude-space",
+            "--peek",
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(78), "fixture: {filename_id}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid");
+    }
+}
+
+#[test]
+fn json_read_preserves_control_characters_and_exact_body_bytes() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
+    let id = "20260715-120000-b0d1e5";
+    let body = "before\u{1b}[2J\r\0after\n\tkept\n";
+    write_custom_mail(
+        &sandbox.mail_root.join("claude-space/inbox"),
+        id,
+        &serde_json::json!({
+            "id": id, "from": "fixture", "to": "claude-space", "kind": "note",
+            "subject": "controls", "sent": "2026-07-15 12:00:00 -0400"
+        }),
+        body,
+    );
+
+    let output = sandbox.run(&["read", id, "--room", "claude-space", "--peek", "--json"]);
+    assert_success(&output);
+    let read: ReadOutput = from_stdout(&output);
+    assert_eq!(read.body.as_bytes(), body.as_bytes());
+}
+
+#[test]
+fn doctor_fix_preserves_invalid_config_and_exits_three_when_repair_fails() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(&sandbox.mail_root).expect("create doctor repair root");
+    let rooms = b"{human managed invalid rooms";
+    let rules = b"{human managed invalid rules";
+    fs::write(sandbox.mail_root.join("rooms.json"), rooms).expect("write invalid rooms");
+    fs::write(sandbox.mail_root.join("rules.json"), rules).expect("write invalid rules");
+    fs::write(sandbox.mail_root.join("archive"), "not a directory")
+        .expect("create unrepairable archive path");
+
+    let output = sandbox.run(&["doctor", "--fix"]);
+    assert_eq!(output.status.code(), Some(3));
+    let doctor: DoctorOutput = from_stdout(&output);
+    assert!(doctor.checks.iter().any(|check| check.id == "fix.failed"));
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("rooms.json")).unwrap(),
+        rooms
+    );
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("rules.json")).unwrap(),
+        rules
+    );
+}
+
+#[test]
+fn inbox_lists_multiple_messages_oldest_first() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
+    let inbox = sandbox.mail_root.join("claude-space/inbox");
+    for id in [
+        "20260715-120002-000003",
+        "20260715-120000-000001",
+        "20260715-120001-000002",
+    ] {
+        write_reference_mail(&inbox, id, id);
+    }
+
+    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
+    assert_success(&output);
+    let inbox: InboxOutput = from_stdout(&output);
+    assert_eq!(
+        inbox
+            .unread
+            .iter()
+            .map(|mail| mail.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "20260715-120000-000001",
+            "20260715-120001-000002",
+            "20260715-120002-000003",
+        ]
+    );
+}
+
+#[test]
+fn missing_home_and_relative_mail_root_fail_before_writing() {
+    let sandbox = Sandbox::new();
+    let missing_home = Command::new(env!("CARGO_BIN_EXE_post"))
+        .arg("rooms")
+        .current_dir(&sandbox.path)
+        .env_remove("HOME")
+        .env_remove("POST_MAIL_ROOT")
+        .output()
+        .expect("run without HOME");
+    assert_eq!(missing_home.status.code(), Some(78));
+    let error: ErrorEnvelope = from_stderr(&missing_home);
+    assert_eq!(error.error.code, "config_invalid");
+    assert_eq!(error.error.details["input"], "HOME");
+
+    let relative_root = Command::new(env!("CARGO_BIN_EXE_post"))
+        .arg("rooms")
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", "relative-mail")
+        .output()
+        .expect("run with relative mail root");
+    assert_eq!(relative_root.status.code(), Some(78));
+    let error: ErrorEnvelope = from_stderr(&relative_root);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(!sandbox.path.join("relative-mail").exists());
+}
+
 fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
     let envelope = serde_json::json!({
         "id": id,
@@ -921,6 +1230,17 @@ fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
         ),
     )
     .expect("write mail fixture");
+}
+
+fn write_custom_mail(inbox: &Path, filename_id: &str, envelope: &serde_json::Value, body: &str) {
+    fs::write(
+        inbox.join(format!("{filename_id}.mail")),
+        format!(
+            "{}\n---\n{body}",
+            serde_json::to_string_pretty(envelope).expect("serialize custom envelope")
+        ),
+    )
+    .expect("write custom mail fixture");
 }
 
 fn assert_success(output: &Output) {
