@@ -1,9 +1,8 @@
-use super::{CommandResult, Context};
 use crate::cli::ReadArgs;
+use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::mailbox::{exclusive_move, mail_files, parse_mail, Context, MoveError};
 use crate::output::{self, Framing, ReadOutput};
-use crate::{exclusive_move, mail_files, parse_mail, MoveError};
-use serde_json::json;
 
 pub fn run(
     context: &Context,
@@ -31,9 +30,9 @@ pub fn run(
             ),
             format!("Run `post inbox --room {room}` and retry with one listed id."),
         )
-        .detail("input", args.id)
-        .detail("reason", "no unread id has this prefix")
-        .detail("room", room));
+        .input(args.id)
+        .reason("no unread id has this prefix")
+        .room(room));
     }
     if matches.len() > 1 {
         let ids: Vec<_> = matches
@@ -53,9 +52,9 @@ pub fn run(
                 ids[0]
             ),
         )
-        .detail("input", args.id)
-        .detail("reason", "prefix matches more than one unread message")
-        .detail("matches", json!(ids)));
+        .input(args.id)
+        .reason("prefix matches more than one unread message")
+        .matches(ids));
     }
     let path = &matches[0];
     let mail = parse_mail(path)?;
@@ -76,13 +75,7 @@ pub fn run(
     if args.peek {
         return Ok(CommandResult::success(rendered));
     }
-    let destination = read.join(path.file_name().ok_or_else(|| {
-        AppError::new(
-            ErrorCode::IoError,
-            format!("mail path '{}' has no filename", path.display()),
-            "Run `post doctor`; restore the mail to a valid '<id>.mail' filename.",
-        )
-    })?);
+    let destination = read.join(format!("{}.mail", mail.envelope.id));
     let source = path.clone();
     Ok(CommandResult::after_stdout(rendered, move || {
         match exclusive_move(&source, &destination) {
@@ -97,8 +90,8 @@ pub fn run(
                     ),
                     "Run `post doctor`; resolve the duplicate without deleting either copy.",
                 )
-                .detail("input", mail.envelope.id)
-                .detail("reason", "read destination already exists"))
+                .input(mail.envelope.id)
+                .reason("read destination already exists"))
             }
             Err(MoveError::Link(error)) => Err(AppError::io(
                 "move mail from inbox to read",
@@ -114,8 +107,8 @@ pub fn run(
                 ),
                 "Do not treat the next inbox listing of this id as new mail; run `post doctor` and reconcile the duplicate links by hand.",
             )
-            .detail("input", mail.envelope.id)
-            .detail("reason", "inbox link removal failed after read link was committed")),
+            .input(mail.envelope.id)
+            .reason("inbox link removal failed after read link was committed")),
         }
     }))
 }

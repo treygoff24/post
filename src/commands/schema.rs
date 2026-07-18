@@ -1,5 +1,5 @@
-use super::CommandResult;
-use crate::error::AppResult;
+use crate::command_result::CommandResult;
+use crate::error::{AppResult, ErrorCode};
 use crate::output::{self, CommandSchema, ErrorSchema, ExitSchema, SchemaOutput};
 use std::collections::BTreeMap;
 
@@ -85,26 +85,14 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
             "exit_codes",
         ]),
     );
-    let errors = [
-        ("unknown_room", 65, false),
-        ("blocked_route", 77, false),
-        ("reserved_sender", 65, false),
-        ("empty_body", 65, false),
-        ("ambiguous_id", 65, false),
-        ("not_found", 66, false),
-        ("invalid_argument", 2, false),
-        ("config_invalid", 78, false),
-        ("io_error", 75, true),
-        ("delivered_output_failure", 70, false),
-        ("delivered_unarchived", 70, false),
-    ]
-    .into_iter()
-    .map(|(code, exit, retryable)| ErrorSchema {
-        code: code.to_owned(),
-        exit,
-        retryable,
-    })
-    .collect();
+    let errors = ErrorCode::ALL
+        .iter()
+        .map(|code| ErrorSchema {
+            code: code.as_str().to_owned(),
+            exit: code.exit_code(),
+            retryable: code.retryable(),
+        })
+        .collect();
     let output = SchemaOutput {
         ok: true,
         name: "post".to_owned(),
@@ -151,7 +139,7 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
             "HOME: resolves the default ~/.claude-mail root and ~/ room paths",
         ]),
     };
-    Ok(CommandResult::success(output::json(&output, pretty)?))
+    CommandResult::json(&output, pretty)
 }
 
 pub fn doctor_exit_codes() -> Vec<ExitSchema> {

@@ -1,7 +1,7 @@
 use crate::cli::MailKind;
-use crate::error::AppError;
+use crate::error::{AppError, ErrorDetails};
+pub use crate::model::BlockingRule as BlockingRuleOutput;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
@@ -74,13 +74,6 @@ pub struct ReadOutput {
     pub framing: Framing,
     pub envelope: Envelope,
     pub body: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockingRuleOutput {
-    pub from: String,
-    pub to: String,
-    pub reason: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -166,7 +159,7 @@ pub struct DoctorOutput {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
-    pub details: BTreeMap<String, Value>,
+    pub details: ErrorDetails,
     pub retryable: bool,
     pub suggested_fix: String,
 }
@@ -184,7 +177,7 @@ impl From<&AppError> for ErrorEnvelope {
             error: ErrorBody {
                 code: error.code.as_str().to_owned(),
                 message: error.message.clone(),
-                details: error.details.clone(),
+                details: (*error.details).clone(),
                 retryable: error.retryable,
                 suggested_fix: error.suggested_fix.clone(),
             },

@@ -1,6 +1,7 @@
-use super::{CommandResult, Context};
+use crate::command_result::CommandResult;
 use crate::error::AppResult;
-use crate::output::{self, BlockingRuleOutput, RoomOutput, RoomsOutput};
+use crate::mailbox::Context;
+use crate::output::{RoomOutput, RoomsOutput};
 
 pub fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
@@ -12,7 +13,7 @@ pub fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
                 .blocked
                 .iter()
                 .filter(|rule| rule.to == "*" || rule.to == name)
-                .map(BlockingRuleOutput::from)
+                .cloned()
                 .collect();
             RoomOutput {
                 name,
@@ -27,5 +28,5 @@ pub fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         rooms: output_rooms,
         count,
     };
-    Ok(CommandResult::success(output::json(&output, pretty)?))
+    CommandResult::json(&output, pretty)
 }

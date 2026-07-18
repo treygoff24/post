@@ -1,12 +1,12 @@
-use super::{CommandResult, Context};
 use crate::cli::SendArgs;
+use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::output::{self, Envelope, SendOutput};
-use crate::{
+use crate::mailbox::{
     closest_room, encode_mail, exclusive_atomic_write, local_timestamp, new_mail_id,
-    validate_envelope,
+    validate_envelope, Context,
 };
-use serde_json::json;
+use crate::model::RoomMap;
+use crate::output::{self, Envelope, SendOutput};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
@@ -64,10 +64,10 @@ where
             },
             "Run `post rooms`, then retry with `post send --to <registered-room> ...`.",
         )
-        .detail("input", args.to.clone())
-        .detail("reason", "recipient is absent from rooms.json");
+        .input(args.to.clone())
+        .reason("recipient is absent from rooms.json");
         if let Some(room) = suggestion {
-            error = error.detail("did_you_mean", room);
+            error = error.did_you_mean(room);
         }
         return Err(error);
     }
@@ -82,8 +82,8 @@ where
                 args.to
             ),
         )
-        .detail("input", "message body")
-        .detail("reason", "empty or whitespace-only"));
+        .input("message body")
+        .reason("empty or whitespace-only"));
     }
 
     let (id_timestamp, sent) = local_timestamp()?;
@@ -166,7 +166,7 @@ where
 
 fn ensure_route_allowed(
     context: &Context,
-    rooms: &std::collections::BTreeMap<String, String>,
+    rooms: &RoomMap,
     sender: &str,
     recipient: &str,
 ) -> AppResult<()> {
@@ -181,12 +181,9 @@ fn ensure_route_allowed(
         format!("route {sender} -> {recipient} is blocked: {}", rule.reason),
         "Do not route around this block. Ask the human operator to review rules.json.",
     )
-    .detail("input", format!("{sender} -> {recipient}"))
-    .detail("reason", rule.reason.clone())
-    .detail(
-        "rule",
-        json!({"from": rule.from, "to": rule.to, "reason": rule.reason}),
-    ))
+    .input(format!("{sender} -> {recipient}"))
+    .reason(rule.reason.clone())
+    .rule(rule.clone()))
 }
 
 fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<String> {
@@ -195,8 +192,7 @@ fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<
     }
     if let Some(path) = file {
         return fs::read_to_string(path).map_err(|error| {
-            AppError::io("read UTF-8 message body file", path, error).detail(
-                "exact_fix",
+            AppError::io("read UTF-8 message body file", path, error).exact_fix(
                 "Pass an existing UTF-8 FILE, use `--body <text>`, or pipe the body on stdin.",
             )
         });
@@ -207,8 +203,8 @@ fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<
             "message body is missing and stdin is a terminal; post never prompts or waits for interactive input",
             "Pass `--body '<text>'`, pass a UTF-8 FILE, or pipe the body on stdin.",
         )
-        .detail("input", "stdin")
-        .detail("reason", "interactive terminal input is not allowed"));
+        .input("stdin")
+        .reason("interactive terminal input is not allowed"));
     }
     let mut body = String::new();
     io::stdin()
@@ -228,7 +224,7 @@ fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<
 mod tests {
     use super::{run_with_body, run_with_body_and_id};
     use crate::cli::{MailKind, SendArgs};
-    use crate::{Context, DEFAULT_ROOMS_JSON};
+    use crate::mailbox::{Context, DEFAULT_ROOMS_JSON};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 

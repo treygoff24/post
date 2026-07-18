@@ -499,9 +499,11 @@ fn id_prefixes_resolve_uniquely_and_ambiguity_lists_matches() {
     assert_eq!(ambiguous.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&ambiguous);
     assert_eq!(error.error.code, "ambiguous_id");
-    let matches = error.error.details["matches"]
-        .as_array()
-        .expect("ambiguous matches should be an array");
+    let matches = error
+        .error
+        .details
+        .matches
+        .expect("ambiguous matches should be present");
     assert_eq!(matches.len(), 2);
 
     let unique = sandbox.run(&[
@@ -678,8 +680,11 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
     assert_eq!(output.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "unknown_room");
-    assert_eq!(error.error.details["input"], "claude-spac");
-    assert_eq!(error.error.details["did_you_mean"], "claude-space");
+    assert_eq!(error.error.details.input.as_deref(), Some("claude-spac"));
+    assert_eq!(
+        error.error.details.did_you_mean.as_deref(),
+        Some("claude-space")
+    );
     assert!(error.error.suggested_fix.contains("`post rooms`"));
 }
 
@@ -1198,7 +1203,7 @@ fn missing_home_and_relative_mail_root_fail_before_writing() {
     assert_eq!(missing_home.status.code(), Some(78));
     let error: ErrorEnvelope = from_stderr(&missing_home);
     assert_eq!(error.error.code, "config_invalid");
-    assert_eq!(error.error.details["input"], "HOME");
+    assert_eq!(error.error.details.input.as_deref(), Some("HOME"));
 
     let relative_root = Command::new(env!("CARGO_BIN_EXE_post"))
         .arg("rooms")
@@ -1232,7 +1237,12 @@ fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
     .expect("write mail fixture");
 }
 
-fn write_custom_mail(inbox: &Path, filename_id: &str, envelope: &serde_json::Value, body: &str) {
+fn write_custom_mail(
+    inbox: &Path,
+    filename_id: &str,
+    envelope: &impl serde::Serialize,
+    body: &str,
+) {
     fs::write(
         inbox.join(format!("{filename_id}.mail")),
         format!(

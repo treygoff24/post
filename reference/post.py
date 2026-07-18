@@ -93,7 +93,7 @@ def infer_room(explicit):
     for room, path in load_json("rooms.json").items():
         if cwd.startswith(str(Path(path).expanduser())):
             return room
-    return Path.cwd().name  # unregistered dir: sender = the dir you run in
+    return Path.cwd().name
 
 
 def cmd_send(args):

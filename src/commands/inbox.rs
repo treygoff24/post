@@ -1,8 +1,8 @@
-use super::{CommandResult, Context};
 use crate::cli::InboxArgs;
+use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
-use crate::output::{self, InboxItem, InboxOutput};
-use crate::{mail_files, parse_mail};
+use crate::mailbox::{mail_files, parse_mail, Context};
+use crate::output::{InboxItem, InboxOutput};
 
 pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
@@ -68,5 +68,5 @@ pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<Comman
         count,
         skipped_unreadable,
     };
-    Ok(CommandResult::success(output::json(&output, pretty)?))
+    CommandResult::json(&output, pretty)
 }

@@ -1,9 +1,10 @@
-use super::{schema::doctor_exit_codes, CommandResult, Context};
 use crate::cli::DoctorArgs;
+use crate::command_result::CommandResult;
+use crate::commands::schema::doctor_exit_codes;
 use crate::error::{AppError, AppResult};
-use crate::output::{self, DoctorCheck, DoctorOutput, DoctorSeverity};
-use crate::{parse_mail, validate_component, RulesConfig};
-use std::collections::BTreeMap;
+use crate::mailbox::{parse_mail, validate_component, Context};
+use crate::model::{RoomMap, RulesConfig};
+use crate::output::{DoctorCheck, DoctorOutput, DoctorSeverity};
 use std::fs;
 use std::path::Path;
 
@@ -20,7 +21,7 @@ pub fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<Comma
                 suggested_fix: error.suggested_fix,
             }];
             let output = report(context, checks, fixed);
-            let mut result = CommandResult::success(output::json(&output, pretty)?);
+            let mut result = CommandResult::json(&output, pretty)?;
             result.exit_code = 3;
             return Ok(result);
         }
@@ -28,7 +29,7 @@ pub fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<Comma
     let checks = detect(context);
     let output = report(context, checks, fixed);
     let exit_code = if output.count == 0 { 0 } else { 1 };
-    let mut result = CommandResult::success(output::json(&output, pretty)?);
+    let mut result = CommandResult::json(&output, pretty)?;
     result.exit_code = exit_code;
     Ok(result)
 }
@@ -115,11 +116,7 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     checks
 }
 
-fn detect_rooms(
-    context: &Context,
-    path: &Path,
-    checks: &mut Vec<DoctorCheck>,
-) -> Option<BTreeMap<String, String>> {
+fn detect_rooms(context: &Context, path: &Path, checks: &mut Vec<DoctorCheck>) -> Option<RoomMap> {
     if !path.is_file() {
         checks.push(check(
             "config.rooms_missing",
@@ -133,7 +130,7 @@ fn detect_rooms(
     }
     match fs::read(path)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, String>>(&bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<RoomMap>(&bytes).ok())
     {
         Some(rooms) if !rooms.is_empty() => {
             for (name, value) in &rooms {
@@ -174,11 +171,7 @@ fn detect_rooms(
     }
 }
 
-fn detect_rules(
-    path: &Path,
-    rooms: Option<&BTreeMap<String, String>>,
-    checks: &mut Vec<DoctorCheck>,
-) {
+fn detect_rules(path: &Path, rooms: Option<&RoomMap>, checks: &mut Vec<DoctorCheck>) {
     if !path.is_file() {
         checks.push(check(
             "config.rules_missing",

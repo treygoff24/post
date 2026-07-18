@@ -1,9 +1,38 @@
+use crate::model::BlockingRule;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ErrorDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did_you_mean: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_fix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<BlockingRule>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +51,20 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    pub const ALL: [Self; 11] = [
+        Self::UnknownRoom,
+        Self::BlockedRoute,
+        Self::ReservedSender,
+        Self::EmptyBody,
+        Self::AmbiguousId,
+        Self::NotFound,
+        Self::InvalidArgument,
+        Self::ConfigInvalid,
+        Self::IoError,
+        Self::DeliveredOutputFailure,
+        Self::DeliveredUnarchived,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UnknownRoom => "unknown_room",
@@ -37,6 +80,22 @@ impl ErrorCode {
             Self::DeliveredUnarchived => "delivered_unarchived",
         }
     }
+
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            Self::InvalidArgument => 2,
+            Self::UnknownRoom | Self::ReservedSender | Self::EmptyBody | Self::AmbiguousId => 65,
+            Self::NotFound => 66,
+            Self::BlockedRoute => 77,
+            Self::ConfigInvalid => 78,
+            Self::IoError => 75,
+            Self::DeliveredOutputFailure | Self::DeliveredUnarchived => 70,
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::IoError)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -44,7 +103,7 @@ impl ErrorCode {
 pub struct AppError {
     pub code: ErrorCode,
     pub message: String,
-    pub details: BTreeMap<String, Value>,
+    pub details: Box<ErrorDetails>,
     pub retryable: bool,
     pub suggested_fix: String,
     pub exit_code: i32,
@@ -56,30 +115,78 @@ impl AppError {
         message: impl Into<String>,
         suggested_fix: impl Into<String>,
     ) -> Self {
-        let exit_code = match code {
-            ErrorCode::InvalidArgument => 2,
-            ErrorCode::UnknownRoom
-            | ErrorCode::ReservedSender
-            | ErrorCode::EmptyBody
-            | ErrorCode::AmbiguousId => 65,
-            ErrorCode::NotFound => 66,
-            ErrorCode::BlockedRoute => 77,
-            ErrorCode::ConfigInvalid => 78,
-            ErrorCode::IoError => 75,
-            ErrorCode::DeliveredOutputFailure | ErrorCode::DeliveredUnarchived => 70,
-        };
         Self {
             code,
             message: message.into(),
-            details: BTreeMap::new(),
-            retryable: code == ErrorCode::IoError,
+            details: Box::default(),
+            retryable: code.retryable(),
             suggested_fix: suggested_fix.into(),
-            exit_code,
+            exit_code: code.exit_code(),
         }
     }
 
-    pub fn detail(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
-        self.details.insert(key.into(), value.into());
+    pub fn archive_path(mut self, value: impl Into<String>) -> Self {
+        self.details.archive_path = Some(value.into());
+        self
+    }
+
+    pub fn did_you_mean(mut self, value: impl Into<String>) -> Self {
+        self.details.did_you_mean = Some(value.into());
+        self
+    }
+
+    pub fn exact_fix(mut self, value: impl Into<String>) -> Self {
+        self.details.exact_fix = Some(value.into());
+        self
+    }
+
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.details.id = Some(value.into());
+        self
+    }
+
+    pub fn inbox_path(mut self, value: impl Into<String>) -> Self {
+        self.details.inbox_path = Some(value.into());
+        self
+    }
+
+    pub fn input(mut self, value: impl Into<String>) -> Self {
+        self.details.input = Some(value.into());
+        self
+    }
+
+    pub fn matches(mut self, value: Vec<String>) -> Self {
+        self.details.matches = Some(value);
+        self
+    }
+
+    pub fn operation(mut self, value: impl Into<String>) -> Self {
+        self.details.operation = Some(value.into());
+        self
+    }
+
+    pub fn path(mut self, value: impl Into<String>) -> Self {
+        self.details.path = Some(value.into());
+        self
+    }
+
+    pub fn reason(mut self, value: impl Into<String>) -> Self {
+        self.details.reason = Some(value.into());
+        self
+    }
+
+    pub fn registered_path(mut self, value: impl Into<String>) -> Self {
+        self.details.registered_path = Some(value.into());
+        self
+    }
+
+    pub fn room(mut self, value: impl Into<String>) -> Self {
+        self.details.room = Some(value.into());
+        self
+    }
+
+    pub fn rule(mut self, value: BlockingRule) -> Self {
+        self.details.rule = Some(value);
         self
     }
 
@@ -98,8 +205,8 @@ impl AppError {
             format!("configuration '{}' is invalid: {reason}", path.display()),
             "Fix the named file by hand, then run `post doctor`.",
         )
-        .detail("path", path.display().to_string())
-        .detail("reason", reason)
+        .path(path.display().to_string())
+        .reason(reason)
     }
 
     pub fn io(operation: &str, path: &std::path::Path, source: impl std::fmt::Display) -> Self {
@@ -112,9 +219,9 @@ impl AppError {
                 path.display()
             ),
         )
-        .detail("operation", operation)
-        .detail("path", path.display().to_string())
-        .detail("reason", reason)
+        .operation(operation)
+        .path(path.display().to_string())
+        .reason(reason)
     }
 
     pub fn delivered_output_failure(source: impl std::fmt::Display) -> Self {
@@ -124,8 +231,8 @@ impl AppError {
             format!("mail was delivered but its receipt could not be written to stdout: {reason}"),
             "Do not resend this mail; inspect the recipient inbox or archive for the delivered message.",
         )
-        .detail("operation", "write stdout after delivery")
-        .detail("reason", reason)
+        .operation("write stdout after delivery")
+        .reason(reason)
     }
 
     pub fn delivered_unarchived(
@@ -144,9 +251,9 @@ impl AppError {
             ),
             "Do not resend this mail; run `post doctor` and reconcile the delivered and archive copies by hand.",
         )
-        .detail("id", id)
-        .detail("inbox_path", inbox.display().to_string())
-        .detail("archive_path", archive.display().to_string())
-        .detail("reason", reason)
+        .id(id)
+        .inbox_path(inbox.display().to_string())
+        .archive_path(archive.display().to_string())
+        .reason(reason)
     }
 }
