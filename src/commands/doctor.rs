@@ -10,7 +10,7 @@ use crate::output::{DoctorCheck, DoctorOutput, DoctorSeverity};
 use std::fs;
 use std::path::Path;
 
-pub fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<CommandResult> {
+pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<CommandResult> {
     let mut fixed = Vec::new();
     if args.fix {
         if let Err(error) = apply_fixes(context, &mut fixed) {

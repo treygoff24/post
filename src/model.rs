@@ -37,7 +37,7 @@ pub struct Envelope {
 }
 
 #[derive(Debug)]
-pub struct ParsedMail {
+pub(crate) struct ParsedMail {
     pub envelope: Envelope,
     pub body: String,
 }
@@ -49,9 +49,9 @@ pub struct BlockingRule {
     pub reason: String,
 }
 
-pub type RoomMap = BTreeMap<String, String>;
+pub(crate) type RoomMap = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RulesConfig {
+pub(crate) struct RulesConfig {
     pub blocked: Vec<BlockingRule>,
 }

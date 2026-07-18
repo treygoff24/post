@@ -3,7 +3,7 @@ use crate::error::AppResult;
 use crate::mailbox::Context;
 use crate::output::{RoomOutput, RoomsOutput};
 
-pub fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
+pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let rules = context.load_rules(&rooms)?;
     let output_rooms: Vec<_> = rooms

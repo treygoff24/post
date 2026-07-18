@@ -2,7 +2,7 @@ use crate::model::BlockingRule;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub type AppResult<T> = Result<T, AppError>;
+pub(crate) type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ErrorDetails {

@@ -3,7 +3,7 @@ use crate::error::{AppResult, ErrorCode};
 use crate::output::{self, CommandSchema, ErrorSchema, ExitSchema, SchemaOutput};
 use std::collections::BTreeMap;
 
-pub fn run(pretty: bool) -> AppResult<CommandResult> {
+pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "send",
@@ -142,7 +142,7 @@ pub fn run(pretty: bool) -> AppResult<CommandResult> {
     CommandResult::json(&output, pretty)
 }
 
-pub fn doctor_exit_codes() -> Vec<ExitSchema> {
+pub(super) fn doctor_exit_codes() -> Vec<ExitSchema> {
     vec![
         exit(0, "healthy"),
         exit(1, "findings present"),

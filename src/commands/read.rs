@@ -4,15 +4,13 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{exclusive_move, mail_files, parse_mail, Context, MoveError};
 use crate::output::{self, Framing, ReadOutput};
 
-pub fn run(
+pub(super) fn run(
     context: &Context,
     args: ReadArgs,
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
-    let rooms = context.load_rooms()?;
-    let room = context.resolved_room(args.room, &rooms)?;
-    let (inbox, read) = context.mailbox_dirs(&room)?;
+    let (room, inbox, read) = context.resolved_mailbox_dirs(args.room)?;
     let matches: Vec<_> = mail_files(&inbox)?
         .into_iter()
         .filter(|path| {

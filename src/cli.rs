@@ -28,7 +28,7 @@ fn without_controls(value: &str) -> Result<String, String> {
     color = clap::ColorChoice::Never,
     rename_all = "kebab-case"
 )]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Emit JSON for send/read (inbox/rooms/schema/doctor are already JSON).
     #[arg(long, global = true)]
     pub json: bool,
@@ -42,7 +42,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     /// Send mail from --body, FILE, or stdin.
     Send(SendArgs),
     /// List unread mail, oldest first.
@@ -58,7 +58,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
-pub struct SendArgs {
+pub(crate) struct SendArgs {
     /// Registered recipient room.
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub to: String,
@@ -85,7 +85,7 @@ pub struct SendArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct InboxArgs {
+pub(crate) struct InboxArgs {
     /// Mailbox room; defaults to the room containing cwd or cwd basename.
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Option<String>,
@@ -96,7 +96,7 @@ pub struct InboxArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ReadArgs {
+pub(crate) struct ReadArgs {
     /// Full message id or a unique prefix.
     #[arg(value_name = "ID_OR_PREFIX", value_parser = NonEmptyStringValueParser::new())]
     pub id: String,
@@ -111,7 +111,7 @@ pub struct ReadArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct DoctorArgs {
+pub(crate) struct DoctorArgs {
     /// Create missing directories and default config files only.
     #[arg(long)]
     pub fix: bool,

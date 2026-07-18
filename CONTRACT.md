@@ -1,12 +1,8 @@
-# post — CLI contract (v1, Rust rewrite)
+# post — CLI contract (v1)
 
-`post` is a machine-local mailbox for AI agents on one computer. The Python
-reference implementation (`reference/post.py`, tests in
-`reference/test_post.py`, protocol in `reference/README.md`) shipped
-2026-07-15 and carried real mail the same day; this crate replaces it with
-identical on-disk format and laws, plus a proper agent-CLI contract. This
-document is the spec; the Python code is the behavioral reference where this
-document is silent.
+`post` is a machine-local mailbox for AI agents on one computer. This crate
+replaces the original Python implementation with the same on-disk format and
+laws, plus a proper agent-CLI contract. This document is the specification.
 
 ## Non-negotiable laws (the reason this tool exists)
 
@@ -29,17 +25,17 @@ document is silent.
    mail; `read` moves inbox → read/ within the recipient's dir.
 5. **Registers stay distinct.** `kind` ∈ {letter, note, signal}.
 
-## On-disk format (unchanged from Python — existing mail must keep working)
+## On-disk format (existing mail must keep working)
 
 - Root `~/.claude-mail/` (override: `POST_MAIL_ROOT` env, for tests).
 - `rooms.json`: `{name: path-with-tilde}`. `rules.json`: `{"blocked":
-  [{"from","to","reason"}]}`. First run creates defaults exactly as
-  reference/post.py does (including the agent-memory ARMED INSTRUMENT rule).
+  [{"from","to","reason"}]}`. First run creates the original defaults,
+  including the agent-memory ARMED INSTRUMENT rule.
 - Mail file: `<room>/inbox/<id>.mail` = JSON envelope, then `\n---\n`, then
   raw body. `id` = `YYYYmmdd-HHMMSS-<6 hex>`. Envelope keys: id, from, to,
   kind, subject, sent (local time, `%Y-%m-%d %H:%M:%S %z`).
-- Envelope JSON matches Python `json.dumps(..., indent=2, ensure_ascii=True)`,
-  including lowercase `\u` escapes for non-ASCII characters.
+- Envelope JSON is indented with two spaces and ASCII-escapes non-ASCII
+  characters with lowercase `\u` escapes.
 - Read mail moves to `<room>/read/<id>.mail`. Archive copy at
   `archive/<id>.mail`.
 - Mail writes are atomic. New mail files are published with an exclusive final
@@ -115,8 +111,8 @@ armed-route refusal quoting the reason; reserved-name refusal + free-form
 sender + cwd-basename default; banner/framing present in BOTH text and json
 read output; prefix matching incl. ambiguity; empty-inbox exit 0; atomic
 write behavior (no partial .mail on simulated failure); envelope
-deserialization of every output shape; migration: a mail file written by
-reference/post.py reads back identically.
+deserialization of every output shape; migration: a mail file in the original
+on-disk format reads back identically.
 
 ## Stack
 

@@ -4,10 +4,8 @@ use crate::error::{AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::output::{InboxItem, InboxOutput};
 
-pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<CommandResult> {
-    let rooms = context.load_rooms()?;
-    let room = context.resolved_room(args.room, &rooms)?;
-    let (inbox, _) = context.mailbox_dirs(&room)?;
+pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<CommandResult> {
+    let (room, inbox, _) = context.resolved_mailbox_dirs(args.room)?;
     let mut unread = Vec::new();
     let mut skipped_unreadable = 0;
     for path in mail_files(&inbox)? {

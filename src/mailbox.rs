@@ -28,13 +28,13 @@ pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
-pub struct Context {
+pub(crate) struct Context {
     pub root: PathBuf,
     pub home: PathBuf,
 }
 
 impl Context {
-    pub fn from_env() -> AppResult<Self> {
+    pub(crate) fn from_env() -> AppResult<Self> {
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
             AppError::new(
                 ErrorCode::ConfigInvalid,
@@ -62,7 +62,7 @@ impl Context {
         Ok(Self { root, home })
     }
 
-    pub fn prepare_first_run(&self) -> AppResult<()> {
+    pub(crate) fn prepare_first_run(&self) -> AppResult<()> {
         if self.root.exists() {
             return Ok(());
         }
@@ -73,7 +73,7 @@ impl Context {
         Ok(())
     }
 
-    pub fn write_default_if_missing(&self, name: &str, contents: &str) -> AppResult<bool> {
+    pub(crate) fn write_default_if_missing(&self, name: &str, contents: &str) -> AppResult<bool> {
         let path = self.root.join(name);
         match fs::symlink_metadata(&path) {
             Ok(_) => return Ok(false),
@@ -87,7 +87,7 @@ impl Context {
         }
     }
 
-    pub fn load_rooms(&self) -> AppResult<RoomMap> {
+    pub(crate) fn load_rooms(&self) -> AppResult<RoomMap> {
         let path = self.root.join("rooms.json");
         let bytes = fs::read(&path)
             .map_err(|error| AppError::config(&path, format!("cannot read file: {error}")))?;
@@ -104,7 +104,7 @@ impl Context {
         Ok(rooms)
     }
 
-    pub fn load_rules(&self, rooms: &RoomMap) -> AppResult<RulesConfig> {
+    pub(crate) fn load_rules(&self, rooms: &RoomMap) -> AppResult<RulesConfig> {
         let path = self.root.join("rules.json");
         let bytes = fs::read(&path)
             .map_err(|error| AppError::config(&path, format!("cannot read file: {error}")))?;
@@ -138,7 +138,7 @@ impl Context {
         Ok(rules)
     }
 
-    pub fn expand_room_path(&self, value: &str) -> Result<PathBuf, String> {
+    pub(crate) fn expand_room_path(&self, value: &str) -> Result<PathBuf, String> {
         if value == "~" {
             return Ok(self.home.clone());
         }
@@ -158,7 +158,11 @@ impl Context {
         }
     }
 
-    pub fn resolved_room(&self, explicit: Option<String>, rooms: &RoomMap) -> AppResult<String> {
+    pub(crate) fn resolved_room(
+        &self,
+        explicit: Option<String>,
+        rooms: &RoomMap,
+    ) -> AppResult<String> {
         if let Some(room) = explicit {
             validate_component(&room).map_err(|reason| {
                 AppError::new(
@@ -174,7 +178,17 @@ impl Context {
         self.infer_from_cwd(rooms)
     }
 
-    pub fn infer_from_cwd(&self, rooms: &RoomMap) -> AppResult<String> {
+    pub(crate) fn resolved_mailbox_dirs(
+        &self,
+        explicit: Option<String>,
+    ) -> AppResult<(String, PathBuf, PathBuf)> {
+        let rooms = self.load_rooms()?;
+        let room = self.resolved_room(explicit, &rooms)?;
+        let (inbox, read) = self.mailbox_dirs(&room)?;
+        Ok((room, inbox, read))
+    }
+
+    pub(crate) fn infer_from_cwd(&self, rooms: &RoomMap) -> AppResult<String> {
         let cwd = std::env::current_dir()
             .map_err(|error| AppError::io("resolve current directory", Path::new("."), error))?;
         let mut matches = Vec::new();
@@ -217,7 +231,7 @@ impl Context {
         Ok(basename.to_owned())
     }
 
-    pub fn ensure_sender_allowed(&self, sender: &str, rooms: &RoomMap) -> AppResult<()> {
+    pub(crate) fn ensure_sender_allowed(&self, sender: &str, rooms: &RoomMap) -> AppResult<()> {
         let Some(room_path) = rooms.get(sender) else {
             return Ok(());
         };
@@ -246,7 +260,7 @@ impl Context {
         .registered_path(expanded.display().to_string()))
     }
 
-    pub fn mailbox_dirs(&self, room: &str) -> AppResult<(PathBuf, PathBuf)> {
+    pub(crate) fn mailbox_dirs(&self, room: &str) -> AppResult<(PathBuf, PathBuf)> {
         validate_component(room).map_err(|reason| {
             AppError::new(
                 ErrorCode::InvalidArgument,
@@ -265,7 +279,7 @@ impl Context {
     }
 }
 
-pub fn validate_component(value: &str) -> Result<(), String> {
+pub(crate) fn validate_component(value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err("name is empty".to_owned());
     }
@@ -287,7 +301,7 @@ fn path_contains(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-pub fn parse_mail(path: &Path) -> AppResult<ParsedMail> {
+pub(crate) fn parse_mail(path: &Path) -> AppResult<ParsedMail> {
     let mut raw = String::new();
     File::open(path)
         .and_then(|mut file| file.read_to_string(&mut raw))
@@ -349,7 +363,7 @@ pub(crate) fn validate_envelope(path: &Path, envelope: &Envelope) -> AppResult<(
     Ok(())
 }
 
-pub fn mail_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
+pub(crate) fn mail_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
     let mut files = Vec::new();
     let entries = fs::read_dir(directory)
         .map_err(|error| AppError::io("list mailbox directory", directory, error))?;
@@ -432,7 +446,7 @@ fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
-pub fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
+pub(crate) fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>> {
     let payload = serde_json::to_string_pretty(envelope).map_err(|error| {
         AppError::new(
             ErrorCode::IoError,
@@ -470,7 +484,7 @@ fn ascii_escape_json(json: &str) -> String {
     escaped
 }
 
-pub fn local_timestamp() -> AppResult<(String, String)> {
+pub(crate) fn local_timestamp() -> AppResult<(String, String)> {
     let seconds = time_since_unix_epoch()?.as_secs();
     format_local_timestamp(seconds)
 }
@@ -529,14 +543,14 @@ fn format_local_timestamp(seconds: u64) -> AppResult<(String, String)> {
     Ok((id_time, sent))
 }
 
-pub fn new_mail_id(timestamp: &str, attempt: u64) -> AppResult<String> {
+pub(crate) fn new_mail_id(timestamp: &str, attempt: u64) -> AppResult<String> {
     let nanos = time_since_unix_epoch()?.as_nanos() as u64;
     let counter = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mixed = nanos ^ counter.rotate_left(17) ^ u64::from(std::process::id()) ^ attempt;
     Ok(format!("{timestamp}-{:06x}", mixed & 0x00ff_ffff))
 }
 
-pub fn closest_room<'a>(input: &str, rooms: &'a RoomMap) -> Option<&'a str> {
+pub(crate) fn closest_room<'a>(input: &str, rooms: &'a RoomMap) -> Option<&'a str> {
     rooms
         .keys()
         .map(|room| (levenshtein(input, room), room.as_str()))
@@ -562,32 +576,13 @@ fn levenshtein(left: &str, right: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{ascii_escape_json, exclusive_atomic_write, exclusive_atomic_write_with};
+    use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::io;
-    use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(unix)]
     unsafe extern "C" {
         fn tzset();
-    }
-
-    fn test_root(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-{label}-{nonce}"));
-        fs::create_dir_all(&root).expect("create test root");
-        root
-    }
-
-    fn trash_test_root(root: &Path) {
-        let cleanup = std::process::Command::new("trash")
-            .arg(root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean test root");
     }
 
     #[test]

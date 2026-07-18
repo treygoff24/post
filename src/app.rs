@@ -65,9 +65,9 @@ fn finish_command_result<W: Write>(mut result: CommandResult, stdout: &mut W) ->
 mod tests {
     use super::finish_command_result;
     use crate::command_result::CommandResult;
+    use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::io;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     struct BrokenWriter;
 
@@ -86,12 +86,7 @@ mod tests {
 
     #[test]
     fn stdout_failure_leaves_read_mail_unmoved_and_delivered_send_nonretryable() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-stdout-{nonce}"));
-        fs::create_dir_all(&root).expect("create stdout test root");
+        let root = test_root("stdout");
         let inbox = root.join("inbox.mail");
         fs::write(&inbox, "mail").expect("create unread mail");
         let read = root.join("read.mail");
@@ -113,10 +108,6 @@ mod tests {
         assert!(!error.retryable);
         assert_eq!(error.code, crate::error::ErrorCode::DeliveredOutputFailure);
         assert_eq!(error.exit_code, 70);
-        let cleanup = std::process::Command::new("trash")
-            .arg(&root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean stdout test root");
+        trash_test_root(&root);
     }
 }

@@ -10,7 +10,7 @@ use crate::output::{self, SendOutput};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
-pub fn run(
+pub(super) fn run(
     context: &Context,
     args: SendArgs,
     json_output: bool,
@@ -226,16 +226,11 @@ mod tests {
     use crate::cli::SendArgs;
     use crate::mailbox::{Context, DEFAULT_ROOMS_JSON};
     use crate::model::MailKind;
+    use crate::test_support::{test_root, trash_test_root};
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_context(label: &str) -> (std::path::PathBuf, Context) {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-send-{label}-{nonce}"));
-        fs::create_dir_all(&root).expect("create send test root");
+        let root = test_root(&format!("send-{label}"));
         fs::write(root.join("rooms.json"), DEFAULT_ROOMS_JSON).expect("write rooms config");
         fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules config");
         (
@@ -245,14 +240,6 @@ mod tests {
                 home: root,
             },
         )
-    }
-
-    fn trash_test_root(root: &std::path::Path) {
-        let cleanup = std::process::Command::new("trash")
-            .arg(root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean send test root");
     }
 
     #[test]
