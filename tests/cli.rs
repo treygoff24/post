@@ -1227,14 +1227,7 @@ fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
         "subject": "",
         "sent": "2026-07-15 12:00:00 -0400"
     });
-    fs::write(
-        inbox.join(format!("{id}.mail")),
-        format!(
-            "{}\n---\n{body}",
-            serde_json::to_string_pretty(&envelope).expect("serialize fixture envelope")
-        ),
-    )
-    .expect("write mail fixture");
+    write_custom_mail(inbox, id, &envelope, body);
 }
 
 fn write_custom_mail(

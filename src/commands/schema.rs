@@ -1,7 +1,6 @@
 use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
-use crate::output::{self, CommandSchema, ErrorSchema, ExitSchema, SchemaOutput};
-use std::collections::BTreeMap;
+use crate::output::{self, CommandSchema, ErrorSchema, ExitSchema, OutputShapes, SchemaOutput};
 
 pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
@@ -42,23 +41,20 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "read-only unless --fix; --fix only creates missing directories/defaults",
         ),
     ];
-    let mut output_shapes = BTreeMap::new();
-    output_shapes.insert(
-        "send_json".to_owned(),
-        fields(&["ok", "envelope", "archived"]),
-    );
-    output_shapes.insert(
-        "inbox".to_owned(),
-        fields(&["ok", "room", "unread", "count", "skipped_unreadable"]),
-    );
-    output_shapes.insert(
-        "read_json".to_owned(),
-        fields(&["ok", "framing", "envelope", "body"]),
-    );
-    output_shapes.insert("rooms".to_owned(), fields(&["ok", "rooms", "count"]));
-    output_shapes.insert(
-        "schema".to_owned(),
-        fields(&[
+    let output_shapes = OutputShapes {
+        doctor: fields(&[
+            "ok",
+            "status",
+            "root",
+            "checks",
+            "count",
+            "fixed",
+            "exit_codes",
+        ]),
+        inbox: fields(&["ok", "room", "unread", "count", "skipped_unreadable"]),
+        read_json: fields(&["ok", "framing", "envelope", "body"]),
+        rooms: fields(&["ok", "rooms", "count"]),
+        schema: fields(&[
             "ok",
             "name",
             "contract_version",
@@ -72,19 +68,8 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "laws",
             "environment",
         ]),
-    );
-    output_shapes.insert(
-        "doctor".to_owned(),
-        fields(&[
-            "ok",
-            "status",
-            "root",
-            "checks",
-            "count",
-            "fixed",
-            "exit_codes",
-        ]),
-    );
+        send_json: fields(&["ok", "envelope", "archived"]),
+    };
     let errors = ErrorCode::ALL
         .iter()
         .map(|code| ErrorSchema {

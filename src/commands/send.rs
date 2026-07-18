@@ -171,9 +171,11 @@ fn ensure_route_allowed(
     recipient: &str,
 ) -> AppResult<()> {
     let rules = context.load_rules(rooms)?;
-    let Some(rule) = rules.blocked.iter().find(|rule| {
-        (rule.from == "*" || rule.from == sender) && (rule.to == "*" || rule.to == recipient)
-    }) else {
+    let Some(rule) = rules
+        .blocked
+        .iter()
+        .find(|rule| rule.matches_route(sender, recipient))
+    else {
         return Ok(());
     };
     Err(AppError::new(

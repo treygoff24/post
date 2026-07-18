@@ -49,6 +49,16 @@ pub struct BlockingRule {
     pub reason: String,
 }
 
+impl BlockingRule {
+    pub(crate) fn matches_route(&self, sender: &str, recipient: &str) -> bool {
+        (self.from == "*" || self.from == sender) && self.targets(recipient)
+    }
+
+    pub(crate) fn targets(&self, recipient: &str) -> bool {
+        self.to == "*" || self.to == recipient
+    }
+}
+
 pub(crate) type RoomMap = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

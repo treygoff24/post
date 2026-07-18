@@ -12,7 +12,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             let blocked = rules
                 .blocked
                 .iter()
-                .filter(|rule| rule.to == "*" || rule.to == name)
+                .filter(|rule| rule.targets(&name))
                 .cloned()
                 .collect();
             RoomOutput {
