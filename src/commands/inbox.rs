@@ -31,13 +31,7 @@ pub fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<Comman
                 continue;
             }
         };
-        unread.push(InboxItem {
-            id: mail.envelope.id,
-            from: mail.envelope.from,
-            kind: mail.envelope.kind,
-            subject: mail.envelope.subject,
-            sent: mail.envelope.sent,
-        });
+        unread.push(InboxItem::from(mail.envelope));
     }
     unread.sort_by(|left, right| left.id.cmp(&right.id));
     let count = unread.len();

@@ -1,16 +1,16 @@
-pub mod doctor;
-pub mod inbox;
-pub mod read;
-pub mod rooms;
-pub mod schema;
-pub mod send;
+mod doctor;
+mod inbox;
+mod read;
+mod rooms;
+mod schema;
+mod send;
 
 use crate::cli::{Cli, Command};
-pub use crate::command_result::CommandResult;
+use crate::command_result::CommandResult;
 use crate::error::AppResult;
 use crate::mailbox::Context;
 
-pub fn execute(cli: Cli) -> AppResult<CommandResult> {
+pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     let context = Context::from_env()?;
     if !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;

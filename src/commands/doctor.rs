@@ -2,7 +2,9 @@ use crate::cli::DoctorArgs;
 use crate::command_result::CommandResult;
 use crate::commands::schema::doctor_exit_codes;
 use crate::error::{AppError, AppResult};
-use crate::mailbox::{parse_mail, validate_component, Context};
+use crate::mailbox::{
+    parse_mail, validate_component, Context, DEFAULT_ROOMS_JSON, DEFAULT_RULES_JSON,
+};
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{DoctorCheck, DoctorOutput, DoctorSeverity};
 use std::fs;
@@ -327,10 +329,10 @@ fn check_archive_copy(context: &Context, delivered: &Path, checks: &mut Vec<Doct
 
 fn apply_fixes(context: &Context, fixed: &mut Vec<String>) -> Result<(), AppError> {
     create_dir(&context.root, fixed)?;
-    if context.write_default_if_missing("rooms.json", super::super::DEFAULT_ROOMS_JSON)? {
+    if context.write_default_if_missing("rooms.json", DEFAULT_ROOMS_JSON)? {
         fixed.push(context.root.join("rooms.json").display().to_string());
     }
-    if context.write_default_if_missing("rules.json", super::super::DEFAULT_RULES_JSON)? {
+    if context.write_default_if_missing("rules.json", DEFAULT_RULES_JSON)? {
         fixed.push(context.root.join("rules.json").display().to_string());
     }
     create_dir(&context.root.join("archive"), fixed)?;

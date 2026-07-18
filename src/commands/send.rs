@@ -5,8 +5,8 @@ use crate::mailbox::{
     closest_room, encode_mail, exclusive_atomic_write, local_timestamp, new_mail_id,
     validate_envelope, Context,
 };
-use crate::model::RoomMap;
-use crate::output::{self, Envelope, SendOutput};
+use crate::model::{Envelope, RoomMap};
+use crate::output::{self, SendOutput};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
@@ -223,8 +223,9 @@ fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<
 #[cfg(test)]
 mod tests {
     use super::{run_with_body, run_with_body_and_id};
-    use crate::cli::{MailKind, SendArgs};
+    use crate::cli::SendArgs;
     use crate::mailbox::{Context, DEFAULT_ROOMS_JSON};
+    use crate::model::MailKind;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -256,18 +257,7 @@ mod tests {
 
     #[test]
     fn body_after_rule_add_is_refused_before_any_mail_write() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-send-order-{nonce}"));
-        fs::create_dir_all(&root).expect("create send-order root");
-        fs::write(root.join("rooms.json"), DEFAULT_ROOMS_JSON).expect("write rooms config");
-        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules config");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
+        let (root, context) = test_context("order");
         let result = run_with_body(
             &context,
             SendArgs {
@@ -296,27 +286,12 @@ mod tests {
         assert_eq!(error.code.as_str(), "blocked_route");
         assert!(!root.join("archive").exists());
         assert!(!root.join("claude-space/inbox").exists());
-        let cleanup = std::process::Command::new("trash")
-            .arg(&root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean send-order root");
+        trash_test_root(&root);
     }
 
     #[test]
     fn inbox_id_collision_retries_before_writing_any_archive_copy() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-send-collision-{nonce}"));
-        fs::create_dir_all(&root).expect("create send-collision root");
-        fs::write(root.join("rooms.json"), DEFAULT_ROOMS_JSON).expect("write rooms config");
-        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules config");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
+        let (root, context) = test_context("collision");
         let (inbox, _) = context
             .mailbox_dirs("claude-space")
             .expect("create recipient mailbox");
@@ -352,11 +327,7 @@ mod tests {
         assert!(!root.join(format!("archive/{collision_id}.mail")).exists());
         assert!(inbox.join(format!("{fresh_id}.mail")).is_file());
         assert!(root.join(format!("archive/{fresh_id}.mail")).is_file());
-        let cleanup = std::process::Command::new("trash")
-            .arg(&root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean collision root");
+        trash_test_root(&root);
     }
 
     #[test]

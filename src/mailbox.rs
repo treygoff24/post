@@ -1,6 +1,5 @@
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::model::{RoomMap, RulesConfig};
-use crate::output::Envelope;
+use crate::model::{Envelope, ParsedMail, RoomMap, RulesConfig};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -32,12 +31,6 @@ static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct Context {
     pub root: PathBuf,
     pub home: PathBuf,
-}
-
-#[derive(Debug)]
-pub struct ParsedMail {
-    pub envelope: Envelope,
-    pub body: String,
 }
 
 impl Context {
@@ -571,11 +564,30 @@ mod tests {
     use super::{ascii_escape_json, exclusive_atomic_write, exclusive_atomic_write_with};
     use std::fs;
     use std::io;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(unix)]
     unsafe extern "C" {
         fn tzset();
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should follow Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("post-{label}-{nonce}"));
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
+    fn trash_test_root(root: &Path) {
+        let cleanup = std::process::Command::new("trash")
+            .arg(root)
+            .status()
+            .expect("run recoverable test cleanup");
+        assert!(cleanup.success(), "trash should clean test root");
     }
 
     #[test]
@@ -588,12 +600,7 @@ mod tests {
 
     #[test]
     fn exclusive_atomic_write_never_replaces_an_existing_mail_file() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-atomic-{nonce}"));
-        fs::create_dir_all(&root).expect("create atomic-write test root");
+        let root = test_root("atomic");
         let destination = root.join("message.mail");
         fs::write(&destination, "original mail").expect("create collision fixture");
 
@@ -610,24 +617,12 @@ mod tests {
             .map(|entry| entry.expect("read test entry").file_name())
             .collect();
         assert_eq!(entries, vec!["message.mail"]);
-        let cleanup = std::process::Command::new("trash")
-            .arg(&root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(
-            cleanup.success(),
-            "trash should clean atomic-write test root"
-        );
+        trash_test_root(&root);
     }
 
     #[test]
     fn exclusive_atomic_write_stays_successful_after_the_commit_point() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-atomic-commit-{nonce}"));
-        fs::create_dir_all(&root).expect("create atomic-write commit test root");
+        let root = test_root("atomic-commit");
         let destination = root.join("message.mail");
 
         exclusive_atomic_write_with(&destination, b"committed mail", |_, _| {
@@ -639,21 +634,12 @@ mod tests {
             fs::read_to_string(&destination).expect("read committed mail"),
             "committed mail"
         );
-        let cleanup = std::process::Command::new("trash")
-            .arg(&root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean commit test root");
+        trash_test_root(&root);
     }
 
     #[test]
     fn defaults_use_exclusive_create_and_leave_existing_or_dangling_rules_untouched() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("post-defaults-{nonce}"));
-        fs::create_dir_all(&root).expect("create config test root");
+        let root = test_root("defaults");
         let context = super::Context {
             root: root.clone(),
             home: root.clone(),
@@ -678,11 +664,7 @@ mod tests {
             .expect("inspect dangling rules symlink")
             .file_type()
             .is_symlink());
-        let cleanup = std::process::Command::new("trash")
-            .arg(&root)
-            .status()
-            .expect("run recoverable test cleanup");
-        assert!(cleanup.success(), "trash should clean config test root");
+        trash_test_root(&root);
     }
 
     #[test]

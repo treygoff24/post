@@ -113,7 +113,7 @@ pub fn run(
     }))
 }
 
-fn render_text(envelope: &crate::output::Envelope, body: &str) -> String {
+fn render_text(envelope: &crate::model::Envelope, body: &str) -> String {
     let from = sanitize_header(&envelope.from);
     let sent = sanitize_header(&envelope.sent);
     let subject = sanitize_header(&envelope.subject);

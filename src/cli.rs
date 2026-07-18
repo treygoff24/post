@@ -1,6 +1,6 @@
+use crate::model::MailKind;
 use clap::builder::NonEmptyStringValueParser;
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 fn nonempty_without_controls(value: &str) -> Result<String, String> {
@@ -115,28 +115,4 @@ pub struct DoctorArgs {
     /// Create missing directories and default config files only.
     #[arg(long)]
     pub fix: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MailKind {
-    Letter,
-    Note,
-    Signal,
-}
-
-impl MailKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Letter => "letter",
-            Self::Note => "note",
-            Self::Signal => "signal",
-        }
-    }
-}
-
-impl std::fmt::Display for MailKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
