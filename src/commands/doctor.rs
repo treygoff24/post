@@ -3,7 +3,8 @@ use crate::command_result::CommandResult;
 use crate::commands::schema::doctor_exit_codes;
 use crate::error::{AppError, AppResult};
 use crate::mailbox::{
-    parse_mail, validate_component, Context, DEFAULT_ROOMS_JSON, DEFAULT_RULES_JSON,
+    parse_mail, validate_component, validate_room_name, Context, DEFAULT_ROOMS_JSON,
+    DEFAULT_RULES_JSON,
 };
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{DoctorCheck, DoctorOutput, DoctorSeverity};
@@ -136,7 +137,7 @@ fn detect_rooms(context: &Context, path: &Path, checks: &mut Vec<DoctorCheck>) -
     {
         Some(rooms) if !rooms.is_empty() => {
             for (name, value) in &rooms {
-                if let Err(reason) = validate_component(name) {
+                if let Err(reason) = validate_room_name(name) {
                     checks.push(check(
                         &format!("config.room_name.{name}"),
                         DoctorSeverity::Error,

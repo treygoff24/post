@@ -45,13 +45,14 @@ pub enum ErrorCode {
     NotFound,
     InvalidArgument,
     ConfigInvalid,
+    DuplicateWorkspace,
     IoError,
     DeliveredOutputFailure,
     DeliveredUnarchived,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -60,6 +61,7 @@ impl ErrorCode {
         Self::NotFound,
         Self::InvalidArgument,
         Self::ConfigInvalid,
+        Self::DuplicateWorkspace,
         Self::IoError,
         Self::DeliveredOutputFailure,
         Self::DeliveredUnarchived,
@@ -75,6 +77,7 @@ impl ErrorCode {
             Self::NotFound => "not_found",
             Self::InvalidArgument => "invalid_argument",
             Self::ConfigInvalid => "config_invalid",
+            Self::DuplicateWorkspace => "duplicate_workspace",
             Self::IoError => "io_error",
             Self::DeliveredOutputFailure => "delivered_output_failure",
             Self::DeliveredUnarchived => "delivered_unarchived",
@@ -84,7 +87,11 @@ impl ErrorCode {
     pub const fn exit_code(self) -> i32 {
         match self {
             Self::InvalidArgument => 2,
-            Self::UnknownRoom | Self::ReservedSender | Self::EmptyBody | Self::AmbiguousId => 65,
+            Self::UnknownRoom
+            | Self::ReservedSender
+            | Self::EmptyBody
+            | Self::AmbiguousId
+            | Self::DuplicateWorkspace => 65,
             Self::NotFound => 66,
             Self::BlockedRoute => 77,
             Self::ConfigInvalid => 78,

@@ -188,6 +188,10 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert!(schema
         .error_codes
         .iter()
+        .any(|error| error.code == "duplicate_workspace"));
+    assert!(schema
+        .error_codes
+        .iter()
         .any(|error| error.code == "io_error" && error.exit == 75 && error.retryable));
     assert!(schema.error_codes.iter().any(|error| {
         error.code == "delivered_output_failure" && error.exit == 70 && !error.retryable
@@ -528,6 +532,452 @@ fn id_prefixes_resolve_uniquely_and_ambiguity_lists_matches() {
         error.error.suggested_fix,
         "Run `post inbox --room claude-space` and retry with one listed id."
     );
+}
+
+#[test]
+fn rooms_add_registers_an_existing_directory_without_touching_rules() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    for relative in [
+        "Code/agent-memory",
+        "Code/claude-space",
+        "Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+    ] {
+        fs::create_dir_all(sandbox.home.join(relative)).expect("create default room workspace");
+    }
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    assert_eq!(
+        fs::metadata(&rooms_path)
+            .expect("inspect initial rooms config")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let workspace = sandbox.path.join("new-room");
+    fs::create_dir(&workspace).expect("create room workspace");
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let rules_before = fs::read(sandbox.mail_root.join("rules.json")).expect("read rules config");
+
+    let output = sandbox.run(&["rooms", "add", "new-room", &workspace_arg]);
+
+    assert_success(&output);
+    let rooms: RoomsOutput = from_stdout(&output);
+    assert_eq!(rooms.count, 4);
+    assert!(rooms
+        .rooms
+        .iter()
+        .any(|room| room.name == "new-room" && room.path == workspace_arg));
+    let registered: serde_json::Value = serde_json::from_slice(
+        &fs::read(sandbox.mail_root.join("rooms.json")).expect("read rooms config"),
+    )
+    .expect("parse rooms config");
+    assert_eq!(registered["new-room"], workspace_arg);
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("rules.json")).expect("reread rules config"),
+        rules_before
+    );
+    assert_eq!(
+        fs::metadata(&rooms_path)
+            .expect("inspect replaced rooms config")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn rooms_add_rejects_existing_workspace_aliases_including_symlinks() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let workspace = sandbox.home.join("Code/agent-memory");
+    fs::create_dir_all(&workspace).expect("create registered agent-memory workspace");
+    let alias = sandbox.path.join("agent-memory-alias");
+    std::os::unix::fs::symlink(&workspace, &alias).expect("create workspace symlink");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
+
+    for (name, candidate) in [("z-agent-memory", &workspace), ("z-symlink", &alias)] {
+        let output = sandbox.run(&["rooms", "add", name, candidate.to_string_lossy().as_ref()]);
+
+        assert_eq!(output.status.code(), Some(65));
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "duplicate_workspace");
+        assert_eq!(error.error.details.room.as_deref(), Some("agent-memory"));
+        assert_eq!(
+            fs::read(&rooms_path).expect("reread rooms config"),
+            rooms_before
+        );
+    }
+}
+
+#[test]
+fn rooms_add_warns_when_a_stored_alias_cannot_be_verified() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let workspace = sandbox.path.join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    let dangling = workspace.join("dangling");
+    std::os::unix::fs::symlink(workspace.join("missing"), &dangling)
+        .expect("create dangling symlink");
+    let stored_path = dangling.join("..");
+    assert!(fs::canonicalize(&stored_path).is_err());
+
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("read rooms config"))
+            .expect("parse rooms config");
+    rooms["agent-memory"] = serde_json::json!(stored_path.to_string_lossy());
+    fs::write(
+        &rooms_path,
+        serde_json::to_vec_pretty(&rooms).expect("serialize rooms config"),
+    )
+    .expect("write rooms config");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "workspace-alias",
+        workspace.to_string_lossy().as_ref(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("registered room \"agent-memory\""));
+    let listed: RoomsOutput = from_stdout(&output);
+    assert!(listed
+        .rooms
+        .iter()
+        .any(|room| room.name == "workspace-alias"));
+}
+
+#[test]
+fn rooms_add_warns_when_a_dangling_symlink_parent_is_inconclusive() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let a = sandbox.path.join("a");
+    let b = sandbox.path.join("b");
+    fs::create_dir(&a).expect("create candidate workspace");
+    fs::create_dir(&b).expect("create opposite symlink parent");
+    let link = a.join("link");
+    std::os::unix::fs::symlink(b.join("missing"), &link).expect("create dangling symlink");
+    let stored_path = link.join("..");
+    assert!(fs::canonicalize(&stored_path).is_err());
+
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("read rooms config"))
+            .expect("parse rooms config");
+    rooms["agent-memory"] = serde_json::json!(stored_path.to_string_lossy());
+    fs::write(
+        &rooms_path,
+        serde_json::to_vec_pretty(&rooms).expect("serialize rooms config"),
+    )
+    .expect("write rooms config");
+
+    let output = sandbox.run(&["rooms", "add", "a-candidate", a.to_string_lossy().as_ref()]);
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("registered room \"agent-memory\""));
+    let listed: RoomsOutput = from_stdout(&output);
+    assert!(listed.rooms.iter().any(|room| room.name == "a-candidate"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rooms_add_warns_but_succeeds_when_an_existing_room_is_inaccessible() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let locked = sandbox.path.join("locked");
+    let inaccessible = locked.join("workspace");
+    fs::create_dir_all(&inaccessible).expect("create inaccessible workspace fixture");
+
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("read rooms config"))
+            .expect("parse rooms config");
+    rooms["agent-memory"] = serde_json::json!(inaccessible.to_string_lossy());
+    fs::write(
+        &rooms_path,
+        serde_json::to_vec_pretty(&rooms).expect("serialize rooms config"),
+    )
+    .expect("write rooms config");
+
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))
+        .expect("make existing room inaccessible");
+    assert_eq!(
+        fs::canonicalize(&inaccessible)
+            .expect_err("fixture must be inaccessible")
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    let unrelated = sandbox.path.join("unrelated");
+    fs::create_dir(&unrelated).expect("create unrelated workspace");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "unrelated",
+        unrelated.to_string_lossy().as_ref(),
+    ]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700))
+        .expect("restore fixture permissions");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("registered room \"agent-memory\""));
+    assert!(stderr(&output).contains("PermissionDenied"));
+    let listed: RoomsOutput = from_stdout(&output);
+    assert!(listed.rooms.iter().any(|room| room.name == "unrelated"));
+}
+
+#[test]
+fn rooms_add_rejects_mail_root_reserved_names() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
+
+    for name in [
+        "*",
+        "archive",
+        "rooms.json",
+        "rules.json",
+        ".rooms.lock",
+        ".rooms.json.123.0.tmp",
+        "Archive",
+        "ROOMS.JSON",
+        ".ROOMS.LOCK",
+        ".ROOMS.JSON.123.0.TMP",
+    ] {
+        let output = sandbox.run(&[
+            "rooms",
+            "add",
+            name,
+            sandbox.path.to_string_lossy().as_ref(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(2), "reserved name: {name}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "invalid_argument");
+        assert!(error
+            .error
+            .details
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("reserved")));
+    }
+    assert_eq!(
+        fs::read(&rooms_path).expect("reread rooms config"),
+        rooms_before
+    );
+}
+
+#[test]
+fn rooms_add_rejects_duplicate_names_without_overwriting_the_registry() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "claude-space",
+        sandbox.path.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("already registered"));
+    assert_eq!(
+        fs::read(&rooms_path).expect("reread rooms config"),
+        rooms_before
+    );
+}
+
+#[test]
+fn rooms_add_rejects_case_folded_collisions_with_registered_names() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
+    let workspace = sandbox.path.join("case-fold-candidate");
+    fs::create_dir(&workspace).expect("create candidate workspace");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "CLAUDE-SPACE",
+        workspace.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert_eq!(error.error.details.room.as_deref(), Some("claude-space"));
+    assert_eq!(
+        fs::read(&rooms_path).expect("reread rooms config"),
+        rooms_before
+    );
+}
+
+#[test]
+fn rooms_add_rejects_a_blocked_recipient_without_changing_config() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rules_path = sandbox.mail_root.join("rules.json");
+    let reason = "human blocked this room before registration";
+    fs::write(
+        &rules_path,
+        format!(
+            r#"{{"blocked":[{{"from":"*","to":"blocked-room","reason":{}}}]}}"#,
+            serde_json::to_string(reason).expect("serialize rule reason")
+        ),
+    )
+    .expect("write blocking rule");
+    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
+    let rules_before = fs::read(&rules_path).expect("read rules config");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "blocked-room",
+        sandbox.path.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(77));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "blocked_route");
+    assert!(error.error.message.contains(reason));
+    assert_eq!(error.error.details.reason.as_deref(), Some(reason));
+    assert_eq!(
+        fs::read(&rooms_path).expect("reread rooms config"),
+        rooms_before
+    );
+    assert_eq!(
+        fs::read(&rules_path).expect("reread rules config"),
+        rules_before
+    );
+
+    let wildcard_reason = "human blocked every recipient";
+    fs::write(
+        &rules_path,
+        format!(
+            r#"{{"blocked":[{{"from":"named-sender","to":"*","reason":{}}}]}}"#,
+            serde_json::to_string(wildcard_reason).expect("serialize wildcard rule reason")
+        ),
+    )
+    .expect("write wildcard blocking rule");
+    let rules_before = fs::read(&rules_path).expect("read wildcard rules config");
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "wildcard-blocked-room",
+        sandbox.path.to_string_lossy().as_ref(),
+    ]);
+    assert_eq!(output.status.code(), Some(77));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "blocked_route");
+    assert!(error.error.message.contains(wildcard_reason));
+    assert_eq!(
+        fs::read(&rooms_path).expect("reread rooms after wildcard block"),
+        rooms_before
+    );
+    assert_eq!(
+        fs::read(&rules_path).expect("reread wildcard rules config"),
+        rules_before
+    );
+}
+
+#[test]
+fn rooms_add_rejects_a_missing_path_without_changing_the_registry() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
+    let missing = sandbox.path.join("missing-room");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "missing-room",
+        missing.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("does not exist"));
+
+    let file = sandbox.path.join("not-a-directory");
+    fs::write(&file, "room paths must be directories").expect("create non-directory path");
+    let output = sandbox.run(&["rooms", "add", "file-room", file.to_string_lossy().as_ref()]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(error.error.message.contains("is not a directory"));
+    assert_eq!(
+        fs::read(rooms_path).expect("reread rooms config"),
+        rooms_before
+    );
+}
+
+#[test]
+fn rooms_add_rejects_control_characters_in_the_path_argument() {
+    let sandbox = Sandbox::new();
+    let path = format!("{}\nforged", sandbox.path.display());
+
+    let output = sandbox.run(&["rooms", "add", "control-path", &path]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("control characters"));
+    assert!(!sandbox.mail_root.exists());
+}
+
+#[test]
+fn rooms_add_refuses_to_replace_a_symlinked_registry() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let target = sandbox.path.join("rooms-target.json");
+    fs::rename(&rooms_path, &target).expect("move rooms config to symlink target");
+    std::os::unix::fs::symlink(&target, &rooms_path).expect("symlink rooms config");
+    let before = fs::read(&target).expect("read rooms target");
+
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "symlink-refusal",
+        sandbox.path.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(78));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(error.error.message.contains("symlink"));
+    assert_eq!(fs::read(&target).expect("reread rooms target"), before);
+    assert!(fs::symlink_metadata(&rooms_path)
+        .expect("inspect rooms symlink")
+        .file_type()
+        .is_symlink());
 }
 
 #[test]

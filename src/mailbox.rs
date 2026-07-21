@@ -3,6 +3,8 @@ use crate::model::{Envelope, ParsedMail, RoomMap, RulesConfig};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +28,9 @@ pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{
 "#;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const ROOMS_LOCK_FILE: &str = ".rooms.lock";
+const RESERVED_ROOM_NAMES: [&str; 5] =
+    ["*", "archive", "rooms.json", "rules.json", ROOMS_LOCK_FILE];
 
 #[derive(Debug, Clone)]
 pub(crate) struct Context {
@@ -97,11 +102,49 @@ impl Context {
             return Err(AppError::config(&path, "room map is empty"));
         }
         for (name, room_path) in &rooms {
-            validate_component(name).map_err(|reason| AppError::config(&path, reason))?;
+            validate_room_name(name).map_err(|reason| AppError::config(&path, reason))?;
             self.expand_room_path(room_path)
                 .map_err(|reason| AppError::config(&path, reason))?;
         }
         Ok(rooms)
+    }
+
+    pub(crate) fn write_rooms(&self, rooms: &RoomMap) -> AppResult<()> {
+        let path = self.root.join("rooms.json");
+        if fs::symlink_metadata(&path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(AppError::config(
+                &path,
+                "rooms.json is a symlink; replace it with a regular file before registering rooms",
+            ));
+        }
+        let mut bytes = serde_json::to_vec_pretty(rooms)
+            .map_err(|error| AppError::io("serialize room registry", &path, error))?;
+        bytes.push(b'\n');
+        atomic_replace(&path, &bytes)
+            .map_err(|error| AppError::io("atomically update room registry", &path, error))
+    }
+
+    pub(crate) fn lock_rooms(&self) -> AppResult<File> {
+        let path = self.root.join(ROOMS_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| AppError::io("open room registry lock", &path, error))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
+            return Err(AppError::io(
+                "lock room registry",
+                &path,
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(file)
     }
 
     pub(crate) fn load_rules(&self, rooms: &RoomMap) -> AppResult<RulesConfig> {
@@ -164,7 +207,7 @@ impl Context {
         rooms: &RoomMap,
     ) -> AppResult<String> {
         if let Some(room) = explicit {
-            validate_component(&room).map_err(|reason| {
+            validate_room_name(&room).map_err(|reason| {
                 AppError::new(
                     ErrorCode::InvalidArgument,
                     format!("room '{room}' is invalid: {reason}"),
@@ -261,7 +304,7 @@ impl Context {
     }
 
     pub(crate) fn mailbox_dirs(&self, room: &str) -> AppResult<(PathBuf, PathBuf)> {
-        validate_component(room).map_err(|reason| {
+        validate_room_name(room).map_err(|reason| {
             AppError::new(
                 ErrorCode::InvalidArgument,
                 format!("room '{room}' is invalid: {reason}"),
@@ -289,6 +332,19 @@ pub(crate) fn validate_component(value: &str) -> Result<(), String> {
     }
     if value == "." || value == ".." || value.contains('/') || value.contains('\\') {
         return Err("name must not be '.', '..', or contain '/' or '\\'".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_room_name(value: &str) -> Result<(), String> {
+    validate_component(value)?;
+    let folded = value.to_ascii_lowercase();
+    if RESERVED_ROOM_NAMES.contains(&folded.as_str())
+        || (folded.starts_with(".rooms.json.") && folded.ends_with(".tmp"))
+    {
+        return Err(format!(
+            "name '{value}' is reserved by mailbox storage or wildcard semantics"
+        ));
     }
     Ok(())
 }
@@ -385,6 +441,56 @@ pub(crate) fn exclusive_atomic_write(path: &Path, bytes: &[u8]) -> std::io::Resu
     })
 }
 
+fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename is not UTF-8")
+        })?;
+    let nonce = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), nonce));
+    let mode = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to replace a symlinked config file",
+            ));
+        }
+        Ok(metadata) => metadata.permissions().mode() & 0o7777,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0o600,
+        Err(error) => return Err(error),
+    };
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(mode)
+            .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        eprintln!(
+            "post: warning: '{}' was committed, but directory sync failed: {error}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn exclusive_atomic_write_with<F>(path: &Path, bytes: &[u8], after_commit: F) -> std::io::Result<()>
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
@@ -440,7 +546,11 @@ fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
-    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     File::open(parent)?.sync_all()
@@ -579,6 +689,8 @@ mod tests {
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::io;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     #[cfg(unix)]
     unsafe extern "C" {
@@ -659,6 +771,40 @@ mod tests {
             .expect("inspect dangling rules symlink")
             .file_type()
             .is_symlink());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn room_registry_lock_file_is_private_and_excludes_a_second_writer() {
+        let root = test_root("rooms-lock");
+        let context = super::Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let lock = context.lock_rooms().expect("acquire room registry lock");
+        let lock_path = root.join(super::ROOMS_LOCK_FILE);
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&lock_path)
+            .expect("open second lock file handle");
+
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB,) },
+            -1
+        );
+        assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            fs::metadata(&lock_path)
+                .expect("inspect room registry lock")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(contender);
+        drop(lock);
         trash_test_root(&root);
     }
 

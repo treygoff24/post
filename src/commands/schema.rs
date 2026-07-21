@@ -24,9 +24,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "rooms",
-            "post rooms",
+            "post rooms [add <name> <path>]",
             "JSON",
-            "none after first-run initialization",
+            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json",
         ),
         command(
             "schema",
@@ -123,6 +123,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             output::LAW_VERIFY,
             "Blocked routes refuse before any mail write.",
             "Registered room names cannot be claimed from outside their room tree.",
+            "One canonical workspace path can have only one registered room name.",
             "Every successful send has an immutable archive copy.",
             "Mail kinds are exactly letter, note, and signal.",
         ]),

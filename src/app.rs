@@ -45,16 +45,19 @@ where
 }
 
 fn finish_command_result<W: Write>(mut result: CommandResult, stdout: &mut W) -> AppResult<i32> {
-    stdout
+    if let Err(source) = stdout
         .write_all(result.stdout.as_bytes())
         .and_then(|_| stdout.flush())
-        .map_err(|source| {
-            if result.delivery_committed {
-                AppError::delivered_output_failure(source)
-            } else {
-                AppError::io("write stdout", Path::new("<stdout>"), source)
-            }
-        })?;
+    {
+        if result.registration_committed {
+            return Ok(result.exit_code);
+        }
+        return Err(if result.delivery_committed {
+            AppError::delivered_output_failure(source)
+        } else {
+            AppError::io("write stdout", Path::new("<stdout>"), source)
+        });
+    }
     if let Some(action) = result.after_stdout.take() {
         action()?;
     }
@@ -109,5 +112,16 @@ mod tests {
         assert_eq!(error.code, crate::error::ErrorCode::DeliveredOutputFailure);
         assert_eq!(error.exit_code, 70);
         trash_test_root(&root);
+    }
+
+    #[test]
+    fn stdout_failure_after_room_registration_is_still_success() {
+        let result = CommandResult::success("rooms\n".to_owned()).registration_committed();
+
+        assert_eq!(
+            finish_command_result(result, &mut BrokenWriter)
+                .expect("a committed registration must not invite a retry"),
+            0
+        );
     }
 }

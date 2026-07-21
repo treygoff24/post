@@ -21,7 +21,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Send(args) => send::run(&context, args, cli.json, cli.pretty),
         Command::Inbox(args) => inbox::run(&context, args, cli.pretty),
         Command::Read(args) => read::run(&context, args, cli.json, cli.pretty),
-        Command::Rooms => rooms::run(&context, cli.pretty),
+        Command::Rooms(args) => rooms::run(&context, args, cli.pretty),
         Command::Schema => schema::run(cli.pretty),
         Command::Watch(args) => watch::run(&context, args),
     }

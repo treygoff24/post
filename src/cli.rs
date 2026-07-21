@@ -49,8 +49,8 @@ pub(crate) enum Command {
     Inbox(InboxArgs),
     /// Read one unread message by full id or unique prefix.
     Read(ReadArgs),
-    /// List registered rooms and applicable blocking rules.
-    Rooms,
+    /// List or register rooms.
+    Rooms(RoomsArgs),
     /// Print the complete machine-readable CLI contract.
     Schema,
     /// Diagnose mailbox configuration and state.
@@ -95,6 +95,33 @@ pub(crate) struct InboxArgs {
     /// Emit human-readable text instead of the default JSON.
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RoomsArgs {
+    #[command(subcommand)]
+    pub command: Option<RoomsCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RoomsCommand {
+    /// Register an existing workspace directory as a room.
+    Add(RoomsAddArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RoomsAddArgs {
+    /// Path-safe room name to reserve and receive mail under.
+    #[arg(value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub name: String,
+
+    /// Existing workspace directory; absolute or starting with ~/.
+    #[arg(
+        value_name = "PATH",
+        value_hint = clap::ValueHint::DirPath,
+        value_parser = nonempty_without_controls
+    )]
+    pub path: String,
 }
 
 #[derive(Debug, Args)]

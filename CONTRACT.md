@@ -30,7 +30,12 @@ laws, plus a proper agent-CLI contract. This document is the specification.
 - Root `~/.claude-mail/` (override: `POST_MAIL_ROOT` env, for tests).
 - `rooms.json`: `{name: path-with-tilde}`. `rules.json`: `{"blocked":
   [{"from","to","reason"}]}`. First run creates the original defaults,
-  including the agent-memory ARMED INSTRUMENT rule.
+  including the agent-memory ARMED INSTRUMENT rule. New config files use mode
+  `0600`.
+- `post rooms add` takes an advisory exclusive flock on `.rooms.lock`, then
+  reloads, validates, and atomically replaces `rooms.json` while preserving its
+  mode. It never writes `rules.json`. A symlinked `rooms.json` is refused rather
+  than detached.
 - Mail file: `<room>/inbox/<id>.mail` = JSON envelope, then `\n---\n`, then
   raw body. `id` = `YYYYmmdd-HHMMSS-<6 hex>`. Envelope keys: id, from, to,
   kind, subject, sent (local time, `%Y-%m-%d %H:%M:%S %z`).
@@ -79,6 +84,26 @@ results, stderr = diagnostics/errors.
   as the byte-faithful surface. Ambiguous prefix: error listing
   the matches. Not found: error with `suggested_fix: post inbox --room <X>`.
 - `post rooms` — rooms with paths, each with any blocking rules that name it.
+- `post rooms add <name> <path>` — registers an existing workspace directory
+  (absolute or `~/...`) and returns the updated rooms listing. Workspace
+  identity is its canonical filesystem path: one workspace may have only one
+  room name, including through symlinks and any case or Unicode equivalence the
+  host filesystem resolves to the same canonical path (`duplicate_workspace`).
+  If an existing room cannot be canonicalized, its tilde-expanded path is
+  normalized by removing `.` and collapsing `..` only across components
+  verified not to be symlinks, then compared with both the candidate's canonical
+  and expanded forms; a match is refused, while a non-match warns and continues.
+  A dangling symlink cannot be fully verified until its target exists. Refuses
+  invalid names; ASCII-case-folded
+  collisions with existing names; the ASCII-case-insensitive reserved names
+  `*`, `archive`, `rooms.json`, `rules.json`, `.rooms.lock`, and the
+  `.rooms.json.*.tmp` atomic-write namespace; paths with control characters;
+  missing/non-directory paths; and any registration targeted by a blocking rule
+  (including `to: "*"`), quoting the rule's reason verbatim.
+  Validation and replacement are one flock-protected transaction. It never
+  creates the workspace, overwrites an existing registration, or modifies
+  `rules.json`. Once replacement commits, a stdout failure does not turn the
+  registration into a retryable failure.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix]` — validates root exists, rooms.json/rules.json parse
@@ -121,14 +146,16 @@ results, stderr = diagnostics/errors.
 Envelope on stderr: `{ok: false, error: {code, message, details, retryable,
 suggested_fix}}`. Codes (stable): `unknown_room`, `blocked_route`,
 `reserved_sender`, `empty_body`, `ambiguous_id`, `not_found`,
-`invalid_argument`, `config_invalid`, `io_error`,
+`invalid_argument`, `config_invalid`, `duplicate_workspace`, `io_error`,
 `delivered_output_failure`, `delivered_unarchived`. Pre-commit `io_error` is
-retryable with exit 75. Both delivered variants are non-retryable with exit 70:
+retryable with exit 75. `duplicate_workspace` is non-retryable with exit 65.
+Both delivered variants are non-retryable with exit 70:
 the first means delivery committed but stdout receipt failed; the second means
 inbox delivery committed but archive publication failed. Exit codes per the
-agent-CLI standard: 2 usage, 65 validation (reserved_sender, empty_body,
-ambiguous_id), 66 not_found, 77 blocked_route (permission class), 78
-config_invalid, 70 post-commit/internal failure, 75 retryable pre-commit I/O.
+agent-CLI standard: 2 usage, 65 validation (unknown_room, reserved_sender,
+empty_body, ambiguous_id, duplicate_workspace), 66 not_found, 77 blocked_route
+(permission class), 78 config_invalid, 70 post-commit/internal failure, 75
+retryable pre-commit I/O.
 
 ## Quality gate
 
