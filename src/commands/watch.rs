@@ -16,8 +16,31 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         eprintln!("post: warning: room '{room}' is not registered; watching a new empty mailbox");
     }
     let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut scan_failing = false;
     loop {
-        let batch = scan_batch(&room, &inbox, &mut seen)?;
+        // A doorbell that dies is silently useless: transient scan failures
+        // (mailbox trashed and recreated, permission blips) degrade to an
+        // empty batch and polling continues. Only stdout failure is fatal —
+        // if events can't reach the consumer, exiting IS the notification.
+        let batch = match scan_batch(&room, &inbox, &mut seen) {
+            Ok(batch) => {
+                if scan_failing {
+                    scan_failing = false;
+                    eprintln!("post: warning: watch scan recovered for room '{room}'");
+                }
+                batch
+            }
+            Err(error) => {
+                if !scan_failing {
+                    scan_failing = true;
+                    eprintln!(
+                        "post: warning: watch scan failed for room '{room}' (will keep polling): {}",
+                        error.message
+                    );
+                }
+                Vec::new()
+            }
+        };
         if !batch.is_empty() {
             emit(&batch, args.text)?;
             if args.once {
@@ -39,9 +62,12 @@ fn scan_batch(room: &str, inbox: &Path, seen: &mut HashSet<PathBuf>) -> AppResul
             // Consumed by a concurrent read between scan and parse: no longer unread.
             Err(_) if !path.exists() => {}
             Err(error) => {
+                // Debug-quote both the path AND the message: a crafted
+                // filename rides into the error text too, and neither may
+                // inject lines into the warning stream.
                 eprintln!(
-                    "post: warning: unreadable mail '{}': {}",
-                    path.display(),
+                    "post: warning: unreadable mail {:?}: {:?}",
+                    path.display().to_string(),
                     error.message
                 );
                 // Ring anyway — a malformed delivery must not silence the

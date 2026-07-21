@@ -84,12 +84,19 @@ impl WatchEvent {
                 } else {
                     format!("  {:?}", item.subject)
                 };
+                // `from` is debug-quoted like the subject: send's clap layer
+                // refuses control characters, but hand-written mail can carry
+                // them (the contract keeps such mail readable and sanitizes
+                // at render), and a newline here would forge an event line.
                 format!(
-                    "{}  [{}] from {}{}\n",
+                    "{}  [{}] from {:?}{}\n",
                     item.id, item.kind, item.from, subject
                 )
             }
-            Self::Unreadable { id, .. } => format!("{id}  [?] unreadable envelope\n"),
+            // Debug-quoted: this id comes from a filename that never passed
+            // envelope validation, and filenames may contain newlines — the
+            // one watch input that could otherwise forge an event line.
+            Self::Unreadable { id, .. } => format!("{id:?}  [?] unreadable envelope\n"),
         }
     }
 }

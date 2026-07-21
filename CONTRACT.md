@@ -101,12 +101,20 @@ results, stderr = diagnostics/errors.
   subject, sent}`; a delivery whose envelope fails to parse still rings as
   `{"event":"unreadable", room, id}` (filename-derived id, nothing quoted
   from the file) plus a stderr warning. `--text` mirrors inbox's line format
-  with the subject debug-escaped so crafted control characters cannot forge
-  a line or banner. `--once` exits 0 after the first non-empty batch. Stdout
-  is flushed per batch. Never moves, alters, or deletes mail; keeps no state
-  on disk. Known accepted window: mail arriving AND consumed by a concurrent
-  reader within one interval is never emitted (it was never observed
-  unread).
+  with the subject, sender, and unreadable id all debug-escaped — the
+  attacker-reachable fields (crafted subjects and `from` in hand-written
+  mail; filenames, which no envelope validation ever touches) cannot forge
+  an event line, and the stderr warning debug-quotes both path and message
+  for the same reason. `--once` exits 0 after the first non-empty batch.
+  Stdout is flushed per batch. Transient scan failures (mailbox removed or
+  recreated mid-watch, permission blips) degrade to an empty scan with one
+  stderr warning per outage and polling continues — only stdout failure
+  exits, because a doorbell that cannot reach its consumer is better off
+  dead than silent. Caveat: all watch warnings (unregistered room, scan
+  outages) are stderr-only; a consumer that captures just stdout will not
+  see them. Never moves, alters, or deletes mail; keeps no state on disk.
+  Known accepted window: mail arriving AND consumed by a concurrent reader
+  within one interval is never emitted (it was never observed unread).
 
 ## Error contract
 
