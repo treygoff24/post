@@ -55,6 +55,8 @@ pub(crate) enum Command {
     Schema,
     /// Diagnose mailbox configuration and state.
     Doctor(DoctorArgs),
+    /// Stream arriving mail as one event per line; runs until killed.
+    Watch(WatchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -108,6 +110,26 @@ pub(crate) struct ReadArgs {
     /// Read without moving the message to read/.
     #[arg(long)]
     pub peek: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WatchArgs {
+    /// Mailbox room; defaults to the room containing cwd or cwd basename.
+    #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
+    pub room: Option<String>,
+
+    /// Exit 0 after the first batch that emits at least one event.
+    #[arg(long)]
+    pub once: bool,
+
+    /// Poll cadence in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 1000,
+          value_parser = clap::value_parser!(u64).range(100..=60_000))]
+    pub interval_ms: u64,
+
+    /// Emit human-readable lines instead of the default NDJSON events.
+    #[arg(long, conflicts_with = "json")]
+    pub text: bool,
 }
 
 #[derive(Debug, Args)]

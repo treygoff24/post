@@ -4,6 +4,7 @@ mod read;
 mod rooms;
 mod schema;
 mod send;
+mod watch;
 
 use crate::cli::{Cli, Command};
 use crate::command_result::CommandResult;
@@ -22,5 +23,6 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Read(args) => read::run(&context, args, cli.json, cli.pretty),
         Command::Rooms => rooms::run(&context, cli.pretty),
         Command::Schema => schema::run(cli.pretty),
+        Command::Watch(args) => watch::run(&context, args),
     }
 }

@@ -49,6 +49,52 @@ impl From<Envelope> for InboxItem {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum WatchEvent {
+    Mail {
+        room: String,
+        #[serde(flatten)]
+        item: InboxItem,
+    },
+    /// A delivery whose envelope failed to parse: the doorbell still rings,
+    /// but nothing from the file is echoed except its filename-derived id.
+    Unreadable { room: String, id: String },
+}
+
+impl WatchEvent {
+    pub(crate) fn mail(room: &str, item: InboxItem) -> Self {
+        Self::Mail {
+            room: room.to_owned(),
+            item,
+        }
+    }
+
+    pub(crate) fn unreadable(room: &str, id: String) -> Self {
+        Self::Unreadable {
+            room: room.to_owned(),
+            id,
+        }
+    }
+
+    pub(crate) fn text_line(&self) -> String {
+        match self {
+            Self::Mail { item, .. } => {
+                let subject = if item.subject.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {:?}", item.subject)
+                };
+                format!(
+                    "{}  [{}] from {}{}\n",
+                    item.id, item.kind, item.from, subject
+                )
+            }
+            Self::Unreadable { id, .. } => format!("{id}  [?] unreadable envelope\n"),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InboxOutput {
     pub ok: bool,
     pub room: String,
@@ -130,6 +176,7 @@ pub struct OutputShapes {
     pub rooms: Vec<String>,
     pub schema: Vec<String>,
     pub send_json: Vec<String>,
+    pub watch: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

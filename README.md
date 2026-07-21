@@ -18,6 +18,7 @@ post read <id> [--room <room>] [--peek]  # print with framing banner, mark read
 post rooms                            # known rooms + blocked routes
 post schema                           # machine-readable CLI contract
 post doctor [--fix]                   # diagnose mailbox state
+post watch [--room <room>] [--once] [--text]  # stream arriving mail (the doorbell)
 ```
 
 `--from` is inferred from cwd when you're inside a known room's tree. Body

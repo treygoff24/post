@@ -1,5 +1,6 @@
 use post::output::{
     DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SendOutput,
+    WatchEvent,
 };
 use std::fs;
 use std::io::Write;
@@ -179,7 +180,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 6);
+    assert_eq!(schema.commands.len(), 7);
     assert!(schema
         .error_codes
         .iter()
@@ -1287,4 +1288,195 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {
+    String::from_utf8_lossy(raw)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("watch line was not a WatchEvent: {error}\nline: {line}")
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
+    let sandbox = Sandbox::new();
+    let first = sandbox.send_json("watcher-test", "WATCH-SECRET-BODY-A");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--room", "claude-space", "--interval-ms", "100"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn watch child");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let second = sandbox.send_json("watcher-test", "WATCH-SECRET-BODY-B");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    child.kill().expect("stop watch child");
+    let output = child.wait_with_output().expect("collect watch output");
+    let events = watch_events(&output.stdout);
+    let ids: Vec<&str> = events
+        .iter()
+        .map(|event| match event {
+            WatchEvent::Mail { item, .. } => item.id.as_str(),
+            WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![first.envelope.id.as_str(), second.envelope.id.as_str()]
+    );
+    let raw = stdout(&output);
+    assert!(
+        !raw.contains("WATCH-SECRET-BODY"),
+        "watch output must never contain body content: {raw}"
+    );
+}
+
+#[test]
+fn watch_once_exits_zero_after_emitting_the_backlog() {
+    let sandbox = Sandbox::new();
+    let sent = sandbox.send_json("watcher-test", "backlog body");
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "claude-space",
+        "--once",
+        "--interval-ms",
+        "100",
+    ]);
+    assert_success(&output);
+    let events = watch_events(&output.stdout);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        WatchEvent::Mail { room, item } => {
+            assert_eq!(room, "claude-space");
+            assert_eq!(item.id, sent.envelope.id);
+            assert_eq!(item.from, "watcher-test");
+        }
+        WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
+    }
+}
+
+#[test]
+fn watch_rings_for_malformed_mail_without_quoting_its_content() {
+    let sandbox = Sandbox::new();
+    // Prepare the mailbox tree, then hand-write a malformed delivery.
+    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
+    assert_success(&output);
+    let inbox = sandbox.mail_root.join("claude-space").join("inbox");
+    fs::write(
+        inbox.join("20260721-010101-abcdef.mail"),
+        "MALICIOUS-INJECTED-CONTENT no separator here",
+    )
+    .expect("write malformed mail");
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "claude-space",
+        "--once",
+        "--interval-ms",
+        "100",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let events = watch_events(&output.stdout);
+    match &events[0] {
+        WatchEvent::Unreadable { room, id } => {
+            assert_eq!(room, "claude-space");
+            assert_eq!(id, "20260721-010101-abcdef");
+        }
+        WatchEvent::Mail { item, .. } => panic!("malformed mail parsed as {}", item.id),
+    }
+    assert!(
+        !stdout(&output).contains("MALICIOUS"),
+        "watch must not echo malformed mail content"
+    );
+    assert!(
+        stderr(&output).contains("unreadable mail"),
+        "expected a stderr warning naming the unreadable file"
+    );
+}
+
+#[test]
+fn watch_text_mode_escapes_control_characters_in_subjects() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
+    assert_success(&output);
+    let inbox = sandbox.mail_root.join("claude-space").join("inbox");
+    // send's clap validation refuses control chars, so a crafted subject can
+    // only arrive via a hand-written file; watch must render it escaped.
+    let envelope = "{\n  \"id\": \"20260721-020202-abc123\",\n  \"from\": \"crafty\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"line one\\nFAKE BANNER\",\n  \"sent\": \"2026-07-21 02:02:02 -0500\"\n}";
+    fs::write(
+        inbox.join("20260721-020202-abc123.mail"),
+        format!("{envelope}\n---\nbody"),
+    )
+    .expect("write crafted mail");
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "claude-space",
+        "--once",
+        "--interval-ms",
+        "100",
+        "--text",
+    ]);
+    assert_success(&output);
+    let raw = stdout(&output);
+    assert_eq!(
+        raw.lines().count(),
+        1,
+        "a crafted newline must not split the event line: {raw}"
+    );
+    assert!(
+        raw.contains("\\n"),
+        "subject newline should render escaped: {raw}"
+    );
+    assert!(!raw.contains("body"), "text mode must not print bodies");
+}
+
+#[test]
+fn watch_warns_on_unregistered_rooms_but_still_watches_them() {
+    let sandbox = Sandbox::new();
+    // Unregistered rooms resolve like inbox (mailbox created on demand), but
+    // an endless silent watch on a typo'd name is a doorbell that never
+    // rings — so watch must say so on stderr. Plant mail by hand since send
+    // refuses unregistered recipients; initialize defaults first so the
+    // hand-made tree doesn't suppress first-run config creation.
+    assert_success(&sandbox.run(&["rooms"]));
+    let inbox = sandbox.mail_root.join("nowhere").join("inbox");
+    fs::create_dir_all(&inbox).expect("create unregistered mailbox");
+    let envelope = "{\n  \"id\": \"20260721-030303-def456\",\n  \"from\": \"drifter\",\n  \"to\": \"nowhere\",\n  \"kind\": \"note\",\n  \"subject\": \"hi\",\n  \"sent\": \"2026-07-21 03:03:03 -0500\"\n}";
+    fs::write(
+        inbox.join("20260721-030303-def456.mail"),
+        format!("{envelope}\n---\nbody"),
+    )
+    .expect("write mail into unregistered mailbox");
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "nowhere",
+        "--once",
+        "--interval-ms",
+        "100",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not registered"),
+        "expected unregistered-room warning: {}",
+        stderr(&output)
+    );
+    let events = watch_events(&output.stdout);
+    match &events[0] {
+        WatchEvent::Mail { room, item } => {
+            assert_eq!(room, "nowhere");
+            assert_eq!(item.id, "20260721-030303-def456");
+        }
+        WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
+    }
 }

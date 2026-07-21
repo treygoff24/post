@@ -87,6 +87,26 @@ results, stderr = diagnostics/errors.
   touches rules content or mail. Doctor also reports delivered mail with a
   missing or mismatched archive copy for manual reconciliation. Doctor exit
   dictionary: 0 healthy / 1 findings / 3 fix-failed.
+- `post watch [--room <name>] [--once] [--interval-ms <ms>] [--text]` — the
+  doorbell: blocks and streams one event per arriving mail so any harness
+  monitor becomes a mail notifier. Room resolution as `inbox` (unregistered
+  explicit rooms are accepted with a one-line stderr warning, since a silent
+  watch on a typo'd name never rings). Poll-diff over the inbox directory
+  (default 1000ms, clamped 100–60000): the exclusive-link delivery commit
+  means a listing never sees a partial file, and the first batch emits the
+  current unread backlog, so there is no start-vs-arrival loss window. Emits
+  ENVELOPE METADATA ONLY — never body content, on any surface; consumption
+  and its framing banner stay exclusively with `post read`. Default output
+  NDJSON, one object per line: `{"event":"mail", room, id, from, kind,
+  subject, sent}`; a delivery whose envelope fails to parse still rings as
+  `{"event":"unreadable", room, id}` (filename-derived id, nothing quoted
+  from the file) plus a stderr warning. `--text` mirrors inbox's line format
+  with the subject debug-escaped so crafted control characters cannot forge
+  a line or banner. `--once` exits 0 after the first non-empty batch. Stdout
+  is flushed per batch. Never moves, alters, or deletes mail; keeps no state
+  on disk. Known accepted window: mail arriving AND consumed by a concurrent
+  reader within one interval is never emitted (it was never observed
+  unread).
 
 ## Error contract
 

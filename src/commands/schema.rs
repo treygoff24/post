@@ -40,6 +40,12 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "JSON",
             "read-only unless --fix; --fix only creates missing directories/defaults",
         ),
+        command(
+            "watch",
+            "post watch [--room <name>] [--once] [--interval-ms <ms>] [--text]",
+            "NDJSON events, one per line; text with --text",
+            "creates missing mailbox inbox/read directories; reads envelopes only — never moves or alters mail, never emits body content",
+        ),
     ];
     let output_shapes = OutputShapes {
         doctor: fields(&[
@@ -69,6 +75,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "environment",
         ]),
         send_json: fields(&["ok", "envelope", "archived"]),
+        watch: fields(&["event", "room", "id", "from", "kind", "subject", "sent"]),
     };
     let errors = ErrorCode::ALL
         .iter()
