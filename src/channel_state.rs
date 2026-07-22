@@ -71,6 +71,14 @@ impl ChannelState {
             .cursors
             .insert(channel.to_owned(), last_read_id.to_owned());
         let path = channel_state_path(context, room)?;
+        // A room that has never received mail has no <root>/<room>/ yet, and
+        // atomic_replace cannot create parents — without this, such a room
+        // can read but never advance, re-showing the backlog forever (found
+        // by live smoke; the lane's unit tests pre-created the room dir).
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| AppError::io("create channel state directory", parent, error))?;
+        }
         let mut bytes = serde_json::to_vec_pretty(&state.cursors).map_err(|error| {
             AppError::new(
                 ErrorCode::IoError,
@@ -99,6 +107,26 @@ mod tests {
                 home: root,
             },
         )
+    }
+
+    #[test]
+    fn advance_works_for_a_room_that_never_received_mail() {
+        // No <root>/<room>/ directory exists yet: advance must create it
+        // rather than failing forever until the room's first mail arrives.
+        let (root, context) = state_context("freshroom");
+        ChannelState::advance(
+            &context,
+            "never-mailed",
+            "taxonomy",
+            "20260722-013000-000001-abc123",
+        )
+        .expect("advance must create the room state directory");
+        let state = ChannelState::load(&context, "never-mailed").expect("reload");
+        assert_eq!(
+            state.cursor("taxonomy"),
+            Some("20260722-013000-000001-abc123")
+        );
+        trash_test_root(&root);
     }
 
     #[test]
