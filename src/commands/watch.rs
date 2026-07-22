@@ -1,3 +1,4 @@
+use crate::channel::{list_channels, message_files, parse_channel_message, ChannelPaths};
 use crate::cli::WatchArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult};
@@ -16,13 +17,22 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         eprintln!("post: warning: room '{room}' is not registered; watching a new empty mailbox");
     }
     let mut seen: HashSet<PathBuf> = HashSet::new();
+    // Prime the channel backlog WITHOUT emitting. channels/<name>/messages/
+    // is the full append-only history (unlike the inbox, which holds only
+    // unread), so a doorbell that replayed it on every startup would be pure
+    // noise. Watch surfaces channel messages that ARRIVE while it runs; the
+    // reader's cursor owns the backlog. The room inbox keeps its existing
+    // surface-on-startup behavior — its volume is bounded to unread.
+    for path in room_channel_message_paths(context, &room) {
+        seen.insert(path);
+    }
     let mut scan_failing = false;
     loop {
         // A doorbell that dies is silently useless: transient scan failures
         // (mailbox trashed and recreated, permission blips) degrade to an
         // empty batch and polling continues. Only stdout failure is fatal —
         // if events can't reach the consumer, exiting IS the notification.
-        let batch = match scan_batch(&room, &inbox, &mut seen) {
+        let batch = match scan_batch(context, &room, &inbox, &mut seen) {
             Ok(batch) => {
                 if scan_failing {
                     scan_failing = false;
@@ -51,7 +61,12 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     }
 }
 
-fn scan_batch(room: &str, inbox: &Path, seen: &mut HashSet<PathBuf>) -> AppResult<Vec<WatchEvent>> {
+fn scan_batch(
+    context: &Context,
+    room: &str,
+    inbox: &Path,
+    seen: &mut HashSet<PathBuf>,
+) -> AppResult<Vec<WatchEvent>> {
     let mut batch = Vec::new();
     for path in mail_files(inbox)? {
         if !seen.insert(path.clone()) {
@@ -81,7 +96,58 @@ fn scan_batch(room: &str, inbox: &Path, seen: &mut HashSet<PathBuf>) -> AppResul
             }
         }
     }
+    // Channels the room belongs to. NEVER touches a cursor — a doorbell
+    // notifies, it does not consume (contract 013246 watch invariant). New
+    // paths only: the backlog was primed into `seen` before the loop.
+    for path in room_channel_message_paths(context, room) {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        match parse_channel_message(&path) {
+            Ok(parsed) => batch.push(WatchEvent::channel_message(parsed.message)),
+            // Channel messages are append-only and never moved, but a send
+            // caught mid-write can momentarily fail to parse; ring anyway,
+            // echoing only the filename-derived id — same discipline as mail.
+            Err(_) if !path.exists() => {}
+            Err(error) => {
+                eprintln!(
+                    "post: warning: unreadable channel message {:?}: {:?}",
+                    path.display().to_string(),
+                    error.message
+                );
+                let id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("<non-utf8 filename>")
+                    .to_owned();
+                batch.push(WatchEvent::unreadable(room, id));
+            }
+        }
+    }
     Ok(batch)
+}
+
+/// Every `.msg` path across the channels `room` belongs to. Best-effort: a
+/// transient read error degrades to fewer paths, never a killed doorbell
+/// (same posture as the inbox scan's degrade-and-keep-polling). ponytail:
+/// re-enumerates via list_channels each call; fine for a handful of
+/// channels, revisit with a lighter membership scan if that grows.
+fn room_channel_message_paths(context: &Context, room: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(summaries) = list_channels(context) else {
+        return paths;
+    };
+    for summary in summaries {
+        if !summary.members.contains_key(room) {
+            continue;
+        }
+        if let Ok(channel) = ChannelPaths::new(context, &summary.info.name) {
+            if let Ok(files) = message_files(&channel.messages) {
+                paths.extend(files);
+            }
+        }
+    }
+    paths
 }
 
 fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {

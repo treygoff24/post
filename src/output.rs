@@ -134,6 +134,18 @@ pub enum WatchEvent {
     /// A delivery whose envelope failed to parse: the doorbell still rings,
     /// but nothing from the file is echoed except its filename-derived id.
     Unreadable { room: String, id: String },
+    /// A new message in a channel the watching room belongs to. Envelope
+    /// only, never the body; the watcher's cursor is never touched — a
+    /// doorbell notifies, it does not consume (contract 013246, watch
+    /// invariant). No `kind`: channel messages carry none (Decision 1). The
+    /// serde tag renders this as `"event":"channel_message"`.
+    ChannelMessage {
+        channel: String,
+        id: String,
+        from: String,
+        subject: String,
+        sent: String,
+    },
 }
 
 impl WatchEvent {
@@ -148,6 +160,26 @@ impl WatchEvent {
         Self::Unreadable {
             room: room.to_owned(),
             id,
+        }
+    }
+
+    pub(crate) fn channel_message(message: crate::model::ChannelMessage) -> Self {
+        // Drop `event` (join marker) and `kind` (none exists): the watch
+        // shape is exactly {channel,id,from,subject,sent} per contract item 7.
+        let crate::model::ChannelMessage {
+            id,
+            from,
+            channel,
+            subject,
+            sent,
+            event: _,
+        } = message;
+        Self::ChannelMessage {
+            channel,
+            id,
+            from,
+            subject,
+            sent,
         }
     }
 
@@ -172,6 +204,23 @@ impl WatchEvent {
             // envelope validation, and filenames may contain newlines — the
             // one watch input that could otherwise forge an event line.
             Self::Unreadable { id, .. } => format!("{id:?}  [?] unreadable envelope\n"),
+            // Same debug-quote discipline as Mail: a hand-written .msg can
+            // carry control characters, and a newline in `from`/`subject`
+            // would otherwise forge an event line.
+            Self::ChannelMessage {
+                channel,
+                id,
+                from,
+                subject,
+                ..
+            } => {
+                let subject = if subject.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {subject:?}")
+                };
+                format!("{id}  #{channel} from {from:?}{subject}\n")
+            }
         }
     }
 }

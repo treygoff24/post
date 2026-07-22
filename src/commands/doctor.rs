@@ -1,3 +1,6 @@
+use crate::channel::{
+    channel_state_path, parse_channel_message, ChannelPaths, ChannelStateMap, CHANNELS_DIR,
+};
 use crate::cli::DoctorArgs;
 use crate::command_result::CommandResult;
 use crate::commands::schema::doctor_exit_codes;
@@ -115,8 +118,153 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     }
 
     scan_mailbox_state(context, &mut checks);
+    // channels/ is not a room (no inbox/read) and not archive, so the room
+    // and mailbox scans above skip it naturally; its store gets its own pass.
+    detect_channels(context, &mut checks);
     checks.sort_by(|left, right| left.id.cmp(&right.id).then(left.path.cmp(&right.path)));
     checks
+}
+
+/// Validate the channel store: each channel's channel.json and members.json
+/// parse, members are registered rooms, messages/ exists and holds only
+/// well-formed .msg files, and each reader's channel-state.json (if any) is a
+/// valid cursor map. Read-only, like the rest of doctor — nothing is fixed or
+/// moved; a channel is never a `--fix` target because its history is immutable.
+fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let channels_root = context.root.join(CHANNELS_DIR);
+    let Ok(entries) = fs::read_dir(&channels_root) else {
+        return; // no channels dir yet is healthy, not a finding
+    };
+    let rooms = context.load_rooms().unwrap_or_default();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Some(name) = dir.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let name = name.to_owned();
+        if !dir.is_dir() {
+            // The membership lock is expected machinery, not a stray.
+            if name == ".channels.lock" {
+                continue;
+            }
+            checks.push(check(
+                "channels.stray_file",
+                DoctorSeverity::Warning,
+                &dir,
+                "channels/ contains a non-directory that is not a channel",
+                false,
+                "Inspect the file and move it outside channels/ by hand if it does not belong.",
+            ));
+            continue;
+        }
+        let paths = match ChannelPaths::new(context, &name) {
+            Ok(paths) => paths,
+            Err(error) => {
+                checks.push(check(
+                    &format!("channel.{name}.invalid_name"),
+                    DoctorSeverity::Error,
+                    &dir,
+                    &error.message,
+                    false,
+                    "Rename the channel directory to a single path-safe name by hand.",
+                ));
+                continue;
+            }
+        };
+        if let Err(error) = paths.load_info() {
+            checks.push(check(
+                &format!("channel.{name}.info_invalid"),
+                DoctorSeverity::Error,
+                &paths.channel_json,
+                &error.message,
+                false,
+                "Restore a valid channel.json or move the channel aside by hand; nothing is deleted.",
+            ));
+        }
+        match paths.load_members() {
+            Err(error) => checks.push(check(
+                &format!("channel.{name}.members_invalid"),
+                DoctorSeverity::Error,
+                &paths.members_json,
+                &error.message,
+                false,
+                "Restore a valid members.json by hand; nothing is deleted.",
+            )),
+            Ok(members) => {
+                for member in members.keys() {
+                    if !rooms.contains_key(member) {
+                        checks.push(check(
+                            &format!("channel.{name}.member_unregistered"),
+                            DoctorSeverity::Warning,
+                            &paths.members_json,
+                            &format!("channel member '{member}' is not a registered room"),
+                            false,
+                            "Register the room in rooms.json or remove it from members.json by hand.",
+                        ));
+                    }
+                }
+            }
+        }
+        if !paths.messages.is_dir() {
+            checks.push(check(
+                &format!("channel.{name}.messages_missing"),
+                DoctorSeverity::Error,
+                &paths.messages,
+                "channel messages/ directory is missing",
+                false,
+                "Restore the messages/ directory by hand; nothing is deleted.",
+            ));
+        } else if let Ok(items) = fs::read_dir(&paths.messages) {
+            for item in items.flatten() {
+                let message_path = item.path();
+                if !message_path.is_file() {
+                    continue;
+                }
+                if message_path.extension().and_then(|value| value.to_str()) != Some("msg") {
+                    checks.push(check(
+                        "channels.stray_file",
+                        DoctorSeverity::Warning,
+                        &message_path,
+                        "channel messages/ directory contains a non-.msg file",
+                        false,
+                        "Inspect the file and move it outside the channel by hand if it does not belong.",
+                    ));
+                } else if let Err(error) = parse_channel_message(&message_path) {
+                    checks.push(check(
+                        "channels.malformed_message",
+                        DoctorSeverity::Error,
+                        &message_path,
+                        &error.message,
+                        false,
+                        "Restore a valid .msg envelope/body separator or move the file aside by hand; nothing is deleted.",
+                    ));
+                }
+            }
+        }
+    }
+    // Reader cursors live in each room's own tree; a corrupt one can only
+    // hurt that room, but a bad JSON blob silently breaks its reads, so flag it.
+    for name in rooms.keys() {
+        let Ok(state_path) = channel_state_path(context, name) else {
+            continue;
+        };
+        if !state_path.is_file() {
+            continue;
+        }
+        let parsed = fs::read(&state_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ChannelStateMap>(&bytes).ok());
+        if parsed.is_none() {
+            checks.push(check(
+                &format!("channel_state.{name}.invalid"),
+                DoctorSeverity::Error,
+                &state_path,
+                "channel-state.json is not a valid {channel: last-read-id} map",
+                false,
+                "Correct or remove the reader's channel-state.json by hand; the channel history is untouched.",
+            ));
+        }
+    }
 }
 
 fn detect_rooms(context: &Context, path: &Path, checks: &mut Vec<DoctorCheck>) -> Option<RoomMap> {

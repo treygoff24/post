@@ -1780,6 +1780,7 @@ fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
         .map(|event| match event {
             WatchEvent::Mail { item, .. } => item.id.as_str(),
             WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
+            WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
         })
         .collect();
     assert_eq!(
@@ -1815,6 +1816,7 @@ fn watch_once_exits_zero_after_emitting_the_backlog() {
             assert_eq!(item.from, "watcher-test");
         }
         WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
+        WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
     }
 }
 
@@ -1846,6 +1848,7 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
             assert_eq!(id, "20260721-010101-abcdef");
         }
         WatchEvent::Mail { item, .. } => panic!("malformed mail parsed as {}", item.id),
+        WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
     }
     assert!(
         !stdout(&output).contains("MALICIOUS"),
@@ -1932,6 +1935,7 @@ fn watch_warns_on_unregistered_rooms_but_still_watches_them() {
             assert_eq!(item.id, "20260721-030303-def456");
         }
         WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
+        WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
     }
 }
 
