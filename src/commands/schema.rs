@@ -11,6 +11,18 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail",
         ),
         command(
+            "chat",
+            "post chat <channel> [--peek] | post chat <channel> --join | post chat <channel> --send [--subject <s>] [--body <text> | FILE | stdin]",
+            "framed text; JSON with --json",
+            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg; a plain read advances the reader's own cursor only after a successful emit; --peek never advances",
+        ),
+        command(
+            "channels",
+            "post channels",
+            "JSON",
+            "read-only listing of channels, members, and message counts",
+        ),
+        command(
             "inbox",
             "post inbox [--room <name>] [--text]",
             "JSON; text with --text",
@@ -75,6 +87,19 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "environment",
         ]),
         send_json: fields(&["ok", "envelope", "archived"]),
+        chat_join: fields(&[
+            "ok",
+            "channel",
+            "room",
+            "created",
+            "already_member",
+            "event_id",
+        ]),
+        chat_send: fields(&["ok", "message"]),
+        chat_read: fields(&[
+            "ok", "framing", "channel", "room", "peek", "messages", "count",
+        ]),
+        channels: fields(&["ok", "channels", "count"]),
         watch: fields(&["event", "room", "id", "from", "kind", "subject", "sent"]),
     };
     let errors = ErrorCode::ALL
@@ -126,6 +151,11 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "One canonical workspace path can have only one registered room name.",
             "Every successful send has an immutable archive copy.",
             "Mail kinds are exactly letter, note, and signal.",
+            "Channel messages are not mail: they carry no kind, so a signal structurally cannot occur in a channel; anything gate-grade stays 1:1 room mail.",
+            "Blocked routes bar shared channel membership at join time; channels never carry what a route may not.",
+            "Channel history is append-only and is its own immutable archive; nothing in messages/ is ever moved or deleted.",
+            "Channel identity is inferred from cwd; membership and cursors require a registered room, and joins are recorded in the channel history itself.",
+            "Watch emits channel events as notifications only and never advances any cursor; only a read advances, and only after a successful emit.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override; intended for tests",

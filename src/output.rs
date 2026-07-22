@@ -258,6 +258,10 @@ pub struct OutputShapes {
     pub rooms: Vec<String>,
     pub schema: Vec<String>,
     pub send_json: Vec<String>,
+    pub chat_join: Vec<String>,
+    pub chat_send: Vec<String>,
+    pub chat_read: Vec<String>,
+    pub channels: Vec<String>,
     pub watch: Vec<String>,
 }
 
