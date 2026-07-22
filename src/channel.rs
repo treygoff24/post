@@ -423,6 +423,24 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
             ));
         }
     }
+    // The channel field is rendered UNQUOTED in watch text lines ("#name"),
+    // so a hand-written .msg with a control character here could forge event
+    // lines. The CLI mints only validated names; enforce the same at parse.
+    if let Err(reason) = crate::mailbox::validate_component(&message.channel) {
+        return Err(AppError::config(
+            path,
+            format!(
+                "channel message field 'channel' ('{}') is not a path-safe name: {reason}",
+                message.channel.escape_debug()
+            ),
+        ));
+    }
+    if message.channel.chars().any(char::is_control) {
+        return Err(AppError::config(
+            path,
+            "channel message field 'channel' contains control characters",
+        ));
+    }
     // YYYYmmdd-HHMMSS-UUUUUU-<6 hex>: microsecond resolution keeps
     // lexicographic order ~= arrival order, which the reader's high-water
     // cursor depends on for completeness.
@@ -564,6 +582,23 @@ mod tests {
         };
         validate_channel_message(Path::new("<test>"), &message).expect("valid id shape");
         trash_test_root(&root);
+    }
+
+    #[test]
+    fn control_characters_in_channel_field_are_refused_at_parse() {
+        // watch text lines print "#<channel>" unquoted; a newline smuggled
+        // into a hand-written .msg envelope must die in the validator.
+        let message = ChannelMessage {
+            id: "20260722-013000-000001-abc123".to_owned(),
+            from: "alpha".to_owned(),
+            channel: "tax\nFORGED".to_owned(),
+            subject: String::new(),
+            sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            event: None,
+        };
+        let error = validate_channel_message(Path::new("<test>"), &message)
+            .expect_err("control characters in channel must be refused");
+        assert_eq!(error.code.as_str(), "config_invalid");
     }
 
     #[test]
