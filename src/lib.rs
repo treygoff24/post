@@ -1,5 +1,6 @@
 mod app;
 mod channel;
+mod channel_state;
 mod cli;
 mod command_result;
 mod commands;
