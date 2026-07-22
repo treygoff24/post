@@ -45,6 +45,10 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Send mail from --body, FILE, or stdin.
     Send(SendArgs),
+    /// Join, send to, or read a shared channel (group chat).
+    Chat(ChatArgs),
+    /// List channels with their members.
+    Channels,
     /// List unread mail, oldest first.
     Inbox(InboxArgs),
     /// Read one unread message by full id or unique prefix.
@@ -84,6 +88,37 @@ pub(crate) struct SendArgs {
     /// Read the message body from this UTF-8 file; omit for stdin.
     #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ChatArgs {
+    /// Channel name.
+    #[arg(value_name = "CHANNEL", value_parser = nonempty_without_controls)]
+    pub name: String,
+
+    /// Join the channel (creates it on first join); recorded in history.
+    #[arg(long, conflicts_with_all = ["send", "peek", "body", "file", "subject"])]
+    pub join: bool,
+
+    /// Send a message from --body, FILE, or stdin.
+    #[arg(long, conflicts_with = "peek")]
+    pub send: bool,
+
+    /// Optional subject for --send.
+    #[arg(long, default_value = "", value_parser = without_controls, requires = "send")]
+    pub subject: String,
+
+    /// Inline message body for --send.
+    #[arg(long, value_name = "TEXT", conflicts_with = "file", requires = "send")]
+    pub body: Option<String>,
+
+    /// Read the message body for --send from this UTF-8 file; omit for stdin.
+    #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath, requires = "send")]
+    pub file: Option<PathBuf>,
+
+    /// Read without advancing the cursor.
+    #[arg(long)]
+    pub peek: bool,
 }
 
 #[derive(Debug, Args)]

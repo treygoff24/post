@@ -1,3 +1,5 @@
+mod channels;
+mod chat;
 mod doctor;
 mod inbox;
 mod read;
@@ -19,6 +21,8 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     match cli.command {
         Command::Doctor(args) => doctor::run(&context, args, cli.pretty),
         Command::Send(args) => send::run(&context, args, cli.json, cli.pretty),
+        Command::Chat(args) => chat::run(&context, args, cli.json, cli.pretty),
+        Command::Channels => channels::run(&context, cli.pretty),
         Command::Inbox(args) => inbox::run(&context, args, cli.pretty),
         Command::Read(args) => read::run(&context, args, cli.json, cli.pretty),
         Command::Rooms(args) => rooms::run(&context, args, cli.pretty),

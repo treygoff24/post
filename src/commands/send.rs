@@ -188,7 +188,7 @@ fn ensure_route_allowed(
     .rule(rule.clone()))
 }
 
-fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<String> {
+pub(super) fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<String> {
     if let Some(body) = body {
         return Ok(body);
     }

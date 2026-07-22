@@ -441,7 +441,7 @@ pub(crate) fn exclusive_atomic_write(path: &Path, bytes: &[u8]) -> std::io::Resu
     })
 }
 
-fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
@@ -573,7 +573,7 @@ pub(crate) fn encode_mail(envelope: &Envelope, body: &str) -> AppResult<Vec<u8>>
     Ok(payload.into_bytes())
 }
 
-fn ascii_escape_json(json: &str) -> String {
+pub(crate) fn ascii_escape_json(json: &str) -> String {
     let mut escaped = String::with_capacity(json.len());
     for character in json.chars() {
         // DEL is the one ASCII byte Python's ensure_ascii escaper also rewrites.
@@ -597,6 +597,16 @@ fn ascii_escape_json(json: &str) -> String {
 pub(crate) fn local_timestamp() -> AppResult<(String, String)> {
     let seconds = time_since_unix_epoch()?.as_secs();
     format_local_timestamp(seconds)
+}
+
+/// Channel-message timestamps carry microseconds: a second-resolution id
+/// makes "max id read" an unsafe cursor high-water mark, because a
+/// same-second send with a smaller hash sorts *behind* an already-advanced
+/// cursor and is skipped forever (ufos-fable, mail 013351/013510).
+pub(crate) fn local_timestamp_micros() -> AppResult<(String, String)> {
+    let elapsed = time_since_unix_epoch()?;
+    let (id_time, sent) = format_local_timestamp(elapsed.as_secs())?;
+    Ok((format!("{id_time}-{:06}", elapsed.subsec_micros()), sent))
 }
 
 fn time_since_unix_epoch() -> AppResult<std::time::Duration> {

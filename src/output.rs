@@ -20,6 +20,38 @@ pub struct SendOutput {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ChatJoinOutput {
+    pub ok: bool,
+    pub channel: String,
+    pub room: String,
+    pub created: bool,
+    pub already_member: bool,
+    pub event_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatSendOutput {
+    pub ok: bool,
+    pub message: crate::model::ChannelMessage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChannelListItem {
+    pub name: String,
+    pub created: String,
+    pub created_by: String,
+    pub members: Vec<String>,
+    pub messages: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChannelsOutput {
+    pub ok: bool,
+    pub channels: Vec<ChannelListItem>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InboxItem {
     pub id: String,
     pub from: String,

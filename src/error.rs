@@ -49,10 +49,11 @@ pub enum ErrorCode {
     IoError,
     DeliveredOutputFailure,
     DeliveredUnarchived,
+    NotAMember,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -65,6 +66,7 @@ impl ErrorCode {
         Self::IoError,
         Self::DeliveredOutputFailure,
         Self::DeliveredUnarchived,
+        Self::NotAMember,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -81,6 +83,7 @@ impl ErrorCode {
             Self::IoError => "io_error",
             Self::DeliveredOutputFailure => "delivered_output_failure",
             Self::DeliveredUnarchived => "delivered_unarchived",
+            Self::NotAMember => "not_a_member",
         }
     }
 
@@ -91,7 +94,8 @@ impl ErrorCode {
             | Self::ReservedSender
             | Self::EmptyBody
             | Self::AmbiguousId
-            | Self::DuplicateWorkspace => 65,
+            | Self::DuplicateWorkspace
+            | Self::NotAMember => 65,
             Self::NotFound => 66,
             Self::BlockedRoute => 77,
             Self::ConfigInvalid => 78,

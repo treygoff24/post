@@ -59,6 +59,31 @@ impl BlockingRule {
     }
 }
 
+/// A channel message is NOT mail: it has no kind (the kinds law stays
+/// untouched, and kind=signal structurally cannot occur in a channel) and
+/// no single recipient. Contract: mail 20260722-013246 (pinned) as amended
+/// by 013434 (microsecond ids).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelMessage {
+    pub id: String,
+    pub from: String,
+    pub channel: String,
+    #[serde(default)]
+    pub subject: String,
+    pub sent: String,
+    /// "join" on membership events; absent on ordinary messages. Set only
+    /// by the CLI's join path — sends never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ParsedChannelMessage {
+    pub message: ChannelMessage,
+    #[allow(dead_code)] // consumed by the read/cursor lane's patch
+    pub body: String,
+}
+
 pub(crate) type RoomMap = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
