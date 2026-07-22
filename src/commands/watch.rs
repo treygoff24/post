@@ -116,6 +116,9 @@ fn scan_batch(
             }
         }
         match parse_channel_message(&path) {
+            // A room's own words are never news: its own sends don't ring
+            // its own doorbell (they still ring every other member's).
+            Ok(parsed) if parsed.message.from == room => {}
             Ok(parsed) => batch.push(WatchEvent::channel_message(parsed.message)),
             // Channel messages are append-only and never moved, but a send
             // caught mid-write can momentarily fail to parse; ring anyway,
@@ -180,6 +183,66 @@ fn load_channel_floors(context: &Context, room: &str) -> HashMap<String, String>
         }
     }
     floors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channel::encode_message;
+    use crate::model::ChannelMessage;
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+
+    #[test]
+    fn scan_batch_never_rings_for_the_rooms_own_messages() {
+        let root = test_root("watch-ownfilter");
+        let inbox = root.join("alpha").join("inbox");
+        fs::create_dir_all(&inbox).expect("create inbox");
+        let dir = root.join("channels").join("tax");
+        fs::create_dir_all(dir.join("messages")).expect("create channel dirs");
+        fs::write(
+            dir.join("channel.json"),
+            r#"{"name":"tax","created":"2026-07-22 01:00:00 -0500","created_by":"alpha"}"#,
+        )
+        .expect("write channel.json");
+        fs::write(
+            dir.join("members.json"),
+            r#"{"alpha":"2026-07-22 01:00:00 -0500","beta":"2026-07-22 01:00:00 -0500"}"#,
+        )
+        .expect("write members.json");
+        for (id, from) in [
+            ("20260722-013000-000001-aaa111", "alpha"),
+            ("20260722-013000-000002-bbb222", "beta"),
+        ] {
+            let message = ChannelMessage {
+                id: id.to_owned(),
+                from: from.to_owned(),
+                channel: "tax".to_owned(),
+                subject: String::new(),
+                sent: "2026-07-22 01:30:00 -0500".to_owned(),
+                event: None,
+            };
+            let bytes = encode_message(&message, "body").expect("encode");
+            fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
+                .expect("write message");
+        }
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut seen = HashSet::new();
+        let batch = scan_batch(&context, "alpha", &inbox, &HashMap::new(), &mut seen)
+            .expect("scan");
+        let froms: Vec<&str> = batch
+            .iter()
+            .filter_map(|event| match event {
+                WatchEvent::ChannelMessage { from, .. } => Some(from.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(froms, vec!["beta"], "own message must not ring own doorbell");
+        trash_test_root(&root);
+    }
 }
 
 fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {

@@ -156,6 +156,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Channel history is append-only and is its own immutable archive; nothing in messages/ is ever moved or deleted.",
             "Channel identity is inferred from cwd; membership and cursors require a registered room, and joins are recorded in the channel history itself.",
             "Watch emits channel events as notifications only and never advances any cursor; only a read advances, and only after a successful emit.",
+            "A room's own channel messages are never news to it: they never ring its own watch, and a send advances the sender's cursor past their own message when they were already caught up.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override; intended for tests",

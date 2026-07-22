@@ -190,6 +190,14 @@ fn send(
 ) -> AppResult<CommandResult> {
     let body = super::send::read_body(args.body.take(), args.file.as_deref())?;
     let message = channel::send(context, &args.name, &args.subject, &body)?;
+    // The message is committed; a failed cursor advance must not turn the
+    // send into an error, so it degrades to a warning.
+    if let Err(error) = advance_past_own_message(context, &message) {
+        eprintln!(
+            "post: warning: sent ok, but could not advance own cursor for #{}: {}",
+            message.channel, error.message
+        );
+    }
     let rendered = if json_output {
         output::json(&ChatSendOutput { ok: true, message }, pretty)?
     } else {
@@ -199,6 +207,28 @@ fn send(
         )
     };
     Ok(CommandResult::committed(rendered))
+}
+
+/// A sender's own message must never sit "unread" for the sender — it rang
+/// their own doorbell and re-showed in their own next read. Advance the
+/// sender's cursor past the message they just wrote, but ONLY when they were
+/// already caught up: if anything else landed between their cursor and their
+/// own message, the cursor stays put so those messages still surface.
+/// (Messages with ids after our own stay beyond the cursor either way.)
+fn advance_past_own_message(context: &Context, message: &ChannelMessage) -> AppResult<()> {
+    let paths = channel::ChannelPaths::new(context, &message.channel)?;
+    let state = ChannelState::load(context, &message.from)?;
+    let cursor = state.cursor(&message.channel);
+    for path in channel::message_files(&paths.messages)? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let unread = cursor.is_none_or(|last| id > last);
+        if unread && id < message.id.as_str() {
+            return Ok(());
+        }
+    }
+    ChannelState::advance(context, &message.from, &message.channel, &message.id)
 }
 
 #[cfg(test)]
@@ -309,6 +339,49 @@ mod tests {
         let (root, context) = chat_context("missing");
         let error = read_batch(&context, "alpha", "tax").expect_err("missing channel must error");
         assert_eq!(error.code.as_str(), "not_found");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn send_advance_moves_cursor_past_own_message_when_caught_up() {
+        let (root, context) = chat_context("ownadvance");
+        let dir = seed_channel(&root, &["alpha", "beta"]);
+        seed_message(&dir, ID1, "beta", "earlier");
+        ChannelState::advance(&context, "alpha", "tax", ID1).expect("catch up");
+        seed_message(&dir, ID2, "alpha", "my own send");
+
+        let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
+            .expect("parse own message")
+            .message;
+        advance_past_own_message(&context, &own).expect("advance past own");
+        let state = ChannelState::load(&context, "alpha").expect("reload");
+        assert_eq!(state.cursor("tax"), Some(ID2), "caught-up sender skips own message");
+        assert!(
+            read_batch(&context, "alpha", "tax").expect("re-read").is_empty(),
+            "own message must not re-show as unread"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn send_advance_leaves_cursor_when_others_are_unread() {
+        let (root, context) = chat_context("ownblocked");
+        let dir = seed_channel(&root, &["alpha", "beta"]);
+        seed_message(&dir, ID1, "beta", "unread from beta");
+        seed_message(&dir, ID2, "alpha", "my own send");
+
+        let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
+            .expect("parse own message")
+            .message;
+        advance_past_own_message(&context, &own).expect("no-op advance");
+        let state = ChannelState::load(&context, "alpha").expect("reload");
+        assert_eq!(
+            state.cursor("tax"),
+            None,
+            "unread messages from others must block the own-message advance"
+        );
+        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        assert_eq!(batch.len(), 2, "beta's message and own message both still show");
         trash_test_root(&root);
     }
 
