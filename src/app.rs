@@ -21,8 +21,16 @@ where
                 return if error.print().is_ok() { 0 } else { 70 };
             }
             _ => {
-                let error = AppError::invalid_argument(error.to_string().trim().to_owned())
+                let message = error.to_string().trim().to_owned();
+                let mut error = AppError::invalid_argument(message.clone())
                     .reason("command-line parse failure");
+                // ponytail: agents keep typing `post send <room> --body …`; the positional is a
+                // body FILE, so clap reports a FILE/--body conflict that hides the real mistake.
+                if message.contains("'[FILE]' cannot be used with '--body") {
+                    error = error.exact_fix(
+                        "The recipient is a flag, not positional: post send --to <ROOM> --from <NAME> --subject <S> --body <TEXT>. The positional argument is a body FILE.",
+                    );
+                }
                 output::write_error(&error, false);
                 return error.exit_code;
             }
