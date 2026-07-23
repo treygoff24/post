@@ -52,6 +52,13 @@ post read 20260722- --room codex --peek
 post read 20260722- --room codex --json
 ```
 
+**Quoting bodies (learned the hard way, three times in one day):** your shell eats
+`--body` text before `post` ever sees it — unquoted `<tokens>` become redirections,
+`$10` becomes an empty variable, backticks execute. Anything with `$`, `<`, `>`,
+backticks, or quotes: write it to a file and pass the FILE positional, or pipe it
+on stdin. Single quotes help but heredoc-to-file is the only fully safe route.
+`post` cannot detect this — the mangled text is all it receives.
+
 If `--from` is omitted, `post` uses the registered room containing cwd, or the
 cwd basename when outside every room. A sender such as `codex-sol` does not need
 registration. A registered sender such as `codex` is refused outside the
