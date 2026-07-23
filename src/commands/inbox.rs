@@ -2,7 +2,7 @@ use crate::cli::InboxArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
-use crate::output::{InboxItem, InboxOutput};
+use crate::output::{self, InboxItem, InboxOutput};
 
 pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<CommandResult> {
     let (room, inbox, _) = context.resolved_mailbox_dirs(args.room)?;
@@ -34,6 +34,7 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
     unread.sort_by(|left, right| left.id.cmp(&right.id));
     let count = unread.len();
     if args.text {
+        let room = output::sanitize_text_header(&room);
         let rendered = if unread.is_empty() {
             format!("post: inbox empty for {room}\n")
         } else {
@@ -44,9 +45,10 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
                 } else {
                     format!("  {:?}", mail.subject)
                 };
+                let id = output::sanitize_text_header(&mail.id);
                 rendered.push_str(&format!(
-                    "{}  [{}] from {}{}\n",
-                    mail.id, mail.kind, mail.from, subject
+                    "{}  [{}] from {:?}{}\n",
+                    id, mail.kind, mail.from, subject
                 ));
             }
             rendered

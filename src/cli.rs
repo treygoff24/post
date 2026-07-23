@@ -29,7 +29,7 @@ fn without_controls(value: &str) -> Result<String, String> {
     rename_all = "kebab-case"
 )]
 pub(crate) struct Cli {
-    /// Emit JSON for send/read (inbox/rooms/schema/doctor are already JSON).
+    /// Emit JSON for send/read/chat; inbox/rooms/channels/schema/doctor are already JSON.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -59,7 +59,7 @@ pub(crate) enum Command {
     Schema,
     /// Diagnose mailbox configuration and state.
     Doctor(DoctorArgs),
-    /// Stream arriving mail as one event per line; runs until killed.
+    /// Stream direct-mail and joined-channel notifications as one event per line; runs until killed (--snapshot scans once and exits).
     Watch(WatchArgs),
 }
 
@@ -183,6 +183,11 @@ pub(crate) struct WatchArgs {
     /// Exit 0 after the first batch that emits at least one event.
     #[arg(long)]
     pub once: bool,
+
+    /// Scan exactly once and exit 0: a nonblocking poll for lifecycle hooks. An
+    /// empty scan emits nothing; --interval-ms has no effect.
+    #[arg(long, conflicts_with = "once")]
+    pub snapshot: bool,
 
     /// Poll cadence in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = 1000,

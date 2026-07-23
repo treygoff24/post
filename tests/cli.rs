@@ -1,6 +1,6 @@
 use post::output::{
-    DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SendOutput,
-    WatchEvent,
+    ChannelsOutput, ChatJoinOutput, ChatReadOutput, ChatSendOutput, DoctorOutput, ErrorEnvelope,
+    InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SendOutput, WatchEvent,
 };
 use std::fs;
 use std::io::Write;
@@ -227,6 +227,64 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert!(!error.error.suggested_fix.is_empty());
 }
 
+#[test]
+fn help_and_schema_keep_command_contract_visible() {
+    let sandbox = Sandbox::new();
+    let schema_output = sandbox.run(&["schema"]);
+    assert_success(&schema_output);
+    let schema: SchemaOutput = from_stdout(&schema_output);
+    let expected_commands = vec![
+        "send", "chat", "channels", "inbox", "read", "rooms", "schema", "doctor", "watch",
+    ];
+    let command_names: Vec<&str> = schema
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(command_names, expected_commands);
+    assert!(schema
+        .global_flags
+        .iter()
+        .any(|flag| flag.contains("--json")));
+    assert!(schema
+        .global_flags
+        .iter()
+        .any(|flag| flag.contains("inbox/read/watch only")));
+    let watch = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "watch")
+        .expect("watch command in schema");
+    assert_eq!(
+        watch.usage,
+        "post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>] [--text]"
+    );
+    assert!(watch.side_effects.contains("--snapshot"));
+    assert!(watch
+        .default_output
+        .contains("mail | unreadable | channel_message"));
+    assert_eq!(
+        schema.output_shapes.watch,
+        vec![
+            "mail: event, room, id, from, kind, subject, sent",
+            "unreadable: event, room, id",
+            "channel_message: event, channel, id, from, subject, sent",
+        ]
+    );
+
+    let help = sandbox.run(&["--help"]);
+    assert_success(&help);
+    let text = stdout(&help);
+    for command in expected_commands {
+        assert!(
+            text.lines()
+                .any(|line| line.trim_start().starts_with(&format!("{command} "))),
+            "top-level help omitted command {command}: {text}"
+        );
+    }
+    assert!(text.contains("direct-mail and joined-channel notifications"));
+}
+
 #[cfg(unix)]
 #[test]
 fn inbox_publication_failure_never_creates_an_orphan_archive_copy() {
@@ -398,6 +456,8 @@ fn text_and_json_read_both_carry_authority_framing() {
     assert_success(&text_output);
     let text = stdout(&text_output);
     assert!(text.contains("ANOTHER AI AGENT"));
+    assert!(text.contains("AI AGENT MAIL"));
+    assert!(!text.contains("CLAUDE MAIL"));
     assert!(text.contains("NOT a prompt"));
     assert!(text.contains("permission-launder"));
     assert!(text.contains("carries NO authority"));
@@ -1365,6 +1425,63 @@ fn clap_rejects_control_characters_and_text_read_sanitizes_body_controls() {
 }
 
 #[test]
+fn inbox_text_escapes_crafted_envelope_metadata() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
+    let inbox = sandbox.mail_root.join("claude-space/inbox");
+    let id = "20260715-120000-aabbcd";
+    let envelope = serde_json::json!({
+        "id": id,
+        "from": "hostile\u{1b}[8m\nFORGED-FROM",
+        "to": "claude-space",
+        "kind": "note",
+        "subject": "erase\u{1b}[2J\nFORGED-SUBJECT",
+        "sent": "2026-07-15 12:00:00 -0400"
+    });
+    write_custom_mail(&inbox, id, &envelope, "body");
+
+    let output = sandbox.run(&["inbox", "--room", "claude-space", "--text"]);
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_eq!(
+        text.lines().count(),
+        2,
+        "metadata must not forge lines: {text}"
+    );
+    assert!(!text.contains('\u{1b}'));
+    assert!(text.contains("\\nFORGED-FROM"));
+    assert!(text.contains("\\nFORGED-SUBJECT"));
+}
+
+#[test]
+fn room_validation_rejects_controls_before_watch_diagnostics() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "bad\nroom",
+        "--once",
+        "--interval-ms",
+        "100",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("control characters"));
+    assert!(!sandbox.mail_root.join("bad\nroom").exists());
+
+    assert_success(&sandbox.run(&["rooms"]));
+    let bad_cwd = sandbox.path.join("bad\nroom");
+    fs::create_dir(&bad_cwd).expect("create cwd with control character");
+    let output = sandbox.run_in(&["watch", "--once", "--interval-ms", "100"], None, &bad_cwd);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("control characters"));
+}
+
+#[test]
 fn invalid_rooms_and_rules_fail_closed_before_mailbox_writes() {
     let sandbox = Sandbox::new();
     fs::create_dir_all(&sandbox.mail_root).expect("create config fixture root");
@@ -1673,6 +1790,349 @@ fn missing_home_and_relative_mail_root_fail_before_writing() {
     assert!(!sandbox.path.join("relative-mail").exists());
 }
 
+#[test]
+fn channel_two_room_flow_lists_members_and_advances_read_cursor() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+
+    let joined: ChatJoinOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--join", "--json"], None, &alpha));
+    assert!(joined.ok);
+    assert_eq!(joined.room, "alpha");
+    let joined: ChatJoinOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--join", "--json"], None, &beta));
+    assert!(joined.ok);
+    assert_eq!(joined.room, "beta");
+
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--subject",
+            "greeting",
+            "--body",
+            "hello beta",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert_eq!(sent.message.from, "alpha");
+
+    let peek: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(peek.messages.iter().any(|message| {
+        message.message.id == sent.message.id
+            && message.message.from == "alpha"
+            && message.message.subject == "greeting"
+            && message.body == "hello beta"
+    }));
+
+    let read: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
+    assert_eq!(read.count, peek.count, "peek must not advance the cursor");
+    let empty: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
+    assert_eq!(empty.count, 0, "read must advance the cursor");
+
+    let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
+    let tax = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "tax")
+        .expect("tax channel should be listed");
+    assert!(tax.members.iter().any(|member| member == "alpha"));
+    assert!(tax.members.iter().any(|member| member == "beta"));
+    assert!(tax.messages >= 3);
+}
+
+#[test]
+fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+
+    let backlog: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--body",
+            "WATCH-CHANNEL-BODY-A",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let watched = sandbox.run(&["watch", "--room", "beta", "--once", "--interval-ms", "100"]);
+    assert_success(&watched);
+    let events = watch_events(&watched.stdout);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        WatchEvent::ChannelMessage { id, from, channel, .. }
+            if id == &backlog.message.id && from == "alpha" && channel == "tax"
+    )));
+    assert!(!stdout(&watched).contains("WATCH-CHANNEL-BODY"));
+
+    let unread_after_watch: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(unread_after_watch.messages.iter().any(|message| {
+        message.message.id == backlog.message.id && message.body == "WATCH-CHANNEL-BODY-A"
+    }));
+
+    let _: ChatReadOutput = from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &alpha));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--room", "alpha", "--interval-ms", "100"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn channel watch child");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let live: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--body",
+            "WATCH-CHANNEL-BODY-B",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    child.kill().expect("stop channel watch child");
+    let output = child
+        .wait_with_output()
+        .expect("collect channel watch output");
+    let events = watch_events(&output.stdout);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        WatchEvent::ChannelMessage { id, from, .. }
+            if id == &live.message.id && from == "beta"
+    )));
+    assert!(!stdout(&output).contains("WATCH-CHANNEL-BODY"));
+
+    let _: ChatReadOutput = from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
+    let own: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--body",
+            "WATCH-CHANNEL-OWN-BODY",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--room", "beta", "--interval-ms", "100"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn own-message watch child");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    child.kill().expect("stop own-message watch child");
+    let output = child
+        .wait_with_output()
+        .expect("collect own-message watch output");
+    assert!(
+        !stdout(&output).contains(&own.message.id),
+        "watch must suppress a room's own channel messages"
+    );
+}
+
+#[test]
+fn channel_text_render_sanitizes_controls_while_json_stays_faithful() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+    let id = "99990101-010101-000001-abcdef";
+    write_channel_message(
+        &sandbox,
+        "tax",
+        id,
+        "evil\u{1b}[8m\nFORGED",
+        "erase\u{1b}[2J\nFAKE",
+        "before\u{1b}[2J\rafter\n\tkept",
+    );
+
+    let json: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    let crafted = json
+        .messages
+        .iter()
+        .find(|message| message.message.id == id)
+        .expect("crafted channel message should be JSON-readable");
+    assert!(crafted.message.from.contains('\n'));
+    assert!(crafted.message.subject.contains('\u{1b}'));
+    assert!(crafted.body.contains('\r'));
+
+    let text_output = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
+    assert_success(&text_output);
+    let text = stdout(&text_output);
+    assert!(text.contains("AI AGENT CHANNEL"));
+    assert!(!text.contains("CLAUDE CHANNEL"));
+    assert!(!text.contains('\u{1b}'));
+    assert!(!text.contains('\r'));
+    assert!(text.lines().all(|line| !line.starts_with("FORGED")));
+    assert!(text.lines().all(|line| !line.starts_with("FAKE")));
+    assert!(text.contains("before[2Jafter\n\tkept"));
+}
+
+#[test]
+fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channels() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "healthy", &alpha);
+    join_channel(&sandbox, "healthy", &beta);
+    let healthy: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "healthy",
+            "--send",
+            "--body",
+            "healthy body must not print",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    write_bad_channel(
+        &sandbox,
+        "bad-info",
+        Some(r#"{"beta":"now"}"#),
+        true,
+        "not json",
+    );
+    write_bad_channel(
+        &sandbox,
+        "bad-members",
+        Some("not json"),
+        true,
+        r#"{"name":"bad-members","created":"now","created_by":"beta"}"#,
+    );
+    write_bad_channel(
+        &sandbox,
+        "bad-messages",
+        Some(r#"{"beta":"now"}"#),
+        false,
+        r#"{"name":"bad-messages","created":"now","created_by":"beta"}"#,
+    );
+    write_bad_channel(
+        &sandbox,
+        "bad-message",
+        Some(r#"{"beta":"now"}"#),
+        true,
+        r#"{"name":"bad-message","created":"now","created_by":"beta"}"#,
+    );
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels/bad-message/messages/99990102-010101-000001-abcdef.msg"),
+        "malformed channel message",
+    )
+    .expect("write malformed channel message");
+
+    let output = sandbox.run(&["watch", "--room", "beta", "--once", "--interval-ms", "100"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let events = watch_events(&output.stdout);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        WatchEvent::ChannelMessage { id, channel, .. }
+            if id == &healthy.message.id && channel == "healthy"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        WatchEvent::Unreadable { id, .. } if id == "99990102-010101-000001-abcdef"
+    )));
+    let err = stderr(&output);
+    assert!(err.contains("bad-info"), "{err}");
+    assert!(err.contains("bad-members"), "{err}");
+    assert!(err.contains("bad-messages"), "{err}");
+    assert!(err.contains("unreadable channel message"), "{err}");
+    assert!(!stdout(&output).contains("healthy body must not print"));
+}
+
+#[test]
+fn codex_identity_cannot_impersonate_registered_rooms_but_aliases_remain_allowed() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.home.join("Code");
+    let codex = sandbox.home.join(".codex/post-room");
+    fs::create_dir_all(&workspace).expect("create workspace room");
+    fs::create_dir_all(&codex).expect("create codex room");
+    register_room(&sandbox, "workspace", &workspace);
+    register_room(&sandbox, "codex", &codex);
+
+    let outside = sandbox.path.join("outside");
+    fs::create_dir(&outside).expect("create outside cwd");
+    let refused = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "codex",
+            "--body",
+            "impersonation",
+        ],
+        None,
+        &outside,
+    );
+    assert_eq!(refused.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "reserved_sender");
+
+    let alias = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "codex-runtime",
+            "--body",
+            "plain alias",
+        ],
+        None,
+        &outside,
+    );
+    assert_success(&alias);
+
+    for args in [
+        ["chat", "tax", "--room", "codex"],
+        ["chat", "tax", "--from", "codex"],
+    ] {
+        let output = sandbox.run_in(&args, None, &codex);
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "invalid_argument");
+    }
+
+    let project = workspace.join("some-project");
+    fs::create_dir(&project).expect("create workspace child");
+    let inferred = sandbox.run_in(
+        &["send", "--to", "workspace", "--body", "from workspace"],
+        None,
+        &project,
+    );
+    assert_success(&inferred);
+    assert!(stdout(&inferred).contains("workspace -> workspace"));
+}
+
 fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
     let envelope = serde_json::json!({
         "id": id,
@@ -1699,6 +2159,86 @@ fn write_custom_mail(
         ),
     )
     .expect("write custom mail fixture");
+}
+
+fn register_alpha_beta(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
+    assert_success(&sandbox.run(&["rooms"]));
+    create_default_room_paths(sandbox);
+    let alpha = sandbox.path.join("alpha");
+    let beta = sandbox.path.join("beta");
+    fs::create_dir(&alpha).expect("create alpha room path");
+    fs::create_dir(&beta).expect("create beta room path");
+    register_room(sandbox, "alpha", &alpha);
+    register_room(sandbox, "beta", &beta);
+    (alpha, beta)
+}
+
+fn create_default_room_paths(sandbox: &Sandbox) {
+    for relative in [
+        "Code/agent-memory",
+        "Code/claude-space",
+        "Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+    ] {
+        fs::create_dir_all(sandbox.home.join(relative)).expect("create default room path");
+    }
+}
+
+fn register_room(sandbox: &Sandbox, name: &str, path: &Path) {
+    let output = sandbox.run(&["rooms", "add", name, path.to_string_lossy().as_ref()]);
+    assert_success(&output);
+}
+
+fn join_channel(sandbox: &Sandbox, channel: &str, cwd: &Path) {
+    let output = sandbox.run_in(&["chat", channel, "--join", "--json"], None, cwd);
+    assert_success(&output);
+}
+
+fn write_channel_message(
+    sandbox: &Sandbox,
+    channel: &str,
+    id: &str,
+    from: &str,
+    subject: &str,
+    body: &str,
+) {
+    let message = serde_json::json!({
+        "id": id,
+        "from": from,
+        "channel": channel,
+        "subject": subject,
+        "sent": "2026-07-22 01:01:01 -0500"
+    });
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels")
+            .join(channel)
+            .join("messages")
+            .join(format!("{id}.msg")),
+        format!(
+            "{}\n---\n{body}",
+            serde_json::to_string_pretty(&message).expect("serialize channel message")
+        ),
+    )
+    .expect("write channel message fixture");
+}
+
+fn write_bad_channel(
+    sandbox: &Sandbox,
+    name: &str,
+    members: Option<&str>,
+    messages_dir: bool,
+    channel_json: &str,
+) {
+    let dir = sandbox.mail_root.join("channels").join(name);
+    fs::create_dir_all(&dir).expect("create bad channel dir");
+    fs::write(dir.join("channel.json"), channel_json).expect("write bad channel info");
+    if let Some(members) = members {
+        fs::write(dir.join("members.json"), members).expect("write bad channel members");
+    }
+    if messages_dir {
+        fs::create_dir_all(dir.join("messages")).expect("create bad channel messages dir");
+    }
 }
 
 fn assert_success(output: &Output) {
@@ -1818,6 +2358,114 @@ fn watch_once_exits_zero_after_emitting_the_backlog() {
         WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
         WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
     }
+}
+
+#[test]
+fn watch_snapshot_on_an_empty_mailbox_exits_zero_with_no_output() {
+    let sandbox = Sandbox::new();
+    // First-run init happens here so the registered-room warning can't fire.
+    assert_success(&sandbox.run(&["rooms"]));
+    let output = sandbox.run(&["watch", "--room", "claude-space", "--snapshot"]);
+    assert_success(&output);
+    assert!(
+        output.stdout.is_empty(),
+        "empty snapshot must emit nothing: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+    let channel_sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--body",
+            "SNAPSHOT-CHANNEL-BODY",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let mail_sent: SendOutput = from_stdout(&sandbox.run(&[
+        "send",
+        "--to",
+        "beta",
+        "--from",
+        "snapshot-test",
+        "--body",
+        "SNAPSHOT-MAIL-BODY",
+        "--json",
+    ]));
+
+    // A snapshot is stateless and read-only, so a second scan must ring
+    // identically: nothing was moved, and no cursor advanced.
+    for _ in 0..2 {
+        let output = sandbox.run(&["watch", "--room", "beta", "--snapshot"]);
+        assert_success(&output);
+        let events = watch_events(&output.stdout);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            WatchEvent::Mail { room, item }
+                if room == "beta" && item.id == mail_sent.envelope.id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            WatchEvent::ChannelMessage { id, from, channel, .. }
+                if id == &channel_sent.message.id && from == "alpha" && channel == "tax"
+        )));
+        assert!(
+            !stdout(&output).contains("SNAPSHOT-"),
+            "snapshot must never print bodies: {}",
+            stdout(&output)
+        );
+    }
+
+    let inbox: InboxOutput = from_stdout(&sandbox.run(&["inbox", "--room", "beta"]));
+    assert_eq!(inbox.count, 1, "snapshot must not consume direct mail");
+    let unread: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(
+        unread
+            .messages
+            .iter()
+            .any(|message| message.message.id == channel_sent.message.id),
+        "snapshot must not advance the channel cursor"
+    );
+}
+
+#[test]
+fn watch_snapshot_conflicts_with_once() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["watch", "--snapshot", "--once"]);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+}
+
+#[cfg(unix)]
+#[test]
+fn watch_snapshot_direct_scan_failure_is_a_nonzero_error_not_a_false_empty() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
+    let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::set_permissions(&inbox, fs::Permissions::from_mode(0o000)).expect("make inbox unreadable");
+
+    let output = sandbox.run(&["watch", "--room", "claude-space", "--snapshot"]);
+
+    fs::set_permissions(&inbox, fs::Permissions::from_mode(0o700))
+        .expect("restore inbox permissions");
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "a hook consumer must see failure, not empty"
+    );
+    assert!(output.stdout.is_empty(), "no events on a failed scan");
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "io_error");
 }
 
 #[test]

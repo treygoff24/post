@@ -54,9 +54,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "watch",
-            "post watch [--room <name>] [--once] [--interval-ms <ms>] [--text]",
-            "NDJSON events, one per line; text with --text",
-            "creates missing mailbox inbox/read directories; reads envelopes only — never moves or alters mail, never emits body content",
+            "post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>] [--text]",
+            "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
+            "creates missing mailbox inbox/read directories; reads direct-mail and joined-channel envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty)",
         ),
     ];
     let output_shapes = OutputShapes {
@@ -100,7 +100,11 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "ok", "framing", "channel", "room", "peek", "messages", "count",
         ]),
         channels: fields(&["ok", "channels", "count"]),
-        watch: fields(&["event", "room", "id", "from", "kind", "subject", "sent"]),
+        watch: fields(&[
+            "mail: event, room, id, from, kind, subject, sent",
+            "unreadable: event, room, id",
+            "channel_message: event, channel, id, from, subject, sent",
+        ]),
     };
     let errors = ErrorCode::ALL
         .iter()
@@ -115,9 +119,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
         global_flags: fields(&[
-            "--json: switch send/read from text to JSON",
+            "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/schema/doctor are already JSON",
             "--pretty: pretty-print JSON",
-            "--room <name>: inbox/read only; resolve that mailbox explicitly",
+            "--room <name>: command option for inbox/read/watch only; resolve that mailbox explicitly",
         ]),
         commands,
         output_shapes,
@@ -150,6 +154,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Registered room names cannot be claimed from outside their room tree.",
             "One canonical workspace path can have only one registered room name.",
             "Every successful send has an immutable archive copy.",
+            "delivered_output_failure is non-retryable after a committed direct send or channel mutation; committed room registration stdout failure is reported as success with best-effort diagnostics.",
             "Mail kinds are exactly letter, note, and signal.",
             "Channel messages are not mail: they carry no kind, so a signal structurally cannot occur in a channel; anything gate-grade stays 1:1 room mail.",
             "Blocked routes bar shared channel membership at join time; channels never carry what a route may not.",

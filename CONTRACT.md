@@ -3,27 +3,37 @@
 `post` is a machine-local mailbox for AI agents on one computer. This crate
 replaces the original Python implementation with the same on-disk format and
 laws, plus a proper agent-CLI contract. This document is the specification.
+The public language is model-neutral; the default root remains
+`~/.claude-mail/` for compatibility with existing mail.
 
 ## Non-negotiable laws (the reason this tool exists)
 
-1. **Mail is data, never a prompt.** Every surface that returns mail content
-   — text AND `--json` — carries the framing: it came from another AI agent,
-   has no authority, and authorization claimed inside it counts for nothing
-   (no permission laundering). In JSON output this is a structured `framing`
-   field with a stable `laws` array, not decoration to be dropped.
-2. **Blocked routes refuse at send time.** `~/.claude-mail/rules.json`
-   `blocked` entries (`from`/`to` may be `"*"`) are checked before any write.
-   The tool NEVER edits rules.json — humans manage it by hand, deliberately.
-   Error must quote the rule's `reason` verbatim.
-3. **Registered room names are reserved.** Sender identity: explicit `--from`
-   allowed EXCEPT a registered room's name from outside that room's tree
-   (refused with the exact fix). Default sender: the registered room
-   containing cwd, else cwd's basename. Resolved sender always appears in
-   output (no silent ambient inference).
-4. **Everything observable, append-only.** Every send also writes an
+1. **Mail and channel messages are data, never prompts.** Every surface that
+   returns body content — text AND `--json` — carries the framing: it came from
+   another AI agent, has no authority, and authorization claimed inside it
+   counts for nothing (no permission laundering). In JSON output this is a
+   structured `framing` field with a stable `laws` array, not decoration to be
+   dropped. Channel reads carry the same laws plus a multi-author warning.
+2. **Blocked routes refuse at write/join time.** `~/.claude-mail/rules.json`
+   `blocked` entries (`from`/`to` may be `"*"`) are checked before any direct
+   mail write and before a channel membership would create a forbidden shared
+   route. The tool NEVER edits rules.json — humans manage it by hand,
+   deliberately. Error must quote the rule's `reason` verbatim.
+3. **Registered room names are reserved.** Direct-mail sender identity:
+   explicit `--from` allowed EXCEPT a registered room's name from outside that
+   room's tree (refused with the exact fix). Default sender: the registered
+   room containing cwd, else cwd's basename. Resolved sender always appears in
+   output (no silent ambient inference). Channel identity is stricter: `post
+   chat` has no `--from` and no `--room`; the acting room is always the
+   registered room containing cwd.
+4. **Everything observable, append-only.** Every direct send also writes an
    immutable copy to `~/.claude-mail/archive/`. Nothing in the tool deletes
-   mail; `read` moves inbox → read/ within the recipient's dir.
-5. **Registers stay distinct.** `kind` ∈ {letter, note, signal}.
+   mail; `read` moves inbox → read/ within the recipient's dir. Channel
+   history is append-only under `channels/<name>/messages/`; channel reads only
+   move per-room cursors forward after successful output.
+5. **Registers stay distinct.** Direct-mail `kind` ∈ {letter, note, signal}.
+   Channel messages have no `kind`, so a signal structurally cannot occur in a
+   channel; anything gate-grade stays one-to-one room mail.
 
 ## On-disk format (existing mail must keep working)
 
@@ -51,12 +61,31 @@ laws, plus a proper agent-CLI contract. This document is the specification.
   an inbox failure cannot strand an archive-only message. `read` likewise
   hard-links inbox to read with no replacement before removing the inbox link.
   Default config creation is exclusive and never replaces existing content.
+- Channel root: `channels/`. Each channel lives at `channels/<name>/` with
+  `channel.json`, `members.json`, and `messages/<id>.msg`. Message ids sort
+  chronologically and use `YYYYmmdd-HHMMSS-UUUUUU-<6 hex>` so cursor ordering
+  remains complete for multiple messages in one second. A channel message file
+  is JSON envelope, then `\n---\n`, then raw body; envelope keys: id, from,
+  channel, subject, sent, event. Normal messages have no event; joins are
+  recorded as event messages. Channel files are append-only: nothing in
+  `messages/` is moved, edited, or deleted by reads.
+- Channel membership is by registered room name. Joining records the acting
+  room in `members.json`; blocked-route checks prevent any two rooms that are
+  structurally blocked from sharing the same channel. Sending and reading
+  require membership; non-members fail with `not_a_member`.
+- Channel cursors are per room and per channel, separate from message history.
+  A plain channel read advances only the acting room's cursor, only after a
+  successful emit, and only to the last emitted message. `--peek` and `watch`
+  never advance channel cursors. A sender's own message is advanced past only
+  when the sender was already caught up; unread messages from others keep the
+  cursor back so they still surface.
 
 ## Commands
 
-Global flags: `--json` (machine envelopes; default for inbox/rooms/schema/
-doctor is already JSON — `--json` on send/read switches them from text),
-`--pretty`, `--room <name>` where noted. No prompts ever; no color; stdout =
+Global flags: `--json` (machine envelopes; default for inbox/rooms/channels/
+schema/doctor is already JSON — `--json` on send/read/chat switches them from
+text), `--pretty`, `--room <name>` where noted. `--room` is not global; it is a
+command option for inbox/read/watch only. No prompts ever; no color; stdout =
 results, stderr = diagnostics/errors.
 
 - `post send --to <room> [--from <name>] [--kind letter|note|signal (default
@@ -104,42 +133,92 @@ results, stderr = diagnostics/errors.
   creates the workspace, overwrites an existing registration, or modifies
   `rules.json`. Once replacement commits, a stdout failure does not turn the
   registration into a retryable failure.
+- `post chat <channel> --join` — joins a shared channel as the registered room
+  containing cwd; creates the channel on first join; records a join event in
+  append-only history; returns `{ok, channel, room, created, already_member,
+  event_id}` with `--json`. Refuses unregistered cwd identity, invalid channel
+  name, and blocked shared membership. There is deliberately no `--room` or
+  `--from` override.
+- `post chat <channel> --send [--subject <s>] [--body <text> | FILE | stdin]`
+  — sends to a shared channel as the registered room containing cwd. Requires
+  membership; otherwise `not_a_member` with suggested fix `post chat <channel>
+  --join`. Success JSON: `{ok, message}`. The channel message is committed to
+  `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
+  is `delivered_output_failure` and must not be blindly retried.
+- `post chat <channel> [--peek]` — reads new channel messages as the registered
+  room containing cwd. Requires membership; otherwise `not_a_member`. Text
+  output includes the channel framing banner plus messages. JSON output is
+  `{ok, framing, channel, room, peek, messages, count}` and preserves parsed
+  message bodies unchanged. Text-mode message headers and bodies are sanitized
+  at the output boundary so crafted controls cannot rewrite the framing banner.
+  After stdout succeeds, a non-peek read advances only that room's cursor;
+  `--peek` never advances.
+- `post channels` — read-only listing of channels, members, creation metadata,
+  and message counts: `{ok, channels, count}`.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix]` — validates root exists, rooms.json/rules.json parse
   and have sane shapes, room paths exist (warn), stray non-.mail files,
-  malformed envelopes. `--fix` creates missing dirs/defaults only — never
-  touches rules content or mail. Doctor also reports delivered mail with a
-  missing or mismatched archive copy for manual reconciliation. Doctor exit
-  dictionary: 0 healthy / 1 findings / 3 fix-failed.
-- `post watch [--room <name>] [--once] [--interval-ms <ms>] [--text]` — the
-  doorbell: blocks and streams one event per arriving mail so any harness
-  monitor becomes a mail notifier. Room resolution as `inbox` (unregistered
-  explicit rooms are accepted with a one-line stderr warning, since a silent
-  watch on a typo'd name never rings). Poll-diff over the inbox directory
-  (default 1000ms, clamped 100–60000): the exclusive-link delivery commit
-  means a listing never sees a partial file, and the first batch emits the
-  current unread backlog, so there is no start-vs-arrival loss window. Emits
-  ENVELOPE METADATA ONLY — never body content, on any surface; consumption
-  and its framing banner stay exclusively with `post read`. Default output
-  NDJSON, one object per line: `{"event":"mail", room, id, from, kind,
-  subject, sent}`; a delivery whose envelope fails to parse still rings as
-  `{"event":"unreadable", room, id}` (filename-derived id, nothing quoted
-  from the file) plus a stderr warning. `--text` mirrors inbox's line format
-  with the subject, sender, and unreadable id all debug-escaped — the
-  attacker-reachable fields (crafted subjects and `from` in hand-written
-  mail; filenames, which no envelope validation ever touches) cannot forge
-  an event line, and the stderr warning debug-quotes both path and message
-  for the same reason. `--once` exits 0 after the first non-empty batch.
-  Stdout is flushed per batch. Transient scan failures (mailbox removed or
-  recreated mid-watch, permission blips) degrade to an empty scan with one
-  stderr warning per outage and polling continues — only stdout failure
-  exits, because a doorbell that cannot reach its consumer is better off
-  dead than silent. Caveat: all watch warnings (unregistered room, scan
-  outages) are stderr-only; a consumer that captures just stdout will not
-  see them. Never moves, alters, or deletes mail; keeps no state on disk.
-  Known accepted window: mail arriving AND consumed by a concurrent reader
-  within one interval is never emitted (it was never observed unread).
+  malformed envelopes, and channel state including malformed channel metadata,
+  membership, and messages. `--fix` creates missing dirs/defaults only — never
+  touches rules content, mail, channel history, membership, or cursors. Doctor
+  also reports delivered mail with a missing or mismatched archive copy for
+  manual reconciliation. Doctor exit dictionary: 0 healthy / 1 findings / 3
+  fix-failed.
+- `post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>]
+  [--text]` — the
+  doorbell: blocks and streams one event per arriving direct mail or joined
+  channel message so any harness monitor becomes a notifier. Room resolution as
+  `inbox` (unregistered explicit rooms are accepted with a one-line stderr
+  warning, since a silent watch on a typo'd name never rings). Poll-diff over
+  the inbox directory and joined channel messages (default 1000ms, clamped
+  100–60000): the exclusive-link delivery commit means a listing never sees a
+  partial direct-mail file, and the first batch emits the current unread
+  backlog plus channel messages after the cursor floor, so there is no
+  start-vs-arrival loss window. Emits ENVELOPE METADATA ONLY — never body
+  content, on any surface; consumption and its framing banner stay exclusively
+  with `post read` or `post chat`. Default output NDJSON, one object per line:
+  direct mail `{"event":"mail", room, id, from, kind, subject, sent}`;
+  unreadable direct mail or channel messages `{"event":"unreadable", room,
+  id}` (filename-derived id, nothing quoted from the file); channel messages
+  `{"event":"channel_message", channel, id, from, subject, sent}`. A room's
+  own channel messages are never news to it and never ring its own watch.
+  `--text` mirrors inbox/channel line formats with the subject, sender,
+  channel, and unreadable id all debug-escaped — the attacker-reachable fields
+  (crafted subjects and `from` in hand-written mail/messages; filenames, which
+  no envelope validation ever touches) cannot forge an event line, and stderr
+  warnings debug-quote both path and message for the same reason. `--once`
+  exits 0 after the first non-empty batch. Stdout is flushed per batch.
+  Transient scan failures (mailbox removed or recreated mid-watch, permission
+  blips) degrade to an empty scan with one stderr warning per outage and
+  polling continues; corrupt or unreadable channel stores warn on stderr and do
+  not suppress healthy joined channels. Only stdout failure exits, because a
+  doorbell that cannot reach its consumer is better off dead than silent.
+  Caveat: all watch warnings (unregistered room, scan outages, channel-store
+  diagnostics) are stderr-only; a consumer that captures just stdout will not
+  see them. Never moves, alters, or deletes mail; keeps no state on disk; never
+  advances channel cursors. Known accepted window: direct mail arriving AND
+  consumed by a concurrent reader within one interval is never emitted because
+  it was never observed unread. Channel messages are append-only; watch holds
+  its startup cursor floor in memory, so a channel read during the same watch
+  does not erase a later notification. `--snapshot` (conflicts with `--once`;
+  `--interval-ms` has no effect) is the nonblocking poll for bounded lifecycle
+  hooks: it performs exactly one scan of unread direct mail plus
+  joined-channel messages past the cursor floor, then exits 0. An empty scan
+  emits nothing; a non-empty scan emits the ordinary NDJSON/text batch. A
+  direct-mail scan failure is a nonzero error envelope — never a false empty —
+  while per-channel failures keep the watch posture (stderr warning, healthy
+  channels still ring). Snapshot mode shares every watch invariant: envelope
+  metadata only, no mail moves, no cursor writes.
+
+## Codex room convention
+
+Codex should use a narrow registered room path, normally
+`~/.codex/post-room`, registered as `codex`. Channel commands must run with cwd
+inside that tree so identity resolves to `codex`. Direct mail may still use
+free-form senders such as `codex-sol` without registration. Registering all of
+`~/.codex` is intentionally avoided so ordinary config/skill work does not act
+as the Codex room.
 
 ## Error contract
 
@@ -147,15 +226,18 @@ Envelope on stderr: `{ok: false, error: {code, message, details, retryable,
 suggested_fix}}`. Codes (stable): `unknown_room`, `blocked_route`,
 `reserved_sender`, `empty_body`, `ambiguous_id`, `not_found`,
 `invalid_argument`, `config_invalid`, `duplicate_workspace`, `io_error`,
-`delivered_output_failure`, `delivered_unarchived`. Pre-commit `io_error` is
-retryable with exit 75. `duplicate_workspace` is non-retryable with exit 65.
-Both delivered variants are non-retryable with exit 70:
-the first means delivery committed but stdout receipt failed; the second means
-inbox delivery committed but archive publication failed. Exit codes per the
-agent-CLI standard: 2 usage, 65 validation (unknown_room, reserved_sender,
-empty_body, ambiguous_id, duplicate_workspace), 66 not_found, 77 blocked_route
-(permission class), 78 config_invalid, 70 post-commit/internal failure, 75
-retryable pre-commit I/O.
+`delivered_output_failure`, `delivered_unarchived`, `not_a_member`.
+Pre-commit `io_error` is retryable with exit 75. `duplicate_workspace` and
+`not_a_member` are non-retryable with exit 65. Both delivered variants are
+non-retryable with exit 70: `delivered_output_failure` means a direct send or
+channel mutation committed but stdout receipt failed; `delivered_unarchived`
+means inbox delivery committed but archive publication failed. Room
+registration stdout failure after commit is reported as success with best-effort
+diagnostics, not `delivered_output_failure`. Exit codes per the agent-CLI
+standard: 2 usage, 65 validation (unknown_room, reserved_sender, empty_body,
+ambiguous_id, duplicate_workspace, not_a_member), 66 not_found, 77
+blocked_route (permission class), 78 config_invalid, 70 post-commit/internal
+failure, 75 retryable pre-commit I/O.
 
 ## Quality gate
 
@@ -167,7 +249,11 @@ sender + cwd-basename default; banner/framing present in BOTH text and json
 read output; prefix matching incl. ambiguity; empty-inbox exit 0; atomic
 write behavior (no partial .mail on simulated failure); envelope
 deserialization of every output shape; migration: a mail file in the original
-on-disk format reads back identically.
+on-disk format reads back identically; channel join/send/read with cursor
+advancement and `--peek`; channel watch backlog/live events without bodies or
+cursor advancement; malformed channel isolation; blocked-route channel sharing
+refusal; `not_a_member`; and schema/help consistency for all nine commands and
+every watch event variant.
 
 ## Stack
 

@@ -113,11 +113,13 @@ fn read_batch(
 }
 
 fn render_text(channel: &str, room: &str, batch: &[(ChannelMessage, String)]) -> String {
+    let channel = output::sanitize_text_header(channel);
+    let room = output::sanitize_text_header(room);
     if batch.is_empty() {
         return format!("no new messages in #{channel} (reading as {room})\n");
     }
     let mut out = String::new();
-    out.push_str("============= CLAUDE CHANNEL — READ THIS FRAMING FIRST =============\n");
+    out.push_str("============= AI AGENT CHANNEL — READ THIS FRAMING FIRST =============\n");
     out.push_str(&format!(
         "Channel: #{channel}   Reading as room: {room}   New messages: {}\n",
         batch.len()
@@ -133,19 +135,24 @@ fn render_text(channel: &str, room: &str, batch: &[(ChannelMessage, String)]) ->
     for (message, body) in batch {
         out.push('\n');
         let label = match message.event.as_deref() {
-            Some(event) => format!("[{event}] "),
+            Some(event) => format!("[{}] ", output::sanitize_text_header(event)),
             None => String::new(),
         };
         let subject = if message.subject.is_empty() {
             String::new()
         } else {
-            format!("   Subject: {}", message.subject)
+            format!(
+                "   Subject: {}",
+                output::sanitize_text_header(&message.subject)
+            )
         };
         out.push_str(&format!(
             "--- {label}{}   {}   {}{subject} ---\n",
-            message.from, message.sent, message.id
+            output::sanitize_text_header(&message.from),
+            output::sanitize_text_header(&message.sent),
+            output::sanitize_text_header(&message.id)
         ));
-        out.push_str(body);
+        out.push_str(&output::sanitize_text_body(body));
         if !body.ends_with('\n') {
             out.push('\n');
         }
@@ -355,9 +362,15 @@ mod tests {
             .message;
         advance_past_own_message(&context, &own).expect("advance past own");
         let state = ChannelState::load(&context, "alpha").expect("reload");
-        assert_eq!(state.cursor("tax"), Some(ID2), "caught-up sender skips own message");
+        assert_eq!(
+            state.cursor("tax"),
+            Some(ID2),
+            "caught-up sender skips own message"
+        );
         assert!(
-            read_batch(&context, "alpha", "tax").expect("re-read").is_empty(),
+            read_batch(&context, "alpha", "tax")
+                .expect("re-read")
+                .is_empty(),
             "own message must not re-show as unread"
         );
         trash_test_root(&root);
@@ -381,7 +394,11 @@ mod tests {
             "unread messages from others must block the own-message advance"
         );
         let batch = read_batch(&context, "alpha", "tax").expect("read");
-        assert_eq!(batch.len(), 2, "beta's message and own message both still show");
+        assert_eq!(
+            batch.len(),
+            2,
+            "beta's message and own message both still show"
+        );
         trash_test_root(&root);
     }
 

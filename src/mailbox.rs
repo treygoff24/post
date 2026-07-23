@@ -326,6 +326,9 @@ pub(crate) fn validate_component(value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err("name is empty".to_owned());
     }
+    if value.chars().any(char::is_control) {
+        return Err("name must not contain control characters".to_owned());
+    }
     let mut components = Path::new(value).components();
     if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
         return Err("name must be one path-safe component".to_owned());

@@ -239,10 +239,10 @@ impl AppError {
         let reason = source.to_string();
         Self::new(
             ErrorCode::DeliveredOutputFailure,
-            format!("mail was delivered but its receipt could not be written to stdout: {reason}"),
-            "Do not resend this mail; inspect the recipient inbox or archive for the delivered message.",
+            format!("operation was committed but its receipt could not be written to stdout: {reason}"),
+            "Do not retry blindly; inspect the recipient inbox, archive, or channel state for the committed operation.",
         )
-        .operation("write stdout after delivery")
+        .operation("write stdout after committed operation")
         .reason(reason)
     }
 

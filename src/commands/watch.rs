@@ -1,6 +1,6 @@
 use crate::channel::{
-    channel_state_path, list_channels, message_files, parse_channel_message, ChannelPaths,
-    ChannelStateMap,
+    channel_state_path, message_files, parse_channel_message, ChannelPaths, ChannelStateMap,
+    CHANNELS_DIR,
 };
 use crate::cli::WatchArgs;
 use crate::command_result::CommandResult;
@@ -17,7 +17,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // A typo'd --room silently watches a fresh empty mailbox forever, so
     // unlike inbox (whose empty listing is immediately visible) watch warns.
     if !context.load_rooms()?.contains_key(&room) {
-        eprintln!("post: warning: room '{room}' is not registered; watching a new empty mailbox");
+        eprintln!("post: warning: room {room:?} is not registered; watching a new empty mailbox");
     }
     let mut seen: HashSet<PathBuf> = HashSet::new();
     // Ring for anything not yet handled. Load each channel's cursor as a
@@ -28,6 +28,17 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // surfaces anything that landed in the gap, instead of silently priming
     // past it. The room inbox keeps its own surface-on-startup behavior.
     let floors = load_channel_floors(context, &room);
+    if args.snapshot {
+        // One scan, then out: the hook-facing poll. Unlike the loop below, a
+        // direct-mail scan failure propagates as a real error — a lifecycle
+        // hook must never mistake "could not look" for "inbox empty".
+        // Per-channel degradation stays inside scan_batch, unchanged.
+        let batch = scan_batch(context, &room, &inbox, &floors, &mut seen)?;
+        if !batch.is_empty() {
+            emit(&batch, args.text)?;
+        }
+        return Ok(CommandResult::success(String::new()));
+    }
     let mut scan_failing = false;
     loop {
         // A doorbell that dies is silently useless: transient scan failures
@@ -38,7 +49,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             Ok(batch) => {
                 if scan_failing {
                     scan_failing = false;
-                    eprintln!("post: warning: watch scan recovered for room '{room}'");
+                    eprintln!("post: warning: watch scan recovered for room {room:?}");
                 }
                 batch
             }
@@ -46,7 +57,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 if !scan_failing {
                     scan_failing = true;
                     eprintln!(
-                        "post: warning: watch scan failed for room '{room}' (will keep polling): {}",
+                        "post: warning: watch scan failed for room {room:?} (will keep polling): {}",
                         error.message
                     );
                 }
@@ -149,19 +160,85 @@ fn scan_batch(
 /// channels, revisit with a lighter membership scan if that grows.
 fn room_channel_message_paths(context: &Context, room: &str) -> Vec<(String, PathBuf)> {
     let mut paths = Vec::new();
-    let Ok(summaries) = list_channels(context) else {
-        return paths;
+    let channels_dir = context.root.join(CHANNELS_DIR);
+    let entries = match std::fs::read_dir(&channels_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return paths,
+        Err(error) => {
+            eprintln!(
+                "post: warning: cannot list channels directory {:?}: {:?}",
+                channels_dir.display().to_string(),
+                error.to_string()
+            );
+            return paths;
+        }
     };
-    for summary in summaries {
-        if !summary.members.contains_key(room) {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!(
+                    "post: warning: cannot read channels entry {:?}: {:?}",
+                    channels_dir.display().to_string(),
+                    error.to_string()
+                );
+                continue;
+            }
+        };
+        if !entry.path().is_dir() {
             continue;
         }
-        let name = summary.info.name;
-        if let Ok(channel) = ChannelPaths::new(context, &name) {
-            if let Ok(files) = message_files(&channel.messages) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            eprintln!(
+                "post: warning: skipped channel with non-UTF-8 name under {:?}",
+                channels_dir.display().to_string()
+            );
+            continue;
+        };
+        let channel = match ChannelPaths::new(context, &name) {
+            Ok(channel) => channel,
+            Err(error) => {
+                eprintln!(
+                    "post: warning: skipped invalid channel {:?}: {:?}",
+                    name, error.message
+                );
+                continue;
+            }
+        };
+        if !channel.exists() {
+            continue;
+        }
+        if let Err(error) = channel.load_info() {
+            eprintln!(
+                "post: warning: skipped channel {:?}: {:?}",
+                name, error.message
+            );
+            continue;
+        }
+        let members = match channel.load_members() {
+            Ok(members) => members,
+            Err(error) => {
+                eprintln!(
+                    "post: warning: skipped channel {:?}: {:?}",
+                    name, error.message
+                );
+                continue;
+            }
+        };
+        if !members.contains_key(room) {
+            continue;
+        }
+        match message_files(&channel.messages) {
+            Ok(files) => {
                 for path in files {
                     paths.push((name.clone(), path));
                 }
+            }
+            Err(error) => {
+                eprintln!(
+                    "post: warning: skipped channel {:?}: {:?}",
+                    name, error.message
+                );
             }
         }
     }
@@ -183,6 +260,23 @@ fn load_channel_floors(context: &Context, room: &str) -> HashMap<String, String>
         }
     }
     floors
+}
+
+fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    for event in batch {
+        let line = if text {
+            event.text_line()
+        } else {
+            crate::output::json(event, false)?
+        };
+        output
+            .write_all(line.as_bytes())
+            .and_then(|_| output.flush())
+            .map_err(|error| AppError::io("write watch event", Path::new("<stdout>"), error))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -231,8 +325,8 @@ mod tests {
             home: root.clone(),
         };
         let mut seen = HashSet::new();
-        let batch = scan_batch(&context, "alpha", &inbox, &HashMap::new(), &mut seen)
-            .expect("scan");
+        let batch =
+            scan_batch(&context, "alpha", &inbox, &HashMap::new(), &mut seen).expect("scan");
         let froms: Vec<&str> = batch
             .iter()
             .filter_map(|event| match event {
@@ -240,24 +334,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(froms, vec!["beta"], "own message must not ring own doorbell");
+        assert_eq!(
+            froms,
+            vec!["beta"],
+            "own message must not ring own doorbell"
+        );
         trash_test_root(&root);
     }
-}
-
-fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-    for event in batch {
-        let line = if text {
-            event.text_line()
-        } else {
-            crate::output::json(event, false)?
-        };
-        output
-            .write_all(line.as_bytes())
-            .and_then(|_| output.flush())
-            .map_err(|error| AppError::io("write watch event", Path::new("<stdout>"), error))?;
-    }
-    Ok(())
 }

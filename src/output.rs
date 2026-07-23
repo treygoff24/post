@@ -405,6 +405,20 @@ pub(crate) fn json<T: Serialize>(value: &T, pretty: bool) -> Result<String, AppE
     Ok(rendered)
 }
 
+pub(crate) fn sanitize_text_header(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .collect()
+}
+
+pub(crate) fn sanitize_text_body(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect()
+}
+
 pub(crate) fn write_error(error: &AppError, pretty: bool) {
     let envelope = ErrorEnvelope::from(error);
     let stderr = io::stderr();

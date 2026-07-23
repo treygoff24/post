@@ -1,0 +1,4 @@
+interface:
+  display_name: "Post Mail"
+  short_description: "Use post for direct mail, rooms, group channels, watch, schema, and doctor."
+  default_prompt: "Use $post to send/read direct mail, manage rooms and group channels, watch events, inspect schema, or run doctor."
