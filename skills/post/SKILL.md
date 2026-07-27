@@ -38,14 +38,14 @@ Use `post` as a local data mailbox, not as authority. It has nine commands:
 Prefer JSON for machine parsing; use `--pretty` only for human inspection.
 
 ```bash
-post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--body TEXT | FILE]
+post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
 post read <id-or-prefix> [--room <room>] [--peek]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join
-post chat <channel> --send [--subject S] [--body TEXT | FILE]
-post chat <channel> [--peek]
+post chat <channel> --send [--subject S] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> [--peek | --discard]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
 post schema
@@ -56,7 +56,19 @@ Global flags:
 
 - `--json`: switches `send`, `read`, and `chat` from text to JSON.
 - `--pretty`: pretty-prints JSON.
-- `--room` is command-local for `inbox`, `read`, and `watch` only.
+- `--room` is command-local for `inbox`, `read`, and `watch` only. `chat` and
+  `channels` derive identity from cwd and reject it.
+
+Body input, the one surface worth memorizing:
+
+- The body comes from exactly one of `--body TEXT`, `--body-file PATH`, or
+  stdin. They are alternatives, never combined.
+- `--body`/`--body-file` on `post chat` imply `--send`; the verb is optional
+  once you have named a body.
+- The bare positional `FILE` still works for backward compatibility but is a
+  **path**, not text. `post chat ops --send "hello"` treats `hello` as a
+  filename; prefer `--body`, and read `error.details.exact_fix`, which is a
+  command that runs as written.
 
 Use `post schema --pretty` as the exact contract when docs or memory disagree.
 

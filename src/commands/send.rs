@@ -27,7 +27,7 @@ fn run_with_body<F>(
     read_body: F,
 ) -> AppResult<CommandResult>
 where
-    F: FnOnce(Option<String>, Option<&std::path::Path>) -> AppResult<String>,
+    F: FnOnce(BodySource<'_>) -> AppResult<String>,
 {
     run_with_body_and_id(context, args, json_output, pretty, read_body, new_mail_id)
 }
@@ -41,13 +41,26 @@ fn run_with_body_and_id<F, G>(
     mut next_id: G,
 ) -> AppResult<CommandResult>
 where
-    F: FnOnce(Option<String>, Option<&std::path::Path>) -> AppResult<String>,
+    F: FnOnce(BodySource<'_>) -> AppResult<String>,
     G: FnMut(&str, u64) -> AppResult<String>,
 {
     let rooms = context.load_rooms()?;
+    // Built before `sender` is consumed, so a body-input fix can echo the
+    // exact flags this invocation used.
+    let fix_prefix = send_fix_prefix(&args);
     let sender = match args.sender {
         Some(sender) => sender,
-        None => context.infer_from_cwd(&rooms)?,
+        None => {
+            let inferred = context.infer_from_cwd(&rooms)?;
+            // Sender identity is derived from cwd, so a prepared command run
+            // from the wrong tree posts as that tree's room. Name the resolved
+            // sender on stderr before anything is written; the success receipt
+            // is otherwise the first place it appears, which is too late.
+            eprintln!(
+                "post: sending as '{inferred}' (identity inferred from cwd); pass --from <NAME> to send as someone else"
+            );
+            inferred
+        }
     };
     context.ensure_sender_allowed(&sender, &rooms)?;
 
@@ -72,16 +85,22 @@ where
         return Err(error);
     }
 
-    let body = read_body(args.body.take(), args.file.as_deref())?;
+    let inline = args.body.take();
+    let body = read_body(BodySource {
+        inline,
+        body_file: args.body_file.as_deref(),
+        file: args.file.as_deref(),
+        fix_prefix: fix_prefix.clone(),
+    })?;
     if body.trim().is_empty() {
         return Err(AppError::new(
             ErrorCode::EmptyBody,
             "message body is empty after trimming whitespace",
             format!(
-                "Retry with `post send --to {} --body '<text>'` or pass a non-empty FILE/stdin.",
-                args.to
+                "Retry with `{fix_prefix} --body '<text>'` or pass a non-empty body file/stdin."
             ),
         )
+        .exact_fix(format!("{fix_prefix} --body '<text>'"))
         .input("message body")
         .reason("empty or whitespace-only"));
     }
@@ -188,23 +207,50 @@ fn ensure_route_allowed(
     .rule(rule.clone()))
 }
 
-pub(super) fn read_body(body: Option<String>, file: Option<&std::path::Path>) -> AppResult<String> {
-    if let Some(body) = body {
+/// The three mutually exclusive body sources plus the verbatim command prefix
+/// used to build executable fixes. Every fix this module emits has to run
+/// as-is: the recurring papercut was a suggested fix the parser then rejected.
+pub(super) struct BodySource<'a> {
+    pub inline: Option<String>,
+    pub body_file: Option<&'a std::path::Path>,
+    pub file: Option<&'a std::path::Path>,
+    pub fix_prefix: String,
+}
+
+/// Quote `value` for a POSIX shell so a fix stays executable when the body
+/// carries spaces or quotes.
+pub(super) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// Rebuild the invocation that got us here, so a fix can append the corrected
+/// body flag and still be copy-pasteable.
+pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
+    let mut prefix = format!("post send --to {}", shell_quote(&args.to));
+    if let Some(sender) = &args.sender {
+        prefix.push_str(&format!(" --from {}", shell_quote(sender)));
+    }
+    if !args.subject.is_empty() {
+        prefix.push_str(&format!(" --subject {}", shell_quote(&args.subject)));
+    }
+    prefix
+}
+
+pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
+    if let Some(body) = source.inline {
         return Ok(body);
     }
-    if let Some(path) = file {
-        return fs::read_to_string(path).map_err(|error| {
-            AppError::io("read UTF-8 message body file", path, error).exact_fix(
-                "Pass an existing UTF-8 FILE, use `--body <text>`, or pipe the body on stdin.",
-            )
-        });
+    if let Some(path) = source.body_file.or(source.file) {
+        return read_body_file(path, &source.fix_prefix);
     }
     if io::stdin().is_terminal() {
+        let fix = format!("{} --body '<text>'", source.fix_prefix);
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
             "message body is missing and stdin is a terminal; post never prompts or waits for interactive input",
-            "Pass `--body '<text>'`, pass a UTF-8 FILE, or pipe the body on stdin.",
+            format!("Run `{fix}`, or pass `--body-file <PATH>`, or pipe the body on stdin."),
         )
+        .exact_fix(fix)
         .input("stdin")
         .reason("interactive terminal input is not allowed"));
     }
@@ -220,6 +266,37 @@ pub(super) fn read_body(body: Option<String>, file: Option<&std::path::Path>) ->
             )
         })?;
     Ok(body)
+}
+
+fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String> {
+    let display = path.display().to_string();
+    match fs::read_to_string(path) {
+        Ok(body) => Ok(body),
+        // The recurring mistake is inline message text landing in the body
+        // FILE slot. A path that does not exist is a usage error, not a
+        // retryable I/O fault, so it reports as invalid_argument and spells
+        // out the corrected command in full.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let fix = format!("{fix_prefix} --body {}", shell_quote(&display));
+            Err(AppError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "message body file '{display}' does not exist; that argument is a path to a body FILE, not inline message text"
+                ),
+                format!("If you meant to send that as text, run `{fix}`."),
+            )
+            .exact_fix(fix)
+            .input(display.clone())
+            .path(display)
+            .reason("body file path does not exist"))
+        }
+        Err(error) => Err(
+            AppError::io("read UTF-8 message body file", path, error).exact_fix(format!(
+                "{fix_prefix} --body-file {}",
+                shell_quote(&display)
+            )),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -255,11 +332,12 @@ mod tests {
                 kind: MailKind::Note,
                 subject: String::new(),
                 body: None,
+                body_file: None,
                 file: None,
             },
             false,
             false,
-            |_, _| {
+            |_| {
                 fs::write(
                     root.join("rules.json"),
                     r#"{"blocked":[{"from":"race-test","to":"claude-space","reason":"added while body was read"}]}"#,
@@ -298,11 +376,12 @@ mod tests {
                 kind: MailKind::Note,
                 subject: String::new(),
                 body: Some("new mail".to_owned()),
+                body_file: None,
                 file: None,
             },
             false,
             false,
-            |body, _| Ok(body.expect("inline body")),
+            |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(ids.next().expect("test provides two ids").to_owned()),
         )
         .expect("send should retry the colliding id");
@@ -338,11 +417,12 @@ mod tests {
                 kind: MailKind::Note,
                 subject: String::new(),
                 body: Some("new mail".to_owned()),
+                body_file: None,
                 file: None,
             },
             false,
             false,
-            |body, _| Ok(body.expect("inline body")),
+            |source| Ok(source.inline.expect("inline body")),
             |_, attempt| {
                 if attempt == 1 {
                     fs::write(
@@ -391,11 +471,12 @@ mod tests {
                 kind: MailKind::Note,
                 subject: String::new(),
                 body: Some("new delivery".to_owned()),
+                body_file: None,
                 file: None,
             },
             false,
             false,
-            |body, _| Ok(body.expect("inline body")),
+            |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
 
@@ -431,11 +512,12 @@ mod tests {
                 kind: MailKind::Note,
                 subject: String::new(),
                 body: Some("new mail".to_owned()),
+                body_file: None,
                 file: None,
             },
             false,
             false,
-            |body, _| Ok(body.expect("inline body")),
+            |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
 

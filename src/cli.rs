@@ -64,6 +64,12 @@ pub(crate) enum Command {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    override_usage = "post send --to <ROOM> [OPTIONS] --body <TEXT>\n       \
+     post send --to <ROOM> [OPTIONS] --body-file <PATH>\n       \
+     post send --to <ROOM> [OPTIONS] < BODY_FILE\n\n\
+     The three body forms are alternatives: pass exactly one, or none to read stdin."
+)]
 pub(crate) struct SendArgs {
     /// Registered recipient room.
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
@@ -81,44 +87,80 @@ pub(crate) struct SendArgs {
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
-    /// Inline message body.
-    #[arg(long, value_name = "TEXT", conflicts_with = "file")]
+    /// Inline message body text.
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file"])]
     pub body: Option<String>,
 
-    /// Read the message body from this UTF-8 file; omit for stdin.
+    /// Read the message body from this UTF-8 file.
+    #[arg(
+        long = "body-file",
+        value_name = "PATH",
+        value_hint = clap::ValueHint::FilePath,
+        conflicts_with = "file"
+    )]
+    pub body_file: Option<PathBuf>,
+
+    /// Deprecated positional spelling of --body-file; omit every body source to read stdin.
     #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
+#[command(
+    override_usage = "post chat <CHANNEL>                             (read new messages)\n       \
+     post chat <CHANNEL> --peek                      (read without advancing)\n       \
+     post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
+     post chat <CHANNEL> --join                      (join, creating on first join)\n       \
+     post chat <CHANNEL> --send --body <TEXT>        (send inline text)\n       \
+     post chat <CHANNEL> --send --body-file <PATH>   (send a file's contents)\n       \
+     post chat <CHANNEL> --send < BODY_FILE          (send stdin)\n\n\
+     These forms are alternatives; pass exactly one. --body/--body-file imply --send."
+)]
 pub(crate) struct ChatArgs {
     /// Channel name.
     #[arg(value_name = "CHANNEL", value_parser = nonempty_without_controls)]
     pub name: String,
 
     /// Join the channel (creates it on first join); recorded in history.
-    #[arg(long, conflicts_with_all = ["send", "peek", "body", "file", "subject"])]
+    #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject"])]
     pub join: bool,
 
-    /// Send a message from --body, FILE, or stdin.
-    #[arg(long, conflicts_with = "peek")]
+    /// Send a message; the body comes from --body, --body-file, or stdin.
+    #[arg(long, conflicts_with_all = ["peek", "discard"])]
     pub send: bool,
 
-    /// Optional subject for --send.
-    #[arg(long, default_value = "", value_parser = without_controls, requires = "send")]
+    /// Optional subject; only meaningful when sending.
+    #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
-    /// Inline message body for --send.
-    #[arg(long, value_name = "TEXT", conflicts_with = "file", requires = "send")]
+    /// Inline message body text; implies --send.
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file", "peek", "discard"])]
     pub body: Option<String>,
 
-    /// Read the message body for --send from this UTF-8 file; omit for stdin.
-    #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath, requires = "send")]
+    /// Read the message body from this UTF-8 file; implies --send.
+    #[arg(
+        long = "body-file",
+        value_name = "PATH",
+        value_hint = clap::ValueHint::FilePath,
+        conflicts_with_all = ["file", "peek", "discard"]
+    )]
+    pub body_file: Option<PathBuf>,
+
+    /// Deprecated positional spelling of --body-file; requires --send.
+    #[arg(
+        value_name = "FILE",
+        value_hint = clap::ValueHint::FilePath,
+        requires = "send"
+    )]
     pub file: Option<PathBuf>,
 
     /// Read without advancing the cursor.
     #[arg(long)]
     pub peek: bool,
+
+    /// Advance the cursor past every unread message without printing them.
+    #[arg(long, conflicts_with_all = ["peek", "send", "join"])]
+    pub discard: bool,
 }
 
 #[derive(Debug, Args)]

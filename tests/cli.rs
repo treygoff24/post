@@ -1,6 +1,7 @@
 use post::output::{
-    ChannelsOutput, ChatJoinOutput, ChatReadOutput, ChatSendOutput, DoctorOutput, ErrorEnvelope,
-    InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SendOutput, WatchEvent,
+    ChannelsOutput, ChatDiscardOutput, ChatJoinOutput, ChatReadOutput, ChatSendOutput,
+    DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SendOutput,
+    WatchEvent,
 };
 use std::fs;
 use std::io::Write;
@@ -46,6 +47,38 @@ impl Sandbox {
 
     fn run_with_stdin(&self, args: &[&str], input: &str) -> Output {
         self.run_in(args, Some(input), &self.path)
+    }
+
+    /// Run a suggested `exact_fix` through a shell with `post` resolved to the
+    /// binary under test. The point of the field is that it runs as written.
+    fn run_fix(&self, fix: &str, cwd: &Path) -> Output {
+        let script = fix.replacen("post ", &format!("'{}' ", env!("CARGO_BIN_EXE_post")), 1);
+        Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("POST_MAIL_ROOT", &self.mail_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run the suggested fix through a shell")
+    }
+
+    /// Run with stdout pointed at the null device: the shape that used to
+    /// consume a channel's unread batch without ever showing it.
+    fn run_in_discarding_stdout(&self, args: &[&str], cwd: &Path) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_post"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("POST_MAIL_ROOT", &self.mail_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run post with stdout discarded")
     }
 
     fn run_in(&self, args: &[&str], input: Option<&str>, cwd: &Path) -> Output {
@@ -2249,11 +2282,23 @@ fn assert_success(output: &Output) {
         stdout(output),
         stderr(output)
     );
+    let rendered = stderr(output);
+    let unexpected: Vec<_> = rendered
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_identity_notice(line))
+        .collect();
     assert!(
-        output.stderr.is_empty(),
+        unexpected.is_empty(),
         "unexpected stderr: {}",
-        stderr(output)
+        unexpected.join("\n")
     );
+}
+
+/// The cwd-identity notice is a deliberate receipt, not noise: mutating and
+/// consuming commands name the room they resolved to before they act. Every
+/// other line on a successful run is still a test failure.
+fn is_identity_notice(line: &str) -> bool {
+    line.contains("(identity inferred from cwd)")
 }
 
 fn from_stdout<T: serde::de::DeserializeOwned>(output: &Output) -> T {
@@ -2282,6 +2327,261 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn chat_send_with_inline_text_in_the_file_slot_suggests_a_fix_that_runs_verbatim() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+
+    let output = sandbox.run_in(&["chat", "tax", "--send", "hello world"], None, &alpha);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "inline text in the body FILE slot is a usage error, not a retryable I/O fault"
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(!error.error.retryable);
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .expect("a body-slot mistake must carry an exact fix");
+
+    let repaired = sandbox.run_fix(&fix, &alpha);
+    assert!(
+        repaired.status.success(),
+        "the suggested fix must run as written: {fix}\nstderr: {}",
+        stderr(&repaired)
+    );
+
+    let read: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(
+        read.messages.iter().any(|item| item.body == "hello world"),
+        "the repaired command must send the text that was mistaken for a path"
+    );
+}
+
+#[test]
+fn chat_body_flags_imply_send_without_the_verb() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+
+    let inline = sandbox.run_in(
+        &["chat", "tax", "--body", "implied by --body", "--json"],
+        None,
+        &alpha,
+    );
+    assert_success(&inline);
+    let inline: ChatSendOutput = from_stdout(&inline);
+    assert_eq!(inline.message.from, "alpha");
+
+    let path = sandbox.path.join("implied-body.txt");
+    fs::write(&path, "implied by --body-file").expect("write body file");
+    let from_file = sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--body-file",
+            path.to_string_lossy().as_ref(),
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&from_file);
+    let from_file: ChatSendOutput = from_stdout(&from_file);
+    assert_ne!(from_file.message.id, inline.message.id);
+
+    let read: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(read.messages.iter().any(|i| i.body == "implied by --body"));
+    assert!(read
+        .messages
+        .iter()
+        .any(|i| i.body == "implied by --body-file"));
+}
+
+#[test]
+fn inline_body_and_body_file_are_exclusive_alternatives() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.path.join("exclusive.txt");
+    fs::write(&path, "from the file").expect("write body file");
+
+    let both = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "exclusive-test",
+        "--body",
+        "inline",
+        "--body-file",
+        path.to_string_lossy().as_ref(),
+    ]);
+    assert_eq!(both.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&both);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(
+        error.error.message.contains("cannot be used with"),
+        "the two body forms must parse as exclusive: {}",
+        error.error.message
+    );
+
+    let by_file = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "exclusive-test",
+        "--body-file",
+        path.to_string_lossy().as_ref(),
+        "--json",
+    ]);
+    assert_success(&by_file);
+    let by_file: SendOutput = from_stdout(&by_file);
+    assert!(by_file.ok);
+}
+
+#[test]
+fn read_serves_already_read_mail_by_prefix_instead_of_reporting_it_missing() {
+    let sandbox = Sandbox::new();
+    let sent = sandbox.send_json("evidence-test", "durable evidence body\n");
+    let id = sent.envelope.id;
+
+    let first = sandbox.run(&["read", &id, "--room", "claude-space", "--json"]);
+    assert_success(&first);
+    let first: ReadOutput = from_stdout(&first);
+    assert!(!first.already_read, "the inbox copy is a fresh read");
+
+    let again = sandbox.run(&["read", &id, "--room", "claude-space", "--json"]);
+    assert_success(&again);
+    let again: ReadOutput = from_stdout(&again);
+    assert!(
+        again.already_read,
+        "a consumed message stays retrievable rather than reading as lost mail"
+    );
+    assert_eq!(again.body, first.body);
+    assert_eq!(again.envelope.id, id);
+
+    let by_prefix = sandbox.run(&["read", &id[..12], "--room", "claude-space", "--json"]);
+    assert_success(&by_prefix);
+    let by_prefix: ReadOutput = from_stdout(&by_prefix);
+    assert!(by_prefix.already_read);
+    assert_eq!(by_prefix.envelope.id, id);
+}
+
+#[test]
+fn read_of_a_wholly_unknown_prefix_names_every_store_it_searched() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["read", "20990101-000000-zzzzzz", "--room", "claude-space"]);
+    assert_eq!(output.status.code(), Some(66));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "not_found");
+    for named in ["not unread", "not already read", "not in the archive"] {
+        assert!(
+            error.error.message.contains(named),
+            "not_found must say which stores were searched, missing '{named}': {}",
+            error.error.message
+        );
+    }
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post inbox --room claude-space")
+    );
+}
+
+#[test]
+fn room_flag_on_channel_commands_names_the_cwd_bound_invocation() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+
+    let on_channels = sandbox.run_in(&["channels", "--room", "alpha"], None, &alpha);
+    assert_eq!(on_channels.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&on_channels);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post channels")
+    );
+
+    let on_chat = sandbox.run_in(&["chat", "tax", "--room", "alpha"], None, &alpha);
+    assert_eq!(on_chat.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&on_chat);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post chat <CHANNEL>")
+    );
+    assert!(
+        error.error.suggested_fix.contains("cwd"),
+        "the fix must explain that channel identity is cwd-bound: {}",
+        error.error.suggested_fix
+    );
+
+    // --room stays valid on the commands that document it.
+    assert_success(&sandbox.run_in(&["inbox", "--room", "claude-space"], None, &alpha));
+}
+
+#[test]
+fn channel_read_into_dev_null_is_refused_and_discard_is_the_deliberate_form() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--body",
+            "must not vanish",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+
+    let into_null = sandbox.run_in_discarding_stdout(&["chat", "tax"], &beta);
+    assert_eq!(
+        into_null.status.code(),
+        Some(2),
+        "a cursor advance into /dev/null must refuse instead of consuming the batch"
+    );
+    let error: ErrorEnvelope = from_stderr(&into_null);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post chat 'tax' --discard")
+    );
+
+    let still: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(
+        still
+            .messages
+            .iter()
+            .any(|item| item.message.id == sent.message.id),
+        "refusing must leave the batch unread"
+    );
+
+    let receipt = sandbox.run_in(&["chat", "tax", "--discard", "--json"], None, &beta);
+    assert_success(&receipt);
+    let receipt: ChatDiscardOutput = from_stdout(&receipt);
+    assert!(receipt.ok);
+    assert_eq!(receipt.room, "beta");
+    assert!(receipt.discarded >= 1);
+
+    let empty: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
+    assert_eq!(
+        empty.count, 0,
+        "--discard advances the cursor past the batch"
+    );
 }
 
 fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {

@@ -16,10 +16,41 @@ pub(super) fn run(
     if args.join {
         return join(context, &args.name, json_output, pretty);
     }
-    if args.send {
+    // --body and --body-file carry their own intent: naming a body is asking
+    // to send. Only the bare positional FILE still demands the explicit verb,
+    // because a stray path there is indistinguishable from a typo.
+    let sending = args.send || args.body.is_some() || args.body_file.is_some();
+    if !sending && !args.subject.is_empty() {
+        let fix = format!(
+            "post chat {} --send --subject {} --body '<text>'",
+            super::send::shell_quote(&args.name),
+            super::send::shell_quote(&args.subject)
+        );
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            "--subject only applies to a send, and this invocation is a read",
+            format!("Run `{fix}`, or drop --subject to read the channel."),
+        )
+        .exact_fix(fix)
+        .input("--subject")
+        .reason("subject passed without a send"));
+    }
+    if sending {
         return send(context, args, json_output, pretty);
     }
     read(context, args, json_output, pretty)
+}
+
+/// Rebuild the send invocation so a body-input fix can be copy-pasted whole.
+fn chat_fix_prefix(args: &ChatArgs) -> String {
+    let mut prefix = format!("post chat {} --send", super::send::shell_quote(&args.name));
+    if !args.subject.is_empty() {
+        prefix.push_str(&format!(
+            " --subject {}",
+            super::send::shell_quote(&args.subject)
+        ));
+    }
+    prefix
 }
 
 fn read(
@@ -32,6 +63,38 @@ fn read(
     let room = channel::acting_room(context, &rooms)?;
     let batch = read_batch(context, &room, &args.name)?;
     let last_id = batch.last().map(|(message, _)| message.id.clone());
+    if args.discard {
+        return discard(
+            context,
+            &args.name,
+            &room,
+            batch.len(),
+            last_id,
+            json_output,
+            pretty,
+        );
+    }
+    // Emitting into /dev/null still advances the cursor, so the batch is
+    // consumed without ever being seen. Refuse before anything is emitted:
+    // nothing is written and the cursor stays put, so nothing is lost.
+    if !args.peek && last_id.is_some() && output::stdout_is_null_device() {
+        let quoted = super::send::shell_quote(&args.name);
+        let fix = format!("post chat {quoted} --discard");
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "refusing to advance the #{} cursor into /dev/null: {} unread message(s) would be consumed without ever being shown",
+                args.name,
+                batch.len()
+            ),
+            format!(
+                "Run `post chat {quoted}` to read them, `post chat {quoted} --peek` to look without advancing, or `{fix}` to skip them deliberately."
+            ),
+        )
+        .exact_fix(fix)
+        .input("stdout")
+        .reason("stdout is the null device and this read would advance the cursor"));
+    }
     let rendered = if json_output {
         output::json(
             &output::ChatReadOutput {
@@ -63,6 +126,49 @@ fn read(
     // untouched and the batch re-shows on the next read.
     let channel_name = args.name;
     let context = context.clone();
+    Ok(CommandResult::after_stdout(rendered, move || {
+        ChannelState::advance(&context, &room, &channel_name, &last_id)
+    }))
+}
+
+/// Skip the unread batch without printing bodies: the honest spelling of what
+/// `> /dev/null` used to do by accident. Same emit-then-advance ordering as a
+/// real read, so a failed receipt leaves the cursor untouched.
+fn discard(
+    context: &Context,
+    channel_name: &str,
+    room: &str,
+    count: usize,
+    last_id: Option<String>,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let rendered = if json_output {
+        output::json(
+            &output::ChatDiscardOutput {
+                ok: true,
+                channel: channel_name.to_owned(),
+                room: room.to_owned(),
+                discarded: count,
+                cursor: last_id.clone(),
+            },
+            pretty,
+        )?
+    } else {
+        let channel = output::sanitize_text_header(channel_name);
+        match &last_id {
+            Some(id) => format!(
+                "post: discarded {count} unread message(s) in #{channel} (cursor advanced to {id})\n"
+            ),
+            None => format!("no new messages to discard in #{channel}\n"),
+        }
+    };
+    let Some(last_id) = last_id else {
+        return Ok(CommandResult::success(rendered));
+    };
+    let context = context.clone();
+    let room = room.to_owned();
+    let channel_name = channel_name.to_owned();
     Ok(CommandResult::after_stdout(rendered, move || {
         ChannelState::advance(&context, &room, &channel_name, &last_id)
     }))
@@ -166,6 +272,9 @@ fn join(
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    let rooms = context.load_rooms()?;
+    let acting = channel::acting_room(context, &rooms)?;
+    eprintln!("post: joining #{name} as room '{acting}' (identity inferred from cwd)");
     let outcome = channel::join(context, name)?;
     let rendered = if json_output {
         output::json(
@@ -195,7 +304,23 @@ fn send(
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
-    let body = super::send::read_body(args.body.take(), args.file.as_deref())?;
+    let fix_prefix = chat_fix_prefix(&args);
+    let inline = args.body.take();
+    let body = super::send::read_body(super::send::BodySource {
+        inline,
+        body_file: args.body_file.as_deref(),
+        file: args.file.as_deref(),
+        fix_prefix,
+    })?;
+    // Channel identity is cwd-derived with no override, so a prepared command
+    // run from the wrong tree posts as that tree's room. Name it before the
+    // append-only write, which cannot be taken back.
+    let rooms = context.load_rooms()?;
+    let acting = channel::acting_room(context, &rooms)?;
+    eprintln!(
+        "post: sending to #{} as room '{acting}' (identity inferred from cwd)",
+        args.name
+    );
     let message = channel::send(context, &args.name, &args.subject, &body)?;
     // The message is committed; a failed cursor advance must not turn the
     // send into an error, so it degrades to a warning.

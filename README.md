@@ -24,14 +24,14 @@ and has no daemon.
 ## Commands
 
 ```text
-post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--body TEXT | FILE]
+post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
 post read <id-or-prefix> [--room <room>] [--peek]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join
-post chat <channel> --send [--subject S] [--body TEXT | FILE]
-post chat <channel> [--peek]
+post chat <channel> --send [--subject S] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> [--peek | --discard]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
 post schema
@@ -41,7 +41,20 @@ post doctor [--fix]
 Global flags: `--json` switches `send`, `read`, and `chat` from text to JSON;
 `inbox`, `rooms`, `channels`, `schema`, and `doctor` are already JSON by
 default. `--pretty` pretty-prints JSON. `--room` is a command option only where
-shown.
+shown; `chat` and `channels` derive identity from cwd and reject it.
+
+The message body comes from exactly one of `--body TEXT`, `--body-file PATH`,
+or stdin — alternatives, never combined. On `post chat`, naming a body implies
+`--send`. The bare positional `FILE` still works but is a **path**, not text:
+`post chat ops --send "hello"` treats `hello` as a filename. When a command is
+rejected, `error.details.exact_fix` holds a command that runs as written.
+
+`post read` serves already-read mail: a prefix that matches nothing unread
+falls back to the room's read store and the archive, answering with
+`already_read: true` instead of reporting the mail missing. A channel read
+whose stdout is `/dev/null` is refused rather than silently consuming the
+batch — use `--peek` to look without advancing or `--discard` to skip on
+purpose.
 
 ## Direct mail
 

@@ -14,7 +14,8 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match cli::Cli::try_parse_from(args) {
+    let argv: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match cli::Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
         Err(error) => match error.kind() {
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
@@ -24,12 +25,9 @@ where
                 let message = error.to_string().trim().to_owned();
                 let mut error = AppError::invalid_argument(message.clone())
                     .reason("command-line parse failure");
-                // ponytail: agents keep typing `post send <room> --body …`; the positional is a
-                // body FILE, so clap reports a FILE/--body conflict that hides the real mistake.
-                if message.contains("'[FILE]' cannot be used with '--body") {
-                    error = error.exact_fix(
-                        "The recipient is a flag, not positional: post send --to <ROOM> --from <NAME> --subject <S> --body <TEXT>. The positional argument is a body FILE.",
-                    );
+                if let Some((fix, guidance)) = parse_failure_fix(&message, &argv) {
+                    error.suggested_fix = guidance;
+                    error = error.exact_fix(fix);
                 }
                 output::write_error(&error, false);
                 return error.exit_code;
@@ -50,6 +48,81 @@ where
             error.exit_code
         }
     }
+}
+
+/// Turn a clap parse failure into a fix that names the right invocation for
+/// the subcommand that was actually attempted. A flag accepted on one
+/// subcommand and rejected on another otherwise produces a bare "unexpected
+/// argument" that offers no alternative.
+/// Returns the command to run and the prose explaining it. `exact_fix` stays a
+/// bare command so a caller can run or template it directly; the reasoning
+/// goes to `suggested_fix`, which is the field that carries prose.
+fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(String, String)> {
+    let subcommand = subcommand_of(argv);
+    let subcommand = subcommand.as_deref();
+    // Agents keep typing `post send <room> --body …`; the positional is a body
+    // FILE, so clap reports a FILE/--body conflict that hides the real mistake.
+    if message.contains("'[FILE]' cannot be used with '--body") {
+        return Some((
+            "post send --to <ROOM> --from <NAME> --subject <SUBJECT> --body <TEXT>".to_owned(),
+            "The recipient is named by --to, never by position: the positional argument is a body FILE. Pass the recipient as a flag and the message as --body."
+                .to_owned(),
+        ));
+    }
+    if message.contains("unexpected argument '--room'") {
+        return Some(match subcommand {
+            Some("chat") => (
+                "post chat <CHANNEL>".to_owned(),
+                "Channel identity comes from cwd, so chat has no --room: run it from inside the room's registered directory. Run `post rooms` to see the paths."
+                    .to_owned(),
+            ),
+            Some("channels") => (
+                "post channels".to_owned(),
+                "channels takes no --room; it lists every channel with its members.".to_owned(),
+            ),
+            Some("send") => (
+                "post send --to <ROOM> --from <NAME> --body <TEXT>".to_owned(),
+                "send names the recipient with --to and the sender with --from; it has no --room."
+                    .to_owned(),
+            ),
+            _ => (
+                "post inbox --room <ROOM>".to_owned(),
+                "--room is a command option for inbox, read, and watch only.".to_owned(),
+            ),
+        });
+    }
+    if message.contains("unexpected argument '--from'") {
+        return Some(match subcommand {
+            Some("chat") => (
+                "post chat <CHANNEL> --send --body <TEXT>".to_owned(),
+                "Channel sender identity comes from cwd, so chat has no --from: run it from inside the room's registered directory."
+                    .to_owned(),
+            ),
+            _ => (
+                "post send --to <ROOM> --from <NAME> --body <TEXT>".to_owned(),
+                "--from names the sender on send only.".to_owned(),
+            ),
+        });
+    }
+    if message.contains("unexpected argument '--body-file'")
+        || message.contains("unexpected argument '--body'")
+    {
+        return Some((
+            format!("post {} --help", subcommand.unwrap_or("<command>")),
+            "--body and --body-file supply a message body on `send` and `chat --send` only."
+                .to_owned(),
+        ));
+    }
+    None
+}
+
+/// First non-flag token after the program name.
+fn subcommand_of(argv: &[OsString]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .filter_map(|value| value.to_str())
+        .find(|value| !value.starts_with('-'))
+        .map(str::to_owned)
 }
 
 fn finish_command_result<W: Write>(mut result: CommandResult, stdout: &mut W) -> AppResult<i32> {

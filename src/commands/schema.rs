@@ -6,15 +6,15 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "send",
-            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--body <text> | FILE | stdin]",
+            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] (--body <text> | --body-file <path> | stdin)",
             "text; JSON with --json",
-            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail",
+            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; the three body forms are mutually exclusive alternatives, and omitting all of them reads stdin",
         ),
         command(
             "chat",
-            "post chat <channel> [--peek] | post chat <channel> --join | post chat <channel> --send [--subject <s>] [--body <text> | FILE | stdin]",
+            "post chat <channel> [--peek | --discard] | post chat <channel> --join | post chat <channel> --send [--subject <s>] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg; a plain read advances the reader's own cursor only after a successful emit; --peek never advances",
+            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg and implies from --body/--body-file; a plain read advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; a cursor-advancing read into /dev/null is refused",
         ),
         command(
             "channels",
@@ -32,7 +32,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "read",
             "post read <id-or-prefix> [--room <name>] [--peek]",
             "framed text; JSON with --json",
-            "moves inbox mail to read unless --peek",
+            "moves inbox mail to read unless --peek; a prefix matching no unread mail falls back to the room's read store and then to archive copies addressed to that room, served with already_read=true and consuming nothing",
         ),
         command(
             "rooms",
@@ -70,7 +70,13 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "exit_codes",
         ]),
         inbox: fields(&["ok", "room", "unread", "count", "skipped_unreadable"]),
-        read_json: fields(&["ok", "framing", "envelope", "body"]),
+        read_json: fields(&[
+            "ok",
+            "framing",
+            "envelope",
+            "body",
+            "already_read (present and true only when served from the read/archive store)",
+        ]),
         rooms: fields(&["ok", "rooms", "count"]),
         schema: fields(&[
             "ok",
@@ -99,6 +105,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         chat_read: fields(&[
             "ok", "framing", "channel", "room", "peek", "messages", "count",
         ]),
+        chat_discard: fields(&["ok", "channel", "room", "discarded", "cursor"]),
         channels: fields(&["ok", "channels", "count"]),
         watch: fields(&[
             "mail: event, room, id, from, kind, subject, sent",
@@ -121,7 +128,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         global_flags: fields(&[
             "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/schema/doctor are already JSON",
             "--pretty: pretty-print JSON",
-            "--room <name>: command option for inbox/read/watch only; resolve that mailbox explicitly",
+            "--room <name>: command option for inbox/read/watch only; chat and channels derive identity from cwd and reject --room",
         ]),
         commands,
         output_shapes,
@@ -162,6 +169,10 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Channel identity is inferred from cwd; membership and cursors require a registered room, and joins are recorded in the channel history itself.",
             "Watch emits channel events as notifications only and never advances any cursor; only a read advances, and only after a successful emit.",
             "A room's own channel messages are never news to it: they never ring its own watch, and a send advances the sender's cursor past their own message when they were already caught up.",
+            "A message body comes from exactly one of --body, --body-file, or stdin; a body-file path that does not exist is a usage error, never a retryable I/O fault.",
+            "Already-read mail stays retrievable by id or prefix from the read store and from archive copies addressed to that room; re-reading consumes nothing and reports already_read.",
+            "A channel read never advances the cursor into /dev/null; skipping unread messages requires --discard.",
+            "Every error that suggests a command suggests one that runs verbatim.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override; intended for tests",
