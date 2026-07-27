@@ -89,7 +89,11 @@ command option for inbox/read/watch only. No prompts ever; no color; stdout =
 results, stderr = diagnostics/errors.
 
 - `post send --to <room> [--from <name>] [--kind letter|note|signal (default
-  note)] [--subject <s>] [--body <text> | FILE | stdin]` — refuses: unknown
+  note)] [--subject <s>] (--body <text> | --body-file <path> | stdin)` — the
+  three body forms are mutually exclusive alternatives; a bare positional FILE
+  remains accepted as the deprecated spelling of `--body-file`, and a
+  body-file path that does not exist is `invalid_argument` (a usage error)
+  rather than a retryable `io_error`. Refuses: unknown
   recipient (did-you-mean over rooms), blocked route (quotes reason),
   reserved-name impersonation, empty body. `--body` exists so agents don't
   need heredocs (the first real mail shipped the literal word "placeholder"
@@ -111,7 +115,12 @@ results, stderr = diagnostics/errors.
   control characters except tab and newline, so neither can rewrite the
   framing banner. JSON mode preserves the parsed envelope and body unchanged
   as the byte-faithful surface. Ambiguous prefix: error listing
-  the matches. Not found: error with `suggested_fix: post inbox --room <X>`.
+  the matches. A prefix matching nothing unread falls back to the room's read/
+  store and then to archive copies addressed to that room; such a message is
+  served with `already_read: true` and consumes nothing (the field is omitted
+  entirely on a fresh read, so existing consumers are unaffected). Only when
+  no store holds the prefix is it not found, with `exact_fix: post inbox
+  --room <X>` and a message naming every store searched.
 - `post rooms` — rooms with paths, each with any blocking rules that name it.
 - `post rooms add <name> <path>` — registers an existing workspace directory
   (absolute or `~/...`) and returns the updated rooms listing. Workspace
@@ -139,8 +148,14 @@ results, stderr = diagnostics/errors.
   event_id}` with `--json`. Refuses unregistered cwd identity, invalid channel
   name, and blocked shared membership. There is deliberately no `--room` or
   `--from` override.
-- `post chat <channel> --send [--subject <s>] [--body <text> | FILE | stdin]`
-  — sends to a shared channel as the registered room containing cwd. Requires
+- `post chat <channel> --send [--subject <s>] (--body <text> | --body-file
+  <path> | stdin)` — sends to a shared channel as the registered room
+  containing cwd. `--body`/`--body-file` imply `--send`, so the verb is
+  optional once a body is named; the deprecated positional FILE still requires
+  it. A plain read whose stdout is the null device is refused before anything
+  is emitted, leaving the cursor untouched; `--discard` is the deliberate way
+  to advance past unread messages without printing them, and reports
+  `{ok, channel, room, discarded, cursor}`. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
