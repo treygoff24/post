@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "claude-mail.mjs");
 // POST_CLAUDE_HOOK_INSTALL_DIR is a test override; live installs use the default.
@@ -33,6 +34,47 @@ const requestedTarget = process.argv[2];
 if (!requestedTarget) {
   console.error("usage: node install-claude-hooks.mjs <path-to-settings.json>");
   process.exit(2);
+}
+
+// Preflight: the adapter depends on post >= 0.2.0, where a snapshot from an
+// unregistered cwd scans nothing and creates nothing. A stale installed binary
+// reproduces the junk-mailbox bug on every hook fire from an unroomed project
+// (caught live in review, 2026-07-30), so the precondition is enforced, not
+// documented: probe the exact binary the adapter will resolve, from a temp
+// unregistered cwd against an isolated mail root, and refuse to install if a
+// mailbox appears or the probe fails.
+function resolvedPostBinary() {
+  if (process.env.POST_CLAUDE_HOOK_BIN) return process.env.POST_CLAUDE_HOOK_BIN;
+  const installed = path.join(os.homedir(), ".local", "bin", "post");
+  try {
+    fs.accessSync(installed, fs.constants.X_OK);
+    return installed;
+  } catch {
+    return "post";
+  }
+}
+{
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "post-claude-preflight-"));
+  const probeCwd = path.join(probeRoot, "unroomed-probe");
+  const probeMail = path.join(probeRoot, "mail");
+  fs.mkdirSync(probeCwd, { recursive: true });
+  const probe = spawnSync(resolvedPostBinary(), ["watch", "--snapshot"], {
+    cwd: probeCwd,
+    env: { ...process.env, POST_MAIL_ROOT: probeMail },
+    encoding: "utf8",
+    timeout: 4000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const minted = fs.existsSync(path.join(probeMail, "unroomed-probe"));
+  fs.rmSync(probeRoot, { recursive: true, force: true });
+  if (probe.error || probe.status !== 0 || minted) {
+    console.error(
+      minted
+        ? "preflight failed: the installed post binary mints a mailbox for an unregistered cwd (pre-0.2.0). Rebuild and reinstall post, then re-run."
+        : `preflight failed: could not run the post binary (${probe.error?.message ?? `exit ${probe.status}`}). Fix the post install, then re-run.`
+    );
+    process.exit(1);
+  }
 }
 let target = requestedTarget;
 try {

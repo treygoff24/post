@@ -18,6 +18,25 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-claude-install-test-"))
 const INSTALL_DIR = path.join(ROOT, "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-claude-mail.mjs");
 
+// Preflight stubs: a fixed post that mints nothing, and a stale one that
+// reproduces the pre-0.2.0 junk-mailbox bug.
+const GOOD_POST = path.join(ROOT, "good-post.mjs");
+fs.writeFileSync(GOOD_POST, "#!/usr/bin/env node\nprocess.exit(0);\n", { mode: 0o755 });
+const STALE_POST = path.join(ROOT, "stale-post.mjs");
+fs.writeFileSync(
+  STALE_POST,
+  [
+    "#!/usr/bin/env node",
+    'import fs from "node:fs";',
+    'import path from "node:path";',
+    'const room = path.basename(process.cwd());',
+    'fs.mkdirSync(path.join(process.env.POST_MAIL_ROOT, room, "inbox"), { recursive: true });',
+    "process.exit(0);",
+    "",
+  ].join("\n"),
+  { mode: 0o755 }
+);
+
 test.after(() => {
   spawnSync("trash", [ROOT], { stdio: "ignore" });
 });
@@ -29,12 +48,16 @@ function freshSettings(content) {
   return file;
 }
 
-function run(target) {
+function run(target, { bin = GOOD_POST } = {}) {
   const args = [INSTALLER];
   if (target !== undefined) args.push(target);
   return spawnSync(process.execPath, args, {
     encoding: "utf8",
-    env: { ...process.env, POST_CLAUDE_HOOK_INSTALL_DIR: INSTALL_DIR },
+    env: {
+      ...process.env,
+      POST_CLAUDE_HOOK_INSTALL_DIR: INSTALL_DIR,
+      POST_CLAUDE_HOOK_BIN: bin,
+    },
   });
 }
 
@@ -42,6 +65,22 @@ test("refuses to run without an explicit target", () => {
   const result = run(undefined);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /usage/);
+});
+
+test("preflight refuses a stale binary that mints unroomed mailboxes, touching nothing", () => {
+  const target = freshSettings();
+  const result = run(target, { bin: STALE_POST });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /mints a mailbox/);
+  assert.ok(!fs.existsSync(target), "a failed preflight must not write the settings file");
+});
+
+test("preflight refuses an unrunnable binary", () => {
+  const target = freshSettings();
+  const result = run(target, { bin: path.join(ROOT, "no-such-binary") });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /could not run the post binary/);
+  assert.ok(!fs.existsSync(target));
 });
 
 test("creates a fresh settings file with all three events and copies the adapter", () => {
