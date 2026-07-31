@@ -223,8 +223,11 @@ results, stderr = diagnostics/errors.
   emits nothing; a non-empty scan emits the ordinary NDJSON/text batch. A
   direct-mail scan failure is a nonzero error envelope — never a false empty —
   while per-channel failures keep the watch posture (stderr warning, healthy
-  channels still ring). Snapshot mode shares every watch invariant: envelope
-  metadata only, no mail moves, no cursor writes.
+  channels still ring). Because lifecycle hooks may invoke it from any cwd, a
+  snapshot whose resolved room is unregistered warns on stderr, scans nothing,
+  creates no mailbox directories, and exits 0. Snapshot mode shares every
+  other watch invariant: envelope metadata only, no mail moves, no cursor
+  writes.
 
 ## Codex room convention
 

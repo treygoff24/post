@@ -56,7 +56,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "watch",
             "post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>] [--text]",
             "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
-            "creates missing mailbox inbox/read directories; reads direct-mail and joined-channel envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty)",
+            "creates missing mailbox inbox/read directories for registered rooms; reads direct-mail and joined-channel envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
         ),
     ];
     let output_shapes = OutputShapes {

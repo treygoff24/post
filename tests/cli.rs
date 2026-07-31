@@ -2675,6 +2675,28 @@ fn watch_snapshot_on_an_empty_mailbox_exits_zero_with_no_output() {
 }
 
 #[test]
+fn watch_snapshot_for_an_unregistered_room_creates_nothing_and_exits_zero() {
+    let sandbox = Sandbox::new();
+    assert_success(&sandbox.run(&["rooms"]));
+    let output = sandbox.run(&["watch", "--room", "no-such-room", "--snapshot"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        output.stdout.is_empty(),
+        "unregistered snapshot must emit nothing: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("not registered"),
+        "expected the unregistered warning on stderr: {}",
+        stderr(&output)
+    );
+    assert!(
+        !sandbox.mail_root.join("no-such-room").exists(),
+        "snapshot must not mint a mailbox for an unregistered room"
+    );
+}
+
+#[test]
 fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);

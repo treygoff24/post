@@ -118,7 +118,10 @@ unseeded health check. `--snapshot` is the nonblocking poll for lifecycle
 hooks: exactly one scan, then exit 0 — an empty scan emits nothing, a
 non-empty scan emits the ordinary event batch, and a direct-mail scan failure
 is a nonzero error rather than a false empty (per-channel failures still
-degrade to stderr warnings). `--interval-ms` has no effect in snapshot mode.
+degrade to stderr warnings). Because lifecycle hooks may fire from any
+directory, a snapshot whose room is not registered warns on stderr, scans
+nothing, and creates no mailbox directories — it never mints a mailbox for an
+arbitrary cwd. `--interval-ms` has no effect in snapshot mode.
 
 ```bash
 post watch --room codex --once

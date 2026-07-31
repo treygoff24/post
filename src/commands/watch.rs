@@ -13,12 +13,24 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult> {
-    let (room, inbox, _) = context.resolved_mailbox_dirs(args.room)?;
-    // A typo'd --room silently watches a fresh empty mailbox forever, so
-    // unlike inbox (whose empty listing is immediately visible) watch warns.
-    if !context.load_rooms()?.contains_key(&room) {
+    let rooms = context.load_rooms()?;
+    let room = context.resolved_room(args.room, &rooms)?;
+    if !rooms.contains_key(&room) {
+        // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
+        // unregistered room means "this directory has no mailbox", so scan
+        // nothing and, critically, create nothing (a machine-wide hook would
+        // otherwise mint a junk mailbox per project directory ever visited).
+        if args.snapshot {
+            eprintln!(
+                "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
+            );
+            return Ok(CommandResult::success(String::new()));
+        }
+        // A typo'd --room silently watches a fresh empty mailbox forever, so
+        // unlike inbox (whose empty listing is immediately visible) watch warns.
         eprintln!("post: warning: room {room:?} is not registered; watching a new empty mailbox");
     }
+    let (inbox, _) = context.mailbox_dirs(&room)?;
     let mut seen: HashSet<PathBuf> = HashSet::new();
     // Ring for anything not yet handled. Load each channel's cursor as a
     // read-only floor — watch NEVER writes a cursor — and emit messages with
