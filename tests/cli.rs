@@ -1279,6 +1279,31 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
 }
 
 #[test]
+fn inline_body_naming_an_existing_file_is_rejected_with_a_body_file_fix() {
+    let sandbox = Sandbox::new();
+    let body_file = sandbox.path.join("accidental.txt");
+    fs::write(&body_file, "file contents").expect("write file");
+    let path_arg = body_file.to_string_lossy().into_owned();
+    let output = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "path-test",
+        "--body",
+        &path_arg,
+        "--json",
+    ]);
+    assert!(!output.status.success(), "path-shaped body must be rejected");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("--body-file"), "fix must point at --body-file: {combined}");
+}
+
+#[test]
 fn body_dash_is_the_stdin_sentinel_not_literal_text() {
     let sandbox = Sandbox::new();
     let output = sandbox.run_with_stdin(

@@ -243,6 +243,23 @@ pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
         // and lost the real message (caught live in #commons, 2026-07-31).
         // A literal one-dash body, if ever wanted, still works via stdin.
         if body != "-" {
+            // An inline body that is exactly an existing file's path is almost
+            // always a reach for --body-file (three garbled channel posts from
+            // one careful agent, 2026-07-31). Reject with the intended command;
+            // a literal path-shaped body still works via stdin or a body file.
+            if std::path::Path::new(&body).is_file() {
+                let fix = format!("{} --body-file {}", source.fix_prefix, shell_quote(&body));
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    "--body is inline text, but its value is an existing file path",
+                    format!(
+                        "Run `{fix}` to send the file's contents, or pipe the literal text on stdin."
+                    ),
+                )
+                .exact_fix(fix)
+                .input("--body")
+                .reason("inline body names an existing file"));
+            }
             return Ok(body);
         }
     }
