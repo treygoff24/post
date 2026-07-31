@@ -31,7 +31,10 @@ const ADAPTER = path.join(
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 
 const requestedTarget = process.argv[2];
-if (!requestedTarget) {
+// A flag-looking argv is a usage error, not a settings path: without this
+// guard, `install-claude-hooks.mjs --help` silently writes a config file
+// literally named ./--help (caught live, 2026-07-31).
+if (!requestedTarget || requestedTarget.startsWith("-")) {
   console.error("usage: node install-claude-hooks.mjs <path-to-settings.json>");
   process.exit(2);
 }

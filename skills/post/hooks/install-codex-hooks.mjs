@@ -20,7 +20,8 @@ const COMMAND = `node ${JSON.stringify(ADAPTER)}`;
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 
 const requestedTarget = process.argv[2];
-if (!requestedTarget) {
+// Flag-looking argv = usage error, not a target path (see Claude twin).
+if (!requestedTarget || requestedTarget.startsWith("-")) {
   console.error("usage: node install-codex-hooks.mjs <path-to-hooks.json>");
   process.exit(2);
 }

@@ -28,6 +28,7 @@ const EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse"]);
 const SEEN_CAP = 2000; // ponytail: FIFO cap bounds state size; enough for any real session
 const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
+const CHANNEL_NAME = /^[A-Za-z0-9._-]+$/;
 
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -88,16 +89,29 @@ function eventKey(event) {
   return `${event.event}:${event.room}:${event.id}`;
 }
 
+// "#general (3), #ops (1)" — channel names are validated against CHANNEL_NAME
+// before an event is accepted, so echoing them cannot inject markup.
+function channelSummary(channel) {
+  const counts = new Map();
+  for (const e of channel) counts.set(e.channel, (counts.get(e.channel) ?? 0) + 1);
+  return [...counts].map(([name, n]) => `#${name} (${n})`).join(", ");
+}
+
 function contextFor(events) {
   const mail = events.filter((e) => e.event === "mail");
   const channel = events.filter((e) => e.event === "channel_message");
   const unreadable = events.filter((e) => e.event === "unreadable");
-  const lines = ["[post] New mail is waiting for room codex."];
+  const channelOnly = mail.length === 0 && unreadable.length === 0;
+  const lines = [
+    channelOnly
+      ? `[post] New channel message(s) for room codex: ${channelSummary(channel)}.`
+      : "[post] New mail is waiting for room codex.",
+  ];
   if (mail.length > 0) {
     lines.push(`Direct mail id(s): ${mail.map((e) => e.id).join(", ")}.`);
   }
-  if (channel.length > 0) {
-    lines.push(`Channel mail: ${channel.length} new message(s).`);
+  if (channel.length > 0 && !channelOnly) {
+    lines.push(`Channel mail: ${channel.length} new message(s) in ${channelSummary(channel)}.`);
   }
   if (unreadable.length > 0) {
     lines.push(`Unreadable mail: ${unreadable.length} item(s).`);
@@ -126,6 +140,7 @@ function validSnapshotEvent(event) {
     case "channel_message":
       return (
         isStringFields(event, ["channel", "id", "from", "subject", "sent"]) &&
+        CHANNEL_NAME.test(event.channel) &&
         CHANNEL_ID.test(event.id)
       );
     case "unreadable":

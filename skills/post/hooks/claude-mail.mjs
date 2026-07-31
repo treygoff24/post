@@ -89,6 +89,14 @@ function eventKey(event) {
   return `${event.event}:${event.room}:${event.id}`;
 }
 
+// "#general (3), #ops (1)" — channel names are validated against ROOM_NAME
+// before an event is accepted, so echoing them cannot inject markup.
+function channelSummary(channel) {
+  const counts = new Map();
+  for (const e of channel) counts.set(e.channel, (counts.get(e.channel) ?? 0) + 1);
+  return [...counts].map(([name, n]) => `#${name} (${n})`).join(", ");
+}
+
 function contextFor(events) {
   const mail = events.filter((e) => e.event === "mail");
   const channel = events.filter((e) => e.event === "channel_message");
@@ -96,16 +104,19 @@ function contextFor(events) {
   // Room names are validated against ROOM_NAME before an event is accepted,
   // so echoing one here cannot inject markup or fake a banner.
   const room = mail[0]?.room ?? unreadable[0]?.room;
+  const channelOnly = mail.length === 0 && unreadable.length === 0;
   const lines = [
-    room
-      ? `[post] Unread agent mail is waiting for room ${room} (resolved from this session's working directory).`
-      : "[post] Unread agent mail is waiting for this session's mail room.",
+    channelOnly
+      ? `[post] New channel message(s): ${channelSummary(channel)}.`
+      : room
+        ? `[post] Unread agent mail is waiting for room ${room} (resolved from this session's working directory).`
+        : "[post] Unread agent mail is waiting for this session's mail room.",
   ];
   if (mail.length > 0) {
     lines.push(`Direct mail id(s): ${mail.map((e) => e.id).join(", ")}.`);
   }
-  if (channel.length > 0) {
-    lines.push(`Channel mail: ${channel.length} new message(s).`);
+  if (channel.length > 0 && !channelOnly) {
+    lines.push(`Channel mail: ${channel.length} new message(s) in ${channelSummary(channel)}.`);
   }
   if (unreadable.length > 0) {
     lines.push(`Unreadable mail: ${unreadable.length} item(s).`);
@@ -133,6 +144,7 @@ function validSnapshotEvent(event) {
     case "channel_message":
       return (
         isStringFields(event, ["channel", "id", "from", "subject", "sent"]) &&
+        ROOM_NAME.test(event.channel) &&
         CHANNEL_ID.test(event.id)
       );
     case "unreadable":
