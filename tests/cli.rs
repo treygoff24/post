@@ -1279,6 +1279,36 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
 }
 
 #[test]
+fn body_dash_is_the_stdin_sentinel_not_literal_text() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run_with_stdin(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "dash-test",
+            "--body",
+            "-",
+            "--json",
+        ],
+        "the real message",
+    );
+    assert_success(&output);
+    let sent: SendOutput = from_stdout(&output);
+    let read = sandbox.run(&[
+        "read",
+        &sent.envelope.id,
+        "--room",
+        "claude-space",
+        "--peek",
+        "--json",
+    ]);
+    let read: ReadOutput = from_stdout(&read);
+    assert_eq!(read.body, "the real message");
+}
+
+#[test]
 fn body_can_come_from_stdin_without_a_tty_or_prompt() {
     let sandbox = Sandbox::new();
     let output = sandbox.run_with_stdin(

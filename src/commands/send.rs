@@ -238,7 +238,13 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
 
 pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
     if let Some(body) = source.inline {
-        return Ok(body);
+        // `--body -` is the Unix stdin sentinel, not literal text: before this
+        // rule an agent piping a body alongside `--body -` silently posted "-"
+        // and lost the real message (caught live in #commons, 2026-07-31).
+        // A literal one-dash body, if ever wanted, still works via stdin.
+        if body != "-" {
+            return Ok(body);
+        }
     }
     if let Some(path) = source.body_file.or(source.file) {
         return read_body_file(path, &source.fix_prefix);
