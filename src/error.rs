@@ -214,7 +214,7 @@ impl AppError {
         Self::new(
             ErrorCode::ConfigInvalid,
             format!("configuration '{}' is invalid: {reason}", path.display()),
-            "Fix the named file by hand, then run `post doctor`.",
+            "Run `post doctor --fix` to recreate missing config, or fix the named file by hand, then run `post doctor`.",
         )
         .path(path.display().to_string())
         .reason(reason)

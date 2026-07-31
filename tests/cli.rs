@@ -22,6 +22,50 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
+        let sandbox = Self::new_unseeded();
+        // The suite's fixture universe: three registered rooms and one armed
+        // rule. Seeded explicitly because the shipped first-run defaults are
+        // deliberately empty (a public binary must not seed anyone's personal
+        // room map — v0.2.3).
+        fs::create_dir_all(&sandbox.mail_root).expect("create sandbox mail root");
+        fs::write(
+            sandbox.mail_root.join("rooms.json"),
+            r#"{
+  "claude-space": "~/claude-space",
+  "pact": "~/pact",
+  "agent-memory": "~/agent-memory"
+}
+"#,
+        )
+        .expect("seed sandbox rooms");
+        fs::write(
+            sandbox.mail_root.join("rules.json"),
+            r#"{
+  "blocked": [
+    {
+      "from": "*",
+      "to": "agent-memory",
+      "reason": "ARMED INSTRUMENT: no contact with the armed room until its closeout exists. Remove this rule only after the closeout is written and the affect check has fired."
+    }
+  ]
+}
+"#,
+        )
+        .expect("seed sandbox rules");
+        #[cfg(unix)]
+        for name in ["rooms.json", "rules.json"] {
+            fs::set_permissions(
+                sandbox.mail_root.join(name),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("restrict seeded config perms");
+        }
+        sandbox
+    }
+
+    /// A sandbox whose mail root does not exist yet — for tests that assert
+    /// first-run seeding or no-write-on-error behavior.
+    fn new_unseeded() -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("test clock should follow Unix epoch")
@@ -455,7 +499,7 @@ fn reserved_sender_refuses_but_free_form_and_cwd_basename_work() {
     assert_success(&inferred);
     assert!(stdout(&inferred).contains("my-project -> claude-space"));
 
-    let registered_workspace = sandbox.home.join("Code/claude-space");
+    let registered_workspace = sandbox.home.join("claude-space");
     fs::create_dir_all(&registered_workspace).expect("create registered room workspace");
     let registered = sandbox.run_in(
         &[
@@ -636,9 +680,9 @@ fn rooms_add_registers_an_existing_directory_without_touching_rules() {
     let sandbox = Sandbox::new();
     assert_success(&sandbox.run(&["rooms"]));
     for relative in [
-        "Code/agent-memory",
-        "Code/claude-space",
-        "Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+        "agent-memory",
+        "claude-space",
+        "pact",
     ] {
         fs::create_dir_all(sandbox.home.join(relative)).expect("create default room workspace");
     }
@@ -688,7 +732,7 @@ fn rooms_add_registers_an_existing_directory_without_touching_rules() {
 fn rooms_add_rejects_existing_workspace_aliases_including_symlinks() {
     let sandbox = Sandbox::new();
     assert_success(&sandbox.run(&["rooms"]));
-    let workspace = sandbox.home.join("Code/agent-memory");
+    let workspace = sandbox.home.join("agent-memory");
     fs::create_dir_all(&workspace).expect("create registered agent-memory workspace");
     let alias = sandbox.path.join("agent-memory-alias");
     std::os::unix::fs::symlink(&workspace, &alias).expect("create workspace symlink");
@@ -1037,7 +1081,7 @@ fn rooms_add_rejects_a_missing_path_without_changing_the_registry() {
 
 #[test]
 fn rooms_add_rejects_control_characters_in_the_path_argument() {
-    let sandbox = Sandbox::new();
+    let sandbox = Sandbox::new_unseeded();
     let path = format!("{}\nforged", sandbox.path.display());
 
     let output = sandbox.run(&["rooms", "add", "control-path", &path]);
@@ -1238,7 +1282,7 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
 
 #[test]
 fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
-    let sandbox = Sandbox::new();
+    let sandbox = Sandbox::new_unseeded();
     let diagnose = sandbox.run(&["doctor"]);
     assert_eq!(diagnose.status.code(), Some(1));
     let report: DoctorOutput = from_stdout(&diagnose);
@@ -1253,6 +1297,13 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     assert!(sandbox.mail_root.join("rooms.json").is_file());
     assert!(sandbox.mail_root.join("rules.json").is_file());
     assert!(sandbox.mail_root.join("archive").is_dir());
+    // Shipped defaults are empty: no room directories until one is registered.
+    let workspace = sandbox.home.join("claude-space");
+    fs::create_dir_all(&workspace).expect("create room workspace");
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    assert_success(&sandbox.run(&["rooms", "add", "claude-space", &workspace_arg]));
+    let refixed = sandbox.run(&["doctor", "--fix"]);
+    let _: DoctorOutput = from_stdout(&refixed);
     assert!(sandbox.mail_root.join("claude-space/inbox").is_dir());
 
     fs::write(
@@ -2263,9 +2314,9 @@ fn register_alpha_beta(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
 
 fn create_default_room_paths(sandbox: &Sandbox) {
     for relative in [
-        "Code/agent-memory",
-        "Code/claude-space",
-        "Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+        "agent-memory",
+        "claude-space",
+        "pact",
     ] {
         fs::create_dir_all(sandbox.home.join(relative)).expect("create default room path");
     }

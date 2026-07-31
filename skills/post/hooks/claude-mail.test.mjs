@@ -138,7 +138,7 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /room claude-space/);
   assert.match(context, /20260730-010101-aaa111/);
-  assert.match(context, /Channel mail: 1 new message\(s\) in #ops \(1\)/);
+  assert.match(context, /New channel message\(s\): #ops \(1\)/);
   assert.ok(!context.includes("20260730-020202-000002-bbb222"));
   assert.match(context, /untrusted/);
   assert.match(context, /post read <id>/);

@@ -10,21 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const DEFAULT_RULES_JSON: &str = r#"{
-  "blocked": [
-    {
-      "from": "*",
-      "to": "agent-memory",
-      "reason": "ARMED INSTRUMENT: no contact with the Memorum room until its arc closeout exists (claude-space JOURNAL 2026-07-12 tick 24). Remove this rule only after the closeout is written and the affect check has fired."
-    }
-  ]
+  "blocked": []
 }
 "#;
 
-pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{
-  "claude-space": "~/Code/claude-space",
-  "pact": "~/Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
-  "agent-memory": "~/Code/agent-memory"
-}
+pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{}
 "#;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -98,9 +88,8 @@ impl Context {
             .map_err(|error| AppError::config(&path, format!("cannot read file: {error}")))?;
         let rooms: RoomMap = serde_json::from_slice(&bytes)
             .map_err(|error| AppError::config(&path, format!("invalid JSON object: {error}")))?;
-        if rooms.is_empty() {
-            return Err(AppError::config(&path, "room map is empty"));
-        }
+        // An empty map is the legitimate fresh-install state (defaults ship
+        // empty as of 0.2.3); `rooms add` is how it stops being empty.
         for (name, room_path) in &rooms {
             validate_room_name(name).map_err(|reason| AppError::config(&path, reason))?;
             self.expand_room_path(room_path)

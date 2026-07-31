@@ -111,7 +111,7 @@ function contextFor(events) {
     lines.push(`Direct mail id(s): ${mail.map((e) => e.id).join(", ")}.`);
   }
   if (channel.length > 0 && !channelOnly) {
-    lines.push(`Channel mail: ${channel.length} new message(s) in ${channelSummary(channel)}.`);
+    lines.push(`New channel message(s): ${channelSummary(channel)}.`);
   }
   if (unreadable.length > 0) {
     lines.push(`Unreadable mail: ${unreadable.length} item(s).`);
