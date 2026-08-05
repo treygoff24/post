@@ -377,7 +377,7 @@ fn signed_status(context: &Context, message: &ChannelMessage, body: &str) -> Opt
     let rest = first.strip_prefix("🧔🔏 ")?;
     let (text, tag) = rest.rsplit_once(" [signed:")?;
     let ts = tag.strip_suffix(']')?;
-    if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Some(SignedStatus::Failed("malformed signature tag"));
     }
     let sigdir = context.home.join(".trey-room");

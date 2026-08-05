@@ -228,9 +228,9 @@ pub(crate) struct ReadArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
-    /// Mailbox room; defaults to the room containing cwd or cwd basename.
+    /// Mailbox room; repeat to merge rooms, or omit for cwd resolution.
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
-    pub room: Option<String>,
+    pub room: Vec<String>,
 
     /// Exit 0 after the first batch that emits at least one event.
     #[arg(long)]

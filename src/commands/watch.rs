@@ -12,26 +12,63 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+struct WatchTarget {
+    room: String,
+    inbox: PathBuf,
+    floors: HashMap<String, String>,
+    seen: HashSet<PathBuf>,
+    scan_failing: bool,
+}
+
 pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult> {
+    let WatchArgs {
+        room: requested_rooms,
+        once,
+        snapshot,
+        interval_ms,
+        text,
+    } = args;
     let rooms = context.load_rooms()?;
-    let room = context.resolved_room(args.room, &rooms)?;
-    if !rooms.contains_key(&room) {
-        // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
-        // unregistered room means "this directory has no mailbox", so scan
-        // nothing and, critically, create nothing (a machine-wide hook would
-        // otherwise mint a junk mailbox per project directory ever visited).
-        if args.snapshot {
-            eprintln!(
-                "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
-            );
-            return Ok(CommandResult::success(String::new()));
+    let requested_rooms = if requested_rooms.is_empty() {
+        vec![context.resolved_room(None, &rooms)?]
+    } else {
+        requested_rooms
+            .into_iter()
+            .map(|room| context.resolved_room(Some(room), &rooms))
+            .collect::<AppResult<Vec<_>>>()?
+    };
+    let mut unique_rooms = HashSet::new();
+    let mut targets = Vec::new();
+    for room in requested_rooms {
+        if !unique_rooms.insert(room.clone()) {
+            continue;
         }
-        // A typo'd --room silently watches a fresh empty mailbox forever, so
-        // unlike inbox (whose empty listing is immediately visible) watch warns.
-        eprintln!("post: warning: room {room:?} is not registered; watching a new empty mailbox");
+        if !rooms.contains_key(&room) {
+            // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
+            // unregistered room means "this directory has no mailbox", so scan
+            // nothing and, critically, create nothing (a machine-wide hook would
+            // otherwise mint a junk mailbox per project directory ever visited).
+            if snapshot {
+                eprintln!(
+                    "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
+                );
+                continue;
+            }
+            // A typo'd --room silently watches a fresh empty mailbox forever, so
+            // unlike inbox (whose empty listing is immediately visible) watch warns.
+            eprintln!(
+                "post: warning: room {room:?} is not registered; watching a new empty mailbox"
+            );
+        }
+        let (inbox, _) = context.mailbox_dirs(&room)?;
+        targets.push(WatchTarget {
+            floors: load_channel_floors(context, &room),
+            room,
+            inbox,
+            seen: HashSet::new(),
+            scan_failing: false,
+        });
     }
-    let (inbox, _) = context.mailbox_dirs(&room)?;
-    let mut seen: HashSet<PathBuf> = HashSet::new();
     // Ring for anything not yet handled. Load each channel's cursor as a
     // read-only floor — watch NEVER writes a cursor — and emit messages with
     // id > floor. A doorbell rings until handled: reading advances the real
@@ -39,50 +76,71 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // after the original dies mid-session (as ours did, repeatedly) still
     // surfaces anything that landed in the gap, instead of silently priming
     // past it. The room inbox keeps its own surface-on-startup behavior.
-    let floors = load_channel_floors(context, &room);
-    if args.snapshot {
+    let mut emitted_channel_ids = HashSet::new();
+    if snapshot {
         // One scan, then out: the hook-facing poll. Unlike the loop below, a
         // direct-mail scan failure propagates as a real error — a lifecycle
         // hook must never mistake "could not look" for "inbox empty".
         // Per-channel degradation stays inside scan_batch, unchanged.
-        let batch = scan_batch(context, &room, &inbox, &floors, &mut seen)?;
+        let mut batch = Vec::new();
+        for target in &mut targets {
+            batch.extend(scan_batch(
+                context,
+                &target.room,
+                &target.inbox,
+                &target.floors,
+                &mut target.seen,
+                &mut emitted_channel_ids,
+            )?);
+        }
         if !batch.is_empty() {
-            emit(&batch, args.text)?;
+            emit(&batch, text)?;
         }
         return Ok(CommandResult::success(String::new()));
     }
-    let mut scan_failing = false;
     loop {
         // A doorbell that dies is silently useless: transient scan failures
         // (mailbox trashed and recreated, permission blips) degrade to an
         // empty batch and polling continues. Only stdout failure is fatal —
         // if events can't reach the consumer, exiting IS the notification.
-        let batch = match scan_batch(context, &room, &inbox, &floors, &mut seen) {
-            Ok(batch) => {
-                if scan_failing {
-                    scan_failing = false;
-                    eprintln!("post: warning: watch scan recovered for room {room:?}");
+        let mut batch = Vec::new();
+        for target in &mut targets {
+            match scan_batch(
+                context,
+                &target.room,
+                &target.inbox,
+                &target.floors,
+                &mut target.seen,
+                &mut emitted_channel_ids,
+            ) {
+                Ok(events) => {
+                    if target.scan_failing {
+                        target.scan_failing = false;
+                        eprintln!(
+                            "post: warning: watch scan recovered for room {:?}",
+                            target.room
+                        );
+                    }
+                    batch.extend(events);
                 }
-                batch
-            }
-            Err(error) => {
-                if !scan_failing {
-                    scan_failing = true;
-                    eprintln!(
-                        "post: warning: watch scan failed for room {room:?} (will keep polling): {}",
-                        error.message
-                    );
+                Err(error) => {
+                    if !target.scan_failing {
+                        target.scan_failing = true;
+                        eprintln!(
+                            "post: warning: watch scan failed for room {:?} (will keep polling): {}",
+                            target.room, error.message
+                        );
+                    }
                 }
-                Vec::new()
             }
-        };
+        }
         if !batch.is_empty() {
-            emit(&batch, args.text)?;
-            if args.once {
+            emit(&batch, text)?;
+            if once {
                 return Ok(CommandResult::success(String::new()));
             }
         }
-        std::thread::sleep(Duration::from_millis(args.interval_ms));
+        std::thread::sleep(Duration::from_millis(interval_ms));
     }
 }
 
@@ -92,6 +150,7 @@ fn scan_batch(
     inbox: &Path,
     floors: &HashMap<String, String>,
     seen: &mut HashSet<PathBuf>,
+    emitted_channel_ids: &mut HashSet<String>,
 ) -> AppResult<Vec<WatchEvent>> {
     let mut batch = Vec::new();
     for path in mail_files(inbox)? {
@@ -128,21 +187,28 @@ fn scan_batch(
         if !seen.insert(path.clone()) {
             continue;
         }
+        let message_id = path.file_stem().and_then(|value| value.to_str());
         // At or below the reader's cursor = already read before watch
         // started; skip without parsing (the filename stem is the id).
-        if let (Some(floor), Some(id)) = (
-            floors.get(&channel),
-            path.file_stem().and_then(|value| value.to_str()),
-        ) {
+        if let (Some(floor), Some(id)) = (floors.get(&channel), message_id) {
             if id <= floor.as_str() {
                 continue;
             }
+        }
+        let dedupe_id = message_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.display().to_string());
+        if emitted_channel_ids.contains(&dedupe_id) {
+            continue;
         }
         match parse_channel_message(&path) {
             // A room's own words are never news: its own sends don't ring
             // its own doorbell (they still ring every other member's).
             Ok(parsed) if parsed.message.from == room => {}
-            Ok(parsed) => batch.push(WatchEvent::channel_message(parsed.message)),
+            Ok(parsed) => {
+                emitted_channel_ids.insert(parsed.message.id.clone());
+                batch.push(WatchEvent::channel_message(parsed.message));
+            }
             // Channel messages are append-only and never moved, but a send
             // caught mid-write can momentarily fail to parse; ring anyway,
             // echoing only the filename-derived id — same discipline as mail.
@@ -153,11 +219,10 @@ fn scan_batch(
                     path.display().to_string(),
                     error.message
                 );
-                let id = path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
+                let id = message_id
                     .unwrap_or("<non-utf8 filename>")
                     .to_owned();
+                emitted_channel_ids.insert(dedupe_id);
                 batch.push(WatchEvent::unreadable(room, id));
             }
         }
@@ -337,8 +402,16 @@ mod tests {
             home: root.clone(),
         };
         let mut seen = HashSet::new();
-        let batch =
-            scan_batch(&context, "alpha", &inbox, &HashMap::new(), &mut seen).expect("scan");
+        let mut emitted_channel_ids = HashSet::new();
+        let batch = scan_batch(
+            &context,
+            "alpha",
+            &inbox,
+            &HashMap::new(),
+            &mut seen,
+            &mut emitted_channel_ids,
+        )
+        .expect("scan");
         let froms: Vec<&str> = batch
             .iter()
             .filter_map(|event| match event {

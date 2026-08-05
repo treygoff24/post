@@ -12,9 +12,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "chat",
-            "post chat <channel> [--peek | --discard] | post chat <channel> --join | post chat <channel> --send [--subject <s>] (--body <text> | --body-file <path> | stdin)",
+            "post chat <channel> [--peek | --discard | --history <n> | --since <id>] | post chat <channel> --join | post chat <channel> --send [--subject <s>] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg and implies from --body/--body-file; a plain read advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; a cursor-advancing read into /dev/null is refused",
+            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg and implies from --body/--body-file; a plain read advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; a cursor-advancing read into /dev/null is refused; --history <n> shows the last n messages and --since <id> shows messages after id — both ignore the cursor entirely, never advance it, and are safe to pipe; the full framing banner renders once per room per day (one-line reminder otherwise); messages from the trey room tagged [signed:TS] are verified against the detached signature in ~/.trey-room/sigs/ and render a one-line VERIFIED/FAILED badge (signed_verified in JSON)",
         ),
         command(
             "channels",
@@ -54,9 +54,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "watch",
-            "post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>] [--text]",
+            "post watch [--room <name>]... [--once | --snapshot] [--interval-ms <ms>] [--text]",
             "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
-            "creates missing mailbox inbox/read directories for registered rooms; reads direct-mail and joined-channel envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
+            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
         ),
     ];
     let output_shapes = OutputShapes {
@@ -128,7 +128,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         global_flags: fields(&[
             "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/schema/doctor are already JSON",
             "--pretty: pretty-print JSON",
-            "--room <name>: command option for inbox/read/watch only; chat and channels derive identity from cwd and reject --room",
+            "--room <name>: command option for inbox/read/watch only; repeat on watch to merge rooms; chat and channels derive identity from cwd and reject --room",
         ]),
         commands,
         output_shapes,

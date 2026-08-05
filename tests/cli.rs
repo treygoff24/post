@@ -334,8 +334,9 @@ fn help_and_schema_keep_command_contract_visible() {
         .expect("watch command in schema");
     assert_eq!(
         watch.usage,
-        "post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>] [--text]"
+        "post watch [--room <name>]... [--once | --snapshot] [--interval-ms <ms>] [--text]"
     );
+    assert!(watch.side_effects.contains("deduplicates channel messages"));
     assert!(watch.side_effects.contains("--snapshot"));
     assert!(watch
         .default_output
@@ -2090,6 +2091,84 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
         !stdout(&output).contains(&own.message.id),
         "watch must suppress a room's own channel messages"
     );
+}
+
+#[test]
+fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+
+    let channel_sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--body",
+            "one shared ring",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let alpha_mail: SendOutput = from_stdout(&sandbox.run(&[
+        "send",
+        "--to",
+        "alpha",
+        "--from",
+        "multi-watch-test",
+        "--body",
+        "alpha mail",
+        "--json",
+    ]));
+    let beta_mail: SendOutput = from_stdout(&sandbox.run(&[
+        "send",
+        "--to",
+        "beta",
+        "--from",
+        "multi-watch-test",
+        "--body",
+        "beta mail",
+        "--json",
+    ]));
+
+    let output = sandbox.run(&["watch", "--room", "alpha", "--room", "beta", "--snapshot"]);
+    assert_success(&output);
+    let events = watch_events(&output.stdout);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                WatchEvent::ChannelMessage { id, .. } if id == &channel_sent.message.id
+            ))
+            .count(),
+        1,
+        "one shared channel message must ring once across watched rooms"
+    );
+    for (room, id) in [
+        ("alpha", alpha_mail.envelope.id.as_str()),
+        ("beta", beta_mail.envelope.id.as_str()),
+    ] {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            WatchEvent::Mail { room: event_room, item }
+                if event_room == room && item.id == id
+        )));
+    }
+
+    for room_path in [&alpha, &beta] {
+        let unread: ChatReadOutput =
+            from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, room_path));
+        assert!(
+            unread
+                .messages
+                .iter()
+                .any(|message| message.message.id == channel_sent.message.id),
+            "watch must not advance either room's channel cursor"
+        );
+    }
 }
 
 #[test]
