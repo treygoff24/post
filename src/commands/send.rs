@@ -326,7 +326,7 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
 mod tests {
     use super::{run_with_body, run_with_body_and_id};
     use crate::cli::SendArgs;
-    use crate::mailbox::{Context, DEFAULT_ROOMS_JSON};
+    use crate::mailbox::Context;
     use crate::model::MailKind;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;

@@ -106,6 +106,11 @@ pub struct ChatMessageItem {
     #[serde(flatten)]
     pub message: crate::model::ChannelMessage,
     pub body: String,
+    /// Present only on 🔏-tagged messages from 'trey': true when the sidecar
+    /// signature cryptographically verifies AND the channel text matches the
+    /// signed payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_verified: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
