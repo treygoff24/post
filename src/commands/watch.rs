@@ -221,9 +221,7 @@ fn scan_batch(
                     path.display().to_string(),
                     error.message
                 );
-                let id = message_id
-                    .unwrap_or("<non-utf8 filename>")
-                    .to_owned();
+                let id = message_id.unwrap_or("<non-utf8 filename>").to_owned();
                 emitted_channel_ids.insert(dedupe_id);
                 batch.push(WatchEvent::unreadable(room, id));
             }

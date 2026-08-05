@@ -334,8 +334,11 @@ mod tests {
     fn test_context(label: &str) -> (std::path::PathBuf, Context) {
         let root = test_root(&format!("send-{label}"));
         // home == root in these fixtures, so "~" resolves inside the sandbox.
-        fs::write(root.join("rooms.json"), r#"{"claude-space": "~/claude-space"}"#)
-            .expect("write rooms config");
+        fs::write(
+            root.join("rooms.json"),
+            r#"{"claude-space": "~/claude-space"}"#,
+        )
+        .expect("write rooms config");
         fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules config");
         (
             root.clone(),

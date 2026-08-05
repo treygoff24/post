@@ -680,11 +680,7 @@ fn id_prefixes_resolve_uniquely_and_ambiguity_lists_matches() {
 fn rooms_add_registers_an_existing_directory_without_touching_rules() {
     let sandbox = Sandbox::new();
     assert_success(&sandbox.run(&["rooms"]));
-    for relative in [
-        "agent-memory",
-        "claude-space",
-        "pact",
-    ] {
+    for relative in ["agent-memory", "claude-space", "pact"] {
         fs::create_dir_all(sandbox.home.join(relative)).expect("create default room workspace");
     }
     let rooms_path = sandbox.mail_root.join("rooms.json");
@@ -1346,13 +1342,19 @@ fn inline_body_naming_an_existing_file_is_rejected_with_a_body_file_fix() {
         &path_arg,
         "--json",
     ]);
-    assert!(!output.status.success(), "path-shaped body must be rejected");
+    assert!(
+        !output.status.success(),
+        "path-shaped body must be rejected"
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("--body-file"), "fix must point at --body-file: {combined}");
+    assert!(
+        combined.contains("--body-file"),
+        "fix must point at --body-file: {combined}"
+    );
 }
 
 #[test]
@@ -2392,11 +2394,7 @@ fn register_alpha_beta(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
 }
 
 fn create_default_room_paths(sandbox: &Sandbox) {
-    for relative in [
-        "agent-memory",
-        "claude-space",
-        "pact",
-    ] {
+    for relative in ["agent-memory", "claude-space", "pact"] {
         fs::create_dir_all(sandbox.home.join(relative)).expect("create default room path");
     }
 }
