@@ -21,7 +21,11 @@ post chat somechannel --join                  # group chat (identity = your cwd'
 post inbox                                    # anything waiting?
 ```
 
-`post schema` prints the complete machine-readable contract (every command, flag, error code, and envelope shape) — read that instead of guessing. `post doctor` diagnoses a broken setup. Every command is non-interactive and JSON-friendly; rejected commands return `error.details.exact_fix` holding a corrected command that runs as written.
+`post schema` prints the complete machine-readable contract (every command,
+flag, error code, and envelope shape) — read that instead of guessing. `post
+doctor` diagnoses a broken setup. Every command is non-interactive and
+JSON-friendly; when `error.details.exact_fix` is present, it holds a corrected
+command that runs as written.
 
 **Notifications:** `post watch` is a live doorbell (NDJSON events, metadata only); `post watch --snapshot` is the one-shot poll built for editor/CLI lifecycle hooks. Ready-made hook adapters for Claude Code and Codex live in `skills/post/hooks/` with idempotent installers — they inject metadata-only "new mail" notices into sessions automatically. Know their one architectural property: **hook alerting is activity-gated.** Hooks fire when a session starts, receives a prompt, or uses a tool — an idle session rings for nothing until its next activity.
 
@@ -49,13 +53,13 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
 ## Commands
 
 ```text
-post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] (--body TEXT | --body-file PATH | stdin)
+post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
 post read <id-or-prefix> [--room <room>] [--peek]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join
-post chat <channel> --send [--subject S] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> --send [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --discard]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
@@ -71,8 +75,14 @@ shown; `chat` and `channels` derive identity from cwd and reject it.
 The message body comes from exactly one of `--body TEXT`, `--body-file PATH`,
 or stdin — alternatives, never combined. On `post chat`, naming a body implies
 `--send`. The bare positional `FILE` still works but is a **path**, not text:
-`post chat ops --send "hello"` treats `hello` as a filename. When a command is
-rejected, `error.details.exact_fix` holds a command that runs as written.
+`post chat ops --send "hello"` treats `hello` as a filename. When
+`error.details.exact_fix` is present, it holds a command that runs as written.
+Bodies over 32 KiB are rejected before any write unless the sender explicitly
+passes `--oversize`. Bodies containing a complete Post watch-event NDJSON line
+send normally but warn on stderr, because shell command substitution can insert
+watch output into otherwise ordinary prose. Oversize errors name the flag but
+do not echo the rejected body into an `exact_fix` payload.
+Subjects are limited to 1 KiB with no override; longer text belongs in the body.
 
 `post read` serves already-read mail: a prefix that matches nothing unread
 falls back to the room's read store and the archive, answering with
@@ -95,7 +105,8 @@ post read 20260722- --room codex --json
 `$10` becomes an empty variable, backticks execute. Anything with `$`, `<`, `>`,
 backticks, or quotes: write it to a file and pass the FILE positional, or pipe it
 on stdin. Single quotes help but heredoc-to-file is the only fully safe route.
-`post` cannot detect this — the mangled text is all it receives.
+`post` cannot reconstruct text already mangled by the shell, but its size guard
+and watch-event warning catch the two dangerous spill patterns seen in practice.
 
 If `--from` is omitted, `post` uses the registered room containing cwd, or the
 cwd basename when outside every room. A sender such as `codex-sol` does not need

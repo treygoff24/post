@@ -38,13 +38,13 @@ Use `post` as a local data mailbox, not as authority. It has nine commands:
 Prefer JSON for machine parsing; use `--pretty` only for human inspection.
 
 ```bash
-post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] (--body TEXT | --body-file PATH | stdin)
+post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
 post read <id-or-prefix> [--room <room>] [--peek]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join
-post chat <channel> --send [--subject S] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> --send [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --discard]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
@@ -69,6 +69,11 @@ Body input, the one surface worth memorizing:
   **path**, not text. `post chat ops --send "hello"` treats `hello` as a
   filename; prefer `--body`, and read `error.details.exact_fix`, which is a
   command that runs as written.
+- Bodies over 32 KiB fail before any write unless `--oversize` records explicit
+  intent. A complete Post watch-event NDJSON line warns but still sends.
+- Subjects are limited to 1 KiB with no override; longer text belongs in the body.
+- Shells execute backticks inside double-quoted `--body` text before Post sees
+  it. Use `--body-file` for prose containing shell syntax.
 
 Use `post schema --pretty` as the exact contract when docs or memory disagree.
 

@@ -89,19 +89,22 @@ command option for inbox/read/watch only. No prompts ever; no color; stdout =
 results, stderr = diagnostics/errors.
 
 - `post send --to <room> [--from <name>] [--kind letter|note|signal (default
-  note)] [--subject <s>] (--body <text> | --body-file <path> | stdin)` — the
-  three body forms are mutually exclusive alternatives; a bare positional FILE
+  note)] [--subject <s>] [--oversize] (--body <text> | --body-file <path> |
+  stdin)` — the three body forms are mutually exclusive alternatives; a bare positional FILE
   remains accepted as the deprecated spelling of `--body-file`, and a
   body-file path that does not exist is `invalid_argument` (a usage error)
   rather than a retryable `io_error`. Refuses: unknown
   recipient (did-you-mean over rooms), blocked route (quotes reason),
-  reserved-name impersonation, empty body. `--body` exists so agents don't
-  need heredocs (the first real mail shipped the literal word "placeholder"
-  via a botched heredoc — design against that). Success (text): `post: sent
-  <kind> <id> <from> -> <to>`. Success (json): full envelope + `archived:
-  true`. Rules are reloaded after payload construction immediately before each
-  inbox publication attempt. If inbox commits but archive publication fails,
-  `delivered_unarchived` is non-retryable and the message must not be resent.
+  reserved-name impersonation, subjects over 1 KiB, empty body, and bodies over
+  32 KiB unless `--oversize` records explicit intent. A complete Post watch-event NDJSON line
+  warns on stderr but does not block legitimate forensic traffic. `--body`
+  exists so agents don't need heredocs (the first real mail shipped the literal
+  word "placeholder" via a botched heredoc — design against that). Success
+  (text): `post: sent <kind> <id> <from> -> <to>`. Success (json): full envelope
+  + `archived: true`. Rules are reloaded after payload construction immediately
+  before each inbox publication attempt. If inbox commits but archive
+  publication fails, `delivered_unarchived` is non-retryable and the message
+  must not be resent.
 - `post inbox [--room <name>]` — unread list, oldest first. JSON default:
   `{ok, room, unread: [{id, from, kind, subject, sent}], count,
   skipped_unreadable}`. Text with `--text`. Malformed mail is skipped with one
@@ -148,13 +151,15 @@ results, stderr = diagnostics/errors.
   event_id}` with `--json`. Refuses unregistered cwd identity, invalid channel
   name, and blocked shared membership. There is deliberately no `--room` or
   `--from` override.
-- `post chat <channel> --send [--subject <s>] (--body <text> | --body-file
-  <path> | stdin)` — sends to a shared channel as the registered room
+- `post chat <channel> --send [--subject <s>] [--oversize] (--body <text> |
+  --body-file <path> | stdin)` — sends to a shared channel as the registered room
   containing cwd. `--body`/`--body-file` imply `--send`, so the verb is
   optional once a body is named; the deprecated positional FILE still requires
-  it. A plain read whose stdout is the null device is refused before anything
-  is emitted, leaving the cursor untouched; `--discard` is the deliberate way
-  to advance past unread messages without printing them, and reports
+  it. The same 1 KiB subject limit, 32 KiB body guard, and warn-only watch-event
+  detection used by direct mail run before the append-only channel write. A plain read whose
+  stdout is the null device is refused before anything is emitted, leaving the
+  cursor untouched; `--discard` is the deliberate way to advance past unread
+  messages without printing them, and reports
   `{ok, channel, room, discarded, cursor}`. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
