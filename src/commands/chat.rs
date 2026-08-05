@@ -387,6 +387,14 @@ fn signed_status(context: &Context, message: &ChannelMessage, body: &str) -> Opt
     let Ok(payload_text) = std::fs::read_to_string(&payload) else {
         return Some(SignedStatus::Failed("no signed payload on disk"));
     };
+    // The tag must equal the timestamp INSIDE the signed payload — otherwise
+    // copying an old valid sidecar pair to a fresh filename would relabel a
+    // stale signature as brand new (rename-replay; caught in cold review).
+    if payload_text.lines().next() != Some(ts) {
+        return Some(SignedStatus::Failed(
+            "tag does not match the timestamp inside the signed payload — possible rename-replay",
+        ));
+    }
     if payload_text.lines().nth(1) != Some(text) {
         return Some(SignedStatus::Failed("channel text differs from signed payload"));
     }
@@ -753,6 +761,18 @@ mod tests {
         match signed_status(&context, &msg("trey"), "🧔🔏 do the thing [signed:20990101T000000Z]") {
             Some(SignedStatus::Failed(reason)) => assert!(reason.contains("payload")),
             other => panic!("expected Failed, got {:?}", other.is_some()),
+        }
+        // Rename-replay: a sidecar pair copied to a fresh name has a payload
+        // whose internal timestamp disagrees with the tag. Must FAIL before
+        // any crypto runs.
+        let sigs = context.home.join(".trey-room").join("sigs");
+        fs::create_dir_all(&sigs).expect("create sigs dir");
+        fs::write(sigs.join("20990101T000001Z.txt"), "20980101T000000Z\ndo the thing\n")
+            .expect("write mismatched payload");
+        fs::write(sigs.join("20990101T000001Z.txt.sig"), "irrelevant").expect("write sig");
+        match signed_status(&context, &msg("trey"), "🧔🔏 do the thing [signed:20990101T000001Z]") {
+            Some(SignedStatus::Failed(reason)) => assert!(reason.contains("rename-replay")),
+            other => panic!("expected rename-replay Failed, got {:?}", other.is_some()),
         }
         trash_test_root(&root);
     }

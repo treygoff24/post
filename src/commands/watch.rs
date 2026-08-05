@@ -76,6 +76,8 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // after the original dies mid-session (as ours did, repeatedly) still
     // surfaces anything that landed in the gap, instead of silently priming
     // past it. The room inbox keeps its own surface-on-startup behavior.
+    // Grows for the life of the watch (like each target's seen set): bounded
+    // by total channel messages, a few bytes each — deliberate, not a leak.
     let mut emitted_channel_ids = HashSet::new();
     if snapshot {
         // One scan, then out: the hook-facing poll. Unlike the loop below, a
