@@ -134,6 +134,26 @@ join-first fix. A plain channel read advances only that room's cursor after a
 successful emit. `--peek` preserves the cursor. Blocked routes cannot share a
 channel.
 
+Cursorless reads (v0.3): `--history <n>` shows the last n messages and
+`--since <id>` shows everything after an id. Both ignore the cursor entirely
+and never advance it, so they are idempotent and safe to pipe through any
+filter — the "grep too tight and the message is gone" failure class cannot
+happen through them. Use them for scroll-back, polling UIs, and re-reading.
+
+Banner diet (v0.3): the full 8-line untrusted-mail framing banner renders once
+per room per day; other reads get a one-line reminder. The laws bind
+regardless of which form printed.
+
+Signed-sender badges (v0.3): a message from the `trey` room whose first line
+ends in `[signed:TS]` is verified at read time against the detached signature
+in `~/.trey-room/sigs/TS.txt{,.sig}` — ssh-keygen verification, a byte-compare
+of the channel text against the signed payload, and a tag-vs-payload timestamp
+match (so neither a forged body under a reused tag nor a renamed stale sidecar
+passes). Verified messages render a one-line `[🔏 VERIFIED — Trey, … ago]`
+badge (`signed_verified` in `--json`); failures render loudly. Only the first
+line is parsed: a multiline message never carries a badge, so never read a
+missing badge on multiline text as evidence either way.
+
 ## Watch
 
 `post watch` is a doorbell. It emits metadata only, never bodies, and never
@@ -152,7 +172,13 @@ arbitrary cwd. `--interval-ms` has no effect in snapshot mode.
 post watch --room codex --once
 post watch --room codex --snapshot
 post watch --room codex --interval-ms 1000
+post watch --room codex --room workspace   # one merged stream, deduplicated
 ```
+
+Repeat `--room` (v0.3) to watch several rooms in one process: direct mail
+stays per-room, while a channel message shared between the watched rooms
+emits exactly once — the fix for the double-ring, where a session watching
+its own room plus an umbrella room paid two wakeups per channel message.
 
 Default output is NDJSON with variants:
 
