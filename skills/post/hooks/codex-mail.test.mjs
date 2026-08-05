@@ -12,6 +12,8 @@ import { spawnSync } from "node:child_process";
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-hook-test-"));
+const CWD = path.join(ROOT, "some-project");
+fs.mkdirSync(CWD, { recursive: true });
 
 const STUB = path.join(ROOT, "post-stub.mjs");
 const CONTROL = path.join(ROOT, "stub-control.json");
@@ -21,7 +23,7 @@ fs.writeFileSync(
   [
     "#!/usr/bin/env node",
     'import fs from "node:fs";',
-    'fs.appendFileSync(process.env.STUB_CALLS, "x");',
+    'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + "\\n");',
     'const control = JSON.parse(fs.readFileSync(process.env.STUB_CONTROL, "utf8"));',
     'if (control.stdout) process.stdout.write(control.stdout);',
     "process.exit(control.exit ?? 0);",
@@ -49,15 +51,31 @@ function setStub({ exit = 0, events = [], stdout } = {}) {
 
 function stubCallCount() {
   try {
-    return fs.readFileSync(CALLS, "utf8").length;
+    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean).length;
   } catch {
     return 0;
   }
 }
 
-function run(input, { stateDir, throttleMs = 0 } = {}) {
+function stubCalls() {
+  try {
+    return fs
+      .readFileSync(CALLS, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function run(input, { stateDir, throttleMs = 0, defaultCwd = true } = {}) {
+  const payload =
+    defaultCwd && input && typeof input === "object" && !Array.isArray(input)
+      ? { cwd: CWD, ...input }
+      : input;
   const result = spawnSync(process.execPath, [ADAPTER], {
-    input: typeof input === "string" ? input : JSON.stringify(input),
+    input: typeof payload === "string" ? payload : JSON.stringify(payload),
     encoding: "utf8",
     env: {
       ...process.env,
@@ -124,10 +142,47 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.match(context, /New channel message\(s\): #ops \(1\)/);
   assert.ok(!context.includes("20260722-020202-000002-bbb222"));
   assert.match(context, /untrusted/);
-  assert.match(context, /post read <id> --room codex/);
+  assert.match(context, /run from the project directory/);
   assert.ok(!context.includes("SECRET"), "subject must be omitted");
   assert.ok(!context.includes("secret-sender"), "sender must be omitted");
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
+});
+
+test("the snapshot runs from the hook cwd with no room pin", () => {
+  setStub({ events: [] });
+  fs.writeFileSync(CALLS, "");
+  run(
+    { hook_event_name: "UserPromptSubmit", session_id: "s-cwd" },
+    { stateDir: freshStateDir() }
+  );
+  assert.deepEqual(stubCalls(), [
+    { cwd: fs.realpathSync(CWD), args: ["watch", "--snapshot"] },
+  ]);
+});
+
+test("mail for the cwd-resolved room is accepted and named", () => {
+  setStub({ events: [{ ...MAIL_A, room: "sol" }] });
+  const out = run(
+    { hook_event_name: "SessionStart", session_id: "s-sol" },
+    { stateDir: freshStateDir() }
+  );
+  assert.match(out.hookSpecificOutput.additionalContext, /room sol/);
+  assert.match(out.hookSpecificOutput.additionalContext, /post read <id>/);
+  assert.ok(!out.hookSpecificOutput.additionalContext.includes("--room codex"));
+});
+
+test("missing, relative, or non-string cwd fails open without spawning post", () => {
+  setStub({ events: [MAIL_A] });
+  const before = stubCallCount();
+  for (const cwd of [undefined, "relative/path", 42]) {
+    const input = { hook_event_name: "SessionStart", session_id: "s-nocwd" };
+    if (cwd !== undefined) input.cwd = cwd;
+    assert.deepEqual(
+      run(input, { stateDir: freshStateDir(), defaultCwd: false }),
+      {}
+    );
+  }
+  assert.equal(stubCallCount(), before);
 });
 
 test("already-surfaced events dedupe to {} and new mail surfaces alone mid-turn", () => {
@@ -223,7 +278,7 @@ test("a failing post emits one diagnostic per streak, never a fake empty", () =>
     { stateDir }
   );
   assert.match(first.hookSpecificOutput.additionalContext, /UNKNOWN/);
-  assert.match(first.hookSpecificOutput.additionalContext, /post inbox --room codex/);
+  assert.match(first.hookSpecificOutput.additionalContext, /post inbox/);
 
   const second = run(
     { hook_event_name: "UserPromptSubmit", session_id: "s-fail" },

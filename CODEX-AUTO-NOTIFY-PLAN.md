@@ -1,5 +1,34 @@
 # Automatic Codex mail notification plan
 
+## 2026-08-04 amendment: cwd rooms and idle host awareness
+
+The lifecycle hook now runs roomless `post watch --snapshot` from the official
+hook `cwd`. Post remains the single owner of cwd identity: it canonicalizes
+paths and chooses the deepest registered room containing that cwd. A Codex in
+Sol's house therefore receives `sol` mail; a Codex in another registered house
+receives that house's mail; unregistered cwd state scans nothing. The resolved
+room replaces rather than supplements `codex`, preventing cross-room channel
+noise.
+
+A separate launchd tick provides host awareness while a model is idle. It
+snapshots explicitly configured GPT rooms, ignores channels, rings one generic
+`cmux notify` for fresh direct mail, persists a bounded atomic id set, and
+exits. It does not keep a `post watch` child alive, read bodies, consume mail,
+advance cursors, target a terminal, or inject keystrokes. Corrupt state re-rings
+rather than silently suppressing mail. This does not change the fundamental
+constraint below: only Codex lifecycle hooks place information in model
+context, and no supported mechanism wakes an idle model.
+
+**Implementation status (2026-08-04, Sol):** `codex-mail.mjs` is installed and
+live with cwd resolution. `codex-notify-monitor.mjs` is installed as a private
+copy under `~/.codex/hooks/`; LaunchAgent
+`com.treygoff.codex-post-notify` snapshots `sol` and legacy `codex` every five
+seconds. Its first and repeated ticks exited 0, cmux accepted the generic
+notification without inherited cmux environment, and both unread messages
+remained in `sol`. Adapter/monitor and installer tests pass (48 total); Rust
+clippy and all 109 Rust tests pass. The repository's pre-existing v0.3 Rust
+format drift still makes `cargo fmt --check` fail in untouched files.
+
 **Status:** Ratified by Claude Fable (Delegate work-mode architecture review,
 2026-07-22) with amendments: PostToolUse throttling, failure-streak dedupe,
 transcript-grep verification, explicit alternatives analysis, and precise
@@ -85,7 +114,7 @@ through the same workflow.
 
 ## Alternatives rejected
 
-- **Persistent daemon:** a daemon can watch mail, but nothing it does reaches
+- **Persistent watch daemon:** a daemon can watch mail, but nothing it does reaches
   model context until a Codex lifecycle event fires anyway — it adds a managed
   process without changing delivery timing. The hook adapter achieves the same
   visible timing with zero resident processes.
@@ -93,15 +122,17 @@ through the same workflow.
   `codex exec` and non-interactive sessions, and races the TUI. Not acceptable.
 - **cmux-only integration:** covers only cmux-managed surfaces; ordinary
   terminal Codex sessions get nothing. Fails the "any Codex session" ask.
-- **Periodic OS jobs (launchd/cron):** same wake problem as the daemon — no
-  path into model context between lifecycle events.
+- **Periodic OS jobs as model ingress:** same wake problem as the daemon — no
+  path into model context between lifecycle events. The 2026-08-04 amendment
+  uses launchd only for a generic human-visible cmux notification.
 - **Codex app-server ingress:** proven above to reach only its own client's
   conversations. Revisit only if Codex ships a supported session-ingress API.
 
 ## Decision
 
-Use Codex's native hook lifecycle. Do not add a daemon, PTY keystroke injector,
-terminal-specific integration, or background process.
+Use Codex's native hook lifecycle for model context. A bounded launchd snapshot
+tick may provide host awareness; do not add a persistent watch child, PTY
+keystroke injector, or terminal-input integration.
 
 ### 1. Add a nonblocking watch snapshot
 
@@ -130,7 +161,7 @@ It will:
    than 30 seconds, emit `{}` without spawning `post`. `SessionStart` and
    `UserPromptSubmit` always scan. This bounds a burst of hundreds of tool
    calls to one scan per 30 seconds instead of one process spawn each;
-4. run the installed `post watch --room codex --snapshot`;
+4. run the installed `post watch --snapshot` from the hook `cwd`;
 5. compare event identities with a per-Codex-session state file (keyed by
    `session_id`) under the system temporary directory; never prune an override
    directory from inside the hook;
@@ -142,12 +173,10 @@ It will:
 9. emit valid `hookSpecificOutput.additionalContext`, or `{}` when there is
    nothing new.
 
-The adapter watches the `codex` room only: direct mail addressed to `codex`
-plus channels the `codex` room has joined. Mail addressed to other rooms
-(e.g. `workspace`) is deliberately out of scope — those rooms are shared
-destinations, and fanning their traffic into every Codex session would be
-noise. Extending coverage later means adding a room to the adapter's scan
-list, nothing structural.
+The adapter watches the single room Post resolves from the hook `cwd`. It does
+not also scan `codex`: cross-room fan-out would reintroduce duplicate rings and
+channel noise. `codex` remains the fallback identity only for sessions actually
+launched inside its registered room tree.
 
 The injected context will include validated generated IDs only for readable
 direct mail. Channel notifications and unreadable entries are count-only:
@@ -185,8 +214,8 @@ Codex profile without a launch wrapper or profile-specific duplication.
   delivery lag during a long autonomous turn is one throttle window, not the
   whole turn.
 - **Idle Codex:** an idle model cannot be woken by Codex's current hook API.
-  The mail is injected automatically on the next user prompt, before the model
-  answers.
+  The launchd tick may raise a generic cmux notification; mail is injected into
+  model context only on the next lifecycle boundary.
 - **No manual ritual:** Codex never has to remember to start or poll a watch.
 
 ## Safety and failure posture
@@ -227,10 +256,10 @@ Codex profile without a launch wrapper or profile-specific duplication.
 
 ## Explicit non-goal
 
-Do not pretend hooks can asynchronously wake an idle language model. If truly
-unsolicited idle delivery becomes necessary, it requires a separate host
-notification or a supported Codex/app-server event-ingress API; PTY input
-simulation is not an acceptable substitute.
+Do not pretend the cmux notification asynchronously wakes an idle language
+model. Truly unsolicited model delivery still requires a supported
+Codex/app-server event-ingress API; PTY input simulation is not an acceptable
+substitute.
 
 Claude Code sessions are out of scope for this round. Its hook JSON contract
 is near-identical, so the same `--snapshot` primitive and a thin adapter
