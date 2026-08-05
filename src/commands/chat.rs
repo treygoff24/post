@@ -20,6 +20,11 @@ pub(super) fn run(
     // to send. Only the bare positional FILE still demands the explicit verb,
     // because a stray path there is indistinguishable from a typo.
     let sending = args.send || args.body.is_some() || args.body_file.is_some();
+    if args.oversize && !sending {
+        return Err(AppError::invalid_argument(
+            "--oversize only applies when sending a message body",
+        ));
+    }
     if !sending && !args.subject.is_empty() {
         let fix = format!(
             "post chat {} --send --subject {} --body '<text>'",
@@ -49,6 +54,9 @@ fn chat_fix_prefix(args: &ChatArgs) -> String {
             " --subject {}",
             super::send::shell_quote(&args.subject)
         ));
+    }
+    if args.oversize {
+        prefix.push_str(" --oversize");
     }
     prefix
 }
@@ -489,12 +497,14 @@ fn send(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let fix_prefix = chat_fix_prefix(&args);
+    super::send::validate_subject(&args.subject)?;
     let inline = args.body.take();
     let body = super::send::read_body(super::send::BodySource {
         inline,
         body_file: args.body_file.as_deref(),
         file: args.file.as_deref(),
         fix_prefix,
+        oversize: args.oversize,
     })?;
     // Channel identity is cwd-derived with no override, so a prepared command
     // run from the wrong tree posts as that tree's room. Name it before the

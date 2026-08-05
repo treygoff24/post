@@ -10,6 +10,9 @@ use crate::output::{self, SendOutput};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
+const MAX_BODY_BYTES: usize = 32 * 1024;
+const MAX_SUBJECT_BYTES: usize = 1024;
+
 pub(super) fn run(
     context: &Context,
     args: SendArgs,
@@ -85,12 +88,14 @@ where
         return Err(error);
     }
 
+    validate_subject(&args.subject)?;
     let inline = args.body.take();
     let body = read_body(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
         file: args.file.as_deref(),
         fix_prefix: fix_prefix.clone(),
+        oversize: args.oversize,
     })?;
     if body.trim().is_empty() {
         return Err(AppError::new(
@@ -215,6 +220,7 @@ pub(super) struct BodySource<'a> {
     pub body_file: Option<&'a std::path::Path>,
     pub file: Option<&'a std::path::Path>,
     pub fix_prefix: String,
+    pub oversize: bool,
 }
 
 /// Quote `value` for a POSIX shell so a fix stays executable when the body
@@ -233,10 +239,54 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
     if !args.subject.is_empty() {
         prefix.push_str(&format!(" --subject {}", shell_quote(&args.subject)));
     }
+    if args.oversize {
+        prefix.push_str(" --oversize");
+    }
     prefix
 }
 
 pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
+    let oversize = source.oversize;
+    let body = read_body_unchecked(source)?;
+    if !oversize && body.len() > MAX_BODY_BYTES {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "message body is {} bytes; the maximum without --oversize is {MAX_BODY_BYTES} bytes",
+                body.len()
+            ),
+            "Inspect the body source. If the size is intentional, add --oversize to the original command and retry.",
+        )
+        .input("message body")
+        .reason(format!("body exceeds {MAX_BODY_BYTES}-byte safety limit")));
+    }
+    if body.lines().any(is_watch_event_line) {
+        eprintln!(
+            "post: warning: message body contains Post watch-event NDJSON; shell command substitution may have inserted watch output. Sending anyway; use --body-file for prose containing shell syntax."
+        );
+    }
+    Ok(body)
+}
+
+pub(super) fn validate_subject(subject: &str) -> AppResult<()> {
+    if subject.len() <= MAX_SUBJECT_BYTES {
+        return Ok(());
+    }
+    Err(AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "message subject is {} bytes; the maximum is {MAX_SUBJECT_BYTES} bytes",
+            subject.len()
+        ),
+        "Move long text into the message body and keep --subject at or below 1024 bytes.",
+    )
+    .input("--subject")
+    .reason(format!(
+        "subject exceeds {MAX_SUBJECT_BYTES}-byte safety limit"
+    )))
+}
+
+fn read_body_unchecked(source: BodySource<'_>) -> AppResult<String> {
     if let Some(body) = source.inline {
         // `--body -` is the Unix stdin sentinel, not literal text: before this
         // rule an agent piping a body alongside `--body -` silently posted "-"
@@ -289,6 +339,23 @@ pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
             )
         })?;
     Ok(body)
+}
+
+fn is_watch_event_line(line: &str) -> bool {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(line) else {
+        return false;
+    };
+    let has_strings = |names: &[&str]| {
+        names
+            .iter()
+            .all(|name| fields.get(*name).and_then(|value| value.as_str()).is_some())
+    };
+    match fields.get("event").and_then(|value| value.as_str()) {
+        Some("mail") => has_strings(&["room", "id", "from", "kind", "subject", "sent"]),
+        Some("unreadable") => has_strings(&["room", "id"]),
+        Some("channel_message") => has_strings(&["channel", "id", "from", "subject", "sent"]),
+        _ => false,
+    }
 }
 
 fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String> {
@@ -361,6 +428,7 @@ mod tests {
                 subject: String::new(),
                 body: None,
                 body_file: None,
+                oversize: false,
                 file: None,
             },
             false,
@@ -405,6 +473,7 @@ mod tests {
                 subject: String::new(),
                 body: Some("new mail".to_owned()),
                 body_file: None,
+                oversize: false,
                 file: None,
             },
             false,
@@ -446,6 +515,7 @@ mod tests {
                 subject: String::new(),
                 body: Some("new mail".to_owned()),
                 body_file: None,
+                oversize: false,
                 file: None,
             },
             false,
@@ -500,6 +570,7 @@ mod tests {
                 subject: String::new(),
                 body: Some("new delivery".to_owned()),
                 body_file: None,
+                oversize: false,
                 file: None,
             },
             false,
@@ -541,6 +612,7 @@ mod tests {
                 subject: String::new(),
                 body: Some("new mail".to_owned()),
                 body_file: None,
+                oversize: false,
                 file: None,
             },
             false,

@@ -6,15 +6,15 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "send",
-            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] (--body <text> | --body-file <path> | stdin)",
+            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "text; JSON with --json",
-            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; the three body forms are mutually exclusive alternatives, and omitting all of them reads stdin",
+            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; subjects over 1 KiB fail, the three body forms are mutually exclusive alternatives, omitting all of them reads stdin, and bodies over 32 KiB require --oversize",
         ),
         command(
             "chat",
-            "post chat <channel> [--peek | --discard | --history <n> | --since <id>] | post chat <channel> --join | post chat <channel> --send [--subject <s>] (--body <text> | --body-file <path> | stdin)",
+            "post chat <channel> [--peek | --discard | --history <n> | --since <id>] | post chat <channel> --join | post chat <channel> --send [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg and implies from --body/--body-file; a plain read advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; a cursor-advancing read into /dev/null is refused; --history <n> shows the last n messages and --since <id> shows messages after id — both ignore the cursor entirely, never advance it, and are safe to pipe; the full framing banner renders once per room per day (one-line reminder otherwise); messages from the trey room tagged [signed:TS] are verified against the detached signature in ~/.trey-room/sigs/ and render a one-line VERIFIED/FAILED badge (signed_verified in JSON)",
+            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, and requires --oversize above 32 KiB; a plain read advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; a cursor-advancing read into /dev/null is refused; --history <n> shows the last n messages and --since <id> shows messages after id — both ignore the cursor entirely, never advance it, and are safe to pipe; the full framing banner renders once per room per day (one-line reminder otherwise); messages from the trey room tagged [signed:TS] are verified against the detached signature in ~/.trey-room/sigs/ and render a one-line VERIFIED/FAILED badge (signed_verified in JSON)",
         ),
         command(
             "channels",
@@ -170,9 +170,11 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Watch emits channel events as notifications only and never advances any cursor; only a read advances, and only after a successful emit.",
             "A room's own channel messages are never news to it: they never ring its own watch, and a send advances the sender's cursor past their own message when they were already caught up.",
             "A message body comes from exactly one of --body, --body-file, or stdin; a body-file path that does not exist is a usage error, never a retryable I/O fault.",
+            "Subjects over 1 KiB fail before any write with no override; longer text belongs in the body.",
+            "Message bodies over 32 KiB fail before any write unless --oversize records explicit intent; complete Post watch-event NDJSON lines warn on stderr but still send.",
             "Already-read mail stays retrievable by id or prefix from the read store and from archive copies addressed to that room; re-reading consumes nothing and reports already_read.",
             "A channel read never advances the cursor into /dev/null; skipping unread messages requires --discard.",
-            "Every error that suggests a command suggests one that runs verbatim.",
+            "Whenever error.details.exact_fix is present, it is a complete command that runs verbatim; oversize body errors deliberately name --oversize without echoing the rejected payload into an exact fix.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override; intended for tests",

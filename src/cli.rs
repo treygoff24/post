@@ -65,9 +65,9 @@ pub(crate) enum Command {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post send --to <ROOM> [OPTIONS] --body <TEXT>\n       \
-     post send --to <ROOM> [OPTIONS] --body-file <PATH>\n       \
-     post send --to <ROOM> [OPTIONS] < BODY_FILE\n\n\
+    override_usage = "post send --to <ROOM> [OPTIONS] [--oversize] --body <TEXT>\n       \
+     post send --to <ROOM> [OPTIONS] [--oversize] --body-file <PATH>\n       \
+     post send --to <ROOM> [OPTIONS] [--oversize] < BODY_FILE\n\n\
      The three body forms are alternatives: pass exactly one, or none to read stdin."
 )]
 pub(crate) struct SendArgs {
@@ -83,7 +83,7 @@ pub(crate) struct SendArgs {
     #[arg(long, value_enum, default_value_t = MailKind::Note)]
     pub kind: MailKind,
 
-    /// Optional subject.
+    /// Optional subject, limited to 1 KiB.
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
@@ -100,6 +100,10 @@ pub(crate) struct SendArgs {
     )]
     pub body_file: Option<PathBuf>,
 
+    /// Allow a body larger than the default 32 KiB safety limit.
+    #[arg(long)]
+    pub oversize: bool,
+
     /// Deprecated positional spelling of --body-file; omit every body source to read stdin.
     #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub file: Option<PathBuf>,
@@ -113,9 +117,9 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --since <ID>                (messages after ID, cursor untouched)\n       \
      post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
      post chat <CHANNEL> --join                      (join, creating on first join)\n       \
-     post chat <CHANNEL> --send --body <TEXT>        (send inline text)\n       \
-     post chat <CHANNEL> --send --body-file <PATH>   (send a file's contents)\n       \
-     post chat <CHANNEL> --send < BODY_FILE          (send stdin)\n\n\
+     post chat <CHANNEL> --send [--oversize] --body <TEXT>        (send inline text)\n       \
+     post chat <CHANNEL> --send [--oversize] --body-file <PATH>   (send a file's contents)\n       \
+     post chat <CHANNEL> --send [--oversize] < BODY_FILE          (send stdin)\n\n\
      These forms are alternatives; pass exactly one. --body/--body-file imply --send."
 )]
 pub(crate) struct ChatArgs {
@@ -131,7 +135,7 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["peek", "discard"])]
     pub send: bool,
 
-    /// Optional subject; only meaningful when sending.
+    /// Optional subject, limited to 1 KiB; only meaningful when sending.
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
@@ -147,6 +151,10 @@ pub(crate) struct ChatArgs {
         conflicts_with_all = ["file", "peek", "discard"]
     )]
     pub body_file: Option<PathBuf>,
+
+    /// Allow a body larger than the default 32 KiB safety limit.
+    #[arg(long, conflicts_with_all = ["join", "peek", "discard"])]
+    pub oversize: bool,
 
     /// Deprecated positional spelling of --body-file; requires --send.
     #[arg(

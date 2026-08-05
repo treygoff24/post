@@ -1441,6 +1441,201 @@ fn body_can_come_from_stdin_without_a_tty_or_prompt() {
 }
 
 #[test]
+fn oversized_direct_bodies_require_an_explicit_override_for_every_source() {
+    let sandbox = Sandbox::new();
+    let at_limit = "x".repeat(32 * 1024);
+    let too_large = "x".repeat(32 * 1024 + 1);
+
+    assert_success(&sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "size-test",
+        "--body",
+        &at_limit,
+        "--json",
+    ]));
+
+    let inline = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "size-test",
+        "--body",
+        &too_large,
+        "--json",
+    ]);
+    assert_eq!(inline.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&inline);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("32769 bytes"));
+    assert!(error.error.message.contains("--oversize"));
+
+    let multibyte = "🏮".repeat(8193);
+    let multibyte_output = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "size-test",
+        "--body",
+        &multibyte,
+        "--json",
+    ]);
+    assert_eq!(multibyte_output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&multibyte_output);
+    assert!(error.error.message.contains("32772 bytes"));
+
+    let stdin = sandbox.run_with_stdin(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "size-test",
+            "--json",
+        ],
+        &too_large,
+    );
+    assert_eq!(stdin.status.code(), Some(2));
+
+    let body_file = sandbox.path.join("oversized.txt");
+    fs::write(&body_file, &too_large).expect("write oversized body file");
+    let body_file_arg = body_file.to_string_lossy().into_owned();
+    let from_file = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "size-test",
+        "--body-file",
+        &body_file_arg,
+        "--json",
+    ]);
+    assert_eq!(from_file.status.code(), Some(2));
+
+    let allowed = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "size-test",
+        "--oversize",
+        "--body-file",
+        &body_file_arg,
+        "--json",
+    ]);
+    assert_success(&allowed);
+}
+
+#[test]
+fn chat_oversize_flag_allows_an_intentional_large_body() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "large", &alpha);
+    join_channel(&sandbox, "large", &beta);
+    let body = "x".repeat(32 * 1024 + 1);
+
+    let refused = sandbox.run_in(&["chat", "large", "--body", &body, "--json"], None, &alpha);
+    assert_eq!(refused.status.code(), Some(2));
+
+    let allowed = sandbox.run_in(
+        &["chat", "large", "--oversize", "--body", &body, "--json"],
+        None,
+        &alpha,
+    );
+    assert_success(&allowed);
+    let read: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "large", "--peek", "--json"], None, &beta));
+    assert!(read.messages.iter().any(|message| message.body == body));
+}
+
+#[test]
+fn subject_size_limit_applies_to_direct_and_channel_sends() {
+    let sandbox = Sandbox::new();
+    let at_limit = "s".repeat(1024);
+    let too_large = "s".repeat(1025);
+
+    assert_success(&sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "subject-test",
+        "--subject",
+        &at_limit,
+        "--body",
+        "body",
+        "--json",
+    ]));
+    let direct = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "subject-test",
+        "--subject",
+        &too_large,
+        "--body",
+        "body",
+        "--json",
+    ]);
+    assert_eq!(direct.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&direct);
+    assert!(error.error.message.contains("1025 bytes"));
+
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "subject", &alpha);
+    let channel = sandbox.run_in(
+        &[
+            "chat",
+            "subject",
+            "--subject",
+            &too_large,
+            "--body",
+            "body",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(channel.status.code(), Some(2));
+}
+
+#[test]
+fn watch_event_ndjson_warns_without_blocking_legitimate_forensics() {
+    let sandbox = Sandbox::new();
+    let event = r#"{"event":"channel_message","channel":"commons","id":"20260804-224402-425133-e9857f","from":"sol","subject":"","sent":"2026-08-04 22:44:02 -0400"}"#;
+    let warned = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "forensics-test",
+        "--body",
+        event,
+        "--json",
+    ]);
+    assert!(warned.status.success(), "stderr: {}", stderr(&warned));
+    assert!(stderr(&warned).contains("contains Post watch-event NDJSON"));
+
+    let control = sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "forensics-test",
+        "--body",
+        r#"{"event":"channel_message","note":"not a Post event envelope"}"#,
+        "--json",
+    ]);
+    assert_success(&control);
+    assert!(!stderr(&control).contains("contains Post watch-event NDJSON"));
+}
+
+#[test]
 fn inbox_skips_malformed_mail_and_rooms_only_show_recipient_rules() {
     let sandbox = Sandbox::new();
     let sent = sandbox.send_json("good-mail", "good body");
