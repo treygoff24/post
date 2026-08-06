@@ -89,6 +89,14 @@ pub struct ChannelMessage {
     /// Sender's emoji sigil as of send time; same rules as display_name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pfp: Option<String>,
+    /// Prior message id this replies to (threads-lite). Absent on ordinary
+    /// messages; old stores without the field keep reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re: Option<String>,
+    /// Registered room names @mentioned in the body (word-boundary match).
+    /// Absent/empty on old messages and on bodies with no mentions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug)]

@@ -14,7 +14,16 @@ pub(super) fn run(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     if args.join {
-        return join(context, &args.name, json_output, pretty);
+        return join(
+            context,
+            &args.name,
+            args.description.as_deref(),
+            json_output,
+            pretty,
+        );
+    }
+    if let Some(msg_id) = args.seen_by.as_deref() {
+        return seen_by(context, &args.name, msg_id, json_output, pretty);
     }
     // --body and --body-file carry their own intent: naming a body is asking
     // to send. Only the bare positional FILE still demands the explicit verb,
@@ -23,6 +32,16 @@ pub(super) fn run(
     if args.oversize && !sending {
         return Err(AppError::invalid_argument(
             "--oversize only applies when sending a message body",
+        ));
+    }
+    if args.anyway && !sending {
+        return Err(AppError::invalid_argument(
+            "--anyway only applies when sending a message body",
+        ));
+    }
+    if args.re.is_some() && !sending {
+        return Err(AppError::invalid_argument(
+            "--re only applies when sending a message body",
         ));
     }
     if !sending && !args.subject.is_empty() {
@@ -49,6 +68,12 @@ pub(super) fn run(
 /// Rebuild the send invocation so a body-input fix can be copy-pasted whole.
 fn chat_fix_prefix(args: &ChatArgs) -> String {
     let mut prefix = format!("post chat {} --send", super::send::shell_quote(&args.name));
+    if args.anyway {
+        prefix.push_str(" --anyway");
+    }
+    if let Some(re) = &args.re {
+        prefix.push_str(&format!(" --re {}", super::send::shell_quote(re)));
+    }
     if !args.subject.is_empty() {
         prefix.push_str(&format!(
             " --subject {}",
@@ -73,12 +98,15 @@ fn read(
     // entirely and NEVER advance it, so they are idempotent and pipe-safe
     // (the cursor-swallow class cannot happen through them).
     let cursorless = args.history.is_some() || args.since.is_some();
-    let batch = if cursorless {
+    let mut batch = if cursorless {
         let mut all = collect_batch(context, &room, &args.name, args.since.as_deref())?;
         if let Some(n) = args.history {
             if all.len() > n {
                 all.drain(..all.len() - n);
             }
+        }
+        if let Some(pattern) = args.grep.as_deref() {
+            all = filter_grep(all, pattern)?;
         }
         all
     } else {
@@ -89,11 +117,15 @@ fn read(
     } else {
         batch.last().map(|(message, _)| message.id.clone())
     };
-    // --limit N: bounded catch-up. Show only the newest N unread; the cursor
-    // still advances past the WHOLE batch (last_id above is from the full
-    // batch), so the skipped tail is consumed deliberately and reported.
-    let mut batch = batch;
-    let skipped = apply_limit(&mut batch, args.limit, &args.name)?;
+    // Default bounded catch-up: plain cursor reads show the newest 25 unread
+    // when the backlog is larger. --limit 0 means unlimited; explicit --limit N
+    // still works. Mentions of the reading room in the skipped range are
+    // never silently dropped — they are pulled forward into the display.
+    let skipped = if cursorless {
+        0
+    } else {
+        apply_catch_up(&mut batch, args.limit, &room)?
+    };
     if args.discard {
         return discard(
             context,
@@ -126,6 +158,7 @@ fn read(
         .input("stdout")
         .reason("stdout is the null device and this read would advance the cursor"));
     }
+    let reply_index = build_reply_index(context, &args.name, &batch);
     let rendered = if json_output {
         output::json(
             &output::ChatReadOutput {
@@ -152,20 +185,21 @@ fn read(
             pretty,
         )?
     } else {
-        let mut text = render_text(context, &args.name, &room, &batch);
+        let mut text = render_text(context, &args.name, &room, &batch, &reply_index);
         if skipped > 0 {
-            let total = batch.len() + skipped;
             let tail = if args.peek {
                 "cursor untouched".to_owned()
             } else {
                 format!(
-                    "cursor advances past them; `post chat {} --history {total}` to revisit",
+                    "cursor advances past them; use --limit 0 for all, or `post chat {} --history` to revisit",
                     super::send::shell_quote(&args.name)
                 )
             };
             text.insert_str(
                 0,
-                &format!("post: --limit: {skipped} older unread message(s) not shown ({tail})\n"),
+                &format!(
+                    "post: skipped {skipped} older messages (use --limit 0 for all; {tail})\n"
+                ),
             );
         }
         text
@@ -187,33 +221,134 @@ fn read(
     }))
 }
 
-/// Trim the unread batch to its newest `limit` entries, returning how many
-/// older messages were dropped from display. The caller's cursor target
-/// (last_id) is computed from the FULL batch, so a non-peek read still
-/// advances past everything — the skip is deliberate and reported.
-fn apply_limit(
+const DEFAULT_CATCH_UP: usize = 25;
+
+/// Apply default/explicit catch-up limit, pulling @mentions of `room` out of
+/// the skipped range so they are never silently dropped. Returns how many
+/// older messages were neither shown nor rescued.
+fn apply_catch_up(
     batch: &mut Vec<(ChannelMessage, String)>,
     limit: Option<usize>,
-    channel_name: &str,
+    room: &str,
 ) -> AppResult<usize> {
-    let Some(n) = limit else { return Ok(0) };
-    if n == 0 {
-        let fix = format!("post chat {} --discard", super::send::shell_quote(channel_name));
-        return Err(AppError::new(
-            ErrorCode::InvalidArgument,
-            "--limit 0 would consume every unread message without showing any",
-            format!("Run `{fix}` to skip them deliberately, or pass --limit 1 or more."),
-        )
-        .exact_fix(fix)
-        .input("--limit")
-        .reason("zero limit is a disguised discard"));
-    }
+    let n = match limit {
+        None => DEFAULT_CATCH_UP,
+        Some(0) => return Ok(0),
+        Some(n) => n,
+    };
     if batch.len() <= n {
         return Ok(0);
     }
-    let skipped = batch.len() - n;
-    batch.drain(..skipped);
+    let split_at = batch.len() - n;
+    let older: Vec<_> = batch.drain(..split_at).collect();
+    let mut rescued = Vec::new();
+    let mut skipped = 0;
+    for item in older {
+        if item.0.mentions.iter().any(|m| m == room) {
+            rescued.push(item);
+        } else {
+            skipped += 1;
+        }
+    }
+    let mut display = rescued;
+    display.append(batch);
+    *batch = display;
     Ok(skipped)
+}
+
+fn filter_grep(
+    batch: Vec<(ChannelMessage, String)>,
+    pattern: &str,
+) -> AppResult<Vec<(ChannelMessage, String)>> {
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .map_err(|error| {
+            AppError::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid --grep regex: {error}"),
+                "Pass a valid Rust regex pattern, or a plain substring (most characters are literal).",
+            )
+            .input("--grep")
+            .reason(error.to_string())
+        })?;
+    Ok(batch
+        .into_iter()
+        .filter(|(message, body)| {
+            re.is_match(body)
+                || re.is_match(&message.subject)
+                || re.is_match(&message.from)
+                || re.is_match(&message.id)
+        })
+        .collect())
+}
+
+/// Map of referenced message id -> (from, body preview) for reply markers.
+fn build_reply_index(
+    context: &Context,
+    channel_name: &str,
+    batch: &[(ChannelMessage, String)],
+) -> std::collections::HashMap<String, (String, String)> {
+    let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (message, _) in batch {
+        if let Some(re) = &message.re {
+            needed.insert(re.as_str());
+        }
+    }
+    let mut index = std::collections::HashMap::new();
+    if needed.is_empty() {
+        return index;
+    }
+    // Prefer bodies already in the batch; fall back to disk for older parents.
+    for (message, body) in batch {
+        if needed.contains(message.id.as_str()) {
+            index.insert(
+                message.id.clone(),
+                (message.from.clone(), preview_body(body)),
+            );
+        }
+    }
+    let Ok(paths) = channel::ChannelPaths::new(context, channel_name) else {
+        return index;
+    };
+    for id in needed {
+        if index.contains_key(id) {
+            continue;
+        }
+        let path = paths.messages.join(format!("{id}.msg"));
+        if let Ok(parsed) = channel::parse_channel_message(&path) {
+            index.insert(
+                parsed.message.id,
+                (parsed.message.from, preview_body(&parsed.body)),
+            );
+        }
+    }
+    index
+}
+
+fn preview_body(body: &str) -> String {
+    let flat: String = body
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let flat = flat.trim();
+    if flat.chars().count() <= 40 {
+        flat.to_owned()
+    } else {
+        let truncated: String = flat.chars().take(40).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn short_id(id: &str) -> &str {
+    // Prefer the trailing 6-hex uniqueness; fall back to a short prefix.
+    id.rsplit('-').next().filter(|s| s.len() == 6).unwrap_or({
+        if id.len() > 8 {
+            &id[..8]
+        } else {
+            id
+        }
+    })
 }
 
 /// Skip the unread batch without printing bodies: the honest spelling of what
@@ -317,6 +452,7 @@ fn render_text(
     channel: &str,
     room: &str,
     batch: &[(ChannelMessage, String)],
+    reply_index: &std::collections::HashMap<String, (String, String)>,
 ) -> String {
     let channel = output::sanitize_text_header(channel);
     let room = output::sanitize_text_header(room);
@@ -355,6 +491,18 @@ fn render_text(
     }
     for (message, body) in batch {
         out.push('\n');
+        if let Some(re) = &message.re {
+            let marker = match reply_index.get(re) {
+                Some((from, preview)) => format!(
+                    "↳ re {} ({}: {})\n",
+                    short_id(re),
+                    output::sanitize_text_header(from),
+                    output::sanitize_text_header(preview)
+                ),
+                None => format!("↳ re {}\n", short_id(re)),
+            };
+            out.push_str(&marker);
+        }
         let label = match message.event.as_deref() {
             Some(event) => format!("[{}] ", output::sanitize_text_header(event)),
             None => String::new(),
@@ -516,13 +664,14 @@ fn signed_age_minutes(ts: &str) -> Option<u64> {
 fn join(
     context: &Context,
     name: &str,
+    description: Option<&str>,
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let acting = channel::acting_room(context, &rooms)?;
     eprintln!("post: joining #{name} as room '{acting}' (identity inferred from cwd)");
-    let outcome = channel::join(context, name)?;
+    let outcome = channel::join(context, name, description)?;
     let rendered = if json_output {
         output::json(
             &output::ChatJoinOutput {
@@ -536,7 +685,19 @@ fn join(
             pretty,
         )?
     } else if outcome.already_member {
-        format!("post: {} is already a member of #{name}\n", outcome.room)
+        match description {
+            Some(desc) if !desc.is_empty() => {
+                format!(
+                    "post: {} is already a member of #{name}; updated description\n",
+                    outcome.room
+                )
+            }
+            Some(_) => format!(
+                "post: {} is already a member of #{name}; cleared description\n",
+                outcome.room
+            ),
+            None => format!("post: {} is already a member of #{name}\n", outcome.room),
+        }
     } else if outcome.channel_created {
         format!("post: created #{name} and joined as {}\n", outcome.room)
     } else {
@@ -570,7 +731,16 @@ fn send(
         "post: sending to #{} as room '{acting}' (identity inferred from cwd)",
         args.name
     );
-    let message = channel::send(context, &args.name, &args.subject, &body)?;
+    let message = channel::send(
+        context,
+        &args.name,
+        channel::SendOptions {
+            subject: &args.subject,
+            body: &body,
+            anyway: args.anyway,
+            re: args.re.as_deref(),
+        },
+    )?;
     // The message is committed; a failed cursor advance must not turn the
     // send into an error, so it degrades to a warning.
     if let Err(error) = advance_past_own_message(context, &message) {
@@ -588,6 +758,72 @@ fn send(
         )
     };
     Ok(CommandResult::committed(rendered))
+}
+
+/// Read-only: which member rooms' cursors have advanced past `msg_id`.
+/// Never touches any cursor.
+fn seen_by(
+    context: &Context,
+    channel_name: &str,
+    msg_id_or_prefix: &str,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let rooms = context.load_rooms()?;
+    let room = channel::acting_room(context, &rooms)?;
+    let paths = channel::ChannelPaths::new(context, channel_name)?;
+    if !paths.exists() {
+        return Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("channel '{channel_name}' does not exist"),
+            format!("Create it with `post chat {channel_name} --join`."),
+        )
+        .input(channel_name)
+        .reason("no channel.json under the channels directory"));
+    }
+    let members = paths.load_members()?;
+    if !members.contains_key(&room) {
+        return Err(AppError::new(
+            ErrorCode::NotAMember,
+            format!("room '{room}' is not a member of channel '{channel_name}'"),
+            format!("Join first with `post chat {channel_name} --join`."),
+        )
+        .input(room)
+        .reason("reader is absent from members.json"));
+    }
+    let message_id = channel::resolve_message_id(&paths, msg_id_or_prefix)?;
+    let mut seen = Vec::new();
+    for member in members.keys() {
+        let state = ChannelState::load(context, member)?;
+        if state
+            .cursor(channel_name)
+            .is_some_and(|cursor| cursor >= message_id.as_str())
+        {
+            seen.push(member.clone());
+        }
+    }
+    seen.sort();
+    let count = seen.len();
+    let rendered = if json_output {
+        output::json(
+            &output::SeenByOutput {
+                ok: true,
+                channel: channel_name.to_owned(),
+                message_id: message_id.clone(),
+                seen_by: seen.clone(),
+                count,
+            },
+            pretty,
+        )?
+    } else if seen.is_empty() {
+        format!("post: no members have read past {message_id} in #{channel_name}\n")
+    } else {
+        format!(
+            "post: seen-by {message_id} in #{channel_name}: {}\n",
+            seen.join(", ")
+        )
+    };
+    Ok(CommandResult::success(rendered))
 }
 
 /// A sender's own message must never sit "unread" for the sender — it rang
@@ -668,6 +904,8 @@ mod tests {
             event: None,
             display_name: Some(display_name.to_owned()),
             pfp: Some(pfp.to_owned()),
+            re: None,
+            mentions: vec![],
         };
         let bytes = crate::channel::encode_message(&message, body).expect("encode");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes).expect("write message");
@@ -683,6 +921,8 @@ mod tests {
             event: None,
             display_name: None,
             pfp: None,
+            re: None,
+            mentions: vec![],
         };
         let bytes = channel::encode_message(&message, body).expect("encode message");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
@@ -827,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn limit_trims_to_newest_and_reports_skip_while_last_id_covers_whole_batch() {
+    fn catch_up_trims_to_newest_and_reports_skip_while_last_id_covers_whole_batch() {
         let (root, context) = chat_context("limit");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "oldest");
@@ -837,7 +1077,7 @@ mod tests {
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
         // read() computes the cursor target from the FULL batch before the trim.
         let last_id = batch.last().map(|(m, _)| m.id.clone());
-        let skipped = apply_limit(&mut batch, Some(2), "tax").expect("limit");
+        let skipped = apply_catch_up(&mut batch, Some(2), "alpha").expect("limit");
         assert_eq!(skipped, 1);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].0.id, ID2, "oldest must be the one dropped");
@@ -851,23 +1091,49 @@ mod tests {
     }
 
     #[test]
-    fn limit_larger_than_batch_is_a_plain_read() {
+    fn catch_up_larger_than_batch_is_a_plain_read() {
         let mut batch = vec![];
-        assert_eq!(apply_limit(&mut batch, Some(5), "tax").expect("empty"), 0);
-        assert_eq!(apply_limit(&mut batch, None, "tax").expect("no limit"), 0);
+        assert_eq!(
+            apply_catch_up(&mut batch, Some(5), "alpha").expect("empty"),
+            0
+        );
+        // Default (None) on an empty batch is also a no-op.
+        assert_eq!(
+            apply_catch_up(&mut batch, None, "alpha").expect("default"),
+            0
+        );
     }
 
     #[test]
-    fn limit_zero_is_refused_as_disguised_discard() {
+    fn limit_zero_means_unlimited() {
         let (root, context) = chat_context("limitzero");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "only");
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        let Err(error) = apply_limit(&mut batch, Some(0), "tax") else {
-            panic!("limit 0 must be refused");
-        };
-        assert_eq!(error.code.as_str(), "invalid_argument");
-        assert_eq!(batch.len(), 1, "refusal must not consume the batch");
+        let skipped = apply_catch_up(&mut batch, Some(0), "alpha").expect("unlimited");
+        assert_eq!(skipped, 0);
+        assert_eq!(batch.len(), 1, "limit 0 must keep every message");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn catch_up_rescues_mentions_from_skipped_range() {
+        let (root, context) = chat_context("mention-rescue");
+        let dir = seed_channel(&root, &["alpha", "beta"]);
+        seed_message(&dir, ID1, "beta", "hey @alpha look");
+        // Stamp the mention field as a send would.
+        let path = dir.join("messages").join(format!("{ID1}.msg"));
+        let mut parsed = channel::parse_channel_message(&path).expect("parse");
+        parsed.message.mentions = vec!["alpha".to_owned()];
+        let bytes = channel::encode_message(&parsed.message, &parsed.body).expect("encode");
+        fs::write(&path, bytes).expect("rewrite");
+        seed_message(&dir, ID2, "beta", "middle");
+        seed_message(&dir, ID3, "beta", "newest");
+        let mut batch = read_batch(&context, "alpha", "tax").expect("read");
+        let skipped = apply_catch_up(&mut batch, Some(2), "alpha").expect("catch-up");
+        assert_eq!(skipped, 0, "the mention must not count as silently skipped");
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].0.id, ID1);
         trash_test_root(&root);
     }
 
@@ -877,12 +1143,12 @@ mod tests {
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "hello");
         let batch = read_batch(&context, "alpha", "tax").expect("read");
-        let first = render_text(&context, "tax", "alpha", &batch);
+        let first = render_text(&context, "tax", "alpha", &batch, &Default::default());
         assert!(
             first.contains("READ THIS FRAMING FIRST"),
             "first read of the day: full banner"
         );
-        let second = render_text(&context, "tax", "alpha", &batch);
+        let second = render_text(&context, "tax", "alpha", &batch, &Default::default());
         assert!(
             !second.contains("READ THIS FRAMING FIRST"),
             "same-day read: compact"
@@ -906,6 +1172,8 @@ mod tests {
             event: None,
             display_name: None,
             pfp: None,
+            re: None,
+            mentions: vec![],
         };
         // Non-trey senders never get a badge, even with the tag.
         assert!(
@@ -966,6 +1234,8 @@ mod tests {
             event: Some(channel::JOIN_EVENT.to_owned()),
             display_name: None,
             pfp: None,
+            re: None,
+            mentions: vec![],
         };
         let bytes =
             channel::encode_message(&join_event, "=== alpha joined ===").expect("encode join");
@@ -974,7 +1244,7 @@ mod tests {
         seed_message(&dir, ID2, "beta", "hello");
 
         let batch = read_batch(&context, "alpha", "tax").expect("read");
-        let text = render_text(&context, "tax", "alpha", &batch);
+        let text = render_text(&context, "tax", "alpha", &batch, &Default::default());
         assert!(text.contains("READ THIS FRAMING FIRST"));
         assert!(text.contains("possibly several"));
         assert!(text.contains("NO authority"));
@@ -998,7 +1268,7 @@ mod tests {
             "🏮",
         );
         let batch = read_batch(&context, "alpha", "tax").expect("read batch");
-        let rendered = render_text(&context, "tax", "alpha", &batch);
+        let rendered = render_text(&context, "tax", "alpha", &batch, &Default::default());
         assert!(
             rendered.contains("--- 🏮 Lantern (beta)   "),
             "sender label missing: {rendered}"
@@ -1012,7 +1282,7 @@ mod tests {
         let dir = seed_channel(&root, &["alpha", "beta"]);
         seed_message(&dir, "20260722-013000-000001-aaa111", "beta", "hello");
         let batch = read_batch(&context, "alpha", "tax").expect("read batch");
-        let rendered = render_text(&context, "tax", "alpha", &batch);
+        let rendered = render_text(&context, "tax", "alpha", &batch, &Default::default());
         assert!(
             rendered.contains(
                 "--- beta   2026-07-22 01:30:00 -0500   20260722-013000-000001-aaa111 ---\n"

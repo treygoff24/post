@@ -32,6 +32,20 @@ pub struct ErrorDetails {
     pub room: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<BlockingRule>,
+    /// Unread channel messages that blocked a crossed send (last 10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missed: Option<Vec<MissedChannelMessage>>,
+}
+
+/// One unread channel message surfaced in a `crossed_send` bounce so the
+/// sender can revise before `--anyway`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissedChannelMessage {
+    pub id: String,
+    pub from: String,
+    pub subject: String,
+    pub sent: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,10 +64,12 @@ pub enum ErrorCode {
     DeliveredOutputFailure,
     DeliveredUnarchived,
     NotAMember,
+    /// Channel tip advanced past the sender's cursor; send was not delivered.
+    CrossedSend,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -67,6 +83,7 @@ impl ErrorCode {
         Self::DeliveredOutputFailure,
         Self::DeliveredUnarchived,
         Self::NotAMember,
+        Self::CrossedSend,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -84,6 +101,7 @@ impl ErrorCode {
             Self::DeliveredOutputFailure => "delivered_output_failure",
             Self::DeliveredUnarchived => "delivered_unarchived",
             Self::NotAMember => "not_a_member",
+            Self::CrossedSend => "crossed_send",
         }
     }
 
@@ -95,7 +113,8 @@ impl ErrorCode {
             | Self::EmptyBody
             | Self::AmbiguousId
             | Self::DuplicateWorkspace
-            | Self::NotAMember => 65,
+            | Self::NotAMember
+            | Self::CrossedSend => 65,
             Self::NotFound => 66,
             Self::BlockedRoute => 77,
             Self::ConfigInvalid => 78,
@@ -198,6 +217,11 @@ impl AppError {
 
     pub fn rule(mut self, value: BlockingRule) -> Self {
         self.details.rule = Some(value);
+        self
+    }
+
+    pub fn missed(mut self, value: Vec<MissedChannelMessage>) -> Self {
+        self.details.missed = Some(value);
         self
     }
 

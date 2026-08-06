@@ -8,6 +8,7 @@ mod error;
 mod mailbox;
 mod model;
 pub mod output;
+mod presence;
 mod profile;
 #[cfg(test)]
 mod test_support;

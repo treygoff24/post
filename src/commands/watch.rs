@@ -79,6 +79,11 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // Grows for the life of the watch (like each target's seen set): bounded
     // by total channel messages, a few bytes each — deliberate, not a leak.
     let mut emitted_channel_ids = HashSet::new();
+    // Presence heartbeat: each poll touches watch.heartbeat so `post who`
+    // can report a live watch without PIDs or process info.
+    for target in &targets {
+        crate::presence::touch_heartbeat(context, &target.room);
+    }
     if snapshot {
         // One scan, then out: the hook-facing poll. Unlike the loop below, a
         // direct-mail scan failure propagates as a real error — a lifecycle
@@ -101,6 +106,10 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         return Ok(CommandResult::success(String::new()));
     }
     loop {
+        // Presence: refresh heartbeats every poll so `post who` sees live watches.
+        for target in &targets {
+            crate::presence::touch_heartbeat(context, &target.room);
+        }
         // A doorbell that dies is silently useless: transient scan failures
         // (mailbox trashed and recreated, permission blips) degrade to an
         // empty batch and polling continues. Only stdout failure is fatal —
@@ -209,7 +218,7 @@ fn scan_batch(
             Ok(parsed) if parsed.message.from == room => {}
             Ok(parsed) => {
                 emitted_channel_ids.insert(parsed.message.id.clone());
-                batch.push(WatchEvent::channel_message(parsed.message));
+                batch.push(WatchEvent::channel_message(parsed.message, room));
             }
             // Channel messages are append-only and never moved, but a send
             // caught mid-write can momentarily fail to parse; ring anyway,
@@ -394,6 +403,8 @@ mod tests {
                 event: None,
                 display_name: None,
                 pfp: None,
+                re: None,
+                mentions: vec![],
             };
             let bytes = encode_message(&message, "body").expect("encode");
             fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)

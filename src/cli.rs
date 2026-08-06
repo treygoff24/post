@@ -48,7 +48,7 @@ pub(crate) enum Command {
     /// Join, send to, or read a shared channel (group chat).
     Chat(ChatArgs),
     /// List channels with their members.
-    Channels,
+    Channels(ChannelsArgs),
     /// List unread mail, oldest first.
     Inbox(InboxArgs),
     /// Read one unread message by full id or unique prefix.
@@ -63,6 +63,8 @@ pub(crate) enum Command {
     Doctor(DoctorArgs),
     /// Stream direct-mail and joined-channel notifications as one event per line; runs until killed (--snapshot scans once and exits).
     Watch(WatchArgs),
+    /// Report which rooms have a live watch and when they were last seen (no PIDs).
+    Who(WhoArgs),
 }
 
 #[derive(Debug, Args)]
@@ -113,16 +115,17 @@ pub(crate) struct SendArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post chat <CHANNEL>                             (read new messages)\n       \
+    override_usage = "post chat <CHANNEL>                             (read new messages; default last 25 unread)\n       \
      post chat <CHANNEL> --peek                      (read without advancing)\n       \
-     post chat <CHANNEL> --limit <N>                 (last N unread; skips + advances past the rest)\n       \
-     post chat <CHANNEL> --history <N>               (last N messages, cursor untouched)\n       \
+     post chat <CHANNEL> --limit <N>                 (last N unread; --limit 0 = all)\n       \
+     post chat <CHANNEL> --history <N> [--grep PAT]  (last N messages, cursor untouched)\n       \
      post chat <CHANNEL> --since <ID>                (messages after ID, cursor untouched)\n       \
      post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
-     post chat <CHANNEL> --join                      (join, creating on first join)\n       \
-     post chat <CHANNEL> --send [--oversize] --body <TEXT>        (send inline text)\n       \
-     post chat <CHANNEL> --send [--oversize] --body-file <PATH>   (send a file's contents)\n       \
-     post chat <CHANNEL> --send [--oversize] < BODY_FILE          (send stdin)\n\n\
+     post chat <CHANNEL> --seen-by <MSG_ID>          (which members' cursors passed MSG_ID)\n       \
+     post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n       \
+     post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body <TEXT>\n       \
+     post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body-file <PATH>\n       \
+     post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] < BODY_FILE\n\n\
      These forms are alternatives; pass exactly one. --body/--body-file imply --send."
 )]
 pub(crate) struct ChatArgs {
@@ -131,19 +134,32 @@ pub(crate) struct ChatArgs {
     pub name: String,
 
     /// Join the channel (creates it on first join); recorded in history.
-    #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject"])]
+    #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway"])]
     pub join: bool,
 
+    /// Set or update the channel description (norms carrier); with --join.
+    /// Cap 1 KiB. Any member may update.
+    #[arg(long, value_name = "TEXT", value_parser = without_controls, requires = "join")]
+    pub description: Option<String>,
+
     /// Send a message; the body comes from --body, --body-file, or stdin.
-    #[arg(long, conflicts_with_all = ["peek", "discard"])]
+    #[arg(long, conflicts_with_all = ["peek", "discard", "seen_by"])]
     pub send: bool,
+
+    /// Deliver even when unread messages sit past the sender's cursor.
+    #[arg(long, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
+    pub anyway: bool,
+
+    /// Reply to a prior message id (or unique prefix) in this channel.
+    #[arg(long = "re", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
+    pub re: Option<String>,
 
     /// Optional subject, limited to 1 KiB; only meaningful when sending.
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
     /// Inline message body text; implies --send.
-    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file", "peek", "discard"])]
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file", "peek", "discard", "seen_by"])]
     pub body: Option<String>,
 
     /// Read the message body from this UTF-8 file; implies --send.
@@ -151,12 +167,12 @@ pub(crate) struct ChatArgs {
         long = "body-file",
         value_name = "PATH",
         value_hint = clap::ValueHint::FilePath,
-        conflicts_with_all = ["file", "peek", "discard"]
+        conflicts_with_all = ["file", "peek", "discard", "seen_by"]
     )]
     pub body_file: Option<PathBuf>,
 
     /// Allow a body larger than the default 32 KiB safety limit.
-    #[arg(long, conflicts_with_all = ["join", "peek", "discard"])]
+    #[arg(long, conflicts_with_all = ["join", "peek", "discard", "seen_by"])]
     pub oversize: bool,
 
     /// Deprecated positional spelling of --body-file; requires --send.
@@ -172,21 +188,48 @@ pub(crate) struct ChatArgs {
     pub peek: bool,
 
     /// Show the last N messages regardless of read state; never advances the cursor.
-    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file"])]
+    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file", "seen_by", "anyway", "re"])]
     pub history: Option<usize>,
 
+    /// Filter --history by case-insensitive regex (requires --history).
+    #[arg(long, value_name = "PATTERN", requires = "history", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file", "seen_by", "anyway", "re", "limit", "since"])]
+    pub grep: Option<String>,
+
     /// Only messages with id strictly after this id (ignores the cursor); never advances the cursor.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file"], value_parser = nonempty_without_controls)]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"], value_parser = nonempty_without_controls)]
     pub since: Option<String>,
 
     /// Advance the cursor past every unread message without printing them.
-    #[arg(long, conflicts_with_all = ["peek", "send", "join"])]
+    #[arg(long, conflicts_with_all = ["peek", "send", "join", "seen_by"])]
     pub discard: bool,
 
-    /// Bounded catch-up: show only the last N unread messages, report how many
-    /// older ones were skipped, and advance the cursor past the whole batch.
-    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file"])]
+    /// Bounded catch-up: show only the last N unread (default 25 when omitted).
+    /// `--limit 0` means unlimited. Mentions of the reading room in the
+    /// skipped range are never silently dropped.
+    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"])]
     pub limit: Option<usize>,
+
+    /// List member rooms whose cursors have advanced past this message (read-only).
+    #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
+    pub seen_by: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ChannelsArgs {
+    /// Emit human-readable text instead of the default JSON.
+    #[arg(long, conflicts_with = "json")]
+    pub text: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WhoArgs {
+    /// Restrict to these rooms; omit for every registered room.
+    #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
+    pub room: Vec<String>,
+
+    /// Emit human-readable text instead of the default JSON.
+    #[arg(long, conflicts_with = "json")]
+    pub text: bool,
 }
 
 #[derive(Debug, Args)]

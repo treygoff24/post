@@ -137,6 +137,9 @@ pub struct ChannelListItem {
     pub name: String,
     pub created: String,
     pub created_by: String,
+    /// Norms carrier; absent when unset (pre-description stores and clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub members: Vec<String>,
     pub messages: usize,
 }
@@ -145,6 +148,31 @@ pub struct ChannelListItem {
 pub struct ChannelsOutput {
     pub ok: bool,
     pub channels: Vec<ChannelListItem>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WhoRoom {
+    pub room: String,
+    pub live_watch: bool,
+    /// Unix-seconds stamp from the room's watch.heartbeat, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WhoOutput {
+    pub ok: bool,
+    pub rooms: Vec<WhoRoom>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SeenByOutput {
+    pub ok: bool,
+    pub channel: String,
+    pub message_id: String,
+    pub seen_by: Vec<String>,
     pub count: usize,
 }
 
@@ -195,6 +223,8 @@ pub enum WatchEvent {
         room: String,
         #[serde(flatten)]
         item: InboxItem,
+        /// Always `"mail"` for direct-mail doorbell events.
+        reason: WatchReason,
     },
     /// A delivery whose envelope failed to parse: the doorbell still rings,
     /// but nothing from the file is echoed except its filename-derived id.
@@ -212,12 +242,34 @@ pub enum WatchEvent {
         sent: String,
         /// Sender profile as stamped at send time (W2 contract extension);
         /// keys absent when the sender had no profile, keeping the
-        /// pre-profile NDJSON byte-identical.
+        /// pre-profile NDJSON byte-identical when reason is channel and no
+        /// profile — reason is always present from v0.4.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pfp: Option<String>,
+        /// `"mention"` when the watching room is @mentioned in the body;
+        /// otherwise `"channel"`.
+        reason: WatchReason,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchReason {
+    Mail,
+    Channel,
+    Mention,
+}
+
+impl WatchReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mail => "mail",
+            Self::Channel => "channel",
+            Self::Mention => "mention",
+        }
+    }
 }
 
 impl WatchEvent {
@@ -225,6 +277,7 @@ impl WatchEvent {
         Self::Mail {
             room: room.to_owned(),
             item,
+            reason: WatchReason::Mail,
         }
     }
 
@@ -235,9 +288,15 @@ impl WatchEvent {
         }
     }
 
-    pub(crate) fn channel_message(message: crate::model::ChannelMessage) -> Self {
-        // Drop `event` (join marker) and `kind` (none exists): the watch
-        // shape is exactly {channel,id,from,subject,sent} per contract item 7.
+    pub(crate) fn channel_message(
+        message: crate::model::ChannelMessage,
+        watching_room: &str,
+    ) -> Self {
+        let reason = if message.mentions.iter().any(|m| m == watching_room) {
+            WatchReason::Mention
+        } else {
+            WatchReason::Channel
+        };
         let crate::model::ChannelMessage {
             id,
             from,
@@ -247,6 +306,8 @@ impl WatchEvent {
             event: _,
             display_name,
             pfp,
+            re: _,
+            mentions: _,
         } = message;
         Self::ChannelMessage {
             channel,
@@ -256,6 +317,7 @@ impl WatchEvent {
             sent,
             display_name,
             pfp,
+            reason,
         }
     }
 
@@ -292,6 +354,7 @@ impl WatchEvent {
                 subject,
                 display_name,
                 pfp,
+                reason,
                 ..
             } => {
                 let subject = if subject.is_empty() {
@@ -299,11 +362,13 @@ impl WatchEvent {
                 } else {
                     format!("  {subject:?}")
                 };
-                // Sender keeps its debug-quote discipline; the stamped
-                // profile renders sanitized ahead of it. Absent profile is
-                // byte-identical to the pre-profile line.
                 let sender = sender_label_quoted(from, display_name.as_deref(), pfp.as_deref());
-                format!("{id}  #{channel} from {sender}{subject}\n")
+                let mention = if *reason == WatchReason::Mention {
+                    "@ "
+                } else {
+                    ""
+                };
+                format!("{id}  {mention}#{channel} from {sender}{subject}\n")
             }
         }
     }
@@ -403,6 +468,7 @@ pub struct OutputShapes {
     pub channels: Vec<String>,
     pub profile: Vec<String>,
     pub watch: Vec<String>,
+    pub who: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -584,6 +650,7 @@ mod tests {
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             display_name: display_name.map(str::to_owned),
             pfp: pfp.map(str::to_owned),
+            reason: WatchReason::Channel,
         }
     }
 

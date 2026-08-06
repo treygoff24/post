@@ -56,6 +56,10 @@ pub struct ChannelInfo {
     pub name: String,
     pub created: String,
     pub created_by: String,
+    /// Norms carrier for the channel; any member may update via
+    /// `--join --description`. Cap 1 KiB. Absent on pre-description stores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug)]
@@ -179,14 +183,26 @@ pub(crate) struct JoinOutcome {
     pub event_id: Option<String>,
 }
 
-pub(crate) fn join(context: &Context, channel: &str) -> AppResult<JoinOutcome> {
+pub(crate) fn join(
+    context: &Context,
+    channel: &str,
+    description: Option<&str>,
+) -> AppResult<JoinOutcome> {
     let rooms = context.load_rooms()?;
     let room = acting_room(context, &rooms)?;
     let paths = ChannelPaths::new(context, channel)?;
     let _lock = lock_channels(context)?;
 
+    if let Some(description) = description {
+        validate_description(description)?;
+    }
+
     let mut members = paths.load_members()?;
     if members.contains_key(&room) {
+        // Already a member: --description still updates the norms carrier.
+        if let Some(description) = description {
+            write_description(&paths, description)?;
+        }
         return Ok(JoinOutcome {
             room,
             channel_created: false,
@@ -225,23 +241,20 @@ pub(crate) fn join(context: &Context, channel: &str) -> AppResult<JoinOutcome> {
 
     let (_, sent) = local_timestamp_micros()?;
     let channel_created = if paths.exists() {
+        if let Some(description) = description {
+            write_description(&paths, description)?;
+        }
         false
     } else {
         let info = ChannelInfo {
             name: channel.to_owned(),
             created: sent.clone(),
             created_by: room.clone(),
+            description: description
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
         };
-        let mut bytes = serde_json::to_vec_pretty(&info).map_err(|error| {
-            AppError::io(
-                "serialize channel info",
-                &paths.channel_json,
-                std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-            )
-        })?;
-        bytes.push(b'\n');
-        atomic_replace(&paths.channel_json, &bytes)
-            .map_err(|error| AppError::io("write channel info", &paths.channel_json, error))?;
+        write_channel_info(&paths, &info)?;
         true
     };
 
@@ -252,11 +265,15 @@ pub(crate) fn join(context: &Context, channel: &str) -> AppResult<JoinOutcome> {
     let event_id = write_message(
         context,
         &paths,
-        &room,
-        channel,
-        "",
-        &format!("=== {room} joined ==="),
-        Some(JOIN_EVENT),
+        WriteMessage {
+            room: &room,
+            channel,
+            subject: "",
+            body: &format!("=== {room} joined ==="),
+            event: Some(JOIN_EVENT),
+            re: None,
+            mentions: Vec::new(),
+        },
     )?;
     members.insert(room.clone(), sent);
     let mut bytes = serde_json::to_vec_pretty(&members).map_err(|error| {
@@ -278,11 +295,60 @@ pub(crate) fn join(context: &Context, channel: &str) -> AppResult<JoinOutcome> {
     })
 }
 
+const MAX_DESCRIPTION_BYTES: usize = 1024;
+
+pub(crate) fn validate_description(description: &str) -> AppResult<()> {
+    if description.len() <= MAX_DESCRIPTION_BYTES {
+        return Ok(());
+    }
+    Err(AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "channel description is {} bytes; the maximum is {MAX_DESCRIPTION_BYTES} bytes",
+            description.len()
+        ),
+        "Keep --description at or below 1024 bytes (same cap as subjects).",
+    )
+    .input("--description")
+    .reason(format!(
+        "description exceeds {MAX_DESCRIPTION_BYTES}-byte safety limit"
+    )))
+}
+
+fn write_channel_info(paths: &ChannelPaths, info: &ChannelInfo) -> AppResult<()> {
+    let mut bytes = serde_json::to_vec_pretty(info).map_err(|error| {
+        AppError::io(
+            "serialize channel info",
+            &paths.channel_json,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        )
+    })?;
+    bytes.push(b'\n');
+    atomic_replace(&paths.channel_json, &bytes)
+        .map_err(|error| AppError::io("write channel info", &paths.channel_json, error))
+}
+
+fn write_description(paths: &ChannelPaths, description: &str) -> AppResult<()> {
+    let mut info = paths.load_info()?;
+    info.description = if description.is_empty() {
+        None
+    } else {
+        Some(description.to_owned())
+    };
+    write_channel_info(paths, &info)
+}
+
+pub(crate) struct SendOptions<'a> {
+    pub subject: &'a str,
+    pub body: &'a str,
+    pub anyway: bool,
+    pub re: Option<&'a str>,
+}
+
 pub(crate) fn send(
     context: &Context,
     channel: &str,
-    subject: &str,
-    body: &str,
+    options: SendOptions<'_>,
 ) -> AppResult<ChannelMessage> {
     let rooms = context.load_rooms()?;
     let room = acting_room(context, &rooms)?;
@@ -306,7 +372,7 @@ pub(crate) fn send(
         .input(room)
         .reason("sender is absent from members.json"));
     }
-    if body.trim().is_empty() {
+    if options.body.trim().is_empty() {
         return Err(AppError::new(
             ErrorCode::EmptyBody,
             "message body is empty after trimming whitespace",
@@ -315,9 +381,155 @@ pub(crate) fn send(
         .input("message body")
         .reason("empty or whitespace-only"));
     }
-    let id = write_message(context, &paths, &room, channel, subject, body, None)?;
+
+    // Crossed-send bounce: humans see incoming while typing; agents get the
+    // equivalent at the send point. Check-then-append has a TOCTOU window
+    // (another room can land a message between check and exclusive create);
+    // that occasional slip is accepted. Corrupting the store is not.
+    if !options.anyway {
+        if let Some(error) = crossed_send_bounce(context, &paths, channel, &room)? {
+            return Err(error);
+        }
+    }
+
+    let re = match options.re {
+        Some(prefix) => Some(resolve_message_id(&paths, prefix)?),
+        None => None,
+    };
+    let mentions = extract_mentions(options.body, &rooms);
+    let id = write_message(
+        context,
+        &paths,
+        WriteMessage {
+            room: &room,
+            channel,
+            subject: options.subject,
+            body: options.body,
+            event: None,
+            re,
+            mentions,
+        },
+    )?;
     let file = paths.messages.join(format!("{id}.msg"));
     Ok(parse_channel_message(&file)?.message)
+}
+
+/// Unread messages from other rooms past the sender's cursor. Empty = clear
+/// to send. Bounded to the last 10 for the bounce payload.
+fn crossed_send_bounce(
+    context: &Context,
+    paths: &ChannelPaths,
+    channel: &str,
+    room: &str,
+) -> AppResult<Option<AppError>> {
+    use crate::channel_state::ChannelState;
+    use crate::error::MissedChannelMessage;
+
+    let state = ChannelState::load(context, room)?;
+    let cursor = state.cursor(channel);
+    let mut missed = Vec::new();
+    for path in message_files(&paths.messages)? {
+        let parsed = match parse_channel_message(&path) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let unread = cursor.is_none_or(|last| parsed.message.id.as_str() > last);
+        // System events (join/profile) are not conversation the sender needs
+        // to revise against; bounce only on ordinary messages from others.
+        if !unread || parsed.message.from == room || parsed.message.event.is_some() {
+            continue;
+        }
+        missed.push(MissedChannelMessage {
+            id: parsed.message.id,
+            from: parsed.message.from,
+            subject: parsed.message.subject,
+            sent: parsed.message.sent,
+            body: parsed.body,
+        });
+    }
+    if missed.is_empty() {
+        return Ok(None);
+    }
+    let total = missed.len();
+    if missed.len() > 10 {
+        missed = missed.split_off(missed.len() - 10);
+    }
+    let fix = format!("post chat {channel} --send --anyway --body '<revised text>'");
+    Ok(Some(
+        AppError::new(
+            ErrorCode::CrossedSend,
+            format!(
+                "channel '{channel}' has {total} unread message(s) past your cursor; send was not delivered (showing the last {})",
+                missed.len()
+            ),
+            format!(
+                "Read the missed messages, revise, then retry with `--anyway` to deliver regardless: `{fix}`."
+            ),
+        )
+        .exact_fix(fix)
+        .input(channel)
+        .reason("channel tip advanced past sender cursor")
+        .missed(missed),
+    ))
+}
+
+/// Resolve a full id or unique prefix within this channel's messages/.
+pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResult<String> {
+    let mut matches = Vec::new();
+    for path in message_files(&paths.messages)? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if id == prefix || id.starts_with(prefix) {
+            matches.push(id.to_owned());
+        }
+    }
+    match matches.len() {
+        0 => Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("no message in channel matching id/prefix '{prefix}'"),
+            "Pass a full message id or a unique prefix from `post chat <channel> --history`.",
+        )
+        .input(prefix)
+        .reason("no matching message id")),
+        1 => Ok(matches.pop().expect("len 1")),
+        _ => {
+            matches.sort();
+            Err(AppError::new(
+                ErrorCode::AmbiguousId,
+                format!(
+                    "message id/prefix '{prefix}' matches {} messages",
+                    matches.len()
+                ),
+                "Pass a longer unique prefix.",
+            )
+            .input(prefix)
+            .matches(matches)
+            .reason("ambiguous message id prefix"))
+        }
+    }
+}
+
+/// Word-boundary `@<room>` matches against registered room names. Longer
+/// names win first so `@claude-space` is not eaten by a hypothetical
+/// `@claude`. Matching is case-sensitive to the registered spelling.
+pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut names: Vec<&String> = rooms.keys().collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    let mut found = BTreeSet::new();
+    for name in names {
+        let Ok(re) = regex::Regex::new(&format!(
+            r"(^|[^A-Za-z0-9_-])@{}($|[^A-Za-z0-9_-])",
+            regex::escape(name)
+        )) else {
+            continue;
+        };
+        if re.is_match(body) {
+            found.insert(name.clone());
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// System-line writer for non-join events (currently profile changes).
@@ -330,7 +542,29 @@ pub(crate) fn write_event(
     body: &str,
     event: &str,
 ) -> AppResult<String> {
-    write_message(context, paths, room, channel, "", body, Some(event))
+    write_message(
+        context,
+        paths,
+        WriteMessage {
+            room,
+            channel,
+            subject: "",
+            body,
+            event: Some(event),
+            re: None,
+            mentions: Vec::new(),
+        },
+    )
+}
+
+struct WriteMessage<'a> {
+    room: &'a str,
+    channel: &'a str,
+    subject: &'a str,
+    body: &'a str,
+    event: Option<&'a str>,
+    re: Option<String>,
+    mentions: Vec<String>,
 }
 
 /// Writes one message with a fresh microsecond-resolution id, retrying on
@@ -338,33 +572,31 @@ pub(crate) fn write_event(
 fn write_message(
     context: &Context,
     paths: &ChannelPaths,
-    room: &str,
-    channel: &str,
-    subject: &str,
-    body: &str,
-    event: Option<&str>,
+    opts: WriteMessage<'_>,
 ) -> AppResult<String> {
     // Send-time stamping: history renders names as they were when the
     // message was sent; renames never rewrite the transcript. Registry
     // values are re-validated at stamp time so a hand-edited profiles.json
     // is inert as an injection path.
     let rooms = context.load_rooms()?;
-    let profile = crate::profile::stamp_for(context, room, &rooms);
+    let profile = crate::profile::stamp_for(context, opts.room, &rooms);
     for attempt in 0..256 {
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
         let message = ChannelMessage {
             id: id.clone(),
-            from: room.to_owned(),
-            channel: channel.to_owned(),
-            subject: subject.to_owned(),
+            from: opts.room.to_owned(),
+            channel: opts.channel.to_owned(),
+            subject: opts.subject.to_owned(),
             sent,
-            event: event.map(str::to_owned),
+            event: opts.event.map(str::to_owned),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
+            re: opts.re.clone(),
+            mentions: opts.mentions.clone(),
         };
         validate_channel_message(Path::new("<generated message>"), &message)?;
-        let payload = encode_message(&message, body)?;
+        let payload = encode_message(&message, opts.body)?;
         let path = paths.messages.join(format!("{id}.msg"));
         match exclusive_atomic_write(&path, &payload) {
             Ok(()) => return Ok(id),
@@ -500,6 +732,7 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
     for (field, value) in [
         ("display_name", &message.display_name),
         ("pfp", &message.pfp),
+        ("re", &message.re),
     ] {
         if let Some(value) = value {
             if value.chars().any(crate::mailbox::refused_profile_char) {
@@ -510,6 +743,19 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
                     ),
                 ));
             }
+        }
+    }
+    for mention in &message.mentions {
+        if mention.chars().any(crate::mailbox::refused_profile_char)
+            || validate_room_name(mention).is_err()
+        {
+            return Err(AppError::config(
+                path,
+                format!(
+                    "channel message mentions entry '{}' is not a valid room name",
+                    mention.escape_debug()
+                ),
+            ));
         }
     }
     Ok(())
@@ -623,6 +869,8 @@ mod tests {
             event: None,
             display_name: None,
             pfp: None,
+            re: None,
+            mentions: vec![],
         };
         validate_channel_message(Path::new("<test>"), &message).expect("valid id shape");
         trash_test_root(&root);
@@ -641,6 +889,8 @@ mod tests {
             event: None,
             display_name: None,
             pfp: None,
+            re: None,
+            mentions: vec![],
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("control characters in channel must be refused");
@@ -658,6 +908,8 @@ mod tests {
             event: None,
             display_name: None,
             pfp: None,
+            re: None,
+            mentions: vec![],
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("second-resolution ids must be refused");
@@ -677,11 +929,15 @@ mod tests {
         let event_id = write_message(
             &context,
             &paths,
-            "alpha",
-            "tax",
-            "",
-            "=== alpha joined ===",
-            Some(JOIN_EVENT),
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "",
+                body: "=== alpha joined ===",
+                event: Some(JOIN_EVENT),
+                re: None,
+                mentions: Vec::new(),
+            },
         )
         .expect("join event");
         let mut members = MemberMap::new();
@@ -692,11 +948,15 @@ mod tests {
         let message_id = write_message(
             &context,
             &paths,
-            "alpha",
-            "tax",
-            "hello",
-            "first message",
-            None,
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "hello",
+                body: "first message",
+                event: None,
+                re: None,
+                mentions: Vec::new(),
+            },
         )
         .expect("send");
         assert!(
@@ -728,7 +988,20 @@ mod tests {
         let paths = ChannelPaths::new(&context, "tax").expect("paths");
         fs::create_dir_all(&paths.messages).expect("messages dir");
 
-        let first = write_message(&context, &paths, "alpha", "tax", "", "hi", None).expect("send");
+        let first = write_message(
+            &context,
+            &paths,
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "",
+                body: "hi",
+                event: None,
+                re: None,
+                mentions: Vec::new(),
+            },
+        )
+        .expect("send");
         // Rename after the first send; the stored first message must keep
         // the old name (history renders as-sent).
         fs::write(
@@ -736,7 +1009,20 @@ mod tests {
             r#"{"alpha": {"name": "Coldwell", "pfp": "🏮"}}"#,
         )
         .expect("rename");
-        let second = write_message(&context, &paths, "alpha", "tax", "", "yo", None).expect("send");
+        let second = write_message(
+            &context,
+            &paths,
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "",
+                body: "yo",
+                event: None,
+                re: None,
+                mentions: Vec::new(),
+            },
+        )
+        .expect("send");
 
         let parse = |id: &str| {
             parse_channel_message(&paths.messages.join(format!("{id}.msg"))).expect("parse")
@@ -787,10 +1073,24 @@ mod tests {
             name: "tax".to_owned(),
             created: "2026-07-22 01:00:00 -0500".to_owned(),
             created_by: "alpha".to_owned(),
+            description: None,
         };
         let bytes = serde_json::to_vec_pretty(&info).expect("info json");
         atomic_replace(&paths.channel_json, &bytes).expect("info write");
-        write_message(&context, &paths, "alpha", "tax", "", "hi", None).expect("send");
+        write_message(
+            &context,
+            &paths,
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "",
+                body: "hi",
+                event: None,
+                re: None,
+                mentions: Vec::new(),
+            },
+        )
+        .expect("send");
         // A stray directory without channel.json must not break the listing.
         fs::create_dir_all(root.join(CHANNELS_DIR).join("not-a-channel")).expect("stray");
 

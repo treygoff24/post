@@ -12,15 +12,15 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "chat",
-            "post chat <channel> [--peek | --discard | --limit <n> | --history <n> | --since <id>] | post chat <channel> --join | post chat <channel> --send [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
+            "post chat <channel> [--peek | --discard | --limit <n> | --history <n> [--grep <pat>] | --since <id> | --seen-by <id>] | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, and requires --oversize above 32 KiB; a plain read advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --limit <n> is a bounded catch-up read: it shows only the newest n unread, reports the skipped-older count, and advances the cursor past the whole batch (with --peek it bounds display only and never advances; --limit 0 is refused); a cursor-advancing read into /dev/null is refused; --history <n> shows the last n messages and --since <id> shows messages after id — both ignore the cursor entirely, never advance it, and are safe to pipe; the full framing banner renders once per room per day (one-line reminder otherwise); messages from the trey room tagged [signed:TS] are verified against the detached signature in ~/.trey-room/sigs/ and render a one-line VERIFIED/FAILED badge (signed_verified in JSON)",
+            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; messages from the trey room tagged [signed:TS] are verified against ~/.trey-room/sigs/",
         ),
         command(
             "channels",
-            "post channels",
-            "JSON",
-            "read-only listing of channels, members, and message counts",
+            "post channels [--text]",
+            "JSON; text with --text",
+            "read-only listing of channels, members, message counts, and descriptions",
         ),
         command(
             "inbox",
@@ -62,7 +62,13 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "watch",
             "post watch [--room <name>]... [--once | --snapshot] [--interval-ms <ms>] [--text]",
             "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
-            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
+            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; each poll touches <room>/watch.heartbeat for presence; events carry reason mail|channel|mention; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
+        ),
+        command(
+            "who",
+            "post who [--room <name>]... [--text]",
+            "JSON; text with --text",
+            "read-only presence: for each registered room, whether a watch heartbeat is live and the last-seen stamp; never reports PIDs or process info",
         ),
     ];
     let output_shapes = OutputShapes {
@@ -109,10 +115,21 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ]),
         chat_send: fields(&["ok", "message"]),
         chat_read: fields(&[
-            "ok", "framing", "channel", "room", "peek", "messages", "count",
+            "ok",
+            "framing",
+            "channel",
+            "room",
+            "peek",
+            "messages",
+            "count",
+            "skipped (omitted when 0)",
         ]),
         chat_discard: fields(&["ok", "channel", "room", "discarded", "cursor"]),
-        channels: fields(&["ok", "channels", "count"]),
+        channels: fields(&[
+            "ok",
+            "channels (name, created, created_by, description?, members, messages)",
+            "count",
+        ]),
         profile: fields(&[
             "ok",
             "room",
@@ -120,10 +137,11 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "announced (set/clear; channels that received the change event)",
         ]),
         watch: fields(&[
-            "mail: event, room, id, from, kind, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
+            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
             "unreadable: event, room, id",
-            "channel_message: event, channel, id, from, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
+            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp]",
         ]),
+        who: fields(&["ok", "rooms (room, live_watch, last_seen?)", "count"]),
     };
     let errors = ErrorCode::ALL
         .iter()
@@ -138,9 +156,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
         global_flags: fields(&[
-            "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/profile/schema/doctor are already JSON",
+            "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/profile/schema/doctor/who are already JSON",
             "--pretty: pretty-print JSON",
-            "--room <name>: command option for inbox/read/watch only; repeat on watch to merge rooms; chat and channels derive identity from cwd and reject --room",
+            "--room <name>: command option for inbox/read/watch/who only; repeat on watch/who to select rooms; chat and channels derive identity from cwd and reject --room",
         ]),
         commands,
         output_shapes,
@@ -187,6 +205,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Already-read mail stays retrievable by id or prefix from the read store and from archive copies addressed to that room; re-reading consumes nothing and reports already_read.",
             "A channel read never advances the cursor into /dev/null; skipping unread messages requires --discard.",
             "Whenever error.details.exact_fix is present, it is a complete command that runs verbatim; oversize body errors deliberately name --oversize without echoing the rejected payload into an exact fix.",
+            "Plain channel reads default to the newest 25 unread; --limit 0 shows all; @mentions of the reader in a skipped range are never silently dropped.",
+            "Channel sends bounce with crossed_send when unread messages from others sit past the sender cursor; --anyway delivers regardless. Direct mail is unaffected.",
+            "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override; intended for tests",
