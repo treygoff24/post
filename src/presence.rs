@@ -10,7 +10,7 @@ use crate::error::{AppError, AppResult};
 use crate::mailbox::Context;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,16 +42,19 @@ pub(crate) fn touch_heartbeat(context: &Context, room: &str, interval_ms: u64) {
     let _ = write_heartbeat_nofollow(&path, payload.as_bytes());
 }
 
-/// Open/create `path` without following symlinks, require a regular file,
-/// write as mode 0600. Returns Err on symlink (ELOOP) or other failure.
+/// Open/create `path` without following symlinks, require a solitary regular
+/// file, write as mode 0600. Existing paths are opened without truncate so a
+/// hard-linked victim cannot be clobbered before the nlink check; O_NONBLOCK
+/// keeps FIFOs from hanging the watch poll. Returns Err on symlink (ELOOP),
+/// hard link, non-regular file, or other failure.
 fn write_heartbeat_nofollow(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     match OpenOptions::new()
         .write(true)
-        .truncate(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
     {
         Ok(mut file) => {
+            // fstat the open fd before any mutation — never trust path metadata.
             let metadata = file.metadata()?;
             if !metadata.file_type().is_file() {
                 return Err(std::io::Error::new(
@@ -59,6 +62,13 @@ fn write_heartbeat_nofollow(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
                     "heartbeat path is not a regular file",
                 ));
             }
+            if metadata.nlink() != 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "heartbeat path has unexpected link count",
+                ));
+            }
+            file.set_len(0)?;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
             file.write_all(bytes)?;
             return file.sync_all();
@@ -70,7 +80,7 @@ fn write_heartbeat_nofollow(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
@@ -142,7 +152,7 @@ fn format_unix(secs: u64) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{test_root, trash_test_root};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[test]
     fn missing_heartbeat_is_not_live() {
@@ -249,6 +259,60 @@ mod tests {
         touch_heartbeat(&context, "alpha", 1000);
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn heartbeat_write_does_not_clobber_through_hard_link() {
+        let root = test_root("presence-hardlink");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let room = root.join("alpha");
+        std::fs::create_dir_all(&room).expect("room");
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, b"SAFE\n").expect("victim");
+        let hb = room.join("watch.heartbeat");
+        std::fs::hard_link(&victim, &hb).expect("plant hard link");
+        assert_eq!(
+            std::fs::metadata(&hb).expect("meta").nlink(),
+            2,
+            "fixture must be a hard link"
+        );
+        touch_heartbeat(&context, "alpha", 1000);
+        let contents = std::fs::read_to_string(&victim).expect("read victim");
+        assert_eq!(contents, "SAFE\n", "must not truncate/write through hard link");
+        let mode = std::fs::metadata(&victim).expect("victim meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "must not chmod the hard-linked victim");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn heartbeat_write_does_not_hang_or_write_fifo() {
+        let root = test_root("presence-fifo");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let room = root.join("alpha");
+        std::fs::create_dir_all(&room).expect("room");
+        let hb = room.join("watch.heartbeat");
+        let c_path = std::ffi::CString::new(hb.as_os_str().as_encoded_bytes()).expect("c path");
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        // Must return promptly (O_NONBLOCK) and leave the FIFO untouched.
+        let started = std::time::Instant::now();
+        touch_heartbeat(&context, "alpha", 1000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "FIFO open must not block the watch poll"
+        );
+        let meta = std::fs::metadata(&hb).expect("fifo meta");
+        assert!(
+            !meta.file_type().is_file(),
+            "FIFO must remain a non-regular node"
+        );
         trash_test_root(&root);
     }
 }
