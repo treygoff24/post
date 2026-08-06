@@ -112,9 +112,9 @@ where
 
     // Send-time stamping: profiles are presentation only; identity stays
     // `sender`. Absent profile leaves both fields off the envelope.
-    let profile = crate::profile::load_profiles(context)?
-        .remove(&sender)
-        .unwrap_or_default();
+    // Registry values are re-validated and free-form (unregistered) senders
+    // never stamp — profiles are a per-room contract.
+    let profile = crate::profile::stamp_for(context, &sender, &rooms);
     let (id_timestamp, sent) = local_timestamp()?;
     let archive = context.root.join("archive");
     let mut inbox = None;

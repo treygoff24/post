@@ -82,6 +82,22 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_rules(&rules_path, rooms.as_ref(), &mut checks);
     detect_dir(&context.root.join("archive"), "dir.archive", &mut checks);
 
+    // profiles.json is optional, but when present it must parse: sends
+    // consult it while stamping, so a malformed registry breaks delivery.
+    let profiles_path = context.root.join(crate::profile::PROFILES_FILE);
+    if profiles_path.exists() {
+        if let Err(error) = crate::profile::load_profiles(context) {
+            checks.push(check(
+                "profiles.invalid",
+                DoctorSeverity::Error,
+                &profiles_path,
+                &format!("profile registry cannot be loaded: {}", error.message),
+                false,
+                "Fix or delete profiles.json by hand; `post profile set` will recreate it.",
+            ));
+        }
+    }
+
     if let Some(rooms) = rooms {
         for (name, path) in rooms {
             match context.expand_room_path(&path) {

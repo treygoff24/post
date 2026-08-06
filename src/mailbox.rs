@@ -19,8 +19,34 @@ pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{}
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ROOMS_LOCK_FILE: &str = ".rooms.lock";
-const RESERVED_ROOM_NAMES: [&str; 5] =
-    ["*", "archive", "rooms.json", "rules.json", ROOMS_LOCK_FILE];
+const RESERVED_ROOM_NAMES: [&str; 6] = [
+    "*",
+    "archive",
+    "rooms.json",
+    "rules.json",
+    "profiles.json",
+    ROOMS_LOCK_FILE,
+];
+
+/// One refusal predicate for every profile-text enforcement point (both
+/// validators, both parse-time checks, and text sanitization) so the layers
+/// can never drift apart again: Cc controls, the bidi/direction controls
+/// (Cf, invisible to `is_control`), and the Zl/Zp line/paragraph separators
+/// that line-oriented consumers split on. ZWJ (U+200D) and VS16 (U+FE0F)
+/// deliberately stay legal — emoji need them.
+pub(crate) fn refused_profile_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{061C}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Context {
@@ -415,10 +441,12 @@ pub(crate) fn validate_envelope(path: &Path, envelope: &Envelope) -> AppResult<(
         ("pfp", &envelope.pfp),
     ] {
         if let Some(value) = value {
-            if value.chars().any(char::is_control) {
+            if value.chars().any(refused_profile_char) {
                 return Err(AppError::config(
                     path,
-                    format!("mail envelope field '{field}' contains control characters"),
+                    format!(
+                        "mail envelope field '{field}' contains control, bidi, or line-separator characters"
+                    ),
                 ));
             }
         }

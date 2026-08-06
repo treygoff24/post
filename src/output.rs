@@ -536,7 +536,9 @@ pub(crate) fn sender_label(from: &str, display_name: Option<&str>, pfp: Option<&
 pub(crate) fn sanitize_text_header(value: &str) -> String {
     value
         .chars()
-        .filter(|character| !character.is_control() || *character == '\t')
+        .filter(|character| {
+            (!crate::mailbox::refused_profile_char(*character)) || *character == '\t'
+        })
         .collect()
 }
 

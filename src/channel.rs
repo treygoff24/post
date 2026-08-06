@@ -345,10 +345,11 @@ fn write_message(
     event: Option<&str>,
 ) -> AppResult<String> {
     // Send-time stamping: history renders names as they were when the
-    // message was sent; renames never rewrite the transcript.
-    let profile = crate::profile::load_profiles(context)?
-        .remove(room)
-        .unwrap_or_default();
+    // message was sent; renames never rewrite the transcript. Registry
+    // values are re-validated at stamp time so a hand-edited profiles.json
+    // is inert as an injection path.
+    let rooms = context.load_rooms()?;
+    let profile = crate::profile::stamp_for(context, room, &rooms);
     for attempt in 0..256 {
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
@@ -501,10 +502,12 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
         ("pfp", &message.pfp),
     ] {
         if let Some(value) = value {
-            if value.chars().any(char::is_control) {
+            if value.chars().any(crate::mailbox::refused_profile_char) {
                 return Err(AppError::config(
                     path,
-                    format!("channel message field '{field}' contains control characters"),
+                    format!(
+                        "channel message field '{field}' contains control, bidi, or line-separator characters"
+                    ),
                 ));
             }
         }

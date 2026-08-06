@@ -13,14 +13,7 @@ use std::fs;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Bidi control characters (Cf, so `char::is_control` misses them): an RLO
-/// in a display name could visually reorder the rendered line and flip how
-/// the load-bearing (room-id) suffix reads. Refused in names and pfps.
-/// ZWJ (U+200D) and VS16 (U+FE0F) stay legal — emoji need them.
-const BIDI_CONTROLS: [char; 11] = [
-    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}',
-    '\u{2069}', '\u{200E}', '\u{200F}',
-];
+use crate::mailbox::refused_profile_char;
 
 pub(crate) const PROFILES_FILE: &str = "profiles.json";
 pub(crate) const MAX_NAME_CHARS: usize = 32;
@@ -77,17 +70,12 @@ pub(crate) fn validate_display_name(name: &str, own_room: &str, rooms: &RoomMap)
     if trimmed.is_empty() {
         return Err(invalid("display name is empty", name));
     }
-    if name.chars().any(char::is_control) {
-        // A newline here could forge a whole message block in rendered
-        // chat/watch output; refuse every control character outright.
-        return Err(invalid("display name contains control characters", name));
-    }
-    if name
-        .chars()
-        .any(|c| BIDI_CONTROLS.contains(&c) || c == '\u{2028}' || c == '\u{2029}')
-    {
+    // One shared predicate with the parse-time checks and the renderer's
+    // sanitizer: a newline or bidi control here could forge rendered lines
+    // or visually reorder the load-bearing (room-id) suffix.
+    if name.chars().any(refused_profile_char) {
         return Err(invalid(
-            "display name contains bidi controls or line/paragraph separators",
+            "display name contains control, bidi, or line-separator characters",
             name,
         ));
     }
@@ -128,11 +116,11 @@ pub(crate) fn validate_pfp(pfp: &str, own_room: &str, profiles: &ProfileMap) -> 
             pfp,
         ));
     }
-    if pfp.chars().any(char::is_control) {
-        return Err(invalid("pfp contains control characters", pfp));
-    }
-    if pfp.chars().any(|c| BIDI_CONTROLS.contains(&c)) {
-        return Err(invalid("pfp contains bidi controls", pfp));
+    if pfp.chars().any(refused_profile_char) {
+        return Err(invalid(
+            "pfp contains control, bidi, or line-separator characters",
+            pfp,
+        ));
     }
     if pfp.is_ascii() {
         return Err(invalid("pfp must be an emoji, not ASCII", pfp));
@@ -146,6 +134,36 @@ pub(crate) fn validate_pfp(pfp: &str, own_room: &str, profiles: &ProfileMap) -> 
         }
     }
     Ok(())
+}
+
+/// Resolve the profile to stamp for `room` at send time, re-validating the
+/// registry values: a hand-edited profiles.json must be inert as an
+/// injection or imitation path, so invalid fields are dropped (never
+/// stamped) rather than trusted because they are on disk. Unregistered
+/// senders (free-form --from names) get no profile at all — profiles are a
+/// per-room contract. Cross-room pfp uniqueness is deliberately not
+/// re-checked here: a duplicated sigil is cosmetic, not an injection.
+pub(crate) fn stamp_for(context: &Context, room: &str, rooms: &RoomMap) -> Profile {
+    if !rooms.contains_key(room) {
+        return Profile::default();
+    }
+    let Ok(mut profiles) = load_profiles(context) else {
+        return Profile::default();
+    };
+    let mut profile = profiles.remove(room).unwrap_or_default();
+    if let Some(name) = &profile.name {
+        if validate_display_name(name, room, rooms).is_err() {
+            profile.name = None;
+        }
+    }
+    if let Some(pfp) = &profile.pfp {
+        let mut graphemes = pfp.graphemes(true);
+        let single = graphemes.next().is_some() && graphemes.next().is_none();
+        if !single || pfp.is_ascii() || pfp.chars().any(refused_profile_char) {
+            profile.pfp = None;
+        }
+    }
+    profile
 }
 
 fn invalid(reason: &str, input: &str) -> AppError {
@@ -219,5 +237,42 @@ mod tests {
             validate_pfp("\u{202E}", "pact", &profiles).is_err(),
             "bidi pfp"
         );
+        // U+2028 is a single non-ASCII grapheme — the Grok CRITICAL.
+        assert!(
+            validate_pfp("\u{2028}", "pact", &profiles).is_err(),
+            "line-separator pfp"
+        );
+        assert!(
+            validate_display_name("evil\u{061C}name", "pact", &rooms(&["pact"])).is_err(),
+            "ALM (U+061C) refused"
+        );
+    }
+
+    #[test]
+    fn stamp_for_drops_invalid_registry_values_and_freeform_senders() {
+        use crate::mailbox::Context;
+        use std::fs;
+        let root = crate::test_support::test_root("profile-stamp");
+        fs::write(root.join("rooms.json"), r#"{"alpha": "/tmp"}"#).expect("rooms");
+        // Hand-edited registry: imitation name, two-emoji pfp, plus one
+        // valid entry for an unregistered sender.
+        fs::write(
+            root.join(PROFILES_FILE),
+            r#"{"alpha": {"name": "trey", "pfp": "🏮🐋"}, "ghost": {"name": "Ghost", "pfp": "👻"}}"#,
+        )
+        .expect("profiles");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let rooms: RoomMap = [("alpha".to_owned(), "/tmp".to_owned())]
+            .into_iter()
+            .collect();
+        let stamped = stamp_for(&context, "alpha", &rooms);
+        assert_eq!(stamped.name, None, "imitation name must not stamp");
+        assert_eq!(stamped.pfp, None, "two-emoji pfp must not stamp");
+        let ghost = stamp_for(&context, "ghost", &rooms);
+        assert_eq!(ghost, Profile::default(), "free-form sender never stamps");
+        crate::test_support::trash_test_root(&root);
     }
 }

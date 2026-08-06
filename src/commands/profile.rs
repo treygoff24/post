@@ -32,11 +32,14 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
             "Retry with `post profile set --name '<name>' --pfp '<emoji>'` (either flag alone is fine).",
         ));
     }
+    // Rooms lock doubles as the profiles lock: both are rare, human-paced
+    // registry mutations, and one lock cannot deadlock. Taken BEFORE the
+    // rooms load so the imitation check can't race a concurrent
+    // `rooms add` (validating against a stale map would let a name imitate
+    // the just-registered room).
+    let _lock = context.lock_rooms()?;
     let rooms = context.load_rooms()?;
     let room = channel::acting_room(context, &rooms)?;
-    // Rooms lock doubles as the profiles lock: both are rare, human-paced
-    // registry mutations, and one lock cannot deadlock.
-    let _lock = context.lock_rooms()?;
     let mut profiles = load_profiles(context)?;
     if let Some(name) = &args.name {
         validate_display_name(name, &room, &rooms)?;
@@ -49,6 +52,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     let trimmed_name = args.name.map(|name| name.trim().to_owned());
     let entry = profiles.entry(room.clone()).or_default();
     let name_changed = trimmed_name.is_some() && entry.name != trimmed_name;
+    let pfp_changed = args.pfp.is_some() && entry.pfp != args.pfp;
     if let Some(name) = trimmed_name {
         entry.name = Some(name);
     }
@@ -63,7 +67,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     // Announcement failures don't roll back the profile; they surface as
     // warnings (the profile is already true, the announcement is courtesy).
     let mut announced = Vec::new();
-    if name_changed {
+    if name_changed || pfp_changed {
         let line = match &profile.pfp {
             Some(pfp) => format!(
                 "=== {room} is now {} {pfp} ({room}) ===",
