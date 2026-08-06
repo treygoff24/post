@@ -1,7 +1,7 @@
 use post::output::{
     ChannelsOutput, ChatDiscardOutput, ChatJoinOutput, ChatReadOutput, ChatSendOutput,
-    DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SendOutput,
-    WatchEvent,
+    DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SeenByOutput,
+    SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
 use std::fs;
 use std::io::Write;
@@ -257,7 +257,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 10);
+    assert_eq!(schema.commands.len(), 11);
     assert!(schema
         .error_codes
         .iter()
@@ -312,7 +312,7 @@ fn help_and_schema_keep_command_contract_visible() {
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
         "send", "chat", "channels", "inbox", "read", "rooms", "profile", "schema", "doctor",
-        "watch",
+        "watch", "who",
     ];
     let command_names: Vec<&str> = schema
         .commands
@@ -327,7 +327,7 @@ fn help_and_schema_keep_command_contract_visible() {
     assert!(schema
         .global_flags
         .iter()
-        .any(|flag| flag.contains("inbox/read/watch only")));
+        .any(|flag| flag.contains("inbox/read/watch/who only")));
     let watch = schema
         .commands
         .iter()
@@ -345,9 +345,9 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, room, id, from, kind, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
+            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
             "unreadable: event, room, id",
-            "channel_message: event, channel, id, from, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
+            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp]",
         ]
     );
     assert!(
@@ -2155,6 +2155,7 @@ fn channel_two_room_flow_lists_members_and_advances_read_cursor() {
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--subject",
             "greeting",
             "--body",
@@ -2205,6 +2206,7 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--body",
             "WATCH-CHANNEL-BODY-A",
             "--json",
@@ -2245,6 +2247,7 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--body",
             "WATCH-CHANNEL-BODY-B",
             "--json",
@@ -2271,6 +2274,7 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--body",
             "WATCH-CHANNEL-OWN-BODY",
             "--json",
@@ -2311,6 +2315,7 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--body",
             "one shared ring",
             "--json",
@@ -2359,7 +2364,7 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
     ] {
         assert!(events.iter().any(|event| matches!(
             event,
-            WatchEvent::Mail { room: event_room, item }
+            WatchEvent::Mail { room: event_room, item, .. }
                 if event_room == room && item.id == id
         )));
     }
@@ -2427,6 +2432,7 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
             "chat",
             "healthy",
             "--send",
+            "--anyway",
             "--body",
             "healthy body must not print",
             "--json",
@@ -2699,11 +2705,17 @@ fn from_stdout<T: serde::de::DeserializeOwned>(output: &Output) -> T {
 }
 
 fn from_stderr<T: serde::de::DeserializeOwned>(output: &Output) -> T {
-    serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
+    let raw = stderr(output);
+    let json_line = raw
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .unwrap_or(raw.trim());
+    serde_json::from_str(json_line).unwrap_or_else(|error| {
         panic!(
             "stderr was not expected JSON: {error}\nstdout: {}\nstderr: {}",
             stdout(output),
-            stderr(output)
+            raw
         )
     })
 }
@@ -2723,7 +2735,11 @@ fn chat_send_with_inline_text_in_the_file_slot_suggests_a_fix_that_runs_verbatim
     join_channel(&sandbox, "tax", &alpha);
     join_channel(&sandbox, "tax", &beta);
 
-    let output = sandbox.run_in(&["chat", "tax", "--send", "hello world"], None, &alpha);
+    let output = sandbox.run_in(
+        &["chat", "tax", "--send", "--anyway", "hello world"],
+        None,
+        &alpha,
+    );
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -2925,6 +2941,7 @@ fn channel_read_into_dev_null_is_refused_and_discard_is_the_deliberate_form() {
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--body",
             "must not vanish",
             "--json",
@@ -3037,7 +3054,7 @@ fn watch_once_exits_zero_after_emitting_the_backlog() {
     let events = watch_events(&output.stdout);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        WatchEvent::Mail { room, item } => {
+        WatchEvent::Mail { room, item, .. } => {
             assert_eq!(room, "claude-space");
             assert_eq!(item.id, sent.envelope.id);
             assert_eq!(item.from, "watcher-test");
@@ -3094,6 +3111,7 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
             "chat",
             "tax",
             "--send",
+            "--anyway",
             "--body",
             "SNAPSHOT-CHANNEL-BODY",
             "--json",
@@ -3120,7 +3138,7 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
         let events = watch_events(&output.stdout);
         assert!(events.iter().any(|event| matches!(
             event,
-            WatchEvent::Mail { room, item }
+            WatchEvent::Mail { room, item, .. }
                 if room == "beta" && item.id == mail_sent.envelope.id
         )));
         assert!(events.iter().any(|event| matches!(
@@ -3287,7 +3305,7 @@ fn watch_warns_on_unregistered_rooms_but_still_watches_them() {
     );
     let events = watch_events(&output.stdout);
     match &events[0] {
-        WatchEvent::Mail { room, item } => {
+        WatchEvent::Mail { room, item, .. } => {
             assert_eq!(room, "nowhere");
             assert_eq!(item.id, "20260721-030303-def456");
         }
@@ -3422,4 +3440,413 @@ fn watch_survives_the_mailbox_disappearing_and_rings_after_it_returns() {
         )),
         "watch must ring for mail delivered after the mailbox returns"
     );
+}
+
+// --- v0.4 channel ergonomics -------------------------------------------------
+
+#[test]
+fn channel_description_set_by_member_and_listed() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let created: ChatJoinOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "norms",
+            "--join",
+            "--description",
+            "No kill lists. Argue in public.",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert!(created.ok);
+    assert!(created.created);
+    // Non-creator member may update the description.
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "norms",
+            "--join",
+            "--description",
+            "Updated by beta: cite message ids.",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
+    let channel = listed
+        .channels
+        .iter()
+        .find(|c| c.name == "norms")
+        .expect("norms listed");
+    assert_eq!(
+        channel.description.as_deref(),
+        Some("Updated by beta: cite message ids.")
+    );
+    let text = sandbox.run(&["channels", "--text"]);
+    assert_success(&text);
+    let rendered = stdout(&text);
+    assert!(rendered.contains("#norms"));
+    assert!(rendered.contains("Updated by beta: cite message ids."));
+}
+
+#[test]
+fn default_catch_up_skips_older_unless_limit_zero() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "busy", &alpha);
+    join_channel(&sandbox, "busy", &beta);
+    assert_success(&sandbox.run_in(&["chat", "busy", "--discard", "--json"], None, &beta));
+    for i in 0..30 {
+        assert_success(&sandbox.run_in(
+            &[
+                "chat",
+                "busy",
+                "--send",
+                "--anyway",
+                "--body",
+                &format!("msg-{i}"),
+                "--json",
+            ],
+            None,
+            &alpha,
+        ));
+    }
+    let limited: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "busy", "--peek", "--json"], None, &beta));
+    assert_eq!(limited.count, 25);
+    assert_eq!(limited.skipped, 5);
+    let all: ChatReadOutput = from_stdout(&sandbox.run_in(
+        &["chat", "busy", "--peek", "--limit", "0", "--json"],
+        None,
+        &beta,
+    ));
+    assert_eq!(all.count, 30);
+    assert_eq!(all.skipped, 0);
+}
+
+#[test]
+fn crossed_send_bounces_with_missed_messages_unless_anyway() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "cross", &alpha);
+    join_channel(&sandbox, "cross", &beta);
+    // Catch alpha up past joins, then beta posts something alpha has not read.
+    assert_success(&sandbox.run_in(&["chat", "cross", "--discard", "--json"], None, &alpha));
+    let missed: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "stop and revise",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    let bounced = sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "I did not see that",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(bounced.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&bounced);
+    assert_eq!(error.error.code, "crossed_send");
+    let missed_list = error.error.details.missed.as_ref().expect("missed payload");
+    assert_eq!(missed_list.len(), 1);
+    assert_eq!(missed_list[0].id, missed.message.id);
+    assert_eq!(missed_list[0].body, "stop and revise");
+    // --anyway delivers regardless.
+    let forced: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--anyway",
+            "--body",
+            "sending anyway",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert!(forced.ok);
+}
+
+#[test]
+fn mentions_stamp_and_watch_reason_marks_at() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "ping", &alpha);
+    join_channel(&sandbox, "ping", &beta);
+    assert_success(&sandbox.run_in(&["chat", "ping", "--discard", "--json"], None, &alpha));
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "ping",
+            "--send",
+            "--body",
+            "hey @alpha — and not@alpha or @alphabet",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert_eq!(sent.message.mentions, vec!["alpha".to_owned()]);
+    let watched = sandbox.run(&["watch", "--room", "alpha", "--snapshot", "--json"]);
+    assert_success(&watched);
+    let events = watch_events(&watched.stdout);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        WatchEvent::ChannelMessage {
+            id,
+            reason: WatchReason::Mention,
+            ..
+        } if id == &sent.message.id
+    )));
+    let text = sandbox.run(&["watch", "--room", "alpha", "--snapshot", "--text"]);
+    assert_success(&text);
+    assert!(
+        stdout(&text).contains("@ #ping"),
+        "mention must show @ marker: {}",
+        stdout(&text)
+    );
+}
+
+#[test]
+fn threads_lite_stamps_re_and_renders_marker() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "thread", &alpha);
+    join_channel(&sandbox, "thread", &beta);
+    assert_success(&sandbox.run_in(&["chat", "thread", "--discard", "--json"], None, &beta));
+    let parent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "thread",
+            "--send",
+            "--body",
+            "original question here",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let prefix = &parent.message.id[..22];
+    let reply: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat", "thread", "--send", "--anyway", "--re", prefix, "--body", "a reply", "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert_eq!(
+        reply.message.re.as_deref(),
+        Some(parent.message.id.as_str())
+    );
+    let peek: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "thread", "--peek", "--json"], None, &alpha));
+    assert!(peek
+        .messages
+        .iter()
+        .any(|m| m.message.re.as_deref() == Some(parent.message.id.as_str())));
+    let text = sandbox.run_in(&["chat", "thread", "--peek"], None, &alpha);
+    assert_success(&text);
+    let rendered = stdout(&text);
+    assert!(
+        rendered.contains("↳ re ") && rendered.contains("original question"),
+        "reply marker missing: {rendered}"
+    );
+}
+
+#[test]
+fn who_reports_live_watch_without_pids() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    // Ensure room dirs exist so heartbeats can land.
+    assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
+    let before: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    assert_eq!(before.rooms.len(), 1);
+    assert!(!before.rooms[0].live_watch);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--room", "alpha", "--interval-ms", "100"])
+        .current_dir(&alpha)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn watch");
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    assert!(during.rooms[0].live_watch);
+    assert!(during.rooms[0].last_seen.is_some());
+    let raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
+    assert!(raw.contains("live-watch=yes"));
+    assert!(!raw.to_ascii_lowercase().contains("pid"));
+    child.kill().expect("stop watch");
+    let _ = child.wait();
+}
+
+#[test]
+fn seen_by_lists_members_past_a_message_read_only() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "seen", &alpha);
+    join_channel(&sandbox, "seen", &beta);
+    assert_success(&sandbox.run_in(&["chat", "seen", "--discard", "--json"], None, &alpha));
+    assert_success(&sandbox.run_in(&["chat", "seen", "--discard", "--json"], None, &beta));
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--send", "--body", "please ack", "--json"],
+        None,
+        &alpha,
+    ));
+    // beta has never read: empty. alpha advanced past own send when caught up.
+    let before: SeenByOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--seen-by", &sent.message.id, "--json"],
+        None,
+        &alpha,
+    ));
+    assert!(before.seen_by.contains(&"alpha".to_owned()));
+    assert!(!before.seen_by.contains(&"beta".to_owned()));
+    assert_success(&sandbox.run_in(&["chat", "seen", "--json"], None, &beta));
+    let after: SeenByOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--seen-by", &sent.message.id, "--json"],
+        None,
+        &alpha,
+    ));
+    assert!(after.seen_by.contains(&"beta".to_owned()));
+    // Cursor untouched by seen-by itself: peek still empty for beta.
+    let peek: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "seen", "--peek", "--json"], None, &beta));
+    assert_eq!(peek.count, 0);
+}
+
+#[test]
+fn history_grep_filters_case_insensitive_regex() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "crumbs", &alpha);
+    join_channel(&sandbox, "crumbs", &beta);
+    assert_success(&sandbox.run_in(&["chat", "crumbs", "--discard", "--json"], None, &alpha));
+    for body in ["alpha one", "BETA two", "gamma three"] {
+        assert_success(&sandbox.run_in(
+            &[
+                "chat", "crumbs", "--send", "--anyway", "--body", body, "--json",
+            ],
+            None,
+            &beta,
+        ));
+    }
+    let filtered: ChatReadOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "crumbs",
+            "--history",
+            "10",
+            "--grep",
+            r"BETA two",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert_eq!(filtered.count, 1);
+    assert_eq!(filtered.messages[0].body, "BETA two");
+    let bad = sandbox.run_in(
+        &[
+            "chat",
+            "crumbs",
+            "--history",
+            "10",
+            "--grep",
+            "(unclosed",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(bad.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&bad);
+    assert_eq!(error.error.code, "invalid_argument");
+}
+
+#[test]
+fn catch_up_never_silently_skips_mentions_of_reader() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "rescue", &alpha);
+    join_channel(&sandbox, "rescue", &beta);
+    assert_success(&sandbox.run_in(&["chat", "rescue", "--discard", "--json"], None, &alpha));
+    // Oldest message mentions alpha; then 25 fillers so default catch-up would drop it.
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "rescue",
+            "--send",
+            "--body",
+            "@alpha please see this old ping",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    for i in 0..25 {
+        assert_success(&sandbox.run_in(
+            &[
+                "chat",
+                "rescue",
+                "--send",
+                "--anyway",
+                "--body",
+                &format!("filler-{i}"),
+                "--json",
+            ],
+            None,
+            &beta,
+        ));
+    }
+    let read: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "rescue", "--peek", "--json"], None, &alpha));
+    assert!(
+        read.messages
+            .iter()
+            .any(|m| m.body.contains("@alpha please see")),
+        "mention must be rescued from skipped range"
+    );
+    assert!(read.count >= 26);
+    assert_eq!(read.skipped, 0);
+}
+
+#[test]
+fn description_over_1kib_is_refused() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    let too_long = "d".repeat(1025);
+    let output = sandbox.run_in(
+        &[
+            "chat",
+            "bigdesc",
+            "--join",
+            "--description",
+            &too_long,
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
 }
