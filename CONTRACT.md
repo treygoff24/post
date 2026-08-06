@@ -66,9 +66,12 @@ The public language is model-neutral; the default root remains
   chronologically and use `YYYYmmdd-HHMMSS-UUUUUU-<6 hex>` so cursor ordering
   remains complete for multiple messages in one second. A channel message file
   is JSON envelope, then `\n---\n`, then raw body; envelope keys: id, from,
-  channel, subject, sent, event. Normal messages have no event; joins are
-  recorded as event messages. Channel files are append-only: nothing in
-  `messages/` is moved, edited, or deleted by reads.
+  channel, subject, sent, event, and optionally `re`, `mentions`,
+  `display_name`, `pfp`. Normal messages have no event; joins are
+  recorded as event messages. `channel.json` may carry an optional
+  `description` (norms carrier, ≤1 KiB). Channel files are append-only: nothing in
+  `messages/` is moved, edited, or deleted by reads. Old messages/channel.json
+  without the new fields keep reading; new fields are ignored by old binaries.
 - Channel membership is by registered room name. Joining records the acting
   room in `members.json`; blocked-route checks prevent any two rooms that are
   structurally blocked from sharing the same channel. Sending and reading
@@ -145,40 +148,57 @@ results, stderr = diagnostics/errors.
   creates the workspace, overwrites an existing registration, or modifies
   `rules.json`. Once replacement commits, a stdout failure does not turn the
   registration into a retryable failure.
-- `post chat <channel> --join` — joins a shared channel as the registered room
+- `post chat <channel> --join [--description <text>]` — joins a shared channel as the registered room
   containing cwd; creates the channel on first join; records a join event in
-  append-only history; returns `{ok, channel, room, created, already_member,
+  append-only history; optional `--description` (cap 1 KiB, any member may
+  update on a later `--join`) sets the channel norms carrier; returns `{ok, channel, room, created, already_member,
   event_id}` with `--json`. Refuses unregistered cwd identity, invalid channel
   name, and blocked shared membership. There is deliberately no `--room` or
   `--from` override.
-- `post chat <channel> --send [--subject <s>] [--oversize] (--body <text> |
+- `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> |
   --body-file <path> | stdin)` — sends to a shared channel as the registered room
   containing cwd. `--body`/`--body-file` imply `--send`, so the verb is
   optional once a body is named; the deprecated positional FILE still requires
   it. The same 1 KiB subject limit, 32 KiB body guard, and warn-only watch-event
-  detection used by direct mail run before the append-only channel write. A plain read whose
+  detection used by direct mail run before the append-only channel write.
+  Bodies are scanned for `@<room>` word-boundary mentions of registered rooms
+  (stamped into the envelope as `mentions`). `--re <id>` stamps a reply to a
+  prior message in the same channel (full id or unique prefix). By default, if
+  ordinary unread messages from others sit past the sender's cursor, the send
+  is refused with `crossed_send` (details include up to the last 10 missed
+  messages); `--anyway` delivers regardless. System join/profile events do not
+  trigger the bounce. A plain read whose
   stdout is the null device is refused before anything is emitted, leaving the
   cursor untouched; `--discard` is the deliberate way to advance past unread
   messages without printing them, and reports
-  `{ok, channel, room, discarded, cursor}`. `--limit <n>` is a bounded
-  catch-up read: only the newest n unread are emitted, the skipped-older
-  count is reported (JSON `skipped`, omitted when 0), and the cursor still
-  advances past the whole batch; with `--peek` it bounds display only and
-  never advances, and `--limit 0` is refused as a disguised discard. Requires
+  `{ok, channel, room, discarded, cursor}`. A plain cursor read defaults to the
+  newest 25 unread when the backlog is larger (`skipped` reports how many older
+  ones were neither shown nor rescued; `@mention`s of the reader in the skipped
+  range are pulled forward). Explicit `--limit <n>` still works; `--limit 0`
+  means unlimited. With `--peek` the bound is display-only and never advances.
+  `--seen-by <id>` is a read-only listing of member rooms whose cursors have
+  advanced past that message. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
   is `delivered_output_failure` and must not be blindly retried.
 - `post chat <channel> [--peek]` — reads new channel messages as the registered
   room containing cwd. Requires membership; otherwise `not_a_member`. Text
-  output includes the channel framing banner plus messages. JSON output is
+  output includes the channel framing banner plus messages (reply markers
+  render as `↳ re <short-id> (<sender>: preview…)`). JSON output is
   `{ok, framing, channel, room, peek, messages, count}` and preserves parsed
-  message bodies unchanged. Text-mode message headers and bodies are sanitized
+  message bodies unchanged (`re` and `mentions` when present). Text-mode message headers and bodies are sanitized
   at the output boundary so crafted controls cannot rewrite the framing banner.
   After stdout succeeds, a non-peek read advances only that room's cursor;
-  `--peek` never advances.
-- `post channels` — read-only listing of channels, members, creation metadata,
-  and message counts: `{ok, channels, count}`.
+  `--peek` never advances. `--history <n> [--grep <regex>]` and `--since <id>`
+  are cursorless; `--grep` is a case-insensitive Rust regex over body/subject/from/id.
+- `post channels [--text]` — read-only listing of channels, members, creation metadata,
+  descriptions, and message counts: `{ok, channels, count}`.
+- `post who [--room <name>]... [--text]` — read-only presence: for each selected
+  (or all registered) room, whether a watch heartbeat is live and the last-seen
+  unix-seconds stamp. Heartbeats live at `<room>/watch.heartbeat`, touched each
+  watch poll when the room directory already exists. Never reports PIDs or
+  process info.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix]` — validates root exists, rooms.json/rules.json parse
@@ -205,8 +225,11 @@ results, stderr = diagnostics/errors.
   direct mail `{"event":"mail", room, id, from, kind, subject, sent}`;
   unreadable direct mail or channel messages `{"event":"unreadable", room,
   id}` (filename-derived id, nothing quoted from the file); channel messages
-  `{"event":"channel_message", channel, id, from, subject, sent}`. A room's
+  `{"event":"channel_message", channel, id, from, subject, sent, reason}` where
+  `reason` is `channel` or `mention` (the watching room is @mentioned). A room's
   own channel messages are never news to it and never ring its own watch.
+  Each poll touches `<room>/watch.heartbeat` (unix seconds) when the room
+  directory already exists, so `post who` can report live watches without PIDs.
   `--text` mirrors inbox/channel line formats with the subject, sender,
   channel, and unreadable id all debug-escaped — the attacker-reachable fields
   (crafted subjects and `from` in hand-written mail/messages; filenames, which
@@ -282,16 +305,17 @@ Envelope on stderr: `{ok: false, error: {code, message, details, retryable,
 suggested_fix}}`. Codes (stable): `unknown_room`, `blocked_route`,
 `reserved_sender`, `empty_body`, `ambiguous_id`, `not_found`,
 `invalid_argument`, `config_invalid`, `duplicate_workspace`, `io_error`,
-`delivered_output_failure`, `delivered_unarchived`, `not_a_member`.
-Pre-commit `io_error` is retryable with exit 75. `duplicate_workspace` and
-`not_a_member` are non-retryable with exit 65. Both delivered variants are
+`delivered_output_failure`, `delivered_unarchived`, `not_a_member`,
+`crossed_send`.
+Pre-commit `io_error` is retryable with exit 75. `duplicate_workspace`,
+`not_a_member`, and `crossed_send` are non-retryable with exit 65. Both delivered variants are
 non-retryable with exit 70: `delivered_output_failure` means a direct send or
 channel mutation committed but stdout receipt failed; `delivered_unarchived`
 means inbox delivery committed but archive publication failed. Room
 registration stdout failure after commit is reported as success with best-effort
 diagnostics, not `delivered_output_failure`. Exit codes per the agent-CLI
 standard: 2 usage, 65 validation (unknown_room, reserved_sender, empty_body,
-ambiguous_id, duplicate_workspace, not_a_member), 66 not_found, 77
+ambiguous_id, duplicate_workspace, not_a_member, crossed_send), 66 not_found, 77
 blocked_route (permission class), 78 config_invalid, 70 post-commit/internal
 failure, 75 retryable pre-commit I/O.
 
