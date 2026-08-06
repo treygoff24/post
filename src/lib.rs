@@ -7,8 +7,8 @@ mod commands;
 mod error;
 mod mailbox;
 mod model;
-mod profile;
 pub mod output;
+mod profile;
 #[cfg(test)]
 mod test_support;
 

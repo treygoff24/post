@@ -318,7 +318,11 @@ fn render_text(
         };
         out.push_str(&format!(
             "--- {label}{}   {}   {}{subject} ---\n",
-            output::sanitize_text_header(&message.from),
+            output::sender_label(
+                &message.from,
+                message.display_name.as_deref(),
+                message.pfp.as_deref()
+            ),
             output::sanitize_text_header(&message.sent),
             output::sanitize_text_header(&message.id)
         ));
@@ -596,6 +600,28 @@ mod tests {
         dir
     }
 
+    fn seed_stamped_message(
+        dir: &Path,
+        id: &str,
+        from: &str,
+        body: &str,
+        display_name: &str,
+        pfp: &str,
+    ) {
+        let message = ChannelMessage {
+            id: id.to_owned(),
+            from: from.to_owned(),
+            channel: "tax".to_owned(),
+            subject: String::new(),
+            sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            event: None,
+            display_name: Some(display_name.to_owned()),
+            pfp: Some(pfp.to_owned()),
+        };
+        let bytes = crate::channel::encode_message(&message, body).expect("encode");
+        fs::write(dir.join("messages").join(format!("{id}.msg")), bytes).expect("write message");
+    }
+
     fn seed_message(dir: &Path, id: &str, from: &str, body: &str) {
         let message = ChannelMessage {
             id: id.to_owned(),
@@ -860,6 +886,43 @@ mod tests {
         assert!(text.contains("hello"));
         let banner_count = text.matches("READ THIS FRAMING FIRST").count();
         assert_eq!(banner_count, 1, "banner appears once per batch");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn stamped_profile_renders_name_and_id_in_chat_line() {
+        let (root, context) = chat_context("stamped-profile");
+        let dir = seed_channel(&root, &["alpha", "beta"]);
+        seed_stamped_message(
+            &dir,
+            "20260722-013000-000001-aaa111",
+            "beta",
+            "hello",
+            "Lantern",
+            "🏮",
+        );
+        let batch = read_batch(&context, "alpha", "tax").expect("read batch");
+        let rendered = render_text(&context, "tax", "alpha", &batch);
+        assert!(
+            rendered.contains("--- 🏮 Lantern (beta)   "),
+            "sender label missing: {rendered}"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn absent_profile_chat_line_is_byte_identical() {
+        let (root, context) = chat_context("absent-profile");
+        let dir = seed_channel(&root, &["alpha", "beta"]);
+        seed_message(&dir, "20260722-013000-000001-aaa111", "beta", "hello");
+        let batch = read_batch(&context, "alpha", "tax").expect("read batch");
+        let rendered = render_text(&context, "tax", "alpha", &batch);
+        assert!(
+            rendered.contains(
+                "--- beta   2026-07-22 01:30:00 -0500   20260722-013000-000001-aaa111 ---\n"
+            ),
+            "pre-profile line drifted: {rendered}"
+        );
         trash_test_root(&root);
     }
 }

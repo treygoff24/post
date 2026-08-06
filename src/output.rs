@@ -147,6 +147,13 @@ pub struct InboxItem {
     pub kind: MailKind,
     pub subject: String,
     pub sent: String,
+    /// Sender profile as stamped at send time (W2 contract extension).
+    /// Absent when the sender had no profile — absent-profile JSON is
+    /// byte-identical to the pre-profile shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pfp: Option<String>,
 }
 
 impl From<Envelope> for InboxItem {
@@ -158,10 +165,8 @@ impl From<Envelope> for InboxItem {
             kind,
             subject,
             sent,
-            // W1 stamps these; inbox JSON shape stays unchanged until the
-            // render wave extends the contract deliberately.
-            display_name: _,
-            pfp: _,
+            display_name,
+            pfp,
         } = envelope;
         Self {
             id,
@@ -169,6 +174,8 @@ impl From<Envelope> for InboxItem {
             kind,
             subject,
             sent,
+            display_name,
+            pfp,
         }
     }
 }
@@ -195,6 +202,13 @@ pub enum WatchEvent {
         from: String,
         subject: String,
         sent: String,
+        /// Sender profile as stamped at send time (W2 contract extension);
+        /// keys absent when the sender had no profile, keeping the
+        /// pre-profile NDJSON byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pfp: Option<String>,
     },
 }
 
@@ -223,10 +237,8 @@ impl WatchEvent {
             subject,
             sent,
             event: _,
-            // W1 stamps these; watch/mail JSON shapes stay unchanged until the
-            // render wave extends the contract deliberately.
-            display_name: _,
-            pfp: _,
+            display_name,
+            pfp,
         } = message;
         Self::ChannelMessage {
             channel,
@@ -234,6 +246,8 @@ impl WatchEvent {
             from,
             subject,
             sent,
+            display_name,
+            pfp,
         }
     }
 
@@ -249,10 +263,22 @@ impl WatchEvent {
                 // refuses control characters, but hand-written mail can carry
                 // them (the contract keeps such mail readable and sanitizes
                 // at render), and a newline here would forge an event line.
-                format!(
-                    "{}  [{}] from {:?}{}\n",
-                    item.id, item.kind, item.from, subject
-                )
+                let sender = match (item.display_name.as_deref(), item.pfp.as_deref()) {
+                    (None, None) => format!("{:?}", item.from),
+                    (name, pfp) => {
+                        let mut label = String::new();
+                        if let Some(pfp) = pfp {
+                            label.push_str(&sanitize_text_header(pfp));
+                            label.push(' ');
+                        }
+                        if let Some(name) = name {
+                            label.push_str(&sanitize_text_header(name));
+                            label.push(' ');
+                        }
+                        format!("{label}({:?})", item.from)
+                    }
+                };
+                format!("{}  [{}] from {}{}\n", item.id, item.kind, sender, subject)
             }
             // Debug-quoted: this id comes from a filename that never passed
             // envelope validation, and filenames may contain newlines — the
@@ -266,6 +292,8 @@ impl WatchEvent {
                 id,
                 from,
                 subject,
+                display_name,
+                pfp,
                 ..
             } => {
                 let subject = if subject.is_empty() {
@@ -273,7 +301,25 @@ impl WatchEvent {
                 } else {
                     format!("  {subject:?}")
                 };
-                format!("{id}  #{channel} from {from:?}{subject}\n")
+                // Sender keeps its debug-quote discipline; the stamped
+                // profile renders sanitized ahead of it. Absent profile is
+                // byte-identical to the pre-profile line.
+                let sender = match (display_name.as_deref(), pfp.as_deref()) {
+                    (None, None) => format!("{from:?}"),
+                    (name, pfp) => {
+                        let mut label = String::new();
+                        if let Some(pfp) = pfp {
+                            label.push_str(&sanitize_text_header(pfp));
+                            label.push(' ');
+                        }
+                        if let Some(name) = name {
+                            label.push_str(&sanitize_text_header(name));
+                            label.push(' ');
+                        }
+                        format!("{label}({from:?})")
+                    }
+                };
+                format!("{id}  #{channel} from {sender}{subject}\n")
             }
         }
     }
@@ -465,6 +511,28 @@ pub(crate) fn json<T: Serialize>(value: &T, pretty: bool) -> Result<String, AppE
     Ok(rendered)
 }
 
+/// Render a sender for text surfaces: `"🧊 Name (room)"` when a profile was
+/// stamped at send time, or the bare sanitized room id — byte-identical to
+/// the pre-profile rendering — when absent. Identity (`from`) is always
+/// visible; name and pfp are presentation only and pass through the same
+/// header sanitizer as everything else on the line.
+pub(crate) fn sender_label(from: &str, display_name: Option<&str>, pfp: Option<&str>) -> String {
+    let from = sanitize_text_header(from);
+    if display_name.is_none() && pfp.is_none() {
+        return from;
+    }
+    let mut label = String::new();
+    if let Some(pfp) = pfp {
+        label.push_str(&sanitize_text_header(pfp));
+        label.push(' ');
+    }
+    if let Some(name) = display_name {
+        label.push_str(&sanitize_text_header(name));
+        label.push(' ');
+    }
+    format!("{label}({from})")
+}
+
 pub(crate) fn sanitize_text_header(value: &str) -> String {
     value
         .chars()
@@ -490,5 +558,113 @@ pub(crate) fn write_error(error: &AppError, pretty: bool) {
     };
     if result.is_ok() {
         let _ = writeln!(output);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stamped(display_name: Option<&str>, pfp: Option<&str>) -> WatchEvent {
+        WatchEvent::ChannelMessage {
+            channel: "tax".to_owned(),
+            id: "20260722-013000-000001-aaa111".to_owned(),
+            from: "alpha".to_owned(),
+            subject: String::new(),
+            sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            display_name: display_name.map(str::to_owned),
+            pfp: pfp.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn sender_label_absent_profile_is_bare_room_id() {
+        assert_eq!(sender_label("alpha", None, None), "alpha");
+    }
+
+    #[test]
+    fn sender_label_renders_pfp_name_and_id() {
+        assert_eq!(
+            sender_label("alpha", Some("Snowplow"), Some("🧊")),
+            "🧊 Snowplow (alpha)"
+        );
+        assert_eq!(
+            sender_label("alpha", Some("Snowplow"), None),
+            "Snowplow (alpha)"
+        );
+        assert_eq!(sender_label("alpha", None, Some("🧊")), "🧊 (alpha)");
+    }
+
+    #[test]
+    fn sender_label_sanitizes_control_characters() {
+        assert_eq!(
+            sender_label("alpha", Some("Snow\nplow"), None),
+            "Snowplow (alpha)"
+        );
+    }
+
+    #[test]
+    fn watch_channel_line_absent_profile_is_byte_identical() {
+        // Review criterion (wade): machine-parsed doorbell line must not
+        // drift by a single byte when no profile is stamped.
+        assert_eq!(
+            stamped(None, None).text_line(),
+            "20260722-013000-000001-aaa111  #tax from \"alpha\"\n"
+        );
+    }
+
+    #[test]
+    fn watch_channel_line_renders_stamped_profile() {
+        assert_eq!(
+            stamped(Some("Snowplow"), Some("🧊")).text_line(),
+            "20260722-013000-000001-aaa111  #tax from 🧊 Snowplow (\"alpha\")\n"
+        );
+    }
+
+    #[test]
+    fn watch_mail_line_profile_and_fallback() {
+        let bare = WatchEvent::mail(
+            "alpha",
+            InboxItem {
+                id: "20260722-013000-000002-bbb222".to_owned(),
+                from: "beta".to_owned(),
+                kind: MailKind::Letter,
+                subject: String::new(),
+                sent: "2026-07-22 01:31:00 -0500".to_owned(),
+                display_name: None,
+                pfp: None,
+            },
+        );
+        assert_eq!(
+            bare.text_line(),
+            "20260722-013000-000002-bbb222  [letter] from \"beta\"\n"
+        );
+        let dressed = WatchEvent::mail(
+            "alpha",
+            InboxItem {
+                id: "20260722-013000-000002-bbb222".to_owned(),
+                from: "beta".to_owned(),
+                kind: MailKind::Letter,
+                subject: String::new(),
+                sent: "2026-07-22 01:31:00 -0500".to_owned(),
+                display_name: Some("Lantern".to_owned()),
+                pfp: Some("🏮".to_owned()),
+            },
+        );
+        assert_eq!(
+            dressed.text_line(),
+            "20260722-013000-000002-bbb222  [letter] from 🏮 Lantern (\"beta\")\n"
+        );
+    }
+
+    #[test]
+    fn ndjson_absent_profile_keys_are_absent() {
+        let line = serde_json::to_string(&stamped(None, None)).expect("serialize");
+        assert!(!line.contains("display_name"));
+        assert!(!line.contains("pfp"));
+        let dressed =
+            serde_json::to_string(&stamped(Some("Snowplow"), Some("🧊"))).expect("serialize");
+        assert!(dressed.contains("\"display_name\":\"Snowplow\""));
+        assert!(dressed.contains("\"pfp\":\"🧊\""));
     }
 }

@@ -738,8 +738,14 @@ mod tests {
         let parse = |id: &str| {
             parse_channel_message(&paths.messages.join(format!("{id}.msg"))).expect("parse")
         };
-        assert_eq!(parse(&first).message.display_name.as_deref(), Some("Lantern"));
-        assert_eq!(parse(&second).message.display_name.as_deref(), Some("Coldwell"));
+        assert_eq!(
+            parse(&first).message.display_name.as_deref(),
+            Some("Lantern")
+        );
+        assert_eq!(
+            parse(&second).message.display_name.as_deref(),
+            Some("Coldwell")
+        );
         assert_eq!(parse(&second).message.pfp.as_deref(), Some("🏮"));
         trash_test_root(&root);
     }

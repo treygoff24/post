@@ -79,8 +79,14 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
                 continue;
             }
             let paths = ChannelPaths::new(context, &summary.info.name)?;
-            match channel::write_event(context, &paths, &room, &summary.info.name, &line, PROFILE_EVENT)
-            {
+            match channel::write_event(
+                context,
+                &paths,
+                &room,
+                &summary.info.name,
+                &line,
+                PROFILE_EVENT,
+            ) {
                 Ok(_) => announced.push(summary.info.name),
                 Err(error) => eprintln!(
                     "post: warning: could not announce rename in #{}: {}",

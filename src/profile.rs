@@ -18,8 +18,8 @@ use unicode_segmentation::UnicodeSegmentation;
 /// the load-bearing (room-id) suffix reads. Refused in names and pfps.
 /// ZWJ (U+200D) and VS16 (U+FE0F) stay legal — emoji need them.
 const BIDI_CONTROLS: [char; 11] = [
-    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
-    '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}',
+    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}',
+    '\u{2069}', '\u{200E}', '\u{200F}',
 ];
 
 pub(crate) const PROFILES_FILE: &str = "profiles.json";
@@ -39,9 +39,7 @@ pub(crate) fn load_profiles(context: &Context) -> AppResult<ProfileMap> {
     let path = context.root.join(PROFILES_FILE);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ProfileMap::new())
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ProfileMap::new()),
         Err(error) => return Err(AppError::io("read profiles", &path, error)),
     };
     serde_json::from_slice(&bytes)
@@ -74,11 +72,7 @@ fn skeleton(value: &str) -> String {
 /// Validate a display name for `own_room`. Rejects control characters,
 /// over-long names, and names whose skeleton imitates "trey" or any
 /// registered room id other than the caller's own.
-pub(crate) fn validate_display_name(
-    name: &str,
-    own_room: &str,
-    rooms: &RoomMap,
-) -> AppResult<()> {
+pub(crate) fn validate_display_name(name: &str, own_room: &str, rooms: &RoomMap) -> AppResult<()> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(invalid("display name is empty", name));
@@ -125,15 +119,14 @@ pub(crate) fn validate_display_name(
 /// like ⚖️ and 👩‍🚀 pass while two-emoji strings fail), no control characters,
 /// not ASCII (an ASCII pfp like "[" would just be line noise), and unique
 /// across rooms so the sigil actually identifies.
-pub(crate) fn validate_pfp(
-    pfp: &str,
-    own_room: &str,
-    profiles: &ProfileMap,
-) -> AppResult<()> {
+pub(crate) fn validate_pfp(pfp: &str, own_room: &str, profiles: &ProfileMap) -> AppResult<()> {
     let mut graphemes = pfp.graphemes(true);
     let first = graphemes.next();
     if first.is_none() || graphemes.next().is_some() {
-        return Err(invalid("pfp must be exactly one emoji (one grapheme cluster)", pfp));
+        return Err(invalid(
+            "pfp must be exactly one emoji (one grapheme cluster)",
+            pfp,
+        ));
     }
     if pfp.chars().any(char::is_control) {
         return Err(invalid("pfp contains control characters", pfp));
@@ -187,7 +180,10 @@ mod tests {
         assert!(validate_display_name("evil\nname", "pact", &rooms).is_err());
         assert!(validate_display_name("   ", "pact", &rooms).is_err());
         assert!(validate_display_name(&"x".repeat(33), "pact", &rooms).is_err());
-        assert!(validate_display_name("🏮🏮", "pact", &rooms).is_err(), "no letters");
+        assert!(
+            validate_display_name("🏮🏮", "pact", &rooms).is_err(),
+            "no letters"
+        );
         // Bidi controls are Cf, not Cc — must be refused explicitly (wade F1).
         assert!(validate_display_name("evil\u{202E}name", "pact", &rooms).is_err());
         assert!(validate_display_name("evil\u{2066}name", "pact", &rooms).is_err());
@@ -201,15 +197,27 @@ mod tests {
         let mut profiles = ProfileMap::new();
         profiles.insert(
             "atlasos".to_owned(),
-            Profile { name: None, pfp: Some("🐋".to_owned()) },
+            Profile {
+                name: None,
+                pfp: Some("🐋".to_owned()),
+            },
         );
         validate_pfp("⚖️", "pact", &profiles).expect("VS16 emoji is one grapheme");
         validate_pfp("👩‍🚀", "pact", &profiles).expect("ZWJ emoji is one grapheme");
-        assert!(validate_pfp("🏮🐋", "pact", &profiles).is_err(), "two emoji");
+        assert!(
+            validate_pfp("🏮🐋", "pact", &profiles).is_err(),
+            "two emoji"
+        );
         assert!(validate_pfp("x", "pact", &profiles).is_err(), "ascii");
         assert!(validate_pfp("", "pact", &profiles).is_err(), "empty");
-        assert!(validate_pfp("🐋", "pact", &profiles).is_err(), "taken sigil");
+        assert!(
+            validate_pfp("🐋", "pact", &profiles).is_err(),
+            "taken sigil"
+        );
         validate_pfp("🐋", "atlasos", &profiles).expect("re-setting own sigil ok");
-        assert!(validate_pfp("\u{202E}", "pact", &profiles).is_err(), "bidi pfp");
+        assert!(
+            validate_pfp("\u{202E}", "pact", &profiles).is_err(),
+            "bidi pfp"
+        );
     }
 }
