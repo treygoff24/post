@@ -257,7 +257,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 9);
+    assert_eq!(schema.commands.len(), 10);
     assert!(schema
         .error_codes
         .iter()
@@ -311,7 +311,8 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
-        "send", "chat", "channels", "inbox", "read", "rooms", "schema", "doctor", "watch",
+        "send", "chat", "channels", "inbox", "read", "rooms", "profile", "schema", "doctor",
+        "watch",
     ];
     let command_names: Vec<&str> = schema
         .commands
@@ -344,9 +345,9 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, room, id, from, kind, subject, sent",
+            "mail: event, room, id, from, kind, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
             "unreadable: event, room, id",
-            "channel_message: event, channel, id, from, subject, sent",
+            "channel_message: event, channel, id, from, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
         ]
     );
 

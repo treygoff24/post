@@ -393,6 +393,7 @@ pub struct OutputShapes {
     pub chat_read: Vec<String>,
     pub chat_discard: Vec<String>,
     pub channels: Vec<String>,
+    pub profile: Vec<String>,
     pub watch: Vec<String>,
 }
 

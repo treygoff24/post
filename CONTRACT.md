@@ -234,6 +234,30 @@ results, stderr = diagnostics/errors.
   other watch invariant: envelope metadata only, no mail moves, no cursor
   writes.
 
+## Profiles (amendment, 2026-08-05)
+
+- `post profile set [--name <name>] [--pfp <emoji>]` / `show [room]` / `clear`
+  — per-room display name + emoji sigil, stored in root `profiles.json`
+  (reserved as a room name) under the rooms lock.
+- PRESENTATION ONLY: no profile value may influence identity, auth, routing,
+  blocked routes, cursors, room resolution, or signed-Trey verification. The
+  immutable `(room-id)` suffix is a HARD INVARIANT of every render path that
+  shows a display name (chat banners, read, inbox --text, watch --text);
+  no future renderer may drop or truncate it. Residual non-NFKC homoglyph
+  imitation risk is accepted BECAUSE of this invariant.
+- Validation: name <=32 chars, trimmed, refuses the shared character predicate
+  (Cc + bidi controls incl. U+061C + U+2028/U+2029), NFKC-skeleton imitation
+  check against `trey` and all room ids; pfp is exactly one grapheme cluster,
+  non-ASCII, unique across rooms. The same predicate is enforced at set time,
+  at envelope parse time (mail and channel), and in text sanitization, and
+  registry values are re-validated at stamp time — unregistered (free-form)
+  senders never stamp.
+- Stamping: `display_name`/`pfp` are optional envelope fields written at send
+  time (absent-when-unset keeps pre-profile JSON/NDJSON byte-identical, and
+  absent-profile text output stays byte-identical). History renders as-sent;
+  renames never rewrite stored messages. A name or pfp change emits a
+  `profile` event message in each of the room's channels.
+
 ## Codex room convention
 
 Codex should use a narrow registered room path, normally
@@ -275,7 +299,7 @@ deserialization of every output shape; migration: a mail file in the original
 on-disk format reads back identically; channel join/send/read with cursor
 advancement and `--peek`; channel watch backlog/live events without bodies or
 cursor advancement; malformed channel isolation; blocked-route channel sharing
-refusal; `not_a_member`; and schema/help consistency for all nine commands and
+refusal; `not_a_member`; and schema/help consistency for all ten commands and
 every watch event variant.
 
 ## Stack
