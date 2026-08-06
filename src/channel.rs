@@ -600,7 +600,10 @@ pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
 }
 
 fn is_mention_boundary_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+    // Unicode-aware: ASCII-only would treat `é` as a boundary and stamp
+    // `@foo` out of `@fooé`. Keep `_`/`-` as name continuations for the
+    // registered room-name alphabet.
+    c.is_alphanumeric() || c == '_' || c == '-'
 }
 
 /// System-line writer for non-join events (currently profile changes).
@@ -1226,6 +1229,21 @@ mod tests {
         assert_eq!(
             extract_mentions("hey @claude please", &rooms),
             vec!["claude".to_owned()]
+        );
+        // Non-ASCII letters are word characters: `@fooé` is not `@foo`, and
+        // a leading `é` does not open a mention either.
+        assert!(
+            extract_mentions("ping @fooé please", &rooms).is_empty(),
+            "@fooé must not stamp room foo"
+        );
+        assert!(
+            extract_mentions("é@foo trailing", &rooms).is_empty(),
+            "é@foo must not stamp: leading letter is a word char"
+        );
+        assert_eq!(
+            extract_mentions("hi @café thanks", &rooms),
+            vec!["café".to_owned()],
+            "registered Unicode room names still stamp"
         );
     }
 

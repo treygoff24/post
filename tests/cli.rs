@@ -4047,6 +4047,54 @@ fn mention_prefix_pairs_stamp_longest_only() {
 }
 
 #[test]
+fn mention_boundary_is_unicode_alphanumeric() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let foo = sandbox.path.join("foo");
+    let cafe = sandbox.path.join("café");
+    fs::create_dir(&foo).expect("foo");
+    fs::create_dir(&cafe).expect("café");
+    register_room(&sandbox, "foo", &foo);
+    register_room(&sandbox, "café", &cafe);
+    join_channel(&sandbox, "bounds", &alpha);
+    join_channel(&sandbox, "bounds", &beta);
+
+    let no_foo: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "bounds",
+            "--send",
+            "--anyway",
+            "--body",
+            "ping @fooé and é@foo",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert!(
+        no_foo.message.mentions.is_empty(),
+        "@fooé / é@foo must not stamp ascii room foo: {:?}",
+        no_foo.message.mentions
+    );
+
+    let cafe_hit: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "bounds",
+            "--send",
+            "--anyway",
+            "--body",
+            "hi @café there",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert_eq!(cafe_hit.message.mentions, vec!["café".to_owned()]);
+}
+
+#[test]
 fn discard_receipt_counts_full_unread_past_catch_up() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
