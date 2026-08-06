@@ -197,8 +197,9 @@ results, stderr = diagnostics/errors.
 - `post who [--room <name>]... [--text]` — read-only presence: for each selected
   (or all registered) room, whether a watch heartbeat is live and the last-seen
   unix-seconds stamp. Heartbeats live at `<room>/watch.heartbeat`, touched each
-  watch poll when the room directory already exists. Never reports PIDs or
-  process info.
+  long-running watch poll (not `--snapshot`) when the room directory already
+  exists. Format: `<unix-secs> <interval-ms>`; liveness is age ≤ interval×2 +
+  slack, and future stamps are never live. Never reports PIDs or process info.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix]` — validates root exists, rooms.json/rules.json parse
@@ -222,14 +223,19 @@ results, stderr = diagnostics/errors.
   start-vs-arrival loss window. Emits ENVELOPE METADATA ONLY — never body
   content, on any surface; consumption and its framing banner stay exclusively
   with `post read` or `post chat`. Default output NDJSON, one object per line:
-  direct mail `{"event":"mail", room, id, from, kind, subject, sent}`;
+  direct mail `{"event":"mail", room, id, from, kind, subject, sent, reason}`;
   unreadable direct mail or channel messages `{"event":"unreadable", room,
-  id}` (filename-derived id, nothing quoted from the file); channel messages
+  id, reason}` where `reason` is `mail` or `channel` (filename-derived id,
+  nothing quoted from the file; mention is unknowable without a body);
+  channel messages
   `{"event":"channel_message", channel, id, from, subject, sent, reason}` where
   `reason` is `channel` or `mention` (the watching room is @mentioned). A room's
   own channel messages are never news to it and never ring its own watch.
-  Each poll touches `<room>/watch.heartbeat` (unix seconds) when the room
-  directory already exists, so `post who` can report live watches without PIDs.
+  Each long-running poll touches `<room>/watch.heartbeat` (`<unix-secs>
+  <interval-ms>`) when the room directory already exists, so `post who` can
+  report live watches without PIDs. Snapshot mode never writes heartbeats.
+  A watch is live when the stamp is not in the future and age is at most
+  `interval*2 + slack` (legacy single-number stamps assume a 1000ms interval).
   `--text` mirrors inbox/channel line formats with the subject, sender,
   channel, and unreadable id all debug-escaped — the attacker-reachable fields
   (crafted subjects and `from` in hand-written mail/messages; filenames, which

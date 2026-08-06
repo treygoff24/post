@@ -62,7 +62,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "watch",
             "post watch [--room <name>]... [--once | --snapshot] [--interval-ms <ms>] [--text]",
             "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
-            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; each poll touches <room>/watch.heartbeat for presence; events carry reason mail|channel|mention; --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
+            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; each long-running poll touches <room>/watch.heartbeat for presence (snapshot never does); events carry reason mail|channel|mention on every type (unreadable: mail|channel); --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
         ),
         command(
             "who",
@@ -138,7 +138,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ]),
         watch: fields(&[
             "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
-            "unreadable: event, room, id",
+            "unreadable: event, room, id, reason=mail|channel",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp]",
         ]),
         who: fields(&["ok", "rooms (room, live_watch, last_seen?)", "count"]),

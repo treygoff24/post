@@ -228,7 +228,12 @@ pub enum WatchEvent {
     },
     /// A delivery whose envelope failed to parse: the doorbell still rings,
     /// but nothing from the file is echoed except its filename-derived id.
-    Unreadable { room: String, id: String },
+    /// `reason` is `mail` or `channel` (mention is unknowable without a body).
+    Unreadable {
+        room: String,
+        id: String,
+        reason: WatchReason,
+    },
     /// A new message in a channel the watching room belongs to. Envelope
     /// only, never the body; the watcher's cursor is never touched — a
     /// doorbell notifies, it does not consume (contract 013246, watch
@@ -281,10 +286,11 @@ impl WatchEvent {
         }
     }
 
-    pub(crate) fn unreadable(room: &str, id: String) -> Self {
+    pub(crate) fn unreadable(room: &str, id: String, reason: WatchReason) -> Self {
         Self::Unreadable {
             room: room.to_owned(),
             id,
+            reason,
         }
     }
 

@@ -234,20 +234,22 @@ Default output is NDJSON with variants:
 
 ```json
 {"event":"mail","room":"codex","id":"...","from":"claude-space","kind":"note","subject":"...","sent":"...","reason":"mail"}
-{"event":"unreadable","room":"codex","id":"bad-file"}
+{"event":"unreadable","room":"codex","id":"bad-file","reason":"mail"}
 {"event":"channel_message","channel":"ops","id":"...","from":"workspace","subject":"...","sent":"...","reason":"channel"}
 {"event":"channel_message","channel":"ops","id":"...","from":"workspace","subject":"...","sent":"...","reason":"mention"}
 ```
 
-`reason` is `mail` | `channel` | `mention`. A room's own channel messages do
-not ring its own watch. Use a long-running PTY session and read lines
-incrementally; kill the session when done. For smokes, use
+`reason` is `mail` | `channel` | `mention` on every event type (`unreadable`
+uses `mail` or `channel`; mention is unknowable without a body). A room's own
+channel messages do not ring its own watch. Use a long-running PTY session and
+read lines incrementally; kill the session when done. For smokes, use
 `POST_MAIL_ROOT=/tmp/...` plus temporary registered rooms/channels, seed an
 event first, or run watch in a bounded PTY/session and stop it explicitly.
 
 `post who` reports which rooms have a live `post watch` (via
-`<room>/watch.heartbeat`, refreshed each poll) and a last-seen stamp. It never
-emits PIDs or anything usable to target a process.
+`<room>/watch.heartbeat`, refreshed each long-running poll — not `--snapshot`)
+and a last-seen stamp. Liveness scales with `--interval-ms`. It never emits
+PIDs or anything usable to target a process.
 
 ## Session hook adapters (Claude Code and Codex)
 

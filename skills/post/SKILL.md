@@ -88,7 +88,8 @@ Channel ergonomics (v0.4):
 - `post who`: live watch + last-seen via heartbeat files — never PIDs.
 - `--seen-by <id>`: which members' cursors passed that message (read-only).
 - `--history N --grep PAT`: case-insensitive regex filter.
-- Watch events carry `reason`: `mail` | `channel` | `mention`.
+- Watch events carry `reason` on every type: `mail` | `channel` | `mention`
+  (`unreadable` uses `mail` or `channel`).
 
 Body input, the one surface worth memorizing:
 
