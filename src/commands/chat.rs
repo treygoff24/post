@@ -89,6 +89,11 @@ fn read(
     } else {
         batch.last().map(|(message, _)| message.id.clone())
     };
+    // --limit N: bounded catch-up. Show only the newest N unread; the cursor
+    // still advances past the WHOLE batch (last_id above is from the full
+    // batch), so the skipped tail is consumed deliberately and reported.
+    let mut batch = batch;
+    let skipped = apply_limit(&mut batch, args.limit, &args.name)?;
     if args.discard {
         return discard(
             context,
@@ -130,6 +135,7 @@ fn read(
                 room: room.clone(),
                 peek: args.peek || cursorless,
                 count: batch.len(),
+                skipped,
                 messages: batch
                     .into_iter()
                     .map(|(message, body)| {
@@ -146,7 +152,23 @@ fn read(
             pretty,
         )?
     } else {
-        render_text(context, &args.name, &room, &batch)
+        let mut text = render_text(context, &args.name, &room, &batch);
+        if skipped > 0 {
+            let total = batch.len() + skipped;
+            let tail = if args.peek {
+                "cursor untouched".to_owned()
+            } else {
+                format!(
+                    "cursor advances past them; `post chat {} --history {total}` to revisit",
+                    super::send::shell_quote(&args.name)
+                )
+            };
+            text.insert_str(
+                0,
+                &format!("post: --limit: {skipped} older unread message(s) not shown ({tail})\n"),
+            );
+        }
+        text
     };
     let Some(last_id) = last_id else {
         return Ok(CommandResult::success(rendered));
@@ -163,6 +185,35 @@ fn read(
     Ok(CommandResult::after_stdout(rendered, move || {
         ChannelState::advance(&context, &room, &channel_name, &last_id)
     }))
+}
+
+/// Trim the unread batch to its newest `limit` entries, returning how many
+/// older messages were dropped from display. The caller's cursor target
+/// (last_id) is computed from the FULL batch, so a non-peek read still
+/// advances past everything — the skip is deliberate and reported.
+fn apply_limit(
+    batch: &mut Vec<(ChannelMessage, String)>,
+    limit: Option<usize>,
+    channel_name: &str,
+) -> AppResult<usize> {
+    let Some(n) = limit else { return Ok(0) };
+    if n == 0 {
+        let fix = format!("post chat {} --discard", super::send::shell_quote(channel_name));
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            "--limit 0 would consume every unread message without showing any",
+            format!("Run `{fix}` to skip them deliberately, or pass --limit 1 or more."),
+        )
+        .exact_fix(fix)
+        .input("--limit")
+        .reason("zero limit is a disguised discard"));
+    }
+    if batch.len() <= n {
+        return Ok(0);
+    }
+    let skipped = batch.len() - n;
+    batch.drain(..skipped);
+    Ok(skipped)
 }
 
 /// Skip the unread batch without printing bodies: the honest spelling of what
@@ -772,6 +823,51 @@ mod tests {
         // And the cursor is untouched afterwards.
         let state = ChannelState::load(&context, "alpha").expect("reload");
         assert_eq!(state.cursor("tax"), Some(ID3));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn limit_trims_to_newest_and_reports_skip_while_last_id_covers_whole_batch() {
+        let (root, context) = chat_context("limit");
+        let dir = seed_channel(&root, &["alpha"]);
+        seed_message(&dir, ID1, "beta", "oldest");
+        seed_message(&dir, ID2, "beta", "middle");
+        seed_message(&dir, ID3, "beta", "newest");
+
+        let mut batch = read_batch(&context, "alpha", "tax").expect("read");
+        // read() computes the cursor target from the FULL batch before the trim.
+        let last_id = batch.last().map(|(m, _)| m.id.clone());
+        let skipped = apply_limit(&mut batch, Some(2), "tax").expect("limit");
+        assert_eq!(skipped, 1);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].0.id, ID2, "oldest must be the one dropped");
+        assert_eq!(batch[1].0.id, ID3);
+        assert_eq!(
+            last_id.as_deref(),
+            Some(ID3),
+            "cursor target passes the WHOLE batch, including the skipped tail"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn limit_larger_than_batch_is_a_plain_read() {
+        let mut batch = vec![];
+        assert_eq!(apply_limit(&mut batch, Some(5), "tax").expect("empty"), 0);
+        assert_eq!(apply_limit(&mut batch, None, "tax").expect("no limit"), 0);
+    }
+
+    #[test]
+    fn limit_zero_is_refused_as_disguised_discard() {
+        let (root, context) = chat_context("limitzero");
+        let dir = seed_channel(&root, &["alpha"]);
+        seed_message(&dir, ID1, "beta", "only");
+        let mut batch = read_batch(&context, "alpha", "tax").expect("read");
+        let Err(error) = apply_limit(&mut batch, Some(0), "tax") else {
+            panic!("limit 0 must be refused");
+        };
+        assert_eq!(error.code.as_str(), "invalid_argument");
+        assert_eq!(batch.len(), 1, "refusal must not consume the batch");
         trash_test_root(&root);
     }
 

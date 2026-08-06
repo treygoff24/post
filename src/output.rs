@@ -122,6 +122,14 @@ pub struct ChatReadOutput {
     pub peek: bool,
     pub messages: Vec<ChatMessageItem>,
     pub count: usize,
+    /// Unread messages older than the --limit window that were consumed
+    /// without being shown (0 when no limit or nothing was skipped).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]

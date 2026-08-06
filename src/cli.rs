@@ -115,6 +115,7 @@ pub(crate) struct SendArgs {
 #[command(
     override_usage = "post chat <CHANNEL>                             (read new messages)\n       \
      post chat <CHANNEL> --peek                      (read without advancing)\n       \
+     post chat <CHANNEL> --limit <N>                 (last N unread; skips + advances past the rest)\n       \
      post chat <CHANNEL> --history <N>               (last N messages, cursor untouched)\n       \
      post chat <CHANNEL> --since <ID>                (messages after ID, cursor untouched)\n       \
      post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
@@ -181,6 +182,11 @@ pub(crate) struct ChatArgs {
     /// Advance the cursor past every unread message without printing them.
     #[arg(long, conflicts_with_all = ["peek", "send", "join"])]
     pub discard: bool,
+
+    /// Bounded catch-up: show only the last N unread messages, report how many
+    /// older ones were skipped, and advance the cursor past the whole batch.
+    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file"])]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Args)]
