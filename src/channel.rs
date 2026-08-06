@@ -418,7 +418,9 @@ pub(crate) fn send(
 }
 
 /// Unread messages from other rooms past the sender's cursor. Empty = clear
-/// to send. Bounded to the last 10 for the bounce payload.
+/// to send. Bounded to the last 10 for the bounce payload. Malformed `.msg`
+/// files at/below the cursor are ignored; an unreadable file past the cursor
+/// refuses the send (`--anyway` remains the escape hatch).
 fn crossed_send_bounce(
     context: &Context,
     paths: &ChannelPaths,
@@ -431,10 +433,17 @@ fn crossed_send_bounce(
     let state = ChannelState::load(context, room)?;
     let cursor = state.cursor(channel);
     let mut missed = Vec::new();
+    let mut unreadable_past = false;
     for path in message_files(&paths.messages)? {
+        let past = message_stem_past_cursor(&path, cursor);
         let parsed = match parse_channel_message(&path) {
             Ok(parsed) => parsed,
-            Err(_) => continue,
+            Err(_) => {
+                if past {
+                    unreadable_past = true;
+                }
+                continue;
+            }
         };
         let unread = cursor.is_none_or(|last| parsed.message.id.as_str() > last);
         // System events (join/profile) are not conversation the sender needs
@@ -450,24 +459,45 @@ fn crossed_send_bounce(
             body: parsed.body,
         });
     }
-    if missed.is_empty() {
+    if missed.is_empty() && !unreadable_past {
         return Ok(None);
-    }
-    let total = missed.len();
-    if missed.len() > 10 {
-        missed = missed.split_off(missed.len() - 10);
     }
     let fix = format!(
         "post chat {} --send --anyway --body '<revised text>'",
         crate::mailbox::shell_quote(channel)
     );
+    if unreadable_past && missed.is_empty() {
+        return Ok(Some(
+            AppError::new(
+                ErrorCode::CrossedSend,
+                format!(
+                    "channel '{channel}' has unreadable unread message(s) past your cursor; send was not delivered"
+                ),
+                format!(
+                    "Inspect/repair the channel store, catch up with `post chat {}`, then revise; or retry with `--anyway` to deliver regardless: `{fix}`.",
+                    crate::mailbox::shell_quote(channel)
+                ),
+            )
+            .exact_fix(fix)
+            .input(channel)
+            .reason("unreadable message past sender cursor"),
+        ));
+    }
+    let total = missed.len();
+    if missed.len() > 10 {
+        missed = missed.split_off(missed.len() - 10);
+    }
+    let mut message = format!(
+        "channel '{channel}' has {total} unread message(s) past your cursor; send was not delivered (showing the last {})",
+        missed.len()
+    );
+    if unreadable_past {
+        message.push_str("; plus unreadable unread message(s)");
+    }
     Ok(Some(
         AppError::new(
             ErrorCode::CrossedSend,
-            format!(
-                "channel '{channel}' has {total} unread message(s) past your cursor; send was not delivered (showing the last {})",
-                missed.len()
-            ),
+            message,
             format!(
                 "Read the missed messages, revise, then retry with `--anyway` to deliver regardless: `{fix}`."
             ),
@@ -477,6 +507,13 @@ fn crossed_send_bounce(
         .reason("channel tip advanced past sender cursor")
         .missed(missed),
     ))
+}
+
+fn message_stem_past_cursor(path: &Path, after: Option<&str>) -> bool {
+    let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+        return true;
+    };
+    after.is_none_or(|last| id > last)
 }
 
 /// Resolve a full id or unique prefix within this channel's messages/.

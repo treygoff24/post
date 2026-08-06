@@ -4075,3 +4075,112 @@ fn discard_receipt_counts_full_unread_past_catch_up() {
         "discard receipt must count the full unread batch, not the catch-up window"
     );
 }
+
+#[test]
+fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "repair", &alpha);
+    join_channel(&sandbox, "repair", &beta);
+    assert_success(&sandbox.run_in(&["chat", "repair", "--discard", "--json"], None, &alpha));
+
+    let id_m = "20990101-120000-000001-aaaaaa";
+    let id_l = "20990101-120000-000002-bbbbbb";
+    // Malformed M past cursor, then valid L after it.
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels/repair/messages")
+            .join(format!("{id_m}.msg")),
+        "malformed channel message",
+    )
+    .expect("plant unreadable M");
+    write_channel_message(&sandbox, "repair", id_l, "beta", "", "later readable L");
+
+    let failed = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
+    assert_eq!(failed.status.code(), Some(78), "stderr: {}", stderr(&failed));
+    let error: ErrorEnvelope = from_stderr(&failed);
+    assert_eq!(error.error.code, "config_invalid");
+    // Cursor must be untouched — a second plain read still fails the same way.
+    let still = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
+    assert_eq!(still.status.code(), Some(78));
+    let state_path = sandbox.mail_root.join("alpha/channel-state.json");
+    if state_path.exists() {
+        let raw = fs::read_to_string(&state_path).expect("state");
+        assert!(
+            !raw.contains(id_l),
+            "cursor must not have advanced to L: {raw}"
+        );
+    }
+
+    // History (cursorless) may still skip the unreadable file.
+    let history = sandbox.run_in(&["chat", "repair", "--history", "10"], None, &alpha);
+    assert_eq!(history.status.code(), Some(0), "stderr: {}", stderr(&history));
+    assert!(
+        stderr(&history).contains("skipped unreadable channel message"),
+        "expected history skip warning: {}",
+        stderr(&history)
+    );
+    assert!(stdout(&history).contains("later readable L"));
+
+    // Repair M → plain read emits both and can advance past them.
+    write_channel_message(&sandbox, "repair", id_m, "beta", "", "repaired M");
+    let repaired: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "repair", "--json"], None, &alpha));
+    assert_eq!(repaired.count, 2);
+    assert_eq!(repaired.messages[0].message.id, id_m);
+    assert_eq!(repaired.messages[0].body, "repaired M");
+    assert_eq!(repaired.messages[1].message.id, id_l);
+    let empty: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "repair", "--json"], None, &alpha));
+    assert_eq!(empty.count, 0, "cursor advanced past both after successful emit");
+}
+
+#[test]
+fn crossed_send_bounces_on_unreadable_past_cursor() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "xbad", &alpha);
+    join_channel(&sandbox, "xbad", &beta);
+    assert_success(&sandbox.run_in(&["chat", "xbad", "--discard", "--json"], None, &alpha));
+
+    let id_m = "20990101-130000-000001-cccccc";
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels/xbad/messages")
+            .join(format!("{id_m}.msg")),
+        "malformed unread",
+    )
+    .expect("plant unreadable past cursor");
+
+    let bounced = sandbox.run_in(
+        &["chat", "xbad", "--send", "--body", "blind reply", "--json"],
+        None,
+        &alpha,
+    );
+    assert_eq!(bounced.status.code(), Some(65), "stderr: {}", stderr(&bounced));
+    let error: ErrorEnvelope = from_stderr(&bounced);
+    assert_eq!(error.error.code, "crossed_send");
+    assert!(
+        error.error.message.contains("unreadable"),
+        "bounce should name unreadable past-cursor: {}",
+        error.error.message
+    );
+
+    // --anyway remains the escape hatch.
+    let forced: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "xbad",
+            "--send",
+            "--anyway",
+            "--body",
+            "sending anyway",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert!(forced.ok);
+}

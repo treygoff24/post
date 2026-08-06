@@ -102,7 +102,13 @@ fn read(
     // (the cursor-swallow class cannot happen through them).
     let cursorless = args.history.is_some() || args.since.is_some();
     let mut batch = if cursorless {
-        let mut all = collect_batch(context, &room, &args.name, args.since.as_deref())?;
+        let mut all = collect_batch(
+            context,
+            &room,
+            &args.name,
+            args.since.as_deref(),
+            false,
+        )?;
         if let Some(n) = args.history {
             if all.len() > n {
                 all.drain(..all.len() - n);
@@ -410,7 +416,8 @@ fn discard(
 
 /// Collect the unread batch for `room` in `channel`: every message with id
 /// strictly after the reader's cursor, in id order (lexical = chronological
-/// for microsecond-resolution ids).
+/// for microsecond-resolution ids). Cursor-advancing callers fail closed on
+/// unreadable past-cursor messages so the cursor cannot leap past them.
 fn read_batch(
     context: &Context,
     room: &str,
@@ -418,17 +425,20 @@ fn read_batch(
 ) -> AppResult<Vec<(ChannelMessage, String)>> {
     let state = ChannelState::load(context, room)?;
     let cursor = state.cursor(channel_name).map(str::to_owned);
-    collect_batch(context, room, channel_name, cursor.as_deref())
+    collect_batch(context, room, channel_name, cursor.as_deref(), true)
 }
 
 /// Every message with id strictly after `after` (None = the whole history),
 /// in id order, after existence and membership checks. Pure read: never
-/// touches any cursor.
+/// touches any cursor. When `fail_closed` is true (cursor-advancing reads),
+/// an unreadable `.msg` past `after` returns `config_invalid` so a later
+/// repair is still visible; cursorless history/--since may warn and skip.
 fn collect_batch(
     context: &Context,
     room: &str,
     channel_name: &str,
     after: Option<&str>,
+    fail_closed: bool,
 ) -> AppResult<Vec<(ChannelMessage, String)>> {
     let paths = channel::ChannelPaths::new(context, channel_name)?;
     let quoted = crate::mailbox::shell_quote(channel_name);
@@ -453,11 +463,19 @@ fn collect_batch(
     }
     let mut batch = Vec::new();
     for path in channel::message_files(&paths.messages)? {
+        // Filename id is the cursor-order key. Messages at/below the cursor
+        // were already consumed — ignore them even if now unreadable.
+        if !message_file_past_cursor(&path, after) {
+            continue;
+        }
         let parsed = match channel::parse_channel_message(&path) {
             Ok(parsed) => parsed,
             Err(error) => {
-                // Untrusted store: a single malformed .msg must not brick
-                // history/catch-up/send-advance for the whole channel.
+                if fail_closed {
+                    return Err(error);
+                }
+                // Cursorless history/--since: a single malformed .msg must
+                // not brick the whole channel listing.
                 eprintln!(
                     "post: warning: skipped unreadable channel message {:?}: {:?}",
                     path.display().to_string(),
@@ -472,6 +490,16 @@ fn collect_batch(
     }
     batch.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
     Ok(batch)
+}
+
+/// Whether a `.msg` path's filename stem sorts strictly after `after`
+/// (None = everything is past). Non-UTF-8 stems are treated as past so
+/// fail-closed readers cannot leap over them.
+fn message_file_past_cursor(path: &std::path::Path, after: Option<&str>) -> bool {
+    let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+        return true;
+    };
+    after.is_none_or(|last| id > last)
 }
 
 fn render_text(
@@ -1081,12 +1109,12 @@ mod tests {
             .expect("read")
             .is_empty());
         // ...but --since ignores the cursor entirely.
-        let since = collect_batch(&context, "alpha", "tax", Some(ID1)).expect("since read");
+        let since = collect_batch(&context, "alpha", "tax", Some(ID1), false).expect("since read");
         assert_eq!(since.len(), 2);
         assert_eq!(since[0].0.id, ID2);
         assert_eq!(since[1].0.id, ID3);
         // Full history (the --history base) sees all three.
-        let all = collect_batch(&context, "alpha", "tax", None).expect("history read");
+        let all = collect_batch(&context, "alpha", "tax", None, false).expect("history read");
         assert_eq!(all.len(), 3);
         // And the cursor is untouched afterwards.
         let state = ChannelState::load(&context, "alpha").expect("reload");
@@ -1317,6 +1345,55 @@ mod tests {
             ),
             "pre-profile line drifted: {rendered}"
         );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn unreadable_past_cursor_fails_closed_without_advancing() {
+        let (root, context) = chat_context("fail-closed");
+        let dir = seed_channel(&root, &["alpha"]);
+        // M unreadable, L valid, M < L. Plain/cursor-advancing read must not
+        // skip M and leap the cursor to L.
+        fs::write(dir.join("messages").join(format!("{ID1}.msg")), "not a channel message")
+            .expect("plant malformed M");
+        seed_message(&dir, ID2, "beta", "later readable");
+
+        let error = read_batch(&context, "alpha", "tax").expect_err("must fail closed");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        let state = ChannelState::load(&context, "alpha").expect("load");
+        assert!(
+            state.cursor("tax").is_none(),
+            "failed read must leave cursor untouched"
+        );
+
+        // Cursorless history may still warn+skip.
+        let history = collect_batch(&context, "alpha", "tax", None, false).expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0.id, ID2);
+
+        // Repair M → fail-closed read emits both, oldest first.
+        seed_message(&dir, ID1, "beta", "repaired M");
+        let batch = read_batch(&context, "alpha", "tax").expect("after repair");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].0.id, ID1);
+        assert_eq!(batch[0].1, "repaired M");
+        assert_eq!(batch[1].0.id, ID2);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn unreadable_at_or_below_cursor_is_ignored_on_fail_closed_read() {
+        let (root, context) = chat_context("below-cursor-skip");
+        let dir = seed_channel(&root, &["alpha"]);
+        seed_message(&dir, ID1, "beta", "already read");
+        ChannelState::advance(&context, "alpha", "tax", ID1).expect("advance past ID1");
+        // Corrupt the already-consumed message; a newer readable one follows.
+        fs::write(dir.join("messages").join(format!("{ID1}.msg")), "corrupted")
+            .expect("corrupt below-cursor");
+        seed_message(&dir, ID2, "beta", "new");
+        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0.id, ID2);
         trash_test_root(&root);
     }
 }
