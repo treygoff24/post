@@ -593,8 +593,13 @@ pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
         }
         if let Some(name) = matched {
             found.insert(name.clone());
+            // Resume past the whole matched name: a registered name that
+            // itself contains `@` (legal) must not re-trigger on its embedded
+            // `@` and double-stamp the same token.
+            search_from = after_at + name.len();
+        } else {
+            search_from = at + 1;
         }
-        search_from = at + 1;
     }
     found.into_iter().collect()
 }
@@ -1190,6 +1195,26 @@ mod tests {
         assert_eq!(summaries[0].info.name, "tax");
         assert_eq!(summaries[0].messages, 1);
         trash_test_root(&root);
+    }
+
+    #[test]
+    fn embedded_at_in_registered_name_does_not_double_stamp() {
+        use crate::model::RoomMap;
+        use std::collections::BTreeMap;
+        let mut rooms: RoomMap = BTreeMap::new();
+        rooms.insert("foo.@bar".to_owned(), "/tmp".into());
+        rooms.insert("bar".to_owned(), "/tmp".into());
+        // One token, one mention: the embedded `@` inside the matched longer
+        // name must not re-trigger and also stamp `bar`.
+        assert_eq!(
+            extract_mentions("@foo.@bar one token", &rooms),
+            vec!["foo.@bar".to_owned()]
+        );
+        // A standalone `@bar` still stamps normally.
+        assert_eq!(
+            extract_mentions("plain @bar here", &rooms),
+            vec!["bar".to_owned()]
+        );
     }
 
     #[test]

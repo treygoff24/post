@@ -177,7 +177,15 @@ results, stderr = diagnostics/errors.
   range are pulled forward). Explicit `--limit <n>` still works; `--limit 0`
   means unlimited. With `--peek` the bound is display-only and never advances.
   `--seen-by <id>` is a read-only listing of member rooms whose cursors have
-  advanced past that message. Requires
+  advanced past that message. Cursor-advancing reads fail closed: an
+  unreadable/unparseable `.msg` file past the reader's cursor makes a plain
+  read return `config_invalid` with the cursor untouched (the cursor advances
+  only to the last emitted message, never past one that could not be emitted).
+  Cursorless `--history`/`--since` reads warn on stderr and skip unreadable
+  messages, since they never move a cursor. Crossed-send applies the same
+  posture: an unreadable unread file past the sender's cursor bounces a
+  normal send (`--anyway` remains the escape hatch); malformed files at or
+  below the cursor are ignored. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure

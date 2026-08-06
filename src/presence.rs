@@ -93,11 +93,14 @@ pub(crate) struct Presence {
     pub last_seen: Option<String>,
 }
 
+/// Heartbeats are `<unix-secs> <interval-ms>\n` — anything bigger is not ours.
+const MAX_HEARTBEAT_BYTES: usize = 128;
+
 pub(crate) fn read_presence(context: &Context, room: &str) -> AppResult<Presence> {
     let path = heartbeat_path(context, room);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let raw = match read_heartbeat_nofollow(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => {
             return Ok(Presence {
                 room: room.to_owned(),
                 live_watch: false,
@@ -122,12 +125,47 @@ pub(crate) fn read_presence(context: &Context, room: &str) -> AppResult<Presence
     })
 }
 
+/// Read the heartbeat without following symlinks, without blocking on a
+/// planted FIFO, and without trusting size: fd-first (open, fstat, then read
+/// bounded bytes from that fd — never path-stat-then-open). `Ok(None)` means
+/// no heartbeat; a non-regular or oversized file is treated the same as a
+/// dead heartbeat rather than an error a hostile sibling could weaponize.
+fn read_heartbeat_nofollow(path: &Path) -> std::io::Result<Option<String>> {
+    use std::io::Read;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // ELOOP (symlink refused by O_NOFOLLOW) reads as "no live heartbeat".
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_HEARTBEAT_BYTES as u64 {
+        return Ok(None);
+    }
+    let mut buffer = Vec::with_capacity(MAX_HEARTBEAT_BYTES);
+    Read::take(file, MAX_HEARTBEAT_BYTES as u64).read_to_end(&mut buffer)?;
+    Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
+}
+
+/// The CLI only accepts `--interval-ms` in 100..=60000; a stored interval
+/// outside that range is forged or corrupt and falls back to the legacy
+/// 1000ms window instead of extending liveness (a `u64::MAX` interval would
+/// otherwise keep an ancient heartbeat live forever).
+const MIN_INTERVAL_MS: u64 = 100;
+const MAX_INTERVAL_MS: u64 = 60_000;
+
 fn parse_heartbeat(raw: &str) -> (Option<u64>, u64) {
     let mut parts = raw.split_whitespace();
     let stamp = parts.next().and_then(|value| value.parse::<u64>().ok());
     let interval_ms = parts
         .next()
         .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ms| (MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(ms))
         .unwrap_or(DEFAULT_INTERVAL_MS);
     (stamp, interval_ms)
 }
@@ -164,6 +202,86 @@ mod tests {
         let presence = read_presence(&context, "alpha").expect("read");
         assert!(!presence.live_watch);
         assert!(presence.last_seen.is_none());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn fifo_heartbeat_does_not_hang_who() {
+        let root = test_root("presence-fifo");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let path = heartbeat_path(&context, "alpha");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("cstr");
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        // Must return promptly (no blocking open/read) and read as dead.
+        let presence = read_presence(&context, "alpha").expect("read");
+        assert!(!presence.live_watch);
+        assert!(presence.last_seen.is_none());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn symlink_heartbeat_reads_as_dead() {
+        let root = test_root("presence-symlink");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let path = heartbeat_path(&context, "alpha");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        let target = root.join("victim");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(&target, format!("{now} 1000\n")).expect("victim");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+        let presence = read_presence(&context, "alpha").expect("read");
+        assert!(!presence.live_watch);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn oversized_heartbeat_reads_as_dead() {
+        let root = test_root("presence-oversize");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let path = heartbeat_path(&context, "alpha");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        std::fs::write(&path, "9".repeat(MAX_HEARTBEAT_BYTES + 1)).expect("write");
+        let presence = read_presence(&context, "alpha").expect("read");
+        assert!(!presence.live_watch);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn forged_giant_interval_does_not_pin_liveness() {
+        let root = test_root("presence-forged-interval");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let path = heartbeat_path(&context, "alpha");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        // Epoch-1 stamp with u64::MAX interval: out-of-range interval falls
+        // back to the 1000ms window, so this ancient heartbeat is dead.
+        std::fs::write(&path, format!("1 {}\n", u64::MAX)).expect("write");
+        let presence = read_presence(&context, "alpha").expect("read");
+        assert!(!presence.live_watch);
+        assert_eq!(presence.last_seen.as_deref(), Some("1"));
+        // In-range interval at a fresh stamp still reads live.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(&path, format!("{now} 60000\n")).expect("write");
+        let presence = read_presence(&context, "alpha").expect("read");
+        assert!(presence.live_watch);
         trash_test_root(&root);
     }
 
