@@ -4146,7 +4146,12 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
     write_channel_message(&sandbox, "repair", id_l, "beta", "", "later readable L");
 
     let failed = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
-    assert_eq!(failed.status.code(), Some(78), "stderr: {}", stderr(&failed));
+    assert_eq!(
+        failed.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&failed)
+    );
     let error: ErrorEnvelope = from_stderr(&failed);
     assert_eq!(error.error.code, "config_invalid");
     // Cursor must be untouched — a second plain read still fails the same way.
@@ -4163,7 +4168,12 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
 
     // History (cursorless) may still skip the unreadable file.
     let history = sandbox.run_in(&["chat", "repair", "--history", "10"], None, &alpha);
-    assert_eq!(history.status.code(), Some(0), "stderr: {}", stderr(&history));
+    assert_eq!(
+        history.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&history)
+    );
     assert!(
         stderr(&history).contains("skipped unreadable channel message"),
         "expected history skip warning: {}",
@@ -4181,7 +4191,10 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
     assert_eq!(repaired.messages[1].message.id, id_l);
     let empty: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "repair", "--json"], None, &alpha));
-    assert_eq!(empty.count, 0, "cursor advanced past both after successful emit");
+    assert_eq!(
+        empty.count, 0,
+        "cursor advanced past both after successful emit"
+    );
 }
 
 #[test]
@@ -4207,7 +4220,12 @@ fn crossed_send_bounces_on_unreadable_past_cursor() {
         None,
         &alpha,
     );
-    assert_eq!(bounced.status.code(), Some(65), "stderr: {}", stderr(&bounced));
+    assert_eq!(
+        bounced.status.code(),
+        Some(65),
+        "stderr: {}",
+        stderr(&bounced)
+    );
     let error: ErrorEnvelope = from_stderr(&bounced);
     assert_eq!(error.error.code, "crossed_send");
     assert!(

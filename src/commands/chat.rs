@@ -102,13 +102,7 @@ fn read(
     // (the cursor-swallow class cannot happen through them).
     let cursorless = args.history.is_some() || args.since.is_some();
     let mut batch = if cursorless {
-        let mut all = collect_batch(
-            context,
-            &room,
-            &args.name,
-            args.since.as_deref(),
-            false,
-        )?;
+        let mut all = collect_batch(context, &room, &args.name, args.since.as_deref(), false)?;
         if let Some(n) = args.history {
             if all.len() > n {
                 all.drain(..all.len() - n);
@@ -1354,8 +1348,11 @@ mod tests {
         let dir = seed_channel(&root, &["alpha"]);
         // M unreadable, L valid, M < L. Plain/cursor-advancing read must not
         // skip M and leap the cursor to L.
-        fs::write(dir.join("messages").join(format!("{ID1}.msg")), "not a channel message")
-            .expect("plant malformed M");
+        fs::write(
+            dir.join("messages").join(format!("{ID1}.msg")),
+            "not a channel message",
+        )
+        .expect("plant malformed M");
         seed_message(&dir, ID2, "beta", "later readable");
 
         let error = read_batch(&context, "alpha", "tax").expect_err("must fail closed");

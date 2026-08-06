@@ -282,8 +282,15 @@ mod tests {
         );
         touch_heartbeat(&context, "alpha", 1000);
         let contents = std::fs::read_to_string(&victim).expect("read victim");
-        assert_eq!(contents, "SAFE\n", "must not truncate/write through hard link");
-        let mode = std::fs::metadata(&victim).expect("victim meta").permissions().mode() & 0o777;
+        assert_eq!(
+            contents, "SAFE\n",
+            "must not truncate/write through hard link"
+        );
+        let mode = std::fs::metadata(&victim)
+            .expect("victim meta")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o644, "must not chmod the hard-linked victim");
         trash_test_root(&root);
     }
