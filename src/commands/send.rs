@@ -230,21 +230,18 @@ pub(super) struct BodySource<'a> {
     pub oversize: bool,
 }
 
-/// Quote `value` for a POSIX shell so a fix stays executable when the body
-/// carries spaces or quotes.
-pub(super) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
 /// Rebuild the invocation that got us here, so a fix can append the corrected
 /// body flag and still be copy-pasteable.
 pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
-    let mut prefix = format!("post send --to {}", shell_quote(&args.to));
+    let mut prefix = format!("post send --to {}", crate::mailbox::shell_quote(&args.to));
     if let Some(sender) = &args.sender {
-        prefix.push_str(&format!(" --from {}", shell_quote(sender)));
+        prefix.push_str(&format!(" --from {}", crate::mailbox::shell_quote(sender)));
     }
     if !args.subject.is_empty() {
-        prefix.push_str(&format!(" --subject {}", shell_quote(&args.subject)));
+        prefix.push_str(&format!(
+            " --subject {}",
+            crate::mailbox::shell_quote(&args.subject)
+        ));
     }
     if args.oversize {
         prefix.push_str(" --oversize");
@@ -305,7 +302,11 @@ fn read_body_unchecked(source: BodySource<'_>) -> AppResult<String> {
             // one careful agent, 2026-07-31). Reject with the intended command;
             // a literal path-shaped body still works via stdin or a body file.
             if std::path::Path::new(&body).is_file() {
-                let fix = format!("{} --body-file {}", source.fix_prefix, shell_quote(&body));
+                let fix = format!(
+                    "{} --body-file {}",
+                    source.fix_prefix,
+                    crate::mailbox::shell_quote(&body)
+                );
                 return Err(AppError::new(
                     ErrorCode::InvalidArgument,
                     "--body is inline text, but its value is an existing file path",
@@ -374,7 +375,10 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
         // retryable I/O fault, so it reports as invalid_argument and spells
         // out the corrected command in full.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let fix = format!("{fix_prefix} --body {}", shell_quote(&display));
+            let fix = format!(
+                "{fix_prefix} --body {}",
+                crate::mailbox::shell_quote(&display)
+            );
             Err(AppError::new(
                 ErrorCode::InvalidArgument,
                 format!(
@@ -390,7 +394,7 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
         Err(error) => Err(
             AppError::io("read UTF-8 message body file", path, error).exact_fix(format!(
                 "{fix_prefix} --body-file {}",
-                shell_quote(&display)
+                crate::mailbox::shell_quote(&display)
             )),
         ),
     }

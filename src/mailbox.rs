@@ -354,6 +354,12 @@ pub(crate) fn validate_component(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Quote `value` for a POSIX shell so suggested/exact fixes stay executable
+/// when names or bodies carry spaces, quotes, or other metacharacters.
+pub(crate) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 pub(crate) fn validate_room_name(value: &str) -> Result<(), String> {
     validate_component(value)?;
     let folded = value.to_ascii_lowercase();

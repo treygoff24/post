@@ -47,8 +47,8 @@ pub(super) fn run(
     if !sending && !args.subject.is_empty() {
         let fix = format!(
             "post chat {} --send --subject {} --body '<text>'",
-            super::send::shell_quote(&args.name),
-            super::send::shell_quote(&args.subject)
+            crate::mailbox::shell_quote(&args.name),
+            crate::mailbox::shell_quote(&args.subject)
         );
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
@@ -67,17 +67,20 @@ pub(super) fn run(
 
 /// Rebuild the send invocation so a body-input fix can be copy-pasted whole.
 fn chat_fix_prefix(args: &ChatArgs) -> String {
-    let mut prefix = format!("post chat {} --send", super::send::shell_quote(&args.name));
+    let mut prefix = format!(
+        "post chat {} --send",
+        crate::mailbox::shell_quote(&args.name)
+    );
     if args.anyway {
         prefix.push_str(" --anyway");
     }
     if let Some(re) = &args.re {
-        prefix.push_str(&format!(" --re {}", super::send::shell_quote(re)));
+        prefix.push_str(&format!(" --re {}", crate::mailbox::shell_quote(re)));
     }
     if !args.subject.is_empty() {
         prefix.push_str(&format!(
             " --subject {}",
-            super::send::shell_quote(&args.subject)
+            crate::mailbox::shell_quote(&args.subject)
         ));
     }
     if args.oversize {
@@ -117,15 +120,9 @@ fn read(
     } else {
         batch.last().map(|(message, _)| message.id.clone())
     };
-    // Default bounded catch-up: plain cursor reads show the newest 25 unread
-    // when the backlog is larger. --limit 0 means unlimited; explicit --limit N
-    // still works. Mentions of the reading room in the skipped range are
-    // never silently dropped — they are pulled forward into the display.
-    let skipped = if cursorless {
-        0
-    } else {
-        apply_catch_up(&mut batch, args.limit, &room)?
-    };
+    // --discard must count (and advance past) the full unread batch. Catch-up
+    // trimming is a display concern; applying it first undercounted receipts
+    // when unread > 25 while still advancing the cursor past everything.
     if args.discard {
         return discard(
             context,
@@ -137,11 +134,20 @@ fn read(
             pretty,
         );
     }
+    // Default bounded catch-up: plain cursor reads show the newest 25 unread
+    // when the backlog is larger. --limit 0 means unlimited; explicit --limit N
+    // still works. Mentions of the reading room in the skipped range are
+    // never silently dropped — they are pulled forward into the display.
+    let skipped = if cursorless {
+        0
+    } else {
+        apply_catch_up(&mut batch, args.limit, &room)?
+    };
     // Emitting into /dev/null still advances the cursor, so the batch is
     // consumed without ever being seen. Refuse before anything is emitted:
     // nothing is written and the cursor stays put, so nothing is lost.
     if !args.peek && last_id.is_some() && output::stdout_is_null_device() {
-        let quoted = super::send::shell_quote(&args.name);
+        let quoted = crate::mailbox::shell_quote(&args.name);
         let fix = format!("post chat {quoted} --discard");
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
@@ -192,7 +198,7 @@ fn read(
             } else {
                 format!(
                     "cursor advances past them; use --limit 0 for all, or `post chat {} --history` to revisit",
-                    super::send::shell_quote(&args.name)
+                    crate::mailbox::shell_quote(&args.name)
                 )
             };
             text.insert_str(
@@ -300,6 +306,8 @@ fn build_reply_index(
         return index;
     }
     // Prefer bodies already in the batch; fall back to disk for older parents.
+    // Only accept a parsed message whose envelope id equals the requested `re`
+    // (parse_channel_message already enforces filename↔id match).
     for (message, body) in batch {
         if needed.contains(message.id.as_str()) {
             index.insert(
@@ -315,12 +323,17 @@ fn build_reply_index(
         if index.contains_key(id) {
             continue;
         }
+        if !channel::is_canonical_channel_message_id(id) {
+            continue;
+        }
         let path = paths.messages.join(format!("{id}.msg"));
         if let Ok(parsed) = channel::parse_channel_message(&path) {
-            index.insert(
-                parsed.message.id,
-                (parsed.message.from, preview_body(&parsed.body)),
-            );
+            if parsed.message.id == id {
+                index.insert(
+                    parsed.message.id,
+                    (parsed.message.from, preview_body(&parsed.body)),
+                );
+            }
         }
     }
     index
@@ -342,11 +355,12 @@ fn preview_body(body: &str) -> String {
 
 fn short_id(id: &str) -> &str {
     // Prefer the trailing 6-hex uniqueness; fall back to a short prefix.
+    // Char-boundary safe: untrusted `re` must never panic a reader even if
+    // validation is bypassed.
     id.rsplit('-').next().filter(|s| s.len() == 6).unwrap_or({
-        if id.len() > 8 {
-            &id[..8]
-        } else {
-            id
+        match id.char_indices().nth(8) {
+            Some((idx, _)) => &id[..idx],
+            None => id,
         }
     })
 }
@@ -417,11 +431,12 @@ fn collect_batch(
     after: Option<&str>,
 ) -> AppResult<Vec<(ChannelMessage, String)>> {
     let paths = channel::ChannelPaths::new(context, channel_name)?;
+    let quoted = crate::mailbox::shell_quote(channel_name);
     if !paths.exists() {
         return Err(AppError::new(
             ErrorCode::NotFound,
             format!("channel '{channel_name}' does not exist"),
-            format!("Create it with `post chat {channel_name} --join`."),
+            format!("Create it with `post chat {quoted} --join`."),
         )
         .input(channel_name)
         .reason("no channel.json under the channels directory"));
@@ -431,14 +446,26 @@ fn collect_batch(
         return Err(AppError::new(
             ErrorCode::NotAMember,
             format!("room '{room}' is not a member of channel '{channel_name}'"),
-            format!("Join first with `post chat {channel_name} --join`, then retry the read."),
+            format!("Join first with `post chat {quoted} --join`, then retry the read."),
         )
         .input(room)
         .reason("reader is absent from members.json"));
     }
     let mut batch = Vec::new();
     for path in channel::message_files(&paths.messages)? {
-        let parsed = channel::parse_channel_message(&path)?;
+        let parsed = match channel::parse_channel_message(&path) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                // Untrusted store: a single malformed .msg must not brick
+                // history/catch-up/send-advance for the whole channel.
+                eprintln!(
+                    "post: warning: skipped unreadable channel message {:?}: {:?}",
+                    path.display().to_string(),
+                    error.message
+                );
+                continue;
+            }
+        };
         if after.is_none_or(|last| parsed.message.id.as_str() > last) {
             batch.push((parsed.message, parsed.body));
         }
@@ -772,11 +799,12 @@ fn seen_by(
     let rooms = context.load_rooms()?;
     let room = channel::acting_room(context, &rooms)?;
     let paths = channel::ChannelPaths::new(context, channel_name)?;
+    let quoted = crate::mailbox::shell_quote(channel_name);
     if !paths.exists() {
         return Err(AppError::new(
             ErrorCode::NotFound,
             format!("channel '{channel_name}' does not exist"),
-            format!("Create it with `post chat {channel_name} --join`."),
+            format!("Create it with `post chat {quoted} --join`."),
         )
         .input(channel_name)
         .reason("no channel.json under the channels directory"));
@@ -786,7 +814,7 @@ fn seen_by(
         return Err(AppError::new(
             ErrorCode::NotAMember,
             format!("room '{room}' is not a member of channel '{channel_name}'"),
-            format!("Join first with `post chat {channel_name} --join`."),
+            format!("Join first with `post chat {quoted} --join`."),
         )
         .input(room)
         .reason("reader is absent from members.json"));

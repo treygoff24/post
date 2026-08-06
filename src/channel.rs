@@ -353,11 +353,12 @@ pub(crate) fn send(
     let rooms = context.load_rooms()?;
     let room = acting_room(context, &rooms)?;
     let paths = ChannelPaths::new(context, channel)?;
+    let quoted = crate::mailbox::shell_quote(channel);
     if !paths.exists() {
         return Err(AppError::new(
             ErrorCode::NotFound,
             format!("channel '{channel}' does not exist"),
-            format!("Create it with `post chat {channel} --join`, then retry the send."),
+            format!("Create it with `post chat {quoted} --join`, then retry the send."),
         )
         .input(channel)
         .reason("no channel.json under the channels directory"));
@@ -367,7 +368,7 @@ pub(crate) fn send(
         return Err(AppError::new(
             ErrorCode::NotAMember,
             format!("room '{room}' is not a member of channel '{channel}'"),
-            format!("Join first with `post chat {channel} --join`, then retry the send."),
+            format!("Join first with `post chat {quoted} --join`, then retry the send."),
         )
         .input(room)
         .reason("sender is absent from members.json"));
@@ -376,7 +377,9 @@ pub(crate) fn send(
         return Err(AppError::new(
             ErrorCode::EmptyBody,
             "message body is empty after trimming whitespace",
-            format!("Retry with `post chat {channel} --send --body '<text>'` or a non-empty FILE/stdin."),
+            format!(
+                "Retry with `post chat {quoted} --send --body '<text>'` or a non-empty FILE/stdin."
+            ),
         )
         .input("message body")
         .reason("empty or whitespace-only"));
@@ -454,7 +457,10 @@ fn crossed_send_bounce(
     if missed.len() > 10 {
         missed = missed.split_off(missed.len() - 10);
     }
-    let fix = format!("post chat {channel} --send --anyway --body '<revised text>'");
+    let fix = format!(
+        "post chat {} --send --anyway --body '<revised text>'",
+        crate::mailbox::shell_quote(channel)
+    );
     Ok(Some(
         AppError::new(
             ErrorCode::CrossedSend,
@@ -474,14 +480,17 @@ fn crossed_send_bounce(
 }
 
 /// Resolve a full id or unique prefix within this channel's messages/.
+/// Only accepts paths that parse as channel messages whose envelope id matches
+/// the filename stem — never trust a bare `.msg` name alone.
 pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResult<String> {
     let mut matches = Vec::new();
     for path in message_files(&paths.messages)? {
-        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+        let Ok(parsed) = parse_channel_message(&path) else {
             continue;
         };
+        let id = parsed.message.id;
         if id == prefix || id.starts_with(prefix) {
-            matches.push(id.to_owned());
+            matches.push(id);
         }
     }
     match matches.len() {
@@ -510,26 +519,51 @@ pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResul
     }
 }
 
-/// Word-boundary `@<room>` matches against registered room names. Longer
-/// names win first so `@claude-space` is not eaten by a hypothetical
-/// `@claude`. Matching is case-sensitive to the registered spelling.
+/// Word-boundary `@<room>` matches against registered room names. One
+/// longest registered-name match per `@` occurrence so prefix pairs like
+/// `foo`/`foo.bar` do not double-stamp. Matching is case-sensitive to the
+/// registered spelling.
 pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
     use std::collections::BTreeSet;
     let mut names: Vec<&String> = rooms.keys().collect();
     names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     let mut found = BTreeSet::new();
-    for name in names {
-        let Ok(re) = regex::Regex::new(&format!(
-            r"(^|[^A-Za-z0-9_-])@{}($|[^A-Za-z0-9_-])",
-            regex::escape(name)
-        )) else {
-            continue;
-        };
-        if re.is_match(body) {
+    let mut search_from = 0;
+    while let Some(rel) = body[search_from..].find('@') {
+        let at = search_from + rel;
+        if at > 0 {
+            let before = body[..at].chars().next_back().unwrap_or('\0');
+            if is_mention_boundary_char(before) {
+                search_from = at + 1;
+                continue;
+            }
+        }
+        let after_at = at + '@'.len_utf8();
+        let mut matched: Option<&String> = None;
+        for name in &names {
+            if !body[after_at..].starts_with(name.as_str()) {
+                continue;
+            }
+            let end = after_at + name.len();
+            let ok_end = body[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_mention_boundary_char(c));
+            if ok_end {
+                matched = Some(name);
+                break;
+            }
+        }
+        if let Some(name) = matched {
             found.insert(name.clone());
         }
+        search_from = at + 1;
     }
     found.into_iter().collect()
+}
+
+fn is_mention_boundary_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
 /// System-line writer for non-join events (currently profile changes).
@@ -698,16 +732,7 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
     // YYYYmmdd-HHMMSS-UUUUUU-<6 hex>: microsecond resolution keeps
     // lexicographic order ~= arrival order, which the reader's high-water
     // cursor depends on for completeness.
-    let id = message.id.as_bytes();
-    let valid_id = id.len() == 29
-        && id[..8].iter().all(u8::is_ascii_digit)
-        && id[8] == b'-'
-        && id[9..15].iter().all(u8::is_ascii_digit)
-        && id[15] == b'-'
-        && id[16..22].iter().all(u8::is_ascii_digit)
-        && id[22] == b'-'
-        && id[23..].iter().all(u8::is_ascii_hexdigit);
-    if !valid_id {
+    if !is_canonical_channel_message_id(&message.id) {
         return Err(AppError::config(
             path,
             format!(
@@ -732,7 +757,6 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
     for (field, value) in [
         ("display_name", &message.display_name),
         ("pfp", &message.pfp),
-        ("re", &message.re),
     ] {
         if let Some(value) = value {
             if value.chars().any(crate::mailbox::refused_profile_char) {
@@ -743,6 +767,20 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
                     ),
                 ));
             }
+        }
+    }
+    // `re` is untrusted store data rendered into text output; it must be a
+    // canonical message id so short_id and reply resolution never panic or
+    // trust a mismatched filename.
+    if let Some(re) = &message.re {
+        if !is_canonical_channel_message_id(re) {
+            return Err(AppError::config(
+                path,
+                format!(
+                    "channel message field 're' ('{}') must be a canonical channel message id",
+                    re.escape_debug()
+                ),
+            ));
         }
     }
     for mention in &message.mentions {
@@ -759,6 +797,19 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
         }
     }
     Ok(())
+}
+
+/// Canonical channel message id: `YYYYmmdd-HHMMSS-UUUUUU-<6 hex>` (29 bytes, ASCII).
+pub(crate) fn is_canonical_channel_message_id(id: &str) -> bool {
+    let id = id.as_bytes();
+    id.len() == 29
+        && id[..8].iter().all(u8::is_ascii_digit)
+        && id[8] == b'-'
+        && id[9..15].iter().all(u8::is_ascii_digit)
+        && id[15] == b'-'
+        && id[16..22].iter().all(u8::is_ascii_digit)
+        && id[22] == b'-'
+        && id[23..].iter().all(u8::is_ascii_hexdigit)
 }
 
 pub(crate) fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
@@ -1099,5 +1150,64 @@ mod tests {
         assert_eq!(summaries[0].info.name, "tax");
         assert_eq!(summaries[0].messages, 1);
         trash_test_root(&root);
+    }
+
+    #[test]
+    fn extract_mentions_takes_longest_registered_name_per_at() {
+        use crate::model::RoomMap;
+        use std::collections::BTreeMap;
+        let mut rooms: RoomMap = BTreeMap::new();
+        for name in [
+            "foo",
+            "foo.bar",
+            "baz",
+            "baz+qux",
+            "café",
+            "café.x",
+            "claude",
+            "claude-space",
+        ] {
+            rooms.insert(name.to_owned(), "/tmp".into());
+        }
+        assert_eq!(
+            extract_mentions("ping @foo.bar please", &rooms),
+            vec!["foo.bar".to_owned()]
+        );
+        assert_eq!(
+            extract_mentions("see @baz+qux", &rooms),
+            vec!["baz+qux".to_owned()]
+        );
+        assert_eq!(
+            extract_mentions("hi @café.x", &rooms),
+            vec!["café.x".to_owned()]
+        );
+        // Existing hyphen case: longer name wins; shorter must not also stamp.
+        assert_eq!(
+            extract_mentions("hey @claude-space", &rooms),
+            vec!["claude-space".to_owned()]
+        );
+        assert_eq!(
+            extract_mentions("hey @claude please", &rooms),
+            vec!["claude".to_owned()]
+        );
+    }
+
+    #[test]
+    fn malformed_re_is_refused_at_parse() {
+        let message = ChannelMessage {
+            id: "20260722-013000-000001-abc123".to_owned(),
+            from: "alpha".to_owned(),
+            channel: "tax".to_owned(),
+            subject: String::new(),
+            sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            event: None,
+            display_name: None,
+            pfp: None,
+            re: Some("aaaaaaaéx".to_owned()),
+            mentions: vec![],
+        };
+        let error = validate_channel_message(Path::new("<test>"), &message)
+            .expect_err("non-canonical re must be refused");
+        assert_eq!(error.code.as_str(), "config_invalid");
     }
 }

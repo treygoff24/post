@@ -95,7 +95,7 @@ fn already_read(
         return Err(ambiguous(&found, id, room, "already-read"));
     }
     let Some(path) = found.first() else {
-        let fix = format!("post inbox --room {room}");
+        let fix = format!("post inbox --room {}", crate::mailbox::shell_quote(room));
         return Err(AppError::new(
             ErrorCode::NotFound,
             format!(
@@ -136,9 +136,13 @@ fn ambiguous(matches: &[PathBuf], prefix: &str, room: &str, scope: &str) -> AppE
         .filter_map(|path| path.file_stem().and_then(|value| value.to_str()))
         .map(str::to_owned)
         .collect();
+    let quoted_room = crate::mailbox::shell_quote(room);
     let fix = match ids.first() {
-        Some(id) => format!("post read {id} --room {room}"),
-        None => format!("post inbox --room {room}"),
+        Some(id) => format!(
+            "post read {} --room {quoted_room}",
+            crate::mailbox::shell_quote(id)
+        ),
+        None => format!("post inbox --room {quoted_room}"),
     };
     let listed = ids.join(", ");
     AppError::new(
