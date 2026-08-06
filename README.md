@@ -62,7 +62,7 @@ post rooms
 post rooms add <name> <path>
 post chat <channel> --join
 post chat <channel> --send [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
-post chat <channel> [--peek | --discard]
+post chat <channel> [--peek | --discard | --limit N]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
 post profile [show [<room>]]
@@ -155,6 +155,12 @@ Cursorless reads (v0.3): `--history <n>` shows the last n messages and
 and never advance it, so they are idempotent and safe to pipe through any
 filter — the "grep too tight and the message is gone" failure class cannot
 happen through them. Use them for scroll-back, polling UIs, and re-reading.
+
+Bounded catch-up: `--limit <n>` shows only the newest n unread, reports how
+many older ones were skipped (with a `--history` hint to revisit), and
+advances the cursor past the whole batch — the resume-into-a-busy-channel
+answer that is neither a full-backlog ingest nor a blind `--discard`. With
+`--peek` it bounds display only and never advances; `--limit 0` is refused.
 
 Banner diet (v0.3): the full 8-line untrusted-mail framing banner renders once
 per room per day; other reads get a one-line reminder. The laws bind

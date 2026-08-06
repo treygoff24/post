@@ -160,7 +160,11 @@ results, stderr = diagnostics/errors.
   stdout is the null device is refused before anything is emitted, leaving the
   cursor untouched; `--discard` is the deliberate way to advance past unread
   messages without printing them, and reports
-  `{ok, channel, room, discarded, cursor}`. Requires
+  `{ok, channel, room, discarded, cursor}`. `--limit <n>` is a bounded
+  catch-up read: only the newest n unread are emitted, the skipped-older
+  count is reported (JSON `skipped`, omitted when 0), and the cursor still
+  advances past the whole batch; with `--peek` it bounds display only and
+  never advances, and `--limit 0` is refused as a disguised discard. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure

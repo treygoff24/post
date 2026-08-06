@@ -59,7 +59,7 @@ post rooms
 post rooms add <name> <path>
 post chat <channel> --join
 post chat <channel> --send [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
-post chat <channel> [--peek | --discard]
+post chat <channel> [--peek | --discard | --limit N]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
 post schema
