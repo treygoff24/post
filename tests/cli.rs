@@ -346,7 +346,7 @@ fn help_and_schema_keep_command_contract_visible() {
         schema.output_shapes.watch,
         vec![
             "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
-            "unreadable: event, room, id",
+            "unreadable: event, room, id, reason=mail|channel",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp]",
         ]
     );
@@ -681,7 +681,7 @@ fn id_prefixes_resolve_uniquely_and_ambiguity_lists_matches() {
     assert_eq!(error.error.code, "not_found");
     assert_eq!(
         error.error.suggested_fix,
-        "Run `post inbox --room claude-space` and retry with one listed id."
+        "Run `post inbox --room 'claude-space'` and retry with one listed id."
     );
 }
 
@@ -2486,7 +2486,11 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        WatchEvent::Unreadable { id, .. } if id == "99990102-010101-000001-abcdef"
+        WatchEvent::Unreadable {
+            id,
+            reason: WatchReason::Channel,
+            ..
+        } if id == "99990102-010101-000001-abcdef"
     )));
     let err = stderr(&output);
     assert!(err.contains("bad-info"), "{err}");
@@ -2896,7 +2900,7 @@ fn read_of_a_wholly_unknown_prefix_names_every_store_it_searched() {
     }
     assert_eq!(
         error.error.details.exact_fix.as_deref(),
-        Some("post inbox --room claude-space")
+        Some("post inbox --room 'claude-space'")
     );
 }
 
@@ -3218,9 +3222,10 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let events = watch_events(&output.stdout);
     match &events[0] {
-        WatchEvent::Unreadable { room, id } => {
+        WatchEvent::Unreadable { room, id, reason } => {
             assert_eq!(room, "claude-space");
             assert_eq!(id, "20260721-010101-abcdef");
+            assert_eq!(*reason, WatchReason::Mail);
         }
         WatchEvent::Mail { item, .. } => panic!("malformed mail parsed as {}", item.id),
         WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
@@ -3849,4 +3854,224 @@ fn description_over_1kib_is_refused() {
     assert_eq!(output.status.code(), Some(2));
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "invalid_argument");
+}
+
+#[test]
+fn crossed_send_exact_fix_shell_quotes_channel_metacharacters() {
+    // Channel names may carry spaces/metacharacters; exact_fix runs verbatim
+    // through a shell, so an unquoted name is a command injection.
+    for name in ["ops space", "ops;echo PWNED", "ops'x"] {
+        let sandbox = Sandbox::new();
+        let (alpha, beta) = register_alpha_beta(&sandbox);
+        join_channel(&sandbox, name, &alpha);
+        join_channel(&sandbox, name, &beta);
+        assert_success(&sandbox.run_in(&["chat", name, "--discard", "--json"], None, &alpha));
+        assert_success(&sandbox.run_in(
+            &["chat", name, "--send", "--body", "missed you", "--json"],
+            None,
+            &beta,
+        ));
+        let bounced = sandbox.run_in(
+            &["chat", name, "--send", "--body", "blind reply", "--json"],
+            None,
+            &alpha,
+        );
+        assert_eq!(bounced.status.code(), Some(65), "name={name}");
+        let error: ErrorEnvelope = from_stderr(&bounced);
+        assert_eq!(error.error.code, "crossed_send");
+        let fix = error.error.details.exact_fix.as_deref().expect("exact_fix");
+        let quoted = format!("'{}'", name.replace('\'', r"'\''"));
+        assert_eq!(
+            fix,
+            format!("post chat {quoted} --send --anyway --body '<revised text>'"),
+            "exact_fix must shell-quote channel name {name:?}"
+        );
+        // Semicolon injection must not appear as a bare shell command token.
+        assert!(
+            !fix.contains("post chat ops;echo"),
+            "unquoted metacharacters in exact_fix: {fix}"
+        );
+    }
+}
+
+#[test]
+fn snapshot_does_not_leave_a_live_heartbeat() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
+    assert_success(&sandbox.run(&["watch", "--room", "alpha", "--snapshot"]));
+    let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    assert!(
+        !who.rooms[0].live_watch,
+        "snapshot must not mint a live presence heartbeat"
+    );
+    let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
+    assert!(!hb.exists(), "snapshot must not create watch.heartbeat");
+}
+
+#[test]
+fn who_reports_live_for_ten_second_interval_watch() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--room", "alpha", "--interval-ms", "10000"])
+        .current_dir(&alpha)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn watch");
+    // Wait past the old LIVE_SECS=5 window but well inside interval*2+slack.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    assert!(
+        during.rooms[0].live_watch,
+        "10s-interval watch must read live shortly after first poll"
+    );
+    child.kill().expect("stop watch");
+    let _ = child.wait();
+    // After exit, stamp ages out: write an interval-aware but old stamp.
+    let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
+    fs::write(&hb, "1 10000\n").expect("stale stamp");
+    let after: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    assert!(
+        !after.rooms[0].live_watch,
+        "post-exit stale stamp is not live"
+    );
+}
+
+#[test]
+fn history_survives_hand_written_non_ascii_re_without_panic() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "panicre", &alpha);
+    join_channel(&sandbox, "panicre", &beta);
+    assert_success(&sandbox.run_in(&["chat", "panicre", "--discard", "--json"], None, &beta));
+    // Hand-plant a message whose `re` would previously panic short_id on byte slice.
+    let bad_id = "20260722-120000-000001-aa11bb";
+    let envelope = serde_json::json!({
+        "id": bad_id,
+        "from": "alpha",
+        "channel": "panicre",
+        "subject": "",
+        "sent": "2026-07-22 12:00:00 -0500",
+        "re": "aaaaaaaéx"
+    });
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels/panicre/messages")
+            .join(format!("{bad_id}.msg")),
+        format!(
+            "{}\n---\nbad re payload",
+            serde_json::to_string_pretty(&envelope).unwrap()
+        ),
+    )
+    .expect("plant bad re");
+    // History must not exit 101; the malformed message is skipped as unreadable.
+    let history = sandbox.run_in(&["chat", "panicre", "--history", "10"], None, &beta);
+    assert_eq!(
+        history.status.code(),
+        Some(0),
+        "reader must not panic or fail closed on malformed re: {}",
+        stderr(&history)
+    );
+    assert!(
+        stderr(&history).contains("skipped unreadable channel message"),
+        "expected skip warning, got: {}",
+        stderr(&history)
+    );
+    // A sibling with a well-formed re still renders.
+    let parent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat", "panicre", "--send", "--anyway", "--body", "parent", "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let child = sandbox.run_in(
+        &[
+            "chat",
+            "panicre",
+            "--send",
+            "--anyway",
+            "--re",
+            &parent.message.id,
+            "--body",
+            "child",
+            "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert!(
+        child.status.success(),
+        "child send failed: {}",
+        stderr(&child)
+    );
+    let ok = sandbox.run_in(&["chat", "panicre", "--history", "10"], None, &beta);
+    assert_eq!(ok.status.code(), Some(0), "stderr: {}", stderr(&ok));
+    assert!(stdout(&ok).contains("↳ re"));
+}
+
+#[test]
+fn mention_prefix_pairs_stamp_longest_only() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let foo = sandbox.path.join("foo");
+    let foo_bar = sandbox.path.join("foo.bar");
+    fs::create_dir(&foo).expect("foo");
+    fs::create_dir(&foo_bar).expect("foo.bar");
+    register_room(&sandbox, "foo", &foo);
+    register_room(&sandbox, "foo.bar", &foo_bar);
+    join_channel(&sandbox, "prefix", &alpha);
+    join_channel(&sandbox, "prefix", &beta);
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "prefix",
+            "--send",
+            "--anyway",
+            "--body",
+            "hello @foo.bar",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert_eq!(sent.message.mentions, vec!["foo.bar".to_owned()]);
+    assert!(!sent.message.mentions.iter().any(|m| m == "foo"));
+}
+
+#[test]
+fn discard_receipt_counts_full_unread_past_catch_up() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "dump", &alpha);
+    join_channel(&sandbox, "dump", &beta);
+    assert_success(&sandbox.run_in(&["chat", "dump", "--discard", "--json"], None, &beta));
+    for i in 0..30 {
+        assert_success(&sandbox.run_in(
+            &[
+                "chat",
+                "dump",
+                "--send",
+                "--anyway",
+                "--body",
+                &format!("msg {i}"),
+                "--json",
+            ],
+            None,
+            &alpha,
+        ));
+    }
+    let receipt: ChatDiscardOutput =
+        from_stdout(&sandbox.run_in(&["chat", "dump", "--discard", "--json"], None, &beta));
+    assert_eq!(
+        receipt.discarded, 30,
+        "discard receipt must count the full unread batch, not the catch-up window"
+    );
 }
