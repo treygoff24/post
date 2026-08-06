@@ -6,7 +6,7 @@ use crate::cli::WatchArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult};
 use crate::mailbox::{mail_files, parse_mail, Context};
-use crate::output::{InboxItem, WatchEvent};
+use crate::output::{InboxItem, WatchEvent, WatchReason};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -79,11 +79,9 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // Grows for the life of the watch (like each target's seen set): bounded
     // by total channel messages, a few bytes each — deliberate, not a leak.
     let mut emitted_channel_ids = HashSet::new();
-    // Presence heartbeat: each poll touches watch.heartbeat so `post who`
-    // can report a live watch without PIDs or process info.
-    for target in &targets {
-        crate::presence::touch_heartbeat(context, &target.room);
-    }
+    // Snapshot is a one-shot poll for lifecycle hooks — it must not mint or
+    // refresh a presence heartbeat, or `post who` would report a live watch
+    // for five seconds after a hook that already exited.
     if snapshot {
         // One scan, then out: the hook-facing poll. Unlike the loop below, a
         // direct-mail scan failure propagates as a real error — a lifecycle
@@ -107,8 +105,10 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     }
     loop {
         // Presence: refresh heartbeats every poll so `post who` sees live watches.
+        // Snapshot never reaches here. Stamp carries interval_ms so liveness
+        // scales with --interval-ms instead of a fixed LIVE_SECS window.
         for target in &targets {
-            crate::presence::touch_heartbeat(context, &target.room);
+            crate::presence::touch_heartbeat(context, &target.room, interval_ms);
         }
         // A doorbell that dies is silently useless: transient scan failures
         // (mailbox trashed and recreated, permission blips) degrade to an
@@ -188,7 +188,7 @@ fn scan_batch(
                     .and_then(|value| value.to_str())
                     .unwrap_or("<non-utf8 filename>")
                     .to_owned();
-                batch.push(WatchEvent::unreadable(room, id));
+                batch.push(WatchEvent::unreadable(room, id, WatchReason::Mail));
             }
         }
     }
@@ -232,7 +232,7 @@ fn scan_batch(
                 );
                 let id = message_id.unwrap_or("<non-utf8 filename>").to_owned();
                 emitted_channel_ids.insert(dedupe_id);
-                batch.push(WatchEvent::unreadable(room, id));
+                batch.push(WatchEvent::unreadable(room, id, WatchReason::Channel));
             }
         }
     }
