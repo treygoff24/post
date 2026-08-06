@@ -2,6 +2,7 @@ mod channels;
 mod chat;
 mod doctor;
 mod inbox;
+mod profile;
 mod read;
 mod rooms;
 mod schema;
@@ -26,6 +27,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Inbox(args) => inbox::run(&context, args, cli.pretty),
         Command::Read(args) => read::run(&context, args, cli.json, cli.pretty),
         Command::Rooms(args) => rooms::run(&context, args, cli.pretty),
+        Command::Profile(args) => profile::run(&context, args, cli.pretty),
         Command::Schema => schema::run(cli.pretty),
         Command::Watch(args) => watch::run(&context, args),
     }

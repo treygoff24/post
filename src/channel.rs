@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 pub(crate) const CHANNELS_DIR: &str = "channels";
 const CHANNELS_LOCK_FILE: &str = ".channels.lock";
 pub(crate) const JOIN_EVENT: &str = "join";
+/// Profile-change announcement ("=== pact is now Lantern 🏮 (pact) ===").
+pub(crate) const PROFILE_EVENT: &str = "profile";
 
 pub(crate) type MemberMap = BTreeMap<String, String>;
 
@@ -318,6 +320,19 @@ pub(crate) fn send(
     Ok(parse_channel_message(&file)?.message)
 }
 
+/// System-line writer for non-join events (currently profile changes).
+/// Body is CLI-composed, never user text.
+pub(crate) fn write_event(
+    context: &Context,
+    paths: &ChannelPaths,
+    room: &str,
+    channel: &str,
+    body: &str,
+    event: &str,
+) -> AppResult<String> {
+    write_message(context, paths, room, channel, "", body, Some(event))
+}
+
 /// Writes one message with a fresh microsecond-resolution id, retrying on
 /// the (astronomically rare) same-microsecond hash collision.
 fn write_message(
@@ -329,7 +344,11 @@ fn write_message(
     body: &str,
     event: Option<&str>,
 ) -> AppResult<String> {
-    let _ = context; // reserved: future per-context knobs; keeps the call shape stable
+    // Send-time stamping: history renders names as they were when the
+    // message was sent; renames never rewrite the transcript.
+    let profile = crate::profile::load_profiles(context)?
+        .remove(room)
+        .unwrap_or_default();
     for attempt in 0..256 {
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
@@ -340,6 +359,8 @@ fn write_message(
             subject: subject.to_owned(),
             sent,
             event: event.map(str::to_owned),
+            display_name: profile.name.clone(),
+            pfp: profile.pfp.clone(),
         };
         validate_channel_message(Path::new("<generated message>"), &message)?;
         let payload = encode_message(&message, body)?;
@@ -463,11 +484,29 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
         ));
     }
     if let Some(event) = &message.event {
-        if event != JOIN_EVENT {
+        if event != JOIN_EVENT && event != PROFILE_EVENT {
             return Err(AppError::config(
                 path,
-                format!("channel message event '{event}' is unknown; only '{JOIN_EVENT}' exists"),
+                format!(
+                    "channel message event '{event}' is unknown; only '{JOIN_EVENT}' and '{PROFILE_EVENT}' exist"
+                ),
             ));
+        }
+    }
+    // Stamped profile fields render unquoted in chat banners and watch
+    // text lines; a control character smuggled into a hand-written .msg
+    // could forge whole lines, so refuse them at parse like `channel`.
+    for (field, value) in [
+        ("display_name", &message.display_name),
+        ("pfp", &message.pfp),
+    ] {
+        if let Some(value) = value {
+            if value.chars().any(char::is_control) {
+                return Err(AppError::config(
+                    path,
+                    format!("channel message field '{field}' contains control characters"),
+                ));
+            }
         }
     }
     Ok(())
@@ -579,6 +618,8 @@ mod tests {
             subject: String::new(),
             sent: "2026-07-22 01:00:00 -0500".to_owned(),
             event: None,
+            display_name: None,
+            pfp: None,
         };
         validate_channel_message(Path::new("<test>"), &message).expect("valid id shape");
         trash_test_root(&root);
@@ -595,6 +636,8 @@ mod tests {
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             event: None,
+            display_name: None,
+            pfp: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("control characters in channel must be refused");
@@ -610,6 +653,8 @@ mod tests {
             subject: String::new(),
             sent: "2026-07-22 01:20:00 -0500".to_owned(),
             event: None,
+            display_name: None,
+            pfp: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("second-resolution ids must be refused");
@@ -665,6 +710,37 @@ mod tests {
         assert_eq!(parsed.body, "first message");
         let event = parse_channel_message(&files[0]).expect("parse event");
         assert_eq!(event.message.event.as_deref(), Some(JOIN_EVENT));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn send_stamps_profile_as_of_send_time_and_rename_does_not_retcon() {
+        let (root, context) = test_context("stamp", "{}", r#"{"blocked":[]}"#);
+        fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
+        fs::write(
+            root.join("profiles.json"),
+            r#"{"alpha": {"name": "Lantern", "pfp": "🏮"}}"#,
+        )
+        .expect("profiles");
+        let paths = ChannelPaths::new(&context, "tax").expect("paths");
+        fs::create_dir_all(&paths.messages).expect("messages dir");
+
+        let first = write_message(&context, &paths, "alpha", "tax", "", "hi", None).expect("send");
+        // Rename after the first send; the stored first message must keep
+        // the old name (history renders as-sent).
+        fs::write(
+            root.join("profiles.json"),
+            r#"{"alpha": {"name": "Coldwell", "pfp": "🏮"}}"#,
+        )
+        .expect("rename");
+        let second = write_message(&context, &paths, "alpha", "tax", "", "yo", None).expect("send");
+
+        let parse = |id: &str| {
+            parse_channel_message(&paths.messages.join(format!("{id}.msg"))).expect("parse")
+        };
+        assert_eq!(parse(&first).message.display_name.as_deref(), Some("Lantern"));
+        assert_eq!(parse(&second).message.display_name.as_deref(), Some("Coldwell"));
+        assert_eq!(parse(&second).message.pfp.as_deref(), Some("🏮"));
         trash_test_root(&root);
     }
 

@@ -392,6 +392,8 @@ mod tests {
                 subject: String::new(),
                 sent: "2026-07-22 01:30:00 -0500".to_owned(),
                 event: None,
+                display_name: None,
+                pfp: None,
             };
             let bytes = encode_message(&message, "body").expect("encode");
             fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)

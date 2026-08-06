@@ -110,6 +110,11 @@ where
         .reason("empty or whitespace-only"));
     }
 
+    // Send-time stamping: profiles are presentation only; identity stays
+    // `sender`. Absent profile leaves both fields off the envelope.
+    let profile = crate::profile::load_profiles(context)?
+        .remove(&sender)
+        .unwrap_or_default();
     let (id_timestamp, sent) = local_timestamp()?;
     let archive = context.root.join("archive");
     let mut inbox = None;
@@ -123,6 +128,8 @@ where
             kind: args.kind,
             subject: args.subject.clone(),
             sent: sent.clone(),
+            display_name: profile.name.clone(),
+            pfp: profile.pfp.clone(),
         };
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;

@@ -55,6 +55,8 @@ pub(crate) enum Command {
     Read(ReadArgs),
     /// List or register rooms.
     Rooms(RoomsArgs),
+    /// Show or change this room's display name and emoji pfp (presentation only; identity stays the room id).
+    Profile(ProfileArgs),
     /// Print the complete machine-readable CLI contract.
     Schema,
     /// Diagnose mailbox configuration and state.
@@ -217,6 +219,40 @@ pub(crate) struct RoomsAddArgs {
         value_parser = nonempty_without_controls
     )]
     pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileArgs {
+    #[command(subcommand)]
+    pub command: Option<ProfileCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProfileCommand {
+    /// Set your display name and/or pfp; announces the change in your channels.
+    Set(ProfileSetArgs),
+    /// Show a room's profile (defaults to your own room).
+    Show(ProfileShowArgs),
+    /// Remove your profile; rendering falls back to the bare room id.
+    Clear,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileSetArgs {
+    /// Display name, <=32 chars; may not imitate 'trey' or another room id.
+    #[arg(long, value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub name: Option<String>,
+
+    /// Exactly one emoji (one grapheme cluster), unique across rooms.
+    #[arg(long, value_name = "EMOJI", value_parser = nonempty_without_controls)]
+    pub pfp: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileShowArgs {
+    /// Room to show; defaults to the room resolved from cwd.
+    #[arg(value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
+    pub room: Option<String>,
 }
 
 #[derive(Debug, Args)]

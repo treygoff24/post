@@ -604,6 +604,8 @@ mod tests {
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             event: None,
+            display_name: None,
+            pfp: None,
         };
         let bytes = channel::encode_message(&message, body).expect("encode message");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
@@ -780,6 +782,8 @@ mod tests {
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             event: None,
+            display_name: None,
+            pfp: None,
         };
         // Non-trey senders never get a badge, even with the tag.
         assert!(
@@ -838,6 +842,8 @@ mod tests {
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             event: Some(channel::JOIN_EVENT.to_owned()),
+            display_name: None,
+            pfp: None,
         };
         let bytes =
             channel::encode_message(&join_event, "=== alpha joined ===").expect("encode join");

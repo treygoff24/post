@@ -34,6 +34,13 @@ pub struct Envelope {
     pub kind: MailKind,
     pub subject: String,
     pub sent: String,
+    /// Sender's display name as of send time (presentation only; identity
+    /// is always `from`). Absent when the sender had no profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Sender's emoji sigil as of send time; same rules as display_name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pfp: Option<String>,
 }
 
 #[derive(Debug)]
@@ -75,6 +82,13 @@ pub struct ChannelMessage {
     /// by the CLI's join path — sends never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
+    /// Sender's display name as of send time (presentation only; identity
+    /// is always `from`). Absent when the sender had no profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Sender's emoji sigil as of send time; same rules as display_name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pfp: Option<String>,
 }
 
 #[derive(Debug)]

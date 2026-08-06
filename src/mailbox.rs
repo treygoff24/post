@@ -408,6 +408,21 @@ pub(crate) fn validate_envelope(path: &Path, envelope: &Envelope) -> AppResult<(
             ),
         ));
     }
+    // Stamped profile fields render unquoted in inbox/read banners; refuse
+    // control characters at parse so a hand-edited .mail can't forge lines.
+    for (field, value) in [
+        ("display_name", &envelope.display_name),
+        ("pfp", &envelope.pfp),
+    ] {
+        if let Some(value) = value {
+            if value.chars().any(char::is_control) {
+                return Err(AppError::config(
+                    path,
+                    format!("mail envelope field '{field}' contains control characters"),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

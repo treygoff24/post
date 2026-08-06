@@ -158,6 +158,10 @@ impl From<Envelope> for InboxItem {
             kind,
             subject,
             sent,
+            // W1 stamps these; inbox JSON shape stays unchanged until the
+            // render wave extends the contract deliberately.
+            display_name: _,
+            pfp: _,
         } = envelope;
         Self {
             id,
@@ -219,6 +223,10 @@ impl WatchEvent {
             subject,
             sent,
             event: _,
+            // W1 stamps these; watch/mail JSON shapes stay unchanged until the
+            // render wave extends the contract deliberately.
+            display_name: _,
+            pfp: _,
         } = message;
         Self::ChannelMessage {
             channel,
