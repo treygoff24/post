@@ -263,21 +263,11 @@ impl WatchEvent {
                 // refuses control characters, but hand-written mail can carry
                 // them (the contract keeps such mail readable and sanitizes
                 // at render), and a newline here would forge an event line.
-                let sender = match (item.display_name.as_deref(), item.pfp.as_deref()) {
-                    (None, None) => format!("{:?}", item.from),
-                    (name, pfp) => {
-                        let mut label = String::new();
-                        if let Some(pfp) = pfp {
-                            label.push_str(&sanitize_text_header(pfp));
-                            label.push(' ');
-                        }
-                        if let Some(name) = name {
-                            label.push_str(&sanitize_text_header(name));
-                            label.push(' ');
-                        }
-                        format!("{label}({:?})", item.from)
-                    }
-                };
+                let sender = sender_label_quoted(
+                    &item.from,
+                    item.display_name.as_deref(),
+                    item.pfp.as_deref(),
+                );
                 format!("{}  [{}] from {}{}\n", item.id, item.kind, sender, subject)
             }
             // Debug-quoted: this id comes from a filename that never passed
@@ -304,21 +294,7 @@ impl WatchEvent {
                 // Sender keeps its debug-quote discipline; the stamped
                 // profile renders sanitized ahead of it. Absent profile is
                 // byte-identical to the pre-profile line.
-                let sender = match (display_name.as_deref(), pfp.as_deref()) {
-                    (None, None) => format!("{from:?}"),
-                    (name, pfp) => {
-                        let mut label = String::new();
-                        if let Some(pfp) = pfp {
-                            label.push_str(&sanitize_text_header(pfp));
-                            label.push(' ');
-                        }
-                        if let Some(name) = name {
-                            label.push_str(&sanitize_text_header(name));
-                            label.push(' ');
-                        }
-                        format!("{label}({from:?})")
-                    }
-                };
+                let sender = sender_label_quoted(from, display_name.as_deref(), pfp.as_deref());
                 format!("{id}  #{channel} from {sender}{subject}\n")
             }
         }
@@ -516,10 +492,13 @@ pub(crate) fn json<T: Serialize>(value: &T, pretty: bool) -> Result<String, AppE
 /// the pre-profile rendering — when absent. Identity (`from`) is always
 /// visible; name and pfp are presentation only and pass through the same
 /// header sanitizer as everything else on the line.
-pub(crate) fn sender_label(from: &str, display_name: Option<&str>, pfp: Option<&str>) -> String {
-    let from = sanitize_text_header(from);
+fn sender_label_impl(
+    rendered_from: String,
+    display_name: Option<&str>,
+    pfp: Option<&str>,
+) -> String {
     if display_name.is_none() && pfp.is_none() {
-        return from;
+        return rendered_from;
     }
     let mut label = String::new();
     if let Some(pfp) = pfp {
@@ -530,7 +509,27 @@ pub(crate) fn sender_label(from: &str, display_name: Option<&str>, pfp: Option<&
         label.push_str(&sanitize_text_header(name));
         label.push(' ');
     }
-    format!("{label}({from})")
+    format!("{label}({rendered_from})")
+}
+
+/// Render a sender for text surfaces: `"🧊 Name (room)"` when a profile was
+/// stamped at send time, or the bare sanitized room id — byte-identical to
+/// the pre-profile rendering — when absent. Identity (`from`) is always
+/// visible; name and pfp are presentation only. This function and its
+/// quoted twin are the ONLY owners of the id-suffix invariant.
+pub(crate) fn sender_label(from: &str, display_name: Option<&str>, pfp: Option<&str>) -> String {
+    sender_label_impl(sanitize_text_header(from), display_name, pfp)
+}
+
+/// Quoted-id variant for machine-parsed lines (watch --text, inbox --text)
+/// that debug-quote `from` because hand-written mail can carry control
+/// characters. Same suffix invariant, same single implementation.
+pub(crate) fn sender_label_quoted(
+    from: &str,
+    display_name: Option<&str>,
+    pfp: Option<&str>,
+) -> String {
+    sender_label_impl(format!("{from:?}"), display_name, pfp)
 }
 
 pub(crate) fn sanitize_text_header(value: &str) -> String {

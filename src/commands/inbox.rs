@@ -46,9 +46,14 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
                     format!("  {:?}", mail.subject)
                 };
                 let id = output::sanitize_text_header(&mail.id);
+                let sender = output::sender_label_quoted(
+                    &mail.from,
+                    mail.display_name.as_deref(),
+                    mail.pfp.as_deref(),
+                );
                 rendered.push_str(&format!(
-                    "{}  [{}] from {:?}{}\n",
-                    id, mail.kind, mail.from, subject
+                    "{}  [{}] from {}{}\n",
+                    id, mail.kind, sender, subject
                 ));
             }
             rendered
@@ -63,4 +68,24 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
         skipped_unreadable,
     };
     CommandResult::json(&output, pretty)
+}
+
+#[cfg(test)]
+mod profile_render_tests {
+    use crate::output::sender_label_quoted;
+
+    #[test]
+    fn inbox_line_sender_absent_profile_is_byte_identical() {
+        // The inbox --text line built from this must match the pre-profile
+        // form exactly: `from "beta"` with debug quotes.
+        assert_eq!(sender_label_quoted("beta", None, None), "\"beta\"");
+    }
+
+    #[test]
+    fn inbox_line_sender_renders_stamped_profile() {
+        assert_eq!(
+            sender_label_quoted("beta", Some("Lantern"), Some("🏮")),
+            "🏮 Lantern (\"beta\")"
+        );
+    }
 }
