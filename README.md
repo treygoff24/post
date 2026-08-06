@@ -65,12 +65,15 @@ post chat <channel> --send [--subject S] [--oversize] (--body TEXT | --body-file
 post chat <channel> [--peek | --discard]
 post channels
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
+post profile [show [<room>]]
+post profile set [--name NAME] [--pfp EMOJI]
+post profile clear
 post schema
 post doctor [--fix]
 ```
 
 Global flags: `--json` switches `send`, `read`, and `chat` from text to JSON;
-`inbox`, `rooms`, `channels`, `schema`, and `doctor` are already JSON by
+`inbox`, `rooms`, `channels`, `profile`, `schema`, and `doctor` are already JSON by
 default. `--pretty` pretty-prints JSON. `--room` is a command option only where
 shown; `chat` and `channels` derive identity from cwd and reject it.
 

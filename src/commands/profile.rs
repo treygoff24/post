@@ -59,46 +59,38 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     if let Some(pfp) = args.pfp {
         entry.pfp = Some(pfp);
     }
+    // A field NOT set on this call was preserved from disk and may be a
+    // hand-edited plant; re-validate the merged entry so nothing invalid is
+    // stored or carried into the announcement line below.
+    if crate::profile::drop_invalid_fields(entry, &room, &rooms) {
+        eprintln!(
+            "post: warning: dropped an invalid stored profile field for '{room}' (hand-edited registry values never render)"
+        );
+    }
     let profile = entry.clone();
+
+    // Enumerate the announcement targets BEFORE committing the registry:
+    // if the channel listing fails, the whole command fails pre-commit, so
+    // a retry still sees the change and still announces it (history stays
+    // honest). Per-channel announcement failures after commit only warn.
+    let targets = if name_changed || pfp_changed {
+        member_channels(context, &room)?
+    } else {
+        Vec::new()
+    };
     write_profiles(context, &profiles)?;
 
-    // Announce the rename in every channel this room belongs to, AFTER the
-    // registry write so the announcement is stamped with the new profile.
-    // Announcement failures don't roll back the profile; they surface as
-    // warnings (the profile is already true, the announcement is courtesy).
-    let mut announced = Vec::new();
-    if name_changed || pfp_changed {
-        let line = match &profile.pfp {
-            Some(pfp) => format!(
-                "=== {room} is now {} {pfp} ({room}) ===",
-                profile.name.as_deref().unwrap_or(&room)
-            ),
-            None => format!(
-                "=== {room} is now {} ({room}) ===",
-                profile.name.as_deref().unwrap_or(&room)
-            ),
-        };
-        for summary in channel::list_channels(context)? {
-            if !summary.members.contains_key(&room) {
-                continue;
-            }
-            let paths = ChannelPaths::new(context, &summary.info.name)?;
-            match channel::write_event(
-                context,
-                &paths,
-                &room,
-                &summary.info.name,
-                &line,
-                PROFILE_EVENT,
-            ) {
-                Ok(_) => announced.push(summary.info.name),
-                Err(error) => eprintln!(
-                    "post: warning: could not announce rename in #{}: {}",
-                    summary.info.name, error.message
-                ),
-            }
-        }
-    }
+    let line = match &profile.pfp {
+        Some(pfp) => format!(
+            "=== {room} is now {} {pfp} ({room}) ===",
+            profile.name.as_deref().unwrap_or(&room)
+        ),
+        None => format!(
+            "=== {room} is now {} ({room}) ===",
+            profile.name.as_deref().unwrap_or(&room)
+        ),
+    };
+    let announced = announce(context, &room, &line, &targets);
 
     let output = ProfileOutput {
         ok: true,
@@ -127,18 +119,59 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
 }
 
 fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {
+    // Lock BEFORE resolving the acting room, same as `set`: resolving first
+    // races a concurrent `rooms add` and can clear a stale room's profile.
+    let _lock = context.lock_rooms()?;
     let rooms = context.load_rooms()?;
     let room = channel::acting_room(context, &rooms)?;
-    let _lock = context.lock_rooms()?;
     let mut profiles = load_profiles(context)?;
-    profiles.remove(&room);
+    let existed = profiles.remove(&room).is_some();
+    // Same pre-commit ordering as `set`: listing failure aborts before the
+    // registry write so a retry still announces the change.
+    let targets = if existed {
+        member_channels(context, &room)?
+    } else {
+        Vec::new()
+    };
     write_profiles(context, &profiles)?;
+    let line = format!("=== {room} cleared their profile ===");
+    let announced = announce(context, &room, &line, &targets);
     let profile = Profile::default();
     let output = ProfileOutput {
         ok: true,
         room: &room,
         profile: &profile,
-        announced: Vec::new(),
+        announced,
     };
     Ok(CommandResult::json(&output, pretty)?.registration_committed())
+}
+
+/// Channels the room belongs to — the announcement targets, resolved before
+/// the registry commit so listing failures fail the command pre-commit.
+fn member_channels(context: &Context, room: &str) -> AppResult<Vec<String>> {
+    Ok(channel::list_channels(context)?
+        .into_iter()
+        .filter(|summary| summary.members.contains_key(room))
+        .map(|summary| summary.info.name)
+        .collect())
+}
+
+/// Write the profile event into each target channel. Failures don't roll
+/// back the already-committed registry; they surface as warnings (the
+/// profile is already true, the announcement is courtesy).
+fn announce(context: &Context, room: &str, line: &str, targets: &[String]) -> Vec<String> {
+    let mut announced = Vec::new();
+    for name in targets {
+        let result = ChannelPaths::new(context, name).and_then(|paths| {
+            channel::write_event(context, &paths, room, name, line, PROFILE_EVENT)
+        });
+        match result {
+            Ok(_) => announced.push(name.clone()),
+            Err(error) => eprintln!(
+                "post: warning: could not announce profile change in #{name}: {}",
+                error.message
+            ),
+        }
+    }
+    announced
 }

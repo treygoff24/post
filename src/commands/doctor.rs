@@ -82,19 +82,45 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_rules(&rules_path, rooms.as_ref(), &mut checks);
     detect_dir(&context.root.join("archive"), "dir.archive", &mut checks);
 
-    // profiles.json is optional, but when present it must parse: sends
-    // consult it while stamping, so a malformed registry breaks delivery.
+    // profiles.json is optional and presentation-only: delivery never
+    // depends on it (stamping silently degrades to no profile), so a
+    // malformed registry is a warning that profiles stopped rendering, not
+    // a delivery fault. Entries that parse but no longer validate are also
+    // surfaced — stamp_for drops them silently, so doctor is where a room
+    // learns its stored name/pfp went inert.
     let profiles_path = context.root.join(crate::profile::PROFILES_FILE);
     if profiles_path.exists() {
-        if let Err(error) = crate::profile::load_profiles(context) {
-            checks.push(check(
+        match crate::profile::load_profiles(context) {
+            Err(error) => checks.push(check(
                 "profiles.invalid",
-                DoctorSeverity::Error,
+                DoctorSeverity::Warning,
                 &profiles_path,
-                &format!("profile registry cannot be loaded: {}", error.message),
+                &format!(
+                    "profile registry cannot be loaded ({}); sends still deliver but stamp no profiles until it parses",
+                    error.message
+                ),
                 false,
                 "Fix or delete profiles.json by hand; `post profile set` will recreate it.",
-            ));
+            )),
+            Ok(profiles) => {
+                if let Some(rooms) = rooms.as_ref() {
+                    for (room, profile) in &profiles {
+                        let mut cleaned = profile.clone();
+                        if !rooms.contains_key(room)
+                            || crate::profile::drop_invalid_fields(&mut cleaned, room, rooms)
+                        {
+                            checks.push(check(
+                                &format!("profiles.{room}.inert"),
+                                DoctorSeverity::Warning,
+                                &profiles_path,
+                                "stored profile entry no longer validates (or its room is unregistered) and will not stamp or render",
+                                false,
+                                "Re-run `post profile set` from that room, or remove the entry.",
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 

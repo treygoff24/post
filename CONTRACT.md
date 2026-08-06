@@ -83,7 +83,7 @@ The public language is model-neutral; the default root remains
 ## Commands
 
 Global flags: `--json` (machine envelopes; default for inbox/rooms/channels/
-schema/doctor is already JSON — `--json` on send/read/chat switches them from
+profile/schema/doctor is already JSON — `--json` on send/read/chat switches them from
 text), `--pretty`, `--room <name>` where noted. `--room` is not global; it is a
 command option for inbox/read/watch only. No prompts ever; no color; stdout =
 results, stderr = diagnostics/errors.
@@ -255,8 +255,13 @@ results, stderr = diagnostics/errors.
 - Stamping: `display_name`/`pfp` are optional envelope fields written at send
   time (absent-when-unset keeps pre-profile JSON/NDJSON byte-identical, and
   absent-profile text output stays byte-identical). History renders as-sent;
-  renames never rewrite stored messages. A name or pfp change emits a
-  `profile` event message in each of the room's channels.
+  renames never rewrite stored messages. A name, pfp, or clear change emits a
+  `profile` event message in each of the room's channels; the channel list is
+  resolved before the registry commit, so a listing failure fails the command
+  pre-commit and a retry still announces. A malformed or hand-edited
+  `profiles.json` never blocks delivery: stamping degrades to no profile,
+  `profile set` drops (with a warning) any preserved stored field that no
+  longer validates, and `post doctor` reports inert entries.
 
 ## Codex room convention
 

@@ -29,7 +29,7 @@ fn without_controls(value: &str) -> Result<String, String> {
     rename_all = "kebab-case"
 )]
 pub(crate) struct Cli {
-    /// Emit JSON for send/read/chat; inbox/rooms/channels/schema/doctor are already JSON.
+    /// Emit JSON for send/read/chat; inbox/rooms/channels/profile/schema/doctor are already JSON.
     #[arg(long, global = true)]
     pub json: bool,
 

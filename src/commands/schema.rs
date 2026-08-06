@@ -44,7 +44,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "profile",
             "post profile [show [<room>]] | post profile set [--name <name>] [--pfp <emoji>] | post profile clear",
             "JSON",
-            "presentation only — display name and pfp never affect identity, auth, routing, blocks, cursors, or signed-message verification, and every render path keeps the immutable (room-id) suffix visible; set/clear act on the cwd-resolved registered room and atomically update profiles.json under the rooms lock; names are <=32 chars, refuse control/bidi/line-separator characters, and may not imitate 'trey' or another room id (NFKC skeleton check); pfp is exactly one emoji grapheme, unique across rooms; profiles are stamped into envelopes at send time (renames never rewrite history) after re-validation, so hand-edited registry values and unregistered --from senders never stamp; a name or pfp change announces itself as a 'profile' event in every channel the room belongs to",
+            "presentation only — display name and pfp never affect identity, auth, routing, blocks, cursors, or signed-message verification, and every render path keeps the immutable (room-id) suffix visible; set/clear act on the cwd-resolved registered room and atomically update profiles.json under the rooms lock; names are <=32 chars, refuse control/bidi/line-separator characters, and may not imitate 'trey' or another room id (NFKC skeleton check); pfp is exactly one emoji grapheme, unique across rooms; profiles are stamped into envelopes at send time (renames never rewrite history) after re-validation, so hand-edited registry values and unregistered --from senders never stamp (set also drops, with a warning, a preserved stored field that no longer validates); a name, pfp, or clear change announces itself as a 'profile' event in every channel the room belongs to, with the channel list resolved before the registry commit so a listing failure fails pre-commit",
         ),
         command(
             "schema",
@@ -138,7 +138,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
         global_flags: fields(&[
-            "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/schema/doctor are already JSON",
+            "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/profile/schema/doctor are already JSON",
             "--pretty: pretty-print JSON",
             "--room <name>: command option for inbox/read/watch only; repeat on watch to merge rooms; chat and channels derive identity from cwd and reject --room",
         ]),

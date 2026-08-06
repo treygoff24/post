@@ -151,9 +151,22 @@ pub(crate) fn stamp_for(context: &Context, room: &str, rooms: &RoomMap) -> Profi
         return Profile::default();
     };
     let mut profile = profiles.remove(room).unwrap_or_default();
+    drop_invalid_fields(&mut profile, room, rooms);
+    profile
+}
+
+/// Drop any field that no longer validates (a hand-edited profiles.json must
+/// be inert everywhere, not just at stamp time). Shared by `stamp_for` and
+/// `profile set`, which preserves the unset field of an existing entry and
+/// must not carry a planted value into announcements. Cross-room pfp
+/// uniqueness is deliberately not re-checked: a duplicated sigil is
+/// cosmetic, not an injection. Returns true if anything was dropped.
+pub(crate) fn drop_invalid_fields(profile: &mut Profile, room: &str, rooms: &RoomMap) -> bool {
+    let mut dropped = false;
     if let Some(name) = &profile.name {
         if validate_display_name(name, room, rooms).is_err() {
             profile.name = None;
+            dropped = true;
         }
     }
     if let Some(pfp) = &profile.pfp {
@@ -161,9 +174,10 @@ pub(crate) fn stamp_for(context: &Context, room: &str, rooms: &RoomMap) -> Profi
         let single = graphemes.next().is_some() && graphemes.next().is_none();
         if !single || pfp.is_ascii() || pfp.chars().any(refused_profile_char) {
             profile.pfp = None;
+            dropped = true;
         }
     }
-    profile
+    dropped
 }
 
 fn invalid(reason: &str, input: &str) -> AppError {
@@ -245,6 +259,25 @@ mod tests {
         assert!(
             validate_display_name("evil\u{061C}name", "pact", &rooms(&["pact"])).is_err(),
             "ALM (U+061C) refused"
+        );
+    }
+
+    #[test]
+    fn drop_invalid_fields_catches_planted_pfp_preserved_by_set() {
+        // The Sol final-gate HIGH: `profile set --name New` used to preserve
+        // a hand-edited pfp unvalidated, letting U+2028 ride into the
+        // channel announcement body.
+        let rooms = rooms(&["pact"]);
+        let mut profile = Profile {
+            name: Some("Lantern".to_owned()),
+            pfp: Some("\u{2028}".to_owned()),
+        };
+        assert!(drop_invalid_fields(&mut profile, "pact", &rooms));
+        assert_eq!(profile.name.as_deref(), Some("Lantern"));
+        assert_eq!(profile.pfp, None, "planted pfp must drop");
+        assert!(
+            !drop_invalid_fields(&mut profile, "pact", &rooms),
+            "clean profile drops nothing"
         );
     }
 
