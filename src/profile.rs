@@ -10,7 +10,17 @@ use crate::model::RoomMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// Bidi control characters (Cf, so `char::is_control` misses them): an RLO
+/// in a display name could visually reorder the rendered line and flip how
+/// the load-bearing (room-id) suffix reads. Refused in names and pfps.
+/// ZWJ (U+200D) and VS16 (U+FE0F) stay legal — emoji need them.
+const BIDI_CONTROLS: [char; 11] = [
+    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+    '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}',
+];
 
 pub(crate) const PROFILES_FILE: &str = "profiles.json";
 pub(crate) const MAX_NAME_CHARS: usize = 32;
@@ -48,11 +58,14 @@ pub(crate) fn write_profiles(context: &Context, profiles: &ProfileMap) -> AppRes
 }
 
 /// Case/whitespace/punctuation-insensitive skeleton used for imitation
-/// checks: lowercased alphanumerics only, so "T r e y", "trey_", and "TREY"
-/// all collide with "trey".
+/// checks: NFKC-normalized (so fullwidth/compatibility forms collapse),
+/// then lowercased alphanumerics only, so "T r e y", "trey_", "TREY", and
+/// "ｔｒｅｙ" all collide with "trey". Non-NFKC homoglyphs (e.g. Cyrillic Т)
+/// still pass; that residual risk is accepted because the immutable
+/// (room-id) suffix is a hard invariant on every render path.
 fn skeleton(value: &str) -> String {
     value
-        .chars()
+        .nfkc()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
@@ -74,6 +87,15 @@ pub(crate) fn validate_display_name(
         // A newline here could forge a whole message block in rendered
         // chat/watch output; refuse every control character outright.
         return Err(invalid("display name contains control characters", name));
+    }
+    if name
+        .chars()
+        .any(|c| BIDI_CONTROLS.contains(&c) || c == '\u{2028}' || c == '\u{2029}')
+    {
+        return Err(invalid(
+            "display name contains bidi controls or line/paragraph separators",
+            name,
+        ));
     }
     if name.chars().count() > MAX_NAME_CHARS {
         return Err(invalid(
@@ -115,6 +137,9 @@ pub(crate) fn validate_pfp(
     }
     if pfp.chars().any(char::is_control) {
         return Err(invalid("pfp contains control characters", pfp));
+    }
+    if pfp.chars().any(|c| BIDI_CONTROLS.contains(&c)) {
+        return Err(invalid("pfp contains bidi controls", pfp));
     }
     if pfp.is_ascii() {
         return Err(invalid("pfp must be an emoji, not ASCII", pfp));
@@ -163,6 +188,12 @@ mod tests {
         assert!(validate_display_name("   ", "pact", &rooms).is_err());
         assert!(validate_display_name(&"x".repeat(33), "pact", &rooms).is_err());
         assert!(validate_display_name("🏮🏮", "pact", &rooms).is_err(), "no letters");
+        // Bidi controls are Cf, not Cc — must be refused explicitly (wade F1).
+        assert!(validate_display_name("evil\u{202E}name", "pact", &rooms).is_err());
+        assert!(validate_display_name("evil\u{2066}name", "pact", &rooms).is_err());
+        assert!(validate_display_name("evil\u{2028}name", "pact", &rooms).is_err());
+        // NFKC collapses fullwidth forms into the skeleton (wade F2).
+        assert!(validate_display_name("ｔｒｅｙ", "pact", &rooms).is_err());
     }
 
     #[test]
@@ -179,5 +210,6 @@ mod tests {
         assert!(validate_pfp("", "pact", &profiles).is_err(), "empty");
         assert!(validate_pfp("🐋", "pact", &profiles).is_err(), "taken sigil");
         validate_pfp("🐋", "atlasos", &profiles).expect("re-setting own sigil ok");
+        assert!(validate_pfp("\u{202E}", "pact", &profiles).is_err(), "bidi pfp");
     }
 }

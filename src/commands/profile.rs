@@ -44,9 +44,12 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     if let Some(pfp) = &args.pfp {
         validate_pfp(pfp, &room, &profiles)?;
     }
+    // Trim before store: untrimmed whitespace pads the gap before the
+    // rendered (room) suffix (wade F3).
+    let trimmed_name = args.name.map(|name| name.trim().to_owned());
     let entry = profiles.entry(room.clone()).or_default();
-    let name_changed = args.name.is_some() && entry.name != args.name;
-    if let Some(name) = args.name {
+    let name_changed = trimmed_name.is_some() && entry.name != trimmed_name;
+    if let Some(name) = trimmed_name {
         entry.name = Some(name);
     }
     if let Some(pfp) = args.pfp {
