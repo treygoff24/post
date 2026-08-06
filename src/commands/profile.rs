@@ -45,7 +45,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
         validate_display_name(name, &room, &rooms)?;
     }
     if let Some(pfp) = &args.pfp {
-        validate_pfp(pfp, &room, &profiles)?;
+        validate_pfp(pfp, &room, &profiles, &rooms)?;
     }
     // Trim before store: untrimmed whitespace pads the gap before the
     // rendered (room) suffix (wade F3).

@@ -107,7 +107,12 @@ pub(crate) fn validate_display_name(name: &str, own_room: &str, rooms: &RoomMap)
 /// like ⚖️ and 👩‍🚀 pass while two-emoji strings fail), no control characters,
 /// not ASCII (an ASCII pfp like "[" would just be line noise), and unique
 /// across rooms so the sigil actually identifies.
-pub(crate) fn validate_pfp(pfp: &str, own_room: &str, profiles: &ProfileMap) -> AppResult<()> {
+pub(crate) fn validate_pfp(
+    pfp: &str,
+    own_room: &str,
+    profiles: &ProfileMap,
+    rooms: &RoomMap,
+) -> AppResult<()> {
     let mut graphemes = pfp.graphemes(true);
     let first = graphemes.next();
     if first.is_none() || graphemes.next().is_some() {
@@ -125,8 +130,10 @@ pub(crate) fn validate_pfp(pfp: &str, own_room: &str, profiles: &ProfileMap) -> 
     if pfp.is_ascii() {
         return Err(invalid("pfp must be an emoji, not ASCII", pfp));
     }
+    // Uniqueness only counts registered rooms: an unregistered (hand-edited)
+    // entry never stamps or renders, so it must not squat a sigil either.
     for (room, profile) in profiles {
-        if room != own_room && profile.pfp.as_deref() == Some(pfp) {
+        if room != own_room && rooms.contains_key(room) && profile.pfp.as_deref() == Some(pfp) {
             return Err(invalid(
                 &format!("pfp is already the sigil of room '{room}'"),
                 pfp,
@@ -226,6 +233,7 @@ mod tests {
 
     #[test]
     fn pfp_rules() {
+        let room_map = rooms(&["pact", "atlasos"]);
         let mut profiles = ProfileMap::new();
         profiles.insert(
             "atlasos".to_owned(),
@@ -234,26 +242,43 @@ mod tests {
                 pfp: Some("🐋".to_owned()),
             },
         );
-        validate_pfp("⚖️", "pact", &profiles).expect("VS16 emoji is one grapheme");
-        validate_pfp("👩‍🚀", "pact", &profiles).expect("ZWJ emoji is one grapheme");
+        // A hand-edited entry for an unregistered room must not squat a
+        // sigil (Sol re-gate MEDIUM).
+        profiles.insert(
+            "ghost".to_owned(),
+            Profile {
+                name: None,
+                pfp: Some("👻".to_owned()),
+            },
+        );
+        validate_pfp("⚖️", "pact", &profiles, &room_map).expect("VS16 emoji is one grapheme");
+        validate_pfp("👩‍🚀", "pact", &profiles, &room_map).expect("ZWJ emoji is one grapheme");
+        validate_pfp("👻", "pact", &profiles, &room_map)
+            .expect("unregistered entry does not reserve a sigil");
         assert!(
-            validate_pfp("🏮🐋", "pact", &profiles).is_err(),
+            validate_pfp("🏮🐋", "pact", &profiles, &room_map).is_err(),
             "two emoji"
         );
-        assert!(validate_pfp("x", "pact", &profiles).is_err(), "ascii");
-        assert!(validate_pfp("", "pact", &profiles).is_err(), "empty");
         assert!(
-            validate_pfp("🐋", "pact", &profiles).is_err(),
+            validate_pfp("x", "pact", &profiles, &room_map).is_err(),
+            "ascii"
+        );
+        assert!(
+            validate_pfp("", "pact", &profiles, &room_map).is_err(),
+            "empty"
+        );
+        assert!(
+            validate_pfp("🐋", "pact", &profiles, &room_map).is_err(),
             "taken sigil"
         );
-        validate_pfp("🐋", "atlasos", &profiles).expect("re-setting own sigil ok");
+        validate_pfp("🐋", "atlasos", &profiles, &room_map).expect("re-setting own sigil ok");
         assert!(
-            validate_pfp("\u{202E}", "pact", &profiles).is_err(),
+            validate_pfp("\u{202E}", "pact", &profiles, &room_map).is_err(),
             "bidi pfp"
         );
         // U+2028 is a single non-ASCII grapheme — the Grok CRITICAL.
         assert!(
-            validate_pfp("\u{2028}", "pact", &profiles).is_err(),
+            validate_pfp("\u{2028}", "pact", &profiles, &room_map).is_err(),
             "line-separator pfp"
         );
         assert!(

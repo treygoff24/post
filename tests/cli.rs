@@ -350,6 +350,14 @@ fn help_and_schema_keep_command_contract_visible() {
             "channel_message: event, channel, id, from, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
         ]
     );
+    assert!(
+        schema
+            .output_shapes
+            .profile
+            .iter()
+            .any(|field| field.contains("announced (set/clear")),
+        "profile.announced documents both set and clear"
+    );
 
     let help = sandbox.run(&["--help"]);
     assert_success(&help);

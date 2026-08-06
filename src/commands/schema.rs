@@ -117,7 +117,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "ok",
             "room",
             "profile (name?, pfp?)",
-            "announced (set only; channels that received the change event)",
+            "announced (set/clear; channels that received the change event)",
         ]),
         watch: fields(&[
             "mail: event, room, id, from, kind, subject, sent [, display_name, pfp — present only when the sender had a profile at send time]",
