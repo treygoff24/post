@@ -678,17 +678,31 @@ fn format_local_timestamp(seconds: u64) -> AppResult<(String, String)> {
             "Correct the system timezone configuration and retry the send command.",
         ));
     }
+    // IDs sort as strings, so their timestamp MUST be timezone-independent:
+    // a machine timezone change mid-conversation (observed 2026-08-08,
+    // Eastern -> Central in a moving car) made new local-time IDs sort an
+    // hour BEHIND the channel cursor, silently hiding them from every
+    // max-id reader. IDs use UTC; only the human-facing `sent` string keeps
+    // local wall time (with its offset).
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut utc) }.is_null() {
+        return Err(AppError::new(
+            ErrorCode::IoError,
+            "UTC time conversion failed",
+            "Correct the system clock and retry the send command.",
+        ));
+    }
     let offset = local.tm_gmtoff;
     let sign = if offset < 0 { '-' } else { '+' };
     let offset = offset.unsigned_abs();
     let id_time = format!(
         "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        local.tm_year + 1900,
-        local.tm_mon + 1,
-        local.tm_mday,
-        local.tm_hour,
-        local.tm_min,
-        local.tm_sec
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec
     );
     let sent = format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {sign}{:02}{:02}",
@@ -899,17 +913,20 @@ mod tests {
         }
         unsafe { tzset() };
 
+        // The id timestamp is UTC in every timezone (1_700_000_000 =
+        // 2023-11-14 22:13:20Z) so IDs keep sorting monotonically when the
+        // machine timezone changes; only `sent` carries local wall time.
         assert_eq!(
             kathmandu.expect("format Kathmandu fixture"),
             (
-                "20231115-035820".to_owned(),
+                "20231114-221320".to_owned(),
                 "2023-11-15 03:58:20 +0545".to_owned()
             )
         );
         assert_eq!(
             new_york.expect("format New York fixture"),
             (
-                "20231114-171320".to_owned(),
+                "20231114-221320".to_owned(),
                 "2023-11-14 17:13:20 -0500".to_owned()
             )
         );
