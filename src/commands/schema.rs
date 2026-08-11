@@ -12,9 +12,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "chat",
-            "post chat <channel> [--peek | --discard | --limit <n> | --history <n> [--grep <pat>] | --since <id> | --seen-by <id>] | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
+            "post chat <channel> [--peek | --discard | --limit <n> | --history <n> [--grep <pat>] | --since <id> | --seen-by <id>] [--framing full|compact] | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; messages from the trey room tagged [signed:TS] are verified against ~/.trey-room/sigs/",
+            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing compact (body-returning reads only, rejected on --send/--join/--discard/--seen-by) is stateless per-invocation, renders the condensed laws, never consults or stamps the banner-day state, and keeps JSON framing source/authority unchanged; there is no none mode and the default stays full; messages from the trey room tagged [signed:TS] are verified against ~/.trey-room/sigs/",
         ),
         command(
             "channels",
@@ -30,9 +30,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "read",
-            "post read <id-or-prefix> [--room <name>] [--peek]",
+            "post read <id-or-prefix> [--room <name>] [--peek] [--framing full|compact]",
             "framed text; JSON with --json",
-            "moves inbox mail to read unless --peek; a prefix matching no unread mail falls back to the room's read store and then to archive copies addressed to that room, served with already_read=true and consuming nothing",
+            "moves inbox mail to read unless --peek; --framing compact swaps the multi-line banner for the condensed one-sentence laws (stateless, explicit per invocation, no none mode, full remains the default; JSON framing source/authority unchanged); a prefix matching no unread mail falls back to the room's read store and then to archive copies addressed to that room, served with already_read=true and consuming nothing",
         ),
         command(
             "rooms",

@@ -54,12 +54,12 @@ Prefer JSON for machine parsing; use `--pretty` only for human inspection.
 ```bash
 post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
-post read <id-or-prefix> [--room <room>] [--peek]
+post read <id-or-prefix> [--room <room>] [--peek] [--framing full|compact]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join [--description TEXT]
 post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
-post chat <channel> [--peek | --discard | --limit N]
+post chat <channel> [--peek | --discard | --limit N] [--framing full|compact]
 post chat <channel> --history N [--grep PATTERN]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
