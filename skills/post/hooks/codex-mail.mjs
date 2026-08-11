@@ -2,7 +2,7 @@
 // Codex hook adapter: injects metadata-only "new post mail" notifications into
 // model context at SessionStart / UserPromptSubmit / root PostToolUse.
 //
-// Contract (CODEX-AUTO-NOTIFY-PLAN.md):
+// Contract (see docs/ADAPTERS.md for the full adapter recipe):
 // - runs `post watch --snapshot` from the hook cwd, so post resolves the
 //   deepest registered room itself (read-only, envelope-only);
 // - subagent PostToolUse events are suppressed;

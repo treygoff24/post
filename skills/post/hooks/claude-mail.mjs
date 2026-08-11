@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code hook adapter: injects metadata-only "new post mail" notifications
 // into model context at SessionStart / UserPromptSubmit / root PostToolUse.
-// The Claude twin of codex-mail.mjs (CODEX-AUTO-NOTIFY-PLAN.md's deferred round).
+// The Claude twin of codex-mail.mjs; adapter recipe and contract: docs/ADAPTERS.md.
 //
 // Contract deltas vs the Codex adapter, from the Claude Code hooks reference
 // (code.claude.com/docs/en/hooks, fetched 2026-07-30):
