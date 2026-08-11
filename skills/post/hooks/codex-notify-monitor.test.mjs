@@ -60,10 +60,9 @@ fs.writeFileSync(
 fs.chmodSync(HERDR, 0o755);
 
 test.after(() => {
-  const cleanup = spawnSync("trash", [ROOT], { stdio: "ignore" });
-  // No `trash` on this machine (CI runners, stranger installs): remove the
-  // temp root directly — this test created it.
-  if (cleanup.error) fs.rmSync(ROOT, { recursive: true, force: true });
+  // ROOT is a uniquely named temp dir this test created; plain stdlib
+  // removal is the portable cleanup, no external binary involved.
+  fs.rmSync(ROOT, { recursive: true, force: true });
 });
 
 function setControl(control = {}) {

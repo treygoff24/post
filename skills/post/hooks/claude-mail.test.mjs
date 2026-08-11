@@ -1,6 +1,6 @@
 // Self-tests for claude-mail.mjs. Run: node --test skills/post/hooks/*.test.mjs
 // Node stdlib only; a stub `post` binary is controlled per-test through a
-// JSON control file. Temp cleanup uses `trash` (machine rule: never rm/unlink).
+// JSON control file. Cleanup removes the test-created temp root via stdlib.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -37,10 +37,9 @@ fs.writeFileSync(
 fs.chmodSync(STUB, 0o755);
 
 test.after(() => {
-  const cleanup = spawnSync("trash", [ROOT], { stdio: "ignore" });
-  // No `trash` on this machine (CI runners, stranger installs): remove the
-  // temp root directly — this test created it.
-  if (cleanup.error) fs.rmSync(ROOT, { recursive: true, force: true });
+  // ROOT is a uniquely named temp dir this test created; plain stdlib
+  // removal is the portable cleanup, no external binary involved.
+  fs.rmSync(ROOT, { recursive: true, force: true });
 });
 
 let stateDirCounter = 0;

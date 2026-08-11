@@ -13,15 +13,7 @@ pub(crate) fn test_root(label: &str) -> PathBuf {
 }
 
 pub(crate) fn trash_test_root(root: &Path) {
-    // Prefer the recoverable `trash` cleanup where it exists (this project's
-    // home machine); fall back to a direct remove on machines without it
-    // (CI runners, stranger installs) — the root is a temp dir this process
-    // created, so an unrecoverable delete of it is safe.
-    match std::process::Command::new("trash").arg(root).status() {
-        Ok(status) => assert!(status.success(), "trash should clean test root"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::remove_dir_all(root).expect("run test cleanup");
-        }
-        Err(error) => panic!("run recoverable test cleanup: {error}"),
-    }
+    // The root is a uniquely named temp dir this test created; plain stdlib
+    // removal is the portable cleanup, with no external binary involved.
+    fs::remove_dir_all(root).expect("run test cleanup");
 }

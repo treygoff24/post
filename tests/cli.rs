@@ -172,26 +172,13 @@ impl Drop for Sandbox {
         if !self.path.exists() {
             return;
         }
-        match Command::new("trash").arg(&self.path).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => eprintln!(
-                "failed to trash test sandbox '{}' (status {status})",
+        // The sandbox is a uniquely named temp dir this test created; plain
+        // stdlib removal is the portable cleanup, no external binary involved.
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            eprintln!(
+                "failed to remove test sandbox '{}': {error}",
                 self.path.display()
-            ),
-            // No `trash` on this machine (CI runners, stranger installs):
-            // remove the sandbox directly — it is a temp dir this test created.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if let Err(error) = fs::remove_dir_all(&self.path) {
-                    eprintln!(
-                        "failed to remove test sandbox '{}': {error}",
-                        self.path.display()
-                    );
-                }
-            }
-            Err(error) => eprintln!(
-                "failed to run trash for test sandbox '{}': {error}",
-                self.path.display()
-            ),
+            );
         }
     }
 }
