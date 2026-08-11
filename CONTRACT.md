@@ -343,6 +343,48 @@ results, stderr = diagnostics/errors.
   `profile set` drops (with a warning) any preserved stored field that no
   longer validates, and `post doctor` reports inert entries.
 
+## Signed owner (amendment, 2026-08-11)
+
+- `post owner [init --room <name> [--marker <glyph>] [--label <text>]
+  [--sidecar-dir <abs>] [--allowed-signers <abs>] [--principal <p>]
+  [--namespace <ns>] | show]` — the signed owner is the trust anchor whose
+  channel messages carry verification badges. `init` is create-only and
+  atomic: an identical existing `owner.json` is an idempotent success, a
+  different or malformed one is `config_invalid` (differing fields in
+  `details.reason`), a symlinked one is refused, and nothing is ever
+  overwritten or repaired. Every explicit value and the room registration are
+  validated under the rooms lock (registration cannot race a concurrent
+  `rooms add`), then `<sidecar>/sigs/` is created. Defaults, derived at load:
+  sidecar_dir = the registered room's resolved path; allowed_signers =
+  `<sidecar>/allowed_signers`; principal = `<room>@porch`; namespace =
+  `<room>-porch`; marker = 🧔 (one non-ASCII grapheme, no
+  control/bidi/line-separator characters, no edge ZWJ); label = capitalized
+  room id (≤32 chars, the display-name predicate). Derived and explicit values
+  are validated identically at load, so a hand-written `owner.json` can never
+  ship a broken trust anchor.
+- Resolution: owner.json present → `configured`; absent but room `trey`
+  registered → the synthesized `legacy` owner (pre-A0a behavior, byte-identical
+  output and reservation); neither → feature-absent: no badges render and
+  profile imitation reserves nothing. A present-but-invalid `owner.json` is
+  `config_invalid` on every badge-computing read (fail closed) and reported by
+  `post doctor` (`owner.invalid`); it never degrades to legacy or
+  feature-absent. `owner.json` is reserved as a room name.
+- Verification: a channel message from the owner room whose first line ends
+  in `[signed:TS]` is verified at read time against
+  `<sidecar>/sigs/TS.txt{,.sig}` — ssh-keygen verification against
+  allowed_signers (principal/namespace), a byte-compare of the channel text
+  against the signed payload, and a tag-vs-payload timestamp match (rename
+  replay refused). Verified renders `[🔏 VERIFIED — <label> (<room>), signed
+  TS, age]`; the legacy owner renders `Trey` with no room id (byte-identical),
+  while a configured owner ALWAYS shows its immutable room id. `--json` chat
+  reads carry `signed_verified`. Failures render loudly; a missing badge is
+  never silently unsigned. post never generates keys — porch authors
+  allowed_signers and signs.
+- PRESENTATION ONLY: profile display names may not imitate the owner's room
+  id — configured owner, or `trey` under the legacy fallback; feature-absent
+  reserves nothing — exactly as before, no profile value influences identity,
+  auth, routing, blocked routes, cursors, or room resolution.
+
 ## Codex room convention
 
 Codex should use a narrow registered room path, normally
@@ -385,7 +427,7 @@ deserialization of every output shape; migration: a mail file in the original
 on-disk format reads back identically; channel join/send/read with cursor
 advancement and `--peek`; channel watch backlog/live events without bodies or
 cursor advancement; malformed channel isolation; blocked-route channel sharing
-refusal; `not_a_member`; and schema/help consistency for all ten commands and
+refusal; `not_a_member`; and schema/help consistency for all twelve commands and
 every watch event variant.
 
 ## Stack

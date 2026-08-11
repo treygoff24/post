@@ -54,7 +54,7 @@ pub(crate) fn write_profiles(context: &Context, profiles: &ProfileMap) -> AppRes
 /// "ｔｒｅｙ" all collide with "trey". Non-NFKC homoglyphs (e.g. Cyrillic Т)
 /// still pass; that residual risk is accepted because the immutable
 /// (room-id) suffix is a hard invariant on every render path.
-fn skeleton(value: &str) -> String {
+pub(crate) fn skeleton(value: &str) -> String {
     value
         .nfkc()
         .filter(|c| c.is_alphanumeric())
@@ -63,9 +63,18 @@ fn skeleton(value: &str) -> String {
 }
 
 /// Validate a display name for `own_room`. Rejects control characters,
-/// over-long names, and names whose skeleton imitates "trey" or any
-/// registered room id other than the caller's own.
-pub(crate) fn validate_display_name(name: &str, own_room: &str, rooms: &RoomMap) -> AppResult<()> {
+/// over-long names, and names whose skeleton imitates the configured signed
+/// owner (A0a Decision 4: legacy fallback reserves `trey`, feature-absent
+/// reserves nothing) or any registered room id other than the caller's own.
+/// `owner_room` is the resolved owner's room id — the caller decides how to
+/// resolve it (profile set loads owner.json, per the Decision 3 matrix;
+/// send-time stamping may only consult the room registry).
+pub(crate) fn validate_display_name(
+    name: &str,
+    own_room: &str,
+    rooms: &RoomMap,
+    owner_room: Option<&str>,
+) -> AppResult<()> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(invalid("display name is empty", name));
@@ -89,8 +98,16 @@ pub(crate) fn validate_display_name(name: &str, own_room: &str, rooms: &RoomMap)
     if skel.is_empty() {
         return Err(invalid("display name has no letters or digits", name));
     }
-    if skel == "trey" {
-        return Err(invalid("display name imitates 'trey'", name));
+    // The owner reservation mirrors the pre-A0a unconditional 'trey' check:
+    // it deliberately excludes own_room, because the owner room's display
+    // name must never be able to claim the owner namespace either.
+    if let Some(owner_room) = owner_room {
+        if skeleton(owner_room) == skel {
+            return Err(invalid(
+                &format!("display name imitates the signed owner '{owner_room}'"),
+                name,
+            ));
+        }
     }
     for room in rooms.keys() {
         if room != own_room && skeleton(room) == skel {
@@ -158,7 +175,16 @@ pub(crate) fn stamp_for(context: &Context, room: &str, rooms: &RoomMap) -> Profi
         return Profile::default();
     };
     let mut profile = profiles.remove(room).unwrap_or_default();
-    drop_invalid_fields(&mut profile, room, rooms);
+    // Send-time stamping is transport and never loads the trust anchor (A0a
+    // Decision 3 column). The room registry already reserves a configured
+    // owner's room id (registration is enforced at owner load), so the only
+    // reservation derivable here without loading owner.json is the legacy
+    // one, exactly when it applies: a registered 'trey' room. Feature-absent
+    // (no owner.json, no trey room) reserves nothing, per Decision 4.
+    let owner_hint = rooms
+        .contains_key(crate::mailbox::LEGACY_OWNER_ROOM)
+        .then_some(crate::mailbox::LEGACY_OWNER_ROOM);
+    drop_invalid_fields(&mut profile, room, rooms, owner_hint);
     profile
 }
 
@@ -168,10 +194,15 @@ pub(crate) fn stamp_for(context: &Context, room: &str, rooms: &RoomMap) -> Profi
 /// must not carry a planted value into announcements. Cross-room pfp
 /// uniqueness is deliberately not re-checked: a duplicated sigil is
 /// cosmetic, not an injection. Returns true if anything was dropped.
-pub(crate) fn drop_invalid_fields(profile: &mut Profile, room: &str, rooms: &RoomMap) -> bool {
+pub(crate) fn drop_invalid_fields(
+    profile: &mut Profile,
+    room: &str,
+    rooms: &RoomMap,
+    owner_room: Option<&str>,
+) -> bool {
     let mut dropped = false;
     if let Some(name) = &profile.name {
-        if validate_display_name(name, room, rooms).is_err() {
+        if validate_display_name(name, room, rooms, owner_room).is_err() {
             profile.name = None;
             dropped = true;
         }
@@ -211,24 +242,48 @@ mod tests {
     #[test]
     fn display_name_rules() {
         let rooms = rooms(&["pact", "wade-discovery"]);
-        validate_display_name("Lantern 🏮", "pact", &rooms).expect("plain name ok");
+        validate_display_name("Lantern 🏮", "pact", &rooms, Some("trey")).expect("plain name ok");
         // Own room id is fine as a display name.
-        validate_display_name("pact", "pact", &rooms).expect("own id ok");
-        assert!(validate_display_name("T r e y", "pact", &rooms).is_err());
-        assert!(validate_display_name("Wade Discovery", "pact", &rooms).is_err());
-        assert!(validate_display_name("evil\nname", "pact", &rooms).is_err());
-        assert!(validate_display_name("   ", "pact", &rooms).is_err());
-        assert!(validate_display_name(&"x".repeat(33), "pact", &rooms).is_err());
+        validate_display_name("pact", "pact", &rooms, Some("trey")).expect("own id ok");
+        assert!(validate_display_name("T r e y", "pact", &rooms, Some("trey")).is_err());
+        assert!(validate_display_name("Wade Discovery", "pact", &rooms, Some("trey")).is_err());
+        assert!(validate_display_name("evil\nname", "pact", &rooms, Some("trey")).is_err());
+        assert!(validate_display_name("   ", "pact", &rooms, Some("trey")).is_err());
+        assert!(validate_display_name(&"x".repeat(33), "pact", &rooms, Some("trey")).is_err());
         assert!(
-            validate_display_name("🏮🏮", "pact", &rooms).is_err(),
+            validate_display_name("🏮🏮", "pact", &rooms, Some("trey")).is_err(),
             "no letters"
         );
         // Bidi controls are Cf, not Cc — must be refused explicitly (wade F1).
-        assert!(validate_display_name("evil\u{202E}name", "pact", &rooms).is_err());
-        assert!(validate_display_name("evil\u{2066}name", "pact", &rooms).is_err());
-        assert!(validate_display_name("evil\u{2028}name", "pact", &rooms).is_err());
+        assert!(validate_display_name("evil\u{202E}name", "pact", &rooms, Some("trey")).is_err());
+        assert!(validate_display_name("evil\u{2066}name", "pact", &rooms, Some("trey")).is_err());
+        assert!(validate_display_name("evil\u{2028}name", "pact", &rooms, Some("trey")).is_err());
         // NFKC collapses fullwidth forms into the skeleton (wade F2).
-        assert!(validate_display_name("ｔｒｅｙ", "pact", &rooms).is_err());
+        assert!(validate_display_name("ｔｒｅｙ", "pact", &rooms, Some("trey")).is_err());
+        // A0a Decision 4: the reservation follows the CONFIGURED owner.
+        // (The rooms helper is shadowed by the binding above, so the map is
+        // built inline.)
+        let mara = [("mara", "/tmp"), ("pact", "/tmp")]
+            .into_iter()
+            .map(|(name, path)| (name.to_owned(), path.to_owned()))
+            .collect();
+        assert!(
+            validate_display_name("Mara", "pact", &mara, Some("mara")).is_err(),
+            "configured owner's id is reserved"
+        );
+        assert!(
+            validate_display_name("T r e y", "pact", &mara, Some("mara")).is_ok(),
+            "trey is neither the owner nor a registered room under this config"
+        );
+        assert!(
+            validate_display_name("Mara", "mara", &mara, Some("mara")).is_err(),
+            "owner reservation applies even inside the owner room (mirrors the legacy trey rule)"
+        );
+        // Feature-absent (no owner.json, trey unregistered): no reservation.
+        assert!(
+            validate_display_name("T r e y", "pact", &rooms, None).is_ok(),
+            "no owner configured: trey is a free display name"
+        );
     }
 
     #[test]
@@ -282,7 +337,8 @@ mod tests {
             "line-separator pfp"
         );
         assert!(
-            validate_display_name("evil\u{061C}name", "pact", &rooms(&["pact"])).is_err(),
+            validate_display_name("evil\u{061C}name", "pact", &rooms(&["pact"]), Some("trey"))
+                .is_err(),
             "ALM (U+061C) refused"
         );
     }
@@ -297,11 +353,16 @@ mod tests {
             name: Some("Lantern".to_owned()),
             pfp: Some("\u{2028}".to_owned()),
         };
-        assert!(drop_invalid_fields(&mut profile, "pact", &rooms));
+        assert!(drop_invalid_fields(
+            &mut profile,
+            "pact",
+            &rooms,
+            Some("trey")
+        ));
         assert_eq!(profile.name.as_deref(), Some("Lantern"));
         assert_eq!(profile.pfp, None, "planted pfp must drop");
         assert!(
-            !drop_invalid_fields(&mut profile, "pact", &rooms),
+            !drop_invalid_fields(&mut profile, "pact", &rooms, Some("trey")),
             "clean profile drops nothing"
         );
     }
@@ -311,7 +372,14 @@ mod tests {
         use crate::mailbox::Context;
         use std::fs;
         let root = crate::test_support::test_root("profile-stamp");
-        fs::write(root.join("rooms.json"), r#"{"alpha": "/tmp"}"#).expect("rooms");
+        // trey is registered, so the LEGACY owner fallback applies (A0a
+        // Decision 4: feature-absent reserves nothing; the legacy reservation
+        // requires a registered trey room).
+        fs::write(
+            root.join("rooms.json"),
+            r#"{"alpha": "/tmp", "trey": "/tmp"}"#,
+        )
+        .expect("rooms");
         // Hand-edited registry: imitation name, two-emoji pfp, plus one
         // valid entry for an unregistered sender.
         fs::write(
@@ -323,9 +391,12 @@ mod tests {
             root: root.clone(),
             home: root.clone(),
         };
-        let rooms: RoomMap = [("alpha".to_owned(), "/tmp".to_owned())]
-            .into_iter()
-            .collect();
+        let rooms: RoomMap = [
+            ("alpha".to_owned(), "/tmp".to_owned()),
+            ("trey".to_owned(), "/tmp".to_owned()),
+        ]
+        .into_iter()
+        .collect();
         let stamped = stamp_for(&context, "alpha", &rooms);
         assert_eq!(stamped.name, None, "imitation name must not stamp");
         assert_eq!(stamped.pfp, None, "two-emoji pfp must not stamp");

@@ -1,5 +1,6 @@
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::model::{Envelope, ParsedMail, RoomMap, RulesConfig};
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -8,6 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) const DEFAULT_RULES_JSON: &str = r#"{
   "blocked": []
@@ -19,12 +21,13 @@ pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{}
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ROOMS_LOCK_FILE: &str = ".rooms.lock";
-const RESERVED_ROOM_NAMES: [&str; 6] = [
+const RESERVED_ROOM_NAMES: [&str; 7] = [
     "*",
     "archive",
     "rooms.json",
     "rules.json",
     "profiles.json",
+    "owner.json",
     ROOMS_LOCK_FILE,
 ];
 
@@ -748,6 +751,374 @@ fn levenshtein(left: &str, right: &str) -> usize {
     previous[right.chars().count()]
 }
 
+// ---------------------------------------------------------------------------
+// Signed owner (A0a): the trust anchor for verified mail, configurable via
+// owner.json at the mail root. See docs/plans/a0a-signed-owner-contract.md.
+// ---------------------------------------------------------------------------
+
+pub(crate) const OWNER_FILE: &str = "owner.json";
+/// Room id the legacy fallback owner lives under when no owner.json exists.
+pub(crate) const LEGACY_OWNER_ROOM: &str = "trey";
+const OWNER_DEFAULT_MARKER: &str = "🧔";
+const PRINCIPAL_MAX_BYTES: usize = 128;
+const NAMESPACE_MAX_BYTES: usize = 64;
+
+impl Context {
+    pub(crate) fn owner_json_path(&self) -> PathBuf {
+        self.root.join(OWNER_FILE)
+    }
+}
+
+/// The raw owner.json on disk: what `post owner init` writes and what the
+/// loader parses. Omitted optional fields serialize as JSON null (matching
+/// the A0a example bytes); every null is derived at load time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnerFile {
+    pub room: String,
+    #[serde(default)]
+    pub sidecar_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub allowed_signers: Option<PathBuf>,
+    #[serde(default)]
+    pub principal: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub marker: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// How this owner was resolved: configured via owner.json, or the synthesized
+/// legacy owner (no owner.json + a registered `trey` room).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerSource {
+    Configured,
+    Legacy,
+}
+
+/// The post-derivation owner: every field resolved, every default applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedOwner {
+    pub room: String,
+    pub sidecar_dir: PathBuf,
+    pub allowed_signers: PathBuf,
+    pub principal: String,
+    pub namespace: String,
+    pub marker: String,
+    pub label: String,
+    pub source: OwnerSource,
+}
+
+/// Decision 2 resolution states: configured / legacy fallback / feature-absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OwnerResolution {
+    /// owner.json parsed and validated (Decision 1).
+    Configured(ResolvedOwner),
+    /// No owner.json, but room `trey` is registered: the pre-A0a behavior,
+    /// synthesized. This machine changes nothing and notices nothing.
+    Legacy(ResolvedOwner),
+    /// Neither: no signed owner. signed_status renders no badges and profile
+    /// imitation reserves nothing.
+    None,
+}
+
+/// Full resolution (Decision 2): a present-but-invalid owner.json is
+/// ConfigInvalid (Decision 3) — it never degrades to legacy or feature-absent.
+pub(crate) fn load_owner(context: &Context) -> AppResult<OwnerResolution> {
+    let rooms = context.load_rooms()?;
+    load_owner_with_rooms(context, &rooms)
+}
+
+/// Resolution against an already-loaded room registry (doctor uses this so a
+/// broken rooms.json can still be reported as its own diagnostic).
+pub(crate) fn load_owner_with_rooms(
+    context: &Context,
+    rooms: &RoomMap,
+) -> AppResult<OwnerResolution> {
+    let path = context.owner_json_path();
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            let file = read_owner_file(&path)?;
+            Ok(OwnerResolution::Configured(resolve_owner_file(
+                context, &file, rooms,
+            )?))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if rooms.contains_key(LEGACY_OWNER_ROOM) {
+                Ok(OwnerResolution::Legacy(legacy_owner(context, rooms)?))
+            } else {
+                Ok(OwnerResolution::None)
+            }
+        }
+        Err(error) => Err(AppError::io("inspect owner config", &path, error)),
+    }
+}
+
+/// Option-wrapped resolution for badge-computing paths: None under
+/// feature-absent, the owner under configured and legacy fallback.
+pub(crate) fn resolve_owner(context: &Context) -> AppResult<Option<ResolvedOwner>> {
+    Ok(match load_owner(context)? {
+        OwnerResolution::Configured(owner) | OwnerResolution::Legacy(owner) => Some(owner),
+        OwnerResolution::None => None,
+    })
+}
+
+/// The resolved owner's room id, or None when feature-absent. Callers that
+/// already hold a loaded registry pair this with `load_owner_with_rooms` so
+/// the imitation reservation runs against the same snapshot (profile set,
+/// doctor).
+pub(crate) fn resolved_owner_room(resolution: &OwnerResolution) -> Option<&str> {
+    match resolution {
+        OwnerResolution::Configured(owner) | OwnerResolution::Legacy(owner) => Some(&owner.room),
+        OwnerResolution::None => None,
+    }
+}
+
+/// Parse-and-validate a present owner.json without consulting rooms.json, so
+/// `post doctor` still reports a malformed trust anchor when the room
+/// registry it registers against is itself broken. No-op when the file is
+/// absent.
+pub(crate) fn check_owner_parses(context: &Context) -> AppResult<()> {
+    let path = context.owner_json_path();
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            read_owner_file(&path)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::io("inspect owner config", &path, error)),
+    }
+}
+
+/// Parse the raw owner.json and validate every EXPLICIT value. Never follows
+/// a symlinked owner.json: the trust anchor must be a regular file.
+pub(crate) fn read_owner_file(path: &Path) -> AppResult<OwnerFile> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| AppError::io("inspect owner config", path, error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::config(
+            path,
+            "owner.json is a symlink; a trust anchor must be a regular file — replace the symlink with a real file",
+        ));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| AppError::config(path, format!("cannot read file: {error}")))?;
+    let file: OwnerFile = serde_json::from_slice(&bytes)
+        .map_err(|error| AppError::config(path, format!("invalid JSON object: {error}")))?;
+    validate_owner_values(path, &file)?;
+    Ok(file)
+}
+
+/// Validate the explicit fields of an owner configuration (the values a
+/// hand-written owner.json or `post owner init` can supply). Registration of
+/// `room` is checked separately at resolution, since it needs rooms.json.
+pub(crate) fn validate_owner_values(path: &Path, file: &OwnerFile) -> AppResult<()> {
+    let config = |reason: String| AppError::config(path, reason);
+    validate_room_name(&file.room)
+        .map_err(|reason| config(format!("'room' must be a valid room name: {reason}")))?;
+    if let Some(dir) = &file.sidecar_dir {
+        if !dir.is_absolute() {
+            return Err(config(
+                "'sidecar_dir' must be an absolute path (the sidecar root is never relative)"
+                    .into(),
+            ));
+        }
+    }
+    if let Some(signers) = &file.allowed_signers {
+        if !signers.is_absolute() {
+            return Err(config("'allowed_signers' must be an absolute path".into()));
+        }
+    }
+    if let Some(principal) = &file.principal {
+        validate_ascii_bound(principal, "'principal'", PRINCIPAL_MAX_BYTES).map_err(config)?;
+    }
+    if let Some(namespace) = &file.namespace {
+        validate_ascii_bound(namespace, "'namespace'", NAMESPACE_MAX_BYTES).map_err(config)?;
+    }
+    if let Some(marker) = &file.marker {
+        validate_marker(marker).map_err(config)?;
+    }
+    if let Some(label) = &file.label {
+        validate_label(label).map_err(config)?;
+    }
+    Ok(())
+}
+
+/// Post-derivation resolution of a raw owner file: registration check against
+/// rooms.json, then every default. Derived values must satisfy the same
+/// bounds as explicit ones — a room name pathological enough to break its
+/// derivations falls closed rather than shipping a broken trust anchor.
+pub(crate) fn resolve_owner_file(
+    context: &Context,
+    file: &OwnerFile,
+    rooms: &RoomMap,
+) -> AppResult<ResolvedOwner> {
+    let path = context.owner_json_path();
+    let config = |reason: String| AppError::config(&path, reason);
+    let room_path = rooms.get(&file.room).ok_or_else(|| {
+        config(format!(
+            "'room' names unregistered room '{}'; register it in rooms.json first",
+            file.room
+        ))
+    })?;
+    let sidecar_dir = match &file.sidecar_dir {
+        Some(dir) => dir.clone(),
+        // Default: the registered room's NORMALIZED/resolved path, never the
+        // raw rooms.json string (live registries contain `~`).
+        None => context.expand_room_path(room_path).map_err(|reason| {
+            config(format!(
+                "cannot derive sidecar_dir from the registered room path: {reason}"
+            ))
+        })?,
+    };
+    let allowed_signers = file
+        .allowed_signers
+        .clone()
+        .unwrap_or_else(|| sidecar_dir.join("allowed_signers"));
+    let principal = file
+        .principal
+        .clone()
+        .unwrap_or_else(|| format!("{}@porch", file.room));
+    let namespace = file
+        .namespace
+        .clone()
+        .unwrap_or_else(|| format!("{}-porch", file.room));
+    let marker = file
+        .marker
+        .clone()
+        .unwrap_or_else(|| OWNER_DEFAULT_MARKER.to_owned());
+    let label = match &file.label {
+        Some(label) => label.clone(),
+        None => default_owner_label(&file.room),
+    };
+    validate_ascii_bound(&principal, "'principal' (derived)", PRINCIPAL_MAX_BYTES)
+        .map_err(config)?;
+    validate_ascii_bound(&namespace, "'namespace' (derived)", NAMESPACE_MAX_BYTES)
+        .map_err(config)?;
+    validate_label(&label).map_err(config)?;
+    Ok(ResolvedOwner {
+        room: file.room.clone(),
+        sidecar_dir,
+        allowed_signers,
+        principal,
+        namespace,
+        marker,
+        label,
+        source: OwnerSource::Configured,
+    })
+}
+
+/// The synthesized legacy owner (Decision 2 step 2): room `trey`, sidecar at
+/// the registered trey room's resolved path (`~/.trey-room` on this machine),
+/// principal/namespace/marker/label matching the pre-A0a hardcodes exactly.
+pub(crate) fn legacy_owner(context: &Context, rooms: &RoomMap) -> AppResult<ResolvedOwner> {
+    let path = context.owner_json_path();
+    let room_path = rooms
+        .get(LEGACY_OWNER_ROOM)
+        .expect("legacy resolution is only entered with 'trey' registered");
+    let sidecar_dir = context.expand_room_path(room_path).map_err(|reason| {
+        AppError::config(
+            &path,
+            format!("cannot derive the legacy sidecar from the 'trey' room registration: {reason}"),
+        )
+    })?;
+    Ok(ResolvedOwner {
+        room: LEGACY_OWNER_ROOM.to_owned(),
+        sidecar_dir: sidecar_dir.clone(),
+        allowed_signers: sidecar_dir.join("allowed_signers"),
+        principal: format!("{LEGACY_OWNER_ROOM}@porch"),
+        namespace: format!("{LEGACY_OWNER_ROOM}-porch"),
+        marker: OWNER_DEFAULT_MARKER.to_owned(),
+        label: "Trey".to_owned(),
+        source: OwnerSource::Legacy,
+    })
+}
+
+fn default_owner_label(room: &str) -> String {
+    let mut chars = room.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut label = first.to_uppercase().collect::<String>();
+            label.push_str(chars.as_str());
+            label
+        }
+        None => String::new(),
+    }
+}
+
+/// Shared bound for principal and namespace: exact ASCII-safe alphabet for
+/// ssh-keygen argv and allowed_signers lines; refuses NUL/control/space by
+/// construction. Bounds shared with porch (B0 onboarding).
+fn validate_ascii_bound(value: &str, what: &str, max_bytes: usize) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{what} must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return Err(format!(
+            "{what} exceeds {max_bytes} bytes (got {})",
+            value.len()
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b'-'))
+    {
+        return Err(format!(
+            "{what} must contain only ASCII letters, digits, '.', '_', '@', or '-'"
+        ));
+    }
+    Ok(())
+}
+
+/// The owner marker: exactly one glyph, validated by the same safe-subset
+/// predicate as profile pfp validation (minus uniqueness) — non-ASCII, no
+/// control/bidi/line-separator characters. ZWJ-abuse at the edges is refused
+/// (a marker must not START or END with U+200D): an unterminated join can
+/// render unstable or invisible, and the wire prefix must be unambiguous.
+fn validate_marker(marker: &str) -> Result<(), String> {
+    // ZWJ abuse is checked before the cluster count: a leading or trailing
+    // bare ZWJ is always a multi-cluster string anyway, so the refusal
+    // message just gets more specific.
+    if marker.starts_with('\u{200d}') || marker.ends_with('\u{200d}') {
+        return Err(
+            "marker must not start or end with a zero-width joiner (ZWJ-abuse refused)".to_owned(),
+        );
+    }
+    let mut graphemes = marker.graphemes(true);
+    if graphemes.next().is_none() || graphemes.next().is_some() {
+        return Err("marker must be exactly one glyph (one grapheme cluster)".to_owned());
+    }
+    if marker.chars().any(refused_profile_char) {
+        return Err("marker contains control, bidi, or line-separator characters".to_owned());
+    }
+    if marker.is_ascii() {
+        return Err("marker must be a non-ASCII glyph, not ASCII".to_owned());
+    }
+    Ok(())
+}
+
+/// The owner label: 1-32 Unicode scalar values, sharing the profile
+/// display-name predicate (no control/bidi/line-separator characters) and
+/// rejecting whitespace-only text.
+fn validate_label(label: &str) -> Result<(), String> {
+    if label.trim().is_empty() {
+        return Err("label must not be empty or whitespace-only".to_owned());
+    }
+    if label.chars().any(refused_profile_char) {
+        return Err("label contains control, bidi, or line-separator characters".to_owned());
+    }
+    let length = label.chars().count();
+    if length > crate::profile::MAX_NAME_CHARS {
+        return Err(format!(
+            "label exceeds {} characters (got {length})",
+            crate::profile::MAX_NAME_CHARS
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ascii_escape_json, exclusive_atomic_write, exclusive_atomic_write_with};
@@ -930,5 +1301,368 @@ mod tests {
                 "2023-11-14 17:13:20 -0500".to_owned()
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::{
+        exclusive_atomic_write, legacy_owner, load_owner, load_owner_with_rooms, read_owner_file,
+        validate_label, validate_marker, validate_owner_values, Context, OwnerFile,
+        OwnerResolution, OwnerSource, ResolvedOwner, LEGACY_OWNER_ROOM,
+    };
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn context(label: &str) -> (PathBuf, Context) {
+        let root = test_root(&format!("owner-{label}"));
+        fs::write(
+            root.join("rooms.json"),
+            r#"{"trey": "~/.trey-room", "mara": "~/.mara-room"}"#,
+        )
+        .expect("seed rooms");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        context.prepare_first_run().expect("defaults");
+        (root, context)
+    }
+
+    fn file(room: &str) -> OwnerFile {
+        OwnerFile {
+            room: room.to_owned(),
+            sidecar_dir: None,
+            allowed_signers: None,
+            principal: None,
+            namespace: None,
+            marker: None,
+            label: None,
+        }
+    }
+
+    #[test]
+    fn resolution_states_configured_legacy_none() {
+        let (root, context) = context("states");
+        // Configured: owner.json wins over the registered trey room.
+        fs::write(
+            root.join("owner.json"),
+            r#"{"room": "mara", "marker": "🐳", "label": "Marvelous"}"#,
+        )
+        .expect("owner");
+        let configured = load_owner(&context).expect("load configured");
+        match configured {
+            OwnerResolution::Configured(owner) => {
+                assert_eq!(owner.room, "mara");
+                assert_eq!(owner.source, OwnerSource::Configured);
+                assert_eq!(owner.marker, "🐳");
+                assert_eq!(owner.label, "Marvelous");
+                assert_eq!(
+                    owner.sidecar_dir,
+                    root.join(".mara-room"),
+                    "derived from the registered room path, never the raw ~ string"
+                );
+                assert_eq!(
+                    owner.allowed_signers,
+                    root.join(".mara-room").join("allowed_signers")
+                );
+                assert_eq!(owner.principal, "mara@porch");
+                assert_eq!(owner.namespace, "mara-porch");
+            }
+            other => panic!("expected configured, got {other:?}"),
+        }
+        fs::remove_file(root.join("owner.json")).expect("remove owner");
+        // Legacy: no owner.json + registered trey room.
+        match load_owner(&context).expect("load legacy") {
+            OwnerResolution::Legacy(owner) => {
+                assert_eq!(owner.room, "trey");
+                assert_eq!(owner.source, OwnerSource::Legacy);
+                assert_eq!(owner.sidecar_dir, root.join(".trey-room"));
+                assert_eq!(owner.principal, "trey@porch");
+                assert_eq!(owner.namespace, "trey-porch");
+                assert_eq!(owner.marker, "🧔");
+                assert_eq!(owner.label, "Trey");
+            }
+            other => panic!("expected legacy, got {other:?}"),
+        }
+        // Feature-absent: no owner.json and no trey room.
+        fs::write(root.join("rooms.json"), r#"{"mara": "~/.mara-room"}"#).expect("no trey");
+        assert_eq!(
+            load_owner(&context).expect("load none"),
+            OwnerResolution::None
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn resolution_rejects_unregistered_room_and_unknown_fields() {
+        let (root, context) = context("unregistered");
+        fs::write(root.join("owner.json"), r#"{"room": "ghost"}"#).expect("owner");
+        let error = load_owner(&context).expect_err("unregistered room must fail closed");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(error.message.contains("unregistered room 'ghost'"));
+        fs::write(root.join("owner.json"), r#"{"room": "mara", "typo": 1}"#).expect("owner");
+        let error = load_owner(&context).expect_err("unknown field must be loud");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(
+            error.message.contains("unknown field"),
+            "deny-unknown-fields: {error:?}"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn legacy_uses_the_registered_rooms_resolved_path_not_the_raw_string() {
+        // rooms.json contains `~/.trey-room`; the resolved sidecar must be
+        // absolute and never contain the literal `~`.
+        let (root, context) = context("legacypath");
+        match load_owner(&context).expect("legacy") {
+            OwnerResolution::Legacy(owner) => {
+                assert!(owner.sidecar_dir.is_absolute());
+                let rendered = owner.sidecar_dir.display().to_string();
+                assert!(
+                    !rendered.contains('~'),
+                    "resolved path leaked '~': {rendered}"
+                );
+                assert_eq!(owner.sidecar_dir, root.join(".trey-room"));
+            }
+            other => panic!("expected legacy, got {other:?}"),
+        }
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn symlinked_owner_json_is_refused_at_load() {
+        let (root, context) = context("symlink");
+        fs::write(root.join("owner-target.json"), r#"{"room": "mara"}"#).expect("target");
+        std::os::unix::fs::symlink(root.join("owner-target.json"), root.join("owner.json"))
+            .expect("symlink");
+        let error = load_owner(&context).expect_err("symlinked anchor must be refused");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(error.message.contains("symlink"));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn explicit_values_are_derived_when_missing_and_bounded_when_present() {
+        let (root, context) = context("explicit");
+        fs::write(
+            root.join("owner.json"),
+            r#"{
+              "room": "mara",
+              "sidecar_dir": "/srv/mara-sidecar",
+              "allowed_signers": "/srv/signers",
+              "principal": "mara@example.com",
+              "namespace": "mara-mail",
+              "marker": "🎩",
+              "label": "Top Hat"
+            }"#,
+        )
+        .expect("owner");
+        let owner = load_owner(&context).expect("load");
+        let OwnerResolution::Configured(owner) = owner else {
+            panic!("expected configured");
+        };
+        assert_eq!(owner.sidecar_dir, PathBuf::from("/srv/mara-sidecar"));
+        assert_eq!(owner.allowed_signers, PathBuf::from("/srv/signers"));
+        assert_eq!(owner.principal, "mara@example.com");
+        assert_eq!(owner.namespace, "mara-mail");
+        assert_eq!(owner.marker, "🎩");
+        assert_eq!(owner.label, "Top Hat");
+
+        // Relative sidecar, hostile principal chars, oversized namespace.
+        for (json, needle) in [
+            (r#"{"room":"mara","sidecar_dir":"relative"}"#, "sidecar_dir"),
+            (r#"{"room":"mara","principal":"mara name"}"#, "principal"),
+            (r#"{"room":"mara","namespace":"a/b"}"#, "namespace"),
+            (r#"{"room":"mara","namespace":""}"#, "namespace"),
+        ] {
+            fs::write(root.join("owner.json"), json).expect("owner fixture");
+            let error = load_owner(&context).expect_err("invalid owner must fail closed");
+            assert_eq!(error.code.as_str(), "config_invalid");
+            assert!(
+                error.message.contains(needle),
+                "expected {needle} in: {}",
+                error.message
+            );
+        }
+        // Oversized namespace and label derived from an absurd room name fail
+        // closed with the derived-value message.
+        fs::write(
+            root.join("rooms.json"),
+            r#"{"mara": "~/.mara-room", "way-too-long-for-a-namespace-derivation-0123456789abcdef0123456789abcd": "~/x"}"#,
+        )
+        .expect("rooms");
+        fs::write(
+            root.join("owner.json"),
+            r#"{"room":"way-too-long-for-a-namespace-derivation-0123456789abcdef0123456789abcd"}"#,
+        )
+        .expect("owner");
+        let error = load_owner(&context).expect_err("derived namespace must be bounded");
+        assert!(error.message.contains("derived"), "{}", error.message);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn marker_predicate_rejects_hostile_glyphs_and_zwj_abuse() {
+        for (marker, needle) in [
+            ("", "one glyph"),
+            ("🐳🐋", "one glyph"),
+            (".", "non-ASCII"),
+            ("x", "non-ASCII"),
+            ("a\u{200d}b", "one glyph"),
+            ("\u{202E}", "control, bidi"),
+            ("\n", "control, bidi"),
+            ("👩\u{200d}", "zero-width joiner"),
+            ("\u{200d}🐳", "zero-width joiner"),
+        ] {
+            let error = validate_marker(marker).expect_err("marker must be refused");
+            assert!(
+                error.contains(needle),
+                "marker {marker:?} refused with {error:?}, expected mention of {needle:?}"
+            );
+        }
+        validate_marker("🐳").expect("plain emoji ok");
+        validate_marker("👩\u{200d}🚀").expect("ZWJ emoji ok (join inside the cluster is fine)");
+        validate_marker("⚖️").expect("VS16 emoji ok");
+    }
+
+    #[test]
+    fn label_predicate_rejects_hostile_labels() {
+        for (label, needle) in [
+            ("", "empty"),
+            ("   ", "whitespace-only"),
+            ("evil\u{202E}name", "control, bidi"),
+            ("evil\u{2028}", "control, bidi"),
+            (&"x".repeat(33), "exceeds 32"),
+        ] {
+            let error = validate_label(label).expect_err("label must be refused");
+            assert!(
+                error.contains(needle),
+                "label {label:?} refused with {error:?}, expected {needle:?}"
+            );
+        }
+        validate_label("M").expect("single char ok");
+        validate_label("Marvelous Owner 🎩").expect("plain label ok");
+    }
+
+    #[test]
+    fn validate_owner_values_checks_every_explicit_field() {
+        let root = test_root("owner-values");
+        let path = root.join("owner.json");
+        let check = |file: OwnerFile, needle: &str| {
+            let error = validate_owner_values(&path, &file).expect_err("must refuse");
+            assert_eq!(error.code.as_str(), "config_invalid");
+            assert!(
+                error.message.contains(needle),
+                "expected {needle} in {}",
+                error.message
+            );
+        };
+        check(
+            OwnerFile {
+                room: "bad/room".to_owned(),
+                ..file("mara")
+            },
+            "room",
+        );
+        check(
+            OwnerFile {
+                sidecar_dir: Some(PathBuf::from("relative")),
+                ..file("mara")
+            },
+            "sidecar_dir",
+        );
+        check(
+            OwnerFile {
+                allowed_signers: Some(PathBuf::from("relative")),
+                ..file("mara")
+            },
+            "allowed_signers",
+        );
+        check(
+            OwnerFile {
+                principal: Some("a b".to_owned()),
+                ..file("mara")
+            },
+            "principal",
+        );
+        check(
+            OwnerFile {
+                namespace: Some("n".repeat(65)),
+                ..file("mara")
+            },
+            "namespace",
+        );
+        check(
+            OwnerFile {
+                marker: Some("🐳🐋".to_owned()),
+                ..file("mara")
+            },
+            "marker",
+        );
+        check(
+            OwnerFile {
+                label: Some("   ".to_owned()),
+                ..file("mara")
+            },
+            "label",
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn exclusive_atomic_write_never_replaces_an_existing_destination() {
+        // The A0a init commit primitive: creation is atomic and refusal-based.
+        // Any existing destination (including one that appears between the
+        // temp write and the hard-link commit) surfaces as AlreadyExists and
+        // is never replaced.
+        let root = test_root("owner-atomic-write");
+        let dest = root.join("owner.json");
+        fs::write(&dest, "original bytes").expect("pre-existing destination");
+        let error = exclusive_atomic_write(&dest, b"replacement bytes")
+            .expect_err("must refuse an existing destination");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&dest).expect("reread"),
+            "original bytes",
+            "destination content must be untouched"
+        );
+        fs::remove_file(&dest).expect("remove");
+        exclusive_atomic_write(&dest, b"fresh bytes").expect("absent destination creates");
+        assert_eq!(
+            fs::read_to_string(&dest).expect("reread"),
+            "fresh bytes",
+            "created content"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn read_owner_file_rejects_symlink_and_legacy_matches_registered_path() {
+        let (root, context) = context("readfile");
+        let legacy: ResolvedOwner =
+            legacy_owner(&context, &context.load_rooms().expect("rooms")).expect("legacy");
+        assert_eq!(legacy.room, LEGACY_OWNER_ROOM);
+        fs::write(root.join("rooms.json"), r#"{"mara":"~/.mara-room"}"#).expect("rooms");
+        let rooms = context.load_rooms().expect("rooms");
+        fs::write(
+            root.join("owner.json"),
+            r#"{"room":"mara","sidecar_dir":"/srv/x"}"#,
+        )
+        .expect("owner");
+        let owner_file = read_owner_file(&root.join("owner.json")).expect("parse");
+        let resolved =
+            crate::mailbox::resolve_owner_file(&context, &owner_file, &rooms).expect("resolve");
+        assert_eq!(resolved.sidecar_dir, PathBuf::from("/srv/x"));
+        // load_owner_with_rooms honors an externally supplied registry.
+        match load_owner_with_rooms(&context, &rooms).expect("with rooms") {
+            OwnerResolution::Configured(resolved) => {
+                assert_eq!(resolved.room, "mara");
+            }
+            other => panic!("expected configured, got {other:?}"),
+        }
+        trash_test_root(&root);
     }
 }

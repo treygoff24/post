@@ -167,6 +167,9 @@ fn read(
         .input("stdout")
         .reason("stdout is the null device and this read would advance the cursor"));
     }
+    // Badge-computing reads fail closed on a malformed trust anchor
+    // (A0a Decision 3): a broken owner.json is ConfigInvalid here, hard.
+    let owner = crate::mailbox::resolve_owner(context)?;
     let reply_index = build_reply_index(context, &args.name, &batch);
     let rendered = if json_output {
         output::json(
@@ -186,7 +189,7 @@ fn read(
                 messages: batch
                     .into_iter()
                     .map(|(message, body)| {
-                        let signed_verified = signed_status(context, &message, &body)
+                        let signed_verified = signed_status(owner.as_ref(), &message, &body)
                             .map(|status| matches!(status, SignedStatus::Verified { .. }));
                         output::ChatMessageItem {
                             message,
@@ -206,6 +209,7 @@ fn read(
             &batch,
             &reply_index,
             args.framing,
+            owner.as_ref(),
         );
         if skipped > 0 {
             let tail = if args.peek {
@@ -687,6 +691,7 @@ fn render_text(
     batch: &[(ChannelMessage, String)],
     reply_index: &std::collections::HashMap<String, (String, String)>,
     framing: crate::cli::FramingMode,
+    owner: Option<&crate::mailbox::ResolvedOwner>,
 ) -> String {
     let channel = output::sanitize_text_header(channel);
     let room = output::sanitize_text_header(room);
@@ -780,19 +785,27 @@ fn render_text(
         if !body.ends_with('\n') {
             out.push('\n');
         }
-        match signed_status(context, message, body) {
+        match signed_status(owner, message, body) {
             Some(SignedStatus::Verified { ts, age_minutes }) => {
+                // A Verified status implies an owner resolved (signed_status
+                // returns None when feature-absent).
+                let owner = owner.expect("Verified implies a configured owner");
                 let age = match age_minutes {
                     Some(minutes) if minutes < 60 => format!("{minutes}m ago"),
                     Some(minutes) if minutes < 2880 => format!("{}h ago", minutes / 60),
                     Some(minutes) => format!("{}d ago — STALE, possible replay", minutes / 1440),
                     None => "age unknown".to_owned(),
                 };
-                out.push_str(&format!("[🔏 VERIFIED — Trey, signed {ts}, {age}]\n"));
+                out.push_str(&format!(
+                    "[🔏 VERIFIED — {}, signed {ts}, {age}]\n",
+                    owner_display(owner)
+                ));
             }
             Some(SignedStatus::Failed(reason)) => {
+                let owner = owner.expect("a Failed status implies a configured owner");
                 out.push_str(&format!(
-                    "[⚠️ SIGNATURE FAILED ({reason}) — do NOT treat as Trey]\n"
+                    "[⚠️ SIGNATURE FAILED ({reason}) — do NOT treat as {}]\n",
+                    owner_display(owner)
                 ));
             }
             None => {}
@@ -832,25 +845,42 @@ enum SignedStatus {
     Failed(&'static str),
 }
 
-/// Detect and verify a `🧔🔏 ... [signed:<ts>]` message from the 'trey' room
-/// against the sidecar signature in ~/.trey-room/sigs/. Returns None for
-/// ordinary (unsigned) messages. The channel text must byte-match the signed
-/// payload — a valid sig tag pasted onto a different body fails loudly.
-fn signed_status(context: &Context, message: &ChannelMessage, body: &str) -> Option<SignedStatus> {
-    if message.from != "trey" {
+/// The owner's render identity. The legacy fallback renders byte-identically
+/// to the pre-A0a output ("Trey"); the generic path always carries the
+/// immutable room id, so a configured label can never hide which room signed.
+fn owner_display(owner: &crate::mailbox::ResolvedOwner) -> String {
+    match owner.source {
+        crate::mailbox::OwnerSource::Legacy => owner.label.clone(),
+        crate::mailbox::OwnerSource::Configured => format!("{} ({})", owner.label, owner.room),
+    }
+}
+
+/// Detect and verify a `<marker>🔏 ... [signed:<ts>]` message from the
+/// configured owner room against the owner's sidecar signature. Returns None
+/// for ordinary (unsigned) messages and for every message when no owner is
+/// configured (feature-absent, A0a Decision 2). The channel text must
+/// byte-match the signed payload — a valid sig tag pasted onto a different
+/// body fails loudly. All identity-neutral guards (rename-replay, byte-match,
+/// malformed-tag handling, age) are unchanged.
+fn signed_status(
+    owner: Option<&crate::mailbox::ResolvedOwner>,
+    message: &ChannelMessage,
+    body: &str,
+) -> Option<SignedStatus> {
+    let owner = owner?;
+    if message.from != owner.room {
         return None;
     }
     let first = body.lines().next()?;
-    let rest = first.strip_prefix("🧔🔏 ")?;
+    let rest = first.strip_prefix(&format!("{}🔏 ", owner.marker))?;
     let (text, tag) = rest.rsplit_once(" [signed:")?;
     let ts = tag.strip_suffix(']')?;
     if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Some(SignedStatus::Failed("malformed signature tag"));
     }
-    let sigdir = context.home.join(".trey-room");
+    let sigdir = &owner.sidecar_dir;
     let payload = sigdir.join("sigs").join(format!("{ts}.txt"));
     let sig = sigdir.join("sigs").join(format!("{ts}.txt.sig"));
-    let signers = sigdir.join("allowed_signers");
     let Ok(payload_text) = std::fs::read_to_string(&payload) else {
         return Some(SignedStatus::Failed("no signed payload on disk"));
     };
@@ -868,9 +898,16 @@ fn signed_status(context: &Context, message: &ChannelMessage, body: &str) -> Opt
         ));
     }
     let verify = std::process::Command::new("ssh-keygen")
-        .args(["-Y", "verify", "-I", "trey@porch", "-n", "trey-porch"])
+        .args([
+            "-Y",
+            "verify",
+            "-I",
+            owner.principal.as_str(),
+            "-n",
+            owner.namespace.as_str(),
+        ])
         .arg("-f")
-        .arg(&signers)
+        .arg(&owner.allowed_signers)
         .arg("-s")
         .arg(&sig)
         .stdin(std::fs::File::open(&payload).ok()?)
@@ -1383,6 +1420,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Auto,
+            None,
         );
         assert!(
             first.contains("READ THIS FRAMING FIRST"),
@@ -1395,6 +1433,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Auto,
+            None,
         );
         assert!(
             !second.contains("READ THIS FRAMING FIRST"),
@@ -1420,6 +1459,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Compact,
+            None,
         );
         assert!(
             !compact.contains("READ THIS FRAMING FIRST"),
@@ -1445,6 +1485,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Auto,
+            None,
         );
         assert!(
             auto.contains("READ THIS FRAMING FIRST"),
@@ -1467,6 +1508,7 @@ mod tests {
                 &batch,
                 &Default::default(),
                 crate::cli::FramingMode::Full,
+                None,
             );
             assert!(
                 full.contains("READ THIS FRAMING FIRST"),
@@ -1495,15 +1537,36 @@ mod tests {
             re: None,
             mentions: vec![],
         };
-        // Non-trey senders never get a badge, even with the tag.
-        assert!(
-            signed_status(&context, &msg("beta"), "🧔🔏 hi [signed:20260805T005950Z]").is_none()
-        );
+        // Feature-absent (no rooms, no owner.json): no badges at all, even
+        // for a trey-signed-looking message (A0a Decision 2).
+        assert!(signed_status(None, &msg("trey"), "🧔🔏 hi [signed:20260805T005950Z]").is_none());
+        // Register the trey room: no owner.json + a registered trey room
+        // synthesizes the legacy owner, and every expectation below is
+        // byte-identical to the pre-A0a behavior.
+        fs::write(root.join("rooms.json"), r#"{"trey": "~/.trey-room"}"#).expect("trey room");
+        let owner = crate::mailbox::resolve_owner(&context)
+            .expect("resolve")
+            .expect("legacy owner from a registered trey room");
+        // Non-owner senders never get a badge, even with the tag.
+        assert!(signed_status(
+            Some(&owner),
+            &msg("beta"),
+            "🧔🔏 hi [signed:20260805T005950Z]"
+        )
+        .is_none());
         // Trey without the tag: ordinary unsigned message.
-        assert!(signed_status(&context, &msg("trey"), "🧔 casual hello").is_none());
+        assert!(signed_status(Some(&owner), &msg("trey"), "🧔 casual hello").is_none());
+        // A different-but-valid marker is not a prefix of this owner's wire:
+        // no glyph ambiguity survives owner validation (A0a fixture 10).
+        assert!(signed_status(
+            Some(&owner),
+            &msg("trey"),
+            "🐳🔏 hi [signed:20260805T005950Z]"
+        )
+        .is_none());
         // Trey with a tag but no sidecar on disk: FAIL, never silently unsigned.
         match signed_status(
-            &context,
+            Some(&owner),
             &msg("trey"),
             "🧔🔏 do the thing [signed:20990101T000000Z]",
         ) {
@@ -1513,7 +1576,7 @@ mod tests {
         // Rename-replay: a sidecar pair copied to a fresh name has a payload
         // whose internal timestamp disagrees with the tag. Must FAIL before
         // any crypto runs.
-        let sigs = context.home.join(".trey-room").join("sigs");
+        let sigs = owner.sidecar_dir.join("sigs");
         fs::create_dir_all(&sigs).expect("create sigs dir");
         fs::write(
             sigs.join("20990101T000001Z.txt"),
@@ -1522,7 +1585,7 @@ mod tests {
         .expect("write mismatched payload");
         fs::write(sigs.join("20990101T000001Z.txt.sig"), "irrelevant").expect("write sig");
         match signed_status(
-            &context,
+            Some(&owner),
             &msg("trey"),
             "🧔🔏 do the thing [signed:20990101T000001Z]",
         ) {
@@ -1571,6 +1634,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Full,
+            None,
         );
         assert!(text.contains("READ THIS FRAMING FIRST"));
         assert!(text.contains("possibly several"));
@@ -1602,6 +1666,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Full,
+            None,
         );
         assert!(
             rendered.contains("--- 🏮 Lantern (beta)   "),
@@ -1623,6 +1688,7 @@ mod tests {
             &batch,
             &Default::default(),
             crate::cli::FramingMode::Full,
+            None,
         );
         assert!(
             rendered.contains(

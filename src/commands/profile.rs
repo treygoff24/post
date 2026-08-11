@@ -40,9 +40,14 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     let _lock = context.lock_rooms()?;
     let rooms = context.load_rooms()?;
     let room = channel::acting_room(context, &rooms)?;
+    // Decision 3 matrix: profile set loads the trust anchor, so the owner
+    // reservation is checked against the SAME registry snapshot the imitation
+    // check uses (and a broken owner.json fails this command closed).
+    let owner_resolution = crate::mailbox::load_owner_with_rooms(context, &rooms)?;
+    let owner_room = crate::mailbox::resolved_owner_room(&owner_resolution);
     let mut profiles = load_profiles(context)?;
     if let Some(name) = &args.name {
-        validate_display_name(name, &room, &rooms)?;
+        validate_display_name(name, &room, &rooms, owner_room)?;
     }
     if let Some(pfp) = &args.pfp {
         validate_pfp(pfp, &room, &profiles, &rooms)?;
@@ -62,7 +67,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     // A field NOT set on this call was preserved from disk and may be a
     // hand-edited plant; re-validate the merged entry so nothing invalid is
     // stored or carried into the announcement line below.
-    if crate::profile::drop_invalid_fields(entry, &room, &rooms) {
+    if crate::profile::drop_invalid_fields(entry, &room, &rooms, owner_room) {
         eprintln!(
             "post: warning: dropped an invalid stored profile field for '{room}' (hand-edited registry values never render)"
         );

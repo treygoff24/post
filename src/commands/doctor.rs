@@ -82,6 +82,37 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_rules(&rules_path, rooms.as_ref(), &mut checks);
     detect_dir(&context.root.join("archive"), "dir.archive", &mut checks);
 
+    // owner.json is the trust anchor: a broken one makes every
+    // badge-computing chat read fail closed (A0a Decision 3), so doctor
+    // flags it rather than silently degrading. Absence is not a finding —
+    // feature-absent and the legacy 'trey' fallback are legitimate states.
+    let owner_json_path = context.owner_json_path();
+    let owner_resolution = rooms
+        .as_ref()
+        .map(|rooms| crate::mailbox::load_owner_with_rooms(context, rooms));
+    // Registry-independent fallback: a broken rooms.json must not hide a
+    // malformed trust anchor.
+    let owner_error: Option<String> = match rooms.as_ref() {
+        Some(rooms) => crate::mailbox::load_owner_with_rooms(context, rooms)
+            .err()
+            .map(|error| error.message.to_string()),
+        None => crate::mailbox::check_owner_parses(context)
+            .err()
+            .map(|error| error.message.to_string()),
+    };
+    if let Some(error) = owner_error {
+        checks.push(check(
+            "owner.invalid",
+            DoctorSeverity::Error,
+            &owner_json_path,
+            &format!(
+                "trust anchor cannot be used ({error}); badge-computing chat reads fail closed until it is fixed"
+            ),
+            false,
+            "Fix or delete owner.json by hand; `post owner init` recreates it create-only.",
+        ));
+    }
+
     // profiles.json is optional and presentation-only: delivery never
     // depends on it (stamping silently degrades to no profile), so a
     // malformed registry is a warning that profiles stopped rendering, not
@@ -104,10 +135,23 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
             )),
             Ok(profiles) => {
                 if let Some(rooms) = rooms.as_ref() {
+                    // Stored profiles are validated against the same owner
+                    // reservation profile set enforces; a broken anchor
+                    // degrades the check to no-owner (owner.invalid above
+                    // already reported it).
+                    let owner_room = owner_resolution
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .and_then(crate::mailbox::resolved_owner_room);
                     for (room, profile) in &profiles {
                         let mut cleaned = profile.clone();
                         if !rooms.contains_key(room)
-                            || crate::profile::drop_invalid_fields(&mut cleaned, room, rooms)
+                            || crate::profile::drop_invalid_fields(
+                                &mut cleaned,
+                                room,
+                                rooms,
+                                owner_room,
+                            )
                         {
                             checks.push(check(
                                 &format!("profiles.{room}.inert"),

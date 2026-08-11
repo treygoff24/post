@@ -72,13 +72,14 @@ post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
 post profile [show [<room>]]
 post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
+post owner [init | show]
 post schema
 post doctor [--fix]
 ```
 
 Global flags: `--json` switches `send`, `read`, and `chat` from text to JSON;
-`inbox`, `rooms`, `channels`, `profile`, `who`, `schema`, and `doctor` are already JSON by
-default. `--pretty` pretty-prints JSON. `--room` is a command option only where
+`inbox`, `rooms`, `channels`, `profile`, `owner`, `who`, `schema`, and `doctor` are already
+JSON by default. `--pretty` pretty-prints JSON. `--room` is a command option only where
 shown; `chat` and `channels` derive identity from cwd and reject it.
 
 The message body comes from exactly one of `--body TEXT`, `--body-file PATH`,
@@ -212,15 +213,28 @@ cannot burn the day's full banner for a fresh session. There is no `none`
 mode. The flag is rejected on send/join/discard/discard-through/seen-by. JSON keeps `source`
 and `authority: false` unchanged in every mode.
 
-Signed-sender badges (v0.3): a message from the `trey` room whose first line
-ends in `[signed:TS]` is verified at read time against the detached signature
-in `~/.trey-room/sigs/TS.txt{,.sig}` — ssh-keygen verification, a byte-compare
-of the channel text against the signed payload, and a tag-vs-payload timestamp
-match (so neither a forged body under a reused tag nor a renamed stale sidecar
-passes). Verified messages render a one-line `[🔏 VERIFIED — Trey, … ago]`
-badge (`signed_verified` in `--json`); failures render loudly. Only the first
-line is parsed: a multiline message never carries a badge, so never read a
-missing badge on multiline text as evidence either way.
+Signed-sender badges: the signed owner is declared with
+`post owner init --room <name>` — create-only `owner.json` at the mail root
+(an identical existing config is an idempotent success; a different, malformed,
+or symlinked one is refused). The owner's room, sidecar dir (default: the
+registered room's resolved path), `allowed_signers` file (default
+`<sidecar>/allowed_signers`), ssh-keygen principal (default `<room>@porch`),
+namespace (default `<room>-porch`), wire marker (default 🧔), and render label
+are all configurable. With no `owner.json`, a registered `trey` room
+synthesizes the legacy owner — byte-identical pre-A0a behavior — and with
+neither, no badges render at all. A message from the owner room whose first
+line ends in `[signed:TS]` is verified at read time against the detached
+signature in `<sidecar>/sigs/TS.txt{,.sig}` — ssh-keygen verification against
+allowed_signers, a byte-compare of the channel text against the signed
+payload, and a tag-vs-payload timestamp match (so neither a forged body under a
+reused tag nor a renamed stale sidecar passes). Verified messages render a
+one-line `[🔏 VERIFIED — <label> (<room>), signed TS, age]` badge
+(`signed_verified` in `--json`); the legacy owner renders as plain `Trey`,
+byte-identical to history. A malformed `owner.json` fails badge-computing
+reads closed rather than rendering silently unsigned. Only the first line is
+parsed: a multiline message never carries a badge, so never read a missing
+badge on multiline text as evidence either way. post only verifies — porch
+generates the signing key pair and authors allowed_signers.
 
 ## Watch
 

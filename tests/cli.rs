@@ -257,7 +257,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 11);
+    assert_eq!(schema.commands.len(), 12);
     assert!(schema
         .error_codes
         .iter()
@@ -311,8 +311,8 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
-        "send", "chat", "channels", "inbox", "read", "rooms", "profile", "schema", "doctor",
-        "watch", "who",
+        "send", "chat", "channels", "inbox", "read", "rooms", "profile", "owner", "schema",
+        "doctor", "watch", "who",
     ];
     let command_names: Vec<&str> = schema
         .commands

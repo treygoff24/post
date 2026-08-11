@@ -57,6 +57,8 @@ pub(crate) enum Command {
     Rooms(RoomsArgs),
     /// Show or change this room's display name and emoji pfp (presentation only; identity stays the room id).
     Profile(ProfileArgs),
+    /// Configure or show the signed owner: the trust anchor whose messages carry verification badges.
+    Owner(OwnerArgs),
     /// Print the complete machine-readable CLI contract.
     Schema,
     /// Diagnose mailbox configuration and state.
@@ -322,6 +324,59 @@ pub(crate) struct ProfileShowArgs {
     /// Room to show; defaults to the room resolved from cwd.
     #[arg(value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OwnerArgs {
+    #[command(subcommand)]
+    pub command: Option<OwnerCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum OwnerCommand {
+    /// Declare the signed owner: validate the room registration and values,
+    /// then create owner.json atomically (create-only; never replaces).
+    Init(OwnerInitArgs),
+    /// Print the resolved owner (post-derivation) as JSON.
+    Show,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    override_usage = "post owner init --room <name> [--marker <glyph>] [--label <text>] [--sidecar-dir <abs>] [--allowed-signers <abs>] [--principal <principal>] [--namespace <namespace>]"
+)]
+pub(crate) struct OwnerInitArgs {
+    /// Registered room that signs ("the owner").
+    #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
+    pub room: String,
+
+    /// One non-ASCII visible glyph preceding the 🔏 lock on the signed wire
+    /// (default 🧔). Must be a single grapheme; control/bidi characters,
+    /// ASCII, and edge ZWJ are refused.
+    #[arg(long, value_name = "GLYPH", value_parser = nonempty_without_controls)]
+    pub marker: Option<String>,
+
+    /// Verification label, 1-32 chars; verified renders always show it as
+    /// "<label> (<room>)" so the immutable room id never disappears.
+    #[arg(long, value_name = "TEXT", value_parser = nonempty_without_controls)]
+    pub label: Option<String>,
+
+    /// Absolute sidecar ROOT; code appends sigs/ under it. Default: the
+    /// registered room's resolved path.
+    #[arg(long = "sidecar-dir", value_name = "ABS", value_hint = clap::ValueHint::DirPath)]
+    pub sidecar_dir: Option<PathBuf>,
+
+    /// Absolute allowed_signers path. Default: <sidecar_dir>/allowed_signers.
+    #[arg(long = "allowed-signers", value_name = "ABS", value_hint = clap::ValueHint::FilePath)]
+    pub allowed_signers: Option<PathBuf>,
+
+    /// ssh-keygen principal: [A-Za-z0-9._@-], 1-128 bytes. Default <room>@porch.
+    #[arg(long, value_name = "PRINCIPAL")]
+    pub principal: Option<String>,
+
+    /// allowed_signers namespace: [A-Za-z0-9._@-], 1-64 bytes. Default <room>-porch.
+    #[arg(long, value_name = "NAMESPACE")]
+    pub namespace: Option<String>,
 }
 
 /// How much framing a body-returning read prints. The laws bind in every
