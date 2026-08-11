@@ -204,8 +204,18 @@ A launchd job may run `hooks/codex-notify-monitor.mjs` on a short interval for
 generic cmux awareness while Codex is idle. Each tick uses repeatable `--room`
 flags plus `--snapshot`, ignores channel events, and dedupes direct-mail ids in
 bounded atomic state. It never reads bodies, consumes mail, advances cursors,
-keeps a watch child alive, or sends terminal input. It cannot wake or inject
-context into an idle model; only the lifecycle hook above reaches model context.
+or keeps a watch child alive.
+
+For a Herdr-managed session, set `POST_CODEX_NOTIFY_HERDR_AGENT` to its unique
+agent name and give that job its own `POST_CODEX_NOTIFY_STATE` file. This
+switches the job from cmux to Herdr: it waits until that exact target is
+unfocused and `idle`/`done`, then submits a fixed `[post-doorbell:v1]` notice
+containing at most 20 validated room/id pairs. Sender, subject, body, channel
+events, and claimed authority never enter the prompt. Missing/busy/focused
+targets remain eligible for a later tick; dedupe commits only after successful
+submission. `POST_CODEX_NOTIFY_HERDR_BIN` overrides `~/.local/bin/herdr`.
+Codex sessions outside Herdr remain activity-gated; run one separate monitor
+job and state file per target rather than sharing delivery state.
 Registration is idempotent via `hooks/install-codex-hooks.mjs
 <path-to-hooks.json>`; Codex records approved hook identities separately under
 `[hooks.state."<key>"].trusted_hash`.

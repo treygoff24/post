@@ -1,5 +1,25 @@
 # Automatic Codex mail notification plan
 
+## 2026-08-10 amendment: scoped Herdr idle wake
+
+Herdr 0.8 adds a public, lifecycle-aware agent-control surface that the prior
+decision did not have. An opt-in launchd tick may now target one unique Herdr
+agent name via `herdr agent get|prompt`. It submits only after observing the
+target unfocused and `idle`/`done`, avoiding ordinary work interruption and
+focused-TUI draft collisions. The prompt is a fixed, non-authoritative
+`[post-doorbell:v1]` envelope with at most 20 validated room/id pairs; no sender,
+subject, body, or channel content crosses the input boundary. A missing, busy,
+blocked, unknown, focused, malformed, or failed target is not deduped and is
+retried later. Each target uses a separate delivery-state file.
+
+This is an explicit Herdr integration, not a Codex session-resume trick or a
+generic PTY injector. Codex still has no supported ingress for independently
+launched sessions outside a controlling harness. Herdr's documented agent
+surface is the authority: <https://herdr.dev/docs/agent-automation/>.
+Herdr protocol 19 has no conditional-submit or expected-revision field, so a
+narrow focus race remains between `agent get` and `agent prompt`; eliminate it
+if Herdr adds an atomic status/focus precondition.
+
 ## 2026-08-04 amendment: cwd rooms and idle host awareness
 
 The lifecycle hook now runs roomless `post watch --snapshot` from the official
@@ -15,9 +35,9 @@ snapshots explicitly configured GPT rooms, ignores channels, rings one generic
 `cmux notify` for fresh direct mail, persists a bounded atomic id set, and
 exits. It does not keep a `post watch` child alive, read bodies, consume mail,
 advance cursors, target a terminal, or inject keystrokes. Corrupt state re-rings
-rather than silently suppressing mail. This does not change the fundamental
-constraint below: only Codex lifecycle hooks place information in model
-context, and no supported mechanism wakes an idle model.
+rather than silently suppressing mail. At that time, only Codex lifecycle hooks
+could place information in model context; the scoped Herdr exception above was
+added on 2026-08-10.
 
 **Implementation status (2026-08-04, Sol):** `codex-mail.mjs` is installed and
 live with cwd resolution. `codex-notify-monitor.mjs` is installed as a private
@@ -118,8 +138,10 @@ through the same workflow.
   model context until a Codex lifecycle event fires anyway — it adds a managed
   process without changing delivery timing. The hook adapter achieves the same
   visible timing with zero resident processes.
-- **Launch wrapper / PTY keystroke injection:** fabricates user input, breaks
-  `codex exec` and non-interactive sessions, and races the TUI. Not acceptable.
+- **Raw launch wrapper / PTY keystroke injection:** fabricates unscoped user
+  input, breaks `codex exec` and non-interactive sessions, and races the TUI.
+  The 2026-08-10 Herdr amendment is narrower: a named recognized agent, public
+  lifecycle API, unfocused-idle gate, and fixed envelope-only prompt.
 - **cmux-only integration:** covers only cmux-managed surfaces; ordinary
   terminal Codex sessions get nothing. Fails the "any Codex session" ask.
 - **Periodic OS jobs as model ingress:** same wake problem as the daemon — no
@@ -130,9 +152,10 @@ through the same workflow.
 
 ## Decision
 
-Use Codex's native hook lifecycle for model context. A bounded launchd snapshot
-tick may provide host awareness; do not add a persistent watch child, PTY
-keystroke injector, or terminal-input integration.
+Use Codex's native hook lifecycle for ordinary model context. A bounded
+launchd snapshot tick may provide host awareness, and may wake one explicitly
+named Herdr agent under the 2026-08-10 constraints. Do not add a persistent
+watch child or generic PTY keystroke injector.
 
 ### 1. Add a nonblocking watch snapshot
 
@@ -257,9 +280,9 @@ Codex profile without a launch wrapper or profile-specific duplication.
 ## Explicit non-goal
 
 Do not pretend the cmux notification asynchronously wakes an idle language
-model. Truly unsolicited model delivery still requires a supported
-Codex/app-server event-ingress API; PTY input simulation is not an acceptable
-substitute.
+model. Codex-native unsolicited delivery still requires a supported
+Codex/app-server event-ingress API. The scoped Herdr adapter is external
+harness ingress, not a native Codex capability or generic PTY substitute.
 
 Claude Code sessions are out of scope for this round. Its hook JSON contract
 is near-identical, so the same `--snapshot` primitive and a thin adapter
