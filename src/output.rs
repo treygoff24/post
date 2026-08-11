@@ -55,6 +55,26 @@ pub struct ChatDiscardOutput {
     pub cursor: Option<String>,
 }
 
+/// Receipt for `--discard-through <id>`: a targeted, replay-safe cursor ack.
+/// Both cursor ids are reported so a caller that lost a previous response can
+/// tell "I advanced it just now" from "it was already there" — `advanced` is
+/// false and `cursor` equals `prior_cursor` in the replay case, which is a
+/// success, not an error.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatDiscardThroughOutput {
+    pub ok: bool,
+    pub channel: String,
+    pub room: String,
+    /// The resolved full message id the cursor was asked to advance through.
+    pub target: String,
+    pub prior_cursor: Option<String>,
+    pub cursor: String,
+    pub advanced: bool,
+    /// Messages skipped by this call: strictly after `prior_cursor`, at or
+    /// before `target`. Zero on a replay.
+    pub discarded: usize,
+}
+
 /// True when stdout is the null device. A channel read advances the reader's
 /// cursor after a successful emit, so `post chat <c> > /dev/null` silently
 /// consumes the whole unread batch; detecting the null sink lets that refuse
@@ -503,6 +523,7 @@ pub struct OutputShapes {
     pub chat_send: Vec<String>,
     pub chat_read: Vec<String>,
     pub chat_discard: Vec<String>,
+    pub chat_discard_through: Vec<String>,
     pub channels: Vec<String>,
     pub profile: Vec<String>,
     pub watch: Vec<String>,

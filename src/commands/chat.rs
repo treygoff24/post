@@ -25,6 +25,9 @@ pub(super) fn run(
     if let Some(msg_id) = args.seen_by.as_deref() {
         return seen_by(context, &args.name, msg_id, json_output, pretty);
     }
+    if let Some(target) = args.discard_through.as_deref() {
+        return discard_through(context, &args.name, target, json_output, pretty);
+    }
     // --body and --body-file carry their own intent: naming a body is asking
     // to send. Only the bare positional FILE still demands the explicit verb,
     // because a stray path there is indistinguishable from a typo.
@@ -235,7 +238,7 @@ fn read(
     let channel_name = args.name;
     let context = context.clone();
     Ok(CommandResult::after_stdout(rendered, move || {
-        ChannelState::advance(&context, &room, &channel_name, &last_id)
+        ChannelState::advance(&context, &room, &channel_name, &last_id).map(|_| ())
     }))
 }
 
@@ -416,8 +419,177 @@ fn discard(
     let room = room.to_owned();
     let channel_name = channel_name.to_owned();
     Ok(CommandResult::after_stdout(rendered, move || {
-        ChannelState::advance(&context, &room, &channel_name, &last_id)
+        ChannelState::advance(&context, &room, &channel_name, &last_id).map(|_| ())
     }))
+}
+
+/// Advance this room's cursor exactly through `target_input` without printing
+/// bodies: the targeted ack a remote reader needs after it has rendered a
+/// known message, where `--discard` (which swallows the whole unread batch)
+/// would consume messages the reader never saw.
+///
+/// Refuses to leap over an unreadable message between the cursor and the
+/// target — same fail-closed rule as a cursor-advancing read, because a
+/// message that cannot be rendered has certainly not been read.
+///
+/// Unlike `--discard` this advances BEFORE emitting its receipt: the receipt's
+/// whole job is to report the cursor that is now stored, and a retried ack is
+/// harmless (it replays as `advanced: false`).
+fn discard_through(
+    context: &Context,
+    channel_name: &str,
+    target_input: &str,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let rooms = context.load_rooms()?;
+    let room = channel::acting_room(context, &rooms)?;
+    let paths = member_channel_paths(context, channel_name, &room)?;
+    let target = resolve_message_stem(&paths, channel_name, target_input)?;
+
+    let state = ChannelState::load(context, &room)?;
+    let cursor = state.cursor(channel_name).map(str::to_owned);
+    // Count and vet the span the ack would consume. The cursor is re-read
+    // under the lock inside `advance`; it can only have moved FORWARD by
+    // then, so this span is a superset of what actually gets skipped and the
+    // fail-closed check stays conservative.
+    let mut discarded = 0usize;
+    if cursor
+        .as_deref()
+        .is_none_or(|current| current < target.as_str())
+    {
+        for path in channel::message_files(&paths.messages)? {
+            if !message_file_past_cursor(&path, cursor.as_deref()) {
+                continue;
+            }
+            // A non-UTF-8 stem cannot be ordered against the target, so it
+            // cannot be shown to sit beyond it: refuse rather than guess.
+            if path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|stem| stem > target.as_str())
+            {
+                continue;
+            }
+            channel::parse_channel_message(&path)?;
+            discarded += 1;
+        }
+    }
+
+    let outcome = ChannelState::advance(context, &room, channel_name, &target)?;
+    if !outcome.advanced {
+        discarded = 0;
+    }
+    let rendered = if json_output {
+        output::json(
+            &output::ChatDiscardThroughOutput {
+                ok: true,
+                channel: channel_name.to_owned(),
+                room: room.clone(),
+                target: target.clone(),
+                prior_cursor: outcome.prior.clone(),
+                cursor: outcome.cursor.clone(),
+                advanced: outcome.advanced,
+                discarded,
+            },
+            pretty,
+        )?
+    } else {
+        let channel = output::sanitize_text_header(channel_name);
+        let prior = match &outcome.prior {
+            Some(prior) => output::sanitize_text_header(prior),
+            None => "none".to_owned(),
+        };
+        if outcome.advanced {
+            format!(
+                "post: #{channel} cursor advanced through {} (was {prior}; {discarded} message(s) skipped)\n",
+                output::sanitize_text_header(&outcome.cursor)
+            )
+        } else {
+            format!(
+                "post: #{channel} cursor already at or past {} (cursor {}); nothing advanced\n",
+                output::sanitize_text_header(&target),
+                output::sanitize_text_header(&outcome.cursor)
+            )
+        }
+    };
+    Ok(CommandResult::success(rendered))
+}
+
+/// Channel paths after the existence and membership checks every cursor-facing
+/// channel command owes its caller.
+fn member_channel_paths(
+    context: &Context,
+    channel_name: &str,
+    room: &str,
+) -> AppResult<channel::ChannelPaths> {
+    let paths = channel::ChannelPaths::new(context, channel_name)?;
+    let quoted = crate::mailbox::shell_quote(channel_name);
+    if !paths.exists() {
+        return Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("channel '{channel_name}' does not exist"),
+            format!("Create it with `post chat {quoted} --join`."),
+        )
+        .input(channel_name)
+        .reason("no channel.json under the channels directory"));
+    }
+    let members = paths.load_members()?;
+    if !members.contains_key(room) {
+        return Err(AppError::new(
+            ErrorCode::NotAMember,
+            format!("room '{room}' is not a member of channel '{channel_name}'"),
+            format!("Join first with `post chat {quoted} --join`."),
+        )
+        .input(room)
+        .reason("reader is absent from members.json"));
+    }
+    Ok(paths)
+}
+
+/// Resolve a full id or unique prefix against this channel's message
+/// FILENAMES. Filenames are the cursor-order key, so a target whose `.msg`
+/// body is malformed still resolves here and then fails loudly as unreadable —
+/// rather than reporting "no such message" and inviting a retry that can never
+/// succeed. An id from another channel simply has no file here: not_found.
+fn resolve_message_stem(
+    paths: &channel::ChannelPaths,
+    channel_name: &str,
+    prefix: &str,
+) -> AppResult<String> {
+    let mut matches: Vec<String> = channel::message_files(&paths.messages)?
+        .iter()
+        .filter_map(|path| path.file_stem().and_then(|value| value.to_str()))
+        .filter(|stem| stem.starts_with(prefix))
+        .map(str::to_owned)
+        .collect();
+    match matches.len() {
+        0 => Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("no message in channel '{channel_name}' matching id/prefix '{prefix}'"),
+            format!(
+                "Pass a full message id from `post chat {} --history 25`; ids from other channels do not resolve here.",
+                crate::mailbox::shell_quote(channel_name)
+            ),
+        )
+        .input(prefix)
+        .reason("no matching message id in this channel")),
+        1 => Ok(matches.pop().expect("len 1")),
+        _ => {
+            matches.sort();
+            Err(AppError::new(
+                ErrorCode::AmbiguousId,
+                format!(
+                    "message id/prefix '{prefix}' matches {} messages in '{channel_name}'",
+                    matches.len()
+                ),
+                "Pass a longer unique prefix, or the full message id.",
+            )
+            .input(prefix)
+            .matches(matches)
+            .reason("ambiguous message id prefix"))
+        }
+    }
 }
 
 /// Collect the unread batch for `room` in `channel`: every message with id
@@ -850,27 +1022,8 @@ fn seen_by(
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let room = channel::acting_room(context, &rooms)?;
-    let paths = channel::ChannelPaths::new(context, channel_name)?;
-    let quoted = crate::mailbox::shell_quote(channel_name);
-    if !paths.exists() {
-        return Err(AppError::new(
-            ErrorCode::NotFound,
-            format!("channel '{channel_name}' does not exist"),
-            format!("Create it with `post chat {quoted} --join`."),
-        )
-        .input(channel_name)
-        .reason("no channel.json under the channels directory"));
-    }
+    let paths = member_channel_paths(context, channel_name, &room)?;
     let members = paths.load_members()?;
-    if !members.contains_key(&room) {
-        return Err(AppError::new(
-            ErrorCode::NotAMember,
-            format!("room '{room}' is not a member of channel '{channel_name}'"),
-            format!("Join first with `post chat {quoted} --join`."),
-        )
-        .input(room)
-        .reason("reader is absent from members.json"));
-    }
     let message_id = channel::resolve_message_id(&paths, msg_id_or_prefix)?;
     let mut seen = Vec::new();
     for member in members.keys() {
@@ -925,7 +1078,7 @@ fn advance_past_own_message(context: &Context, message: &ChannelMessage) -> AppR
             return Ok(());
         }
     }
-    ChannelState::advance(context, &message.from, &message.channel, &message.id)
+    ChannelState::advance(context, &message.from, &message.channel, &message.id).map(|_| ())
 }
 
 #[cfg(test)]

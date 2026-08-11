@@ -12,9 +12,9 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "chat",
-            "post chat <channel> [--peek | --limit <n> | --history <n> [--grep <pat>] | --since <id>] [--framing auto|full|compact] | post chat <channel> --discard | post chat <channel> --seen-by <id> | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
+            "post chat <channel> [--peek | --limit <n> | --history <n> [--grep <pat>] | --since <id>] [--framing auto|full|compact] | post chat <channel> --discard | post chat <channel> --discard-through <id> | post chat <channel> --seen-by <id> | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing (body-returning reads only, rejected on --send/--join/--discard/--seen-by) selects auto (default: legacy once-daily wall on text, full laws elsewhere), full (the complete wall every invocation), or compact (condensed laws in one line); explicit full and compact are stateless per-invocation and never consult or stamp the banner-day state, JSON framing source/authority are unchanged in every mode, and there is no none mode; messages from the trey room tagged [signed:TS] are verified against ~/.trey-room/sigs/",
+            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --discard-through <id> advances the cursor exactly through one message (full id or a prefix unique in that channel), refuses when an unreadable message sits between the cursor and the target, is replay-safe (a target at or behind the cursor succeeds with advanced=false and an unchanged cursor), and reports prior_cursor and cursor; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing (body-returning reads only, rejected on --send/--join/--discard/--discard-through/--seen-by) selects auto (default: legacy once-daily wall on text, full laws elsewhere), full (the complete wall every invocation), or compact (condensed laws in one line); explicit full and compact are stateless per-invocation and never consult or stamp the banner-day state, JSON framing source/authority are unchanged in every mode, and there is no none mode; messages from the trey room tagged [signed:TS] are verified against ~/.trey-room/sigs/",
         ),
         command(
             "channels",
@@ -125,6 +125,16 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "skipped (omitted when 0)",
         ]),
         chat_discard: fields(&["ok", "channel", "room", "discarded", "cursor"]),
+        chat_discard_through: fields(&[
+            "ok",
+            "channel",
+            "room",
+            "target",
+            "prior_cursor",
+            "cursor",
+            "advanced",
+            "discarded",
+        ]),
         channels: fields(&[
             "ok",
             "channels (name, created, created_by, description?, members, messages)",
@@ -203,7 +213,8 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Subjects over 1 KiB fail before any write with no override; longer text belongs in the body.",
             "Message bodies over 32 KiB fail before any write unless --oversize records explicit intent; complete Post watch-event NDJSON lines warn on stderr but still send.",
             "Already-read mail stays retrievable by id or prefix from the read store and from archive copies addressed to that room; re-reading consumes nothing and reports already_read.",
-            "A channel read never advances the cursor into /dev/null; skipping unread messages requires --discard.",
+            "A channel read never advances the cursor into /dev/null; skipping unread messages requires --discard or --discard-through.",
+            "Every cursor advance holds an exclusive interprocess lock on <root>/<room>/.channel-state.lock across reload, monotonic check, and atomic replace, so concurrent acks on different channels cannot lose each other; cursors never move backward.",
             "Whenever error.details.exact_fix is present, it is a complete command that runs verbatim; oversize body errors deliberately name --oversize without echoing the rejected payload into an exact fix.",
             "Plain channel reads default to the newest 25 unread; --limit 0 shows all; @mentions of the reader in a skipped range are never silently dropped.",
             "Channel sends bounce with crossed_send when unread messages from others sit past the sender cursor; --anyway delivers regardless. Direct mail is unaffected.",

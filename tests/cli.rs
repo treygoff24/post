@@ -1,7 +1,7 @@
 use post::output::{
-    ChannelsOutput, ChatDiscardOutput, ChatJoinOutput, ChatReadOutput, ChatSendOutput,
-    DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput, SchemaOutput, SeenByOutput,
-    SendOutput, WatchEvent, WatchReason, WhoOutput,
+    ChannelsOutput, ChatDiscardOutput, ChatDiscardThroughOutput, ChatJoinOutput, ChatReadOutput,
+    ChatSendOutput, DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput,
+    SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
 use std::fs;
 use std::io::Write;
@@ -3186,6 +3186,292 @@ fn channel_read_into_dev_null_is_refused_and_discard_is_the_deliberate_form() {
         empty.count, 0,
         "--discard advances the cursor past the batch"
     );
+}
+
+/// Seed `tax` with three messages from alpha, all unread for beta.
+fn seed_three_message_channel(sandbox: &Sandbox) -> (PathBuf, PathBuf, Vec<String>) {
+    let (alpha, beta) = register_alpha_beta(sandbox);
+    join_channel(sandbox, "tax", &alpha);
+    join_channel(sandbox, "tax", &beta);
+    let ids = ["first", "second", "third"]
+        .iter()
+        .map(|body| {
+            let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+                &[
+                    "chat", "tax", "--send", "--anyway", "--body", body, "--json",
+                ],
+                None,
+                &alpha,
+            ));
+            sent.message.id
+        })
+        .collect();
+    (alpha, beta, ids)
+}
+
+#[test]
+fn discard_through_advances_exactly_to_the_target_and_replays_as_a_no_op() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta, ids) = seed_three_message_channel(&sandbox);
+
+    let output = sandbox.run_in(
+        &["chat", "tax", "--discard-through", &ids[1], "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&output);
+    let receipt: ChatDiscardThroughOutput = from_stdout(&output);
+    assert!(receipt.ok && receipt.advanced);
+    assert_eq!(receipt.room, "beta");
+    assert_eq!(receipt.target, ids[1]);
+    assert_eq!(
+        receipt.prior_cursor, None,
+        "beta had never read the channel"
+    );
+    assert_eq!(receipt.cursor, ids[1]);
+    assert_eq!(
+        receipt.discarded, 4,
+        "both join events and the first two messages sit at or below the target"
+    );
+
+    // Exactly the tail is left unread — the ack skipped no further.
+    let left: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert_eq!(left.count, 1);
+    assert_eq!(left.messages[0].message.id, ids[2]);
+
+    // Replay after a lost response: success, nothing moved.
+    let replay = sandbox.run_in(
+        &["chat", "tax", "--discard-through", &ids[1], "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&replay);
+    let replay: ChatDiscardThroughOutput = from_stdout(&replay);
+    assert!(replay.ok);
+    assert!(!replay.advanced, "a retried ack must not be an error");
+    assert_eq!(replay.prior_cursor.as_deref(), Some(ids[1].as_str()));
+    assert_eq!(replay.cursor, ids[1]);
+    assert_eq!(replay.discarded, 0);
+
+    // A target strictly BEHIND the cursor is the same no-op, never a rewind.
+    let behind: ChatDiscardThroughOutput = from_stdout(&sandbox.run_in(
+        &["chat", "tax", "--discard-through", &ids[0], "--json"],
+        None,
+        &beta,
+    ));
+    assert!(!behind.advanced);
+    assert_eq!(behind.cursor, ids[1], "the cursor must never move backward");
+}
+
+#[test]
+fn discard_through_text_mode_summarizes_in_one_line() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta, ids) = seed_three_message_channel(&sandbox);
+    let output = sandbox.run_in(&["chat", "tax", "--discard-through", &ids[2]], None, &beta);
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_eq!(text.lines().count(), 1, "text mode is one line: {text}");
+    assert!(
+        text.contains("cursor advanced through") && text.contains(&ids[2]),
+        "text receipt must name the new cursor: {text}"
+    );
+    let replay = sandbox.run_in(&["chat", "tax", "--discard-through", &ids[2]], None, &beta);
+    assert_success(&replay);
+    assert!(
+        stdout(&replay).contains("nothing advanced"),
+        "replay must say so plainly: {}",
+        stdout(&replay)
+    );
+}
+
+#[test]
+fn discard_through_accepts_an_unambiguous_prefix_and_refuses_an_ambiguous_one() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta, ids) = seed_three_message_channel(&sandbox);
+    let receipt: ChatDiscardThroughOutput = from_stdout(&sandbox.run_in(
+        &["chat", "tax", "--discard-through", &ids[1], "--json"],
+        None,
+        &beta,
+    ));
+    assert_eq!(receipt.cursor, ids[1]);
+
+    // The shared date-and-second prefix matches several messages.
+    let shared = &ids[2][..11];
+    let ambiguous = sandbox.run_in(
+        &["chat", "tax", "--discard-through", shared, "--json"],
+        None,
+        &beta,
+    );
+    assert_eq!(ambiguous.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&ambiguous);
+    assert_eq!(error.error.code, "ambiguous_id");
+}
+
+#[test]
+fn discard_through_refuses_unknown_ids_and_ids_from_another_channel() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta, _ids) = seed_three_message_channel(&sandbox);
+    join_channel(&sandbox, "build", &alpha);
+    join_channel(&sandbox, "build", &beta);
+    let elsewhere: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat", "build", "--send", "--anyway", "--body", "other", "--json",
+        ],
+        None,
+        &alpha,
+    ));
+
+    for id in [
+        "20260722-013000-000009-fffff9",
+        elsewhere.message.id.as_str(),
+    ] {
+        let output = sandbox.run_in(
+            &["chat", "tax", "--discard-through", id, "--json"],
+            None,
+            &beta,
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(66),
+            "id '{id}' must not resolve in #tax"
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "not_found");
+    }
+
+    // Nothing was consumed by the refusals.
+    let left: ChatReadOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
+    assert!(left.count >= 3, "a refused ack must not advance the cursor");
+}
+
+#[test]
+fn discard_through_refuses_to_leap_over_an_unreadable_predecessor() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta, ids) = seed_three_message_channel(&sandbox);
+    // Corrupt the middle message: it precedes the target, so acking through
+    // the target would claim a reader saw what cannot be rendered.
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels")
+            .join("tax")
+            .join("messages")
+            .join(format!("{}.msg", ids[1])),
+        "not a channel message",
+    )
+    .expect("corrupt the middle message");
+
+    let refused = sandbox.run_in(
+        &["chat", "tax", "--discard-through", &ids[2], "--json"],
+        None,
+        &beta,
+    );
+    assert_eq!(refused.status.code(), Some(78));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "config_invalid");
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(sandbox.mail_root.join("beta").join("channel-state.json"))
+            .unwrap_or_else(|_| b"{}".to_vec()),
+    )
+    .expect("cursor state is JSON");
+    assert!(
+        state.get("tax").is_none(),
+        "a refused ack must leave the cursor untouched: {state}"
+    );
+
+    // Acking through a target BEFORE the corruption is still allowed.
+    let ok: ChatDiscardThroughOutput = from_stdout(&sandbox.run_in(
+        &["chat", "tax", "--discard-through", &ids[0], "--json"],
+        None,
+        &beta,
+    ));
+    assert_eq!(ok.cursor, ids[0]);
+}
+
+#[test]
+fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
+    // The root-cause race: both processes load beta's whole cursor map, then
+    // each writes its own snapshot back. Unlocked, one channel's ack is lost.
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let mut targets = Vec::new();
+    for channel in ["tax", "build"] {
+        join_channel(&sandbox, channel, &alpha);
+        join_channel(&sandbox, channel, &beta);
+        let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+            &[
+                "chat", channel, "--send", "--anyway", "--body", "body", "--json",
+            ],
+            None,
+            &alpha,
+        ));
+        targets.push(sent.message.id);
+    }
+
+    let children: Vec<_> = ["tax", "build"]
+        .iter()
+        .zip(&targets)
+        .map(|(channel, target)| {
+            Command::new(env!("CARGO_BIN_EXE_post"))
+                .args(["chat", channel, "--discard-through", target, "--json"])
+                .current_dir(&beta)
+                .env("HOME", &sandbox.home)
+                .env("POST_MAIL_ROOT", &sandbox.mail_root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null())
+                .spawn()
+                .expect("spawn concurrent post ack")
+        })
+        .collect();
+    for child in children {
+        let output = child.wait_with_output().expect("wait for concurrent ack");
+        assert_success(&output);
+        let receipt: ChatDiscardThroughOutput = from_stdout(&output);
+        assert!(receipt.advanced);
+    }
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(sandbox.mail_root.join("beta").join("channel-state.json"))
+            .expect("read cursor state"),
+    )
+    .expect("cursor state is JSON");
+    for (channel, target) in ["tax", "build"].iter().zip(&targets) {
+        assert_eq!(
+            state.get(channel).and_then(serde_json::Value::as_str),
+            Some(target.as_str()),
+            "#{channel}'s ack was lost to the other process: {state}"
+        );
+    }
+}
+
+#[test]
+fn discard_through_conflicts_with_the_flags_that_would_contradict_it() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta, ids) = seed_three_message_channel(&sandbox);
+    for extra in [
+        vec!["--send", "--body", "x"],
+        vec!["--join"],
+        vec!["--discard"],
+        vec!["--seen-by", ids[0].as_str()],
+        vec!["--body", "x"],
+        vec!["--peek"],
+        vec!["--limit", "1"],
+        vec!["--history", "5"],
+        vec!["--framing", "compact"],
+    ] {
+        let mut args = vec!["chat", "tax", "--discard-through", ids[0].as_str()];
+        args.extend(extra.iter().copied());
+        let output = sandbox.run_in(&args, None, &beta);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--discard-through must refuse {extra:?}: {}",
+            stdout(&output)
+        );
+    }
 }
 
 fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {
