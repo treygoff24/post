@@ -79,6 +79,7 @@ function run({
   state = path.join(ROOT, "seen.json"),
   rooms = ["sol", "codex"],
   herdrAgent,
+  channels,
 } = {}) {
   return spawnSync(process.execPath, [MONITOR, ...rooms], {
     encoding: "utf8",
@@ -88,9 +89,10 @@ function run({
       POST_CODEX_NOTIFY_CMUX_BIN: CMUX,
       POST_CODEX_NOTIFY_HERDR_BIN: HERDR,
       POST_CODEX_NOTIFY_STATE: state,
+      POST_CODEX_NOTIFY_CHANNELS: channels === undefined ? "" : channels,
       ...(herdrAgent
         ? { POST_CODEX_NOTIFY_HERDR_AGENT: herdrAgent }
-        : {}),
+        : { POST_CODEX_NOTIFY_HERDR_AGENT: "" }),
     },
   });
 }
@@ -103,6 +105,7 @@ const MAIL = {
   kind: "note",
   subject: "UNTRUSTED SUBJECT",
   sent: "2026-08-04 22:00:00 -0400",
+  reason: "mail",
 };
 const CHANNEL = {
   event: "channel_message",
@@ -111,6 +114,7 @@ const CHANNEL = {
   from: "untrusted-sender",
   subject: "UNTRUSTED CHANNEL SUBJECT",
   sent: "2026-08-04 22:00:01 -0400",
+  reason: "channel",
 };
 
 test("one snapshot rings once for fresh direct mail and ignores channels", () => {
@@ -367,4 +371,201 @@ test("room names are validated before running post", () => {
   const before = calls(POST_CALLS).length;
   assert.notEqual(run({ rooms: ["../sol"] }).status, 0);
   assert.equal(calls(POST_CALLS).length, before);
+});
+
+test("default mode ignores channel events even when present", () => {
+  const state = path.join(ROOT, "ignore-channel.json");
+  setControl({ postStdout: `${JSON.stringify(CHANNEL)}\n` });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(calls(CMUX_CALLS).length, before);
+  assert.equal(fs.existsSync(state), false);
+});
+
+test("selected channels wake with channel and id only", () => {
+  const state = path.join(ROOT, "selected-channel.json");
+  const build = {
+    ...CHANNEL,
+    channel: "build",
+    id: "20260804-220001-000001-aaaaaa",
+    from: "secret-peer",
+    subject: "SECRET CHANNEL",
+  };
+  setControl({
+    postStdout: `${JSON.stringify(build)}\n`,
+    herdrGetStdout: JSON.stringify({
+      result: {
+        agent: { name: "sol-buddy", agent_status: "idle", focused: false },
+      },
+    }),
+  });
+  const result = run({ state, herdrAgent: "sol-buddy", channels: "build" });
+  assert.equal(result.status, 0, result.stderr);
+  const prompt = calls(HERDR_CALLS).at(-1).at(-1);
+  assert.match(prompt, /1 selected channel message is waiting/);
+  assert.match(prompt, /#build:20260804-220001-000001-aaaaaa/);
+  assert.ok(!prompt.includes("SECRET"));
+  assert.ok(!prompt.includes("secret-peer"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(state, "utf8")), {
+    seen: ["channel:build:20260804-220001-000001-aaaaaa"],
+  });
+});
+
+test("unselected channels stay quiet", () => {
+  const state = path.join(ROOT, "unselected-channel.json");
+  setControl({
+    postStdout: `${JSON.stringify({ ...CHANNEL, channel: "ops" })}\n`,
+  });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state, channels: "build" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(calls(CMUX_CALLS).length, before);
+  assert.equal(fs.existsSync(state), false);
+});
+
+test("a malformed channel allowlist fails before notifying", () => {
+  setControl({ postStdout: `${JSON.stringify(MAIL)}\n` });
+  const beforePost = calls(POST_CALLS).length;
+  const beforeCmux = calls(CMUX_CALLS).length;
+  for (const [label, channels] of [
+    ["bad chars", "good,bad channel!"],
+    ["empty edge", "build,"],
+    ["empty interior", "build,,ops"],
+    ["leading empty", ",build"],
+  ]) {
+    const result = run({ channels });
+    assert.notEqual(result.status, 0, label);
+    assert.match(result.stderr, /invalid channel name/, label);
+    assert.match(result.stderr, /"/, `${label} must quote the bad value`);
+  }
+  assert.equal(calls(POST_CALLS).length, beforePost);
+  assert.equal(calls(CMUX_CALLS).length, beforeCmux);
+});
+
+test("a malformed channel event fails without notifying or deduping", () => {
+  const state = path.join(ROOT, "bad-channel-event.json");
+  setControl({
+    postStdout: `${JSON.stringify({
+      event: "channel_message",
+      channel: "build",
+      id: "forged",
+      from: "x",
+      subject: "x",
+      sent: "x",
+      reason: "channel",
+    })}\n`,
+  });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state, channels: "build" });
+  assert.notEqual(result.status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before);
+  assert.equal(fs.existsSync(state), false);
+});
+
+test("invalid or missing reason on known events fails without notifying", () => {
+  const state = path.join(ROOT, "bad-reason.json");
+  const { reason: _drop, ...mailNoReason } = MAIL;
+  setControl({ postStdout: `${JSON.stringify(mailNoReason)}\n` });
+  const before = calls(CMUX_CALLS).length;
+  assert.notEqual(run({ state }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before);
+
+  setControl({
+    postStdout: `${JSON.stringify({
+      event: "unreadable",
+      room: "sol",
+      id: "bad\nid",
+      reason: "mail",
+    })}\n`,
+  });
+  assert.notEqual(run({ state: path.join(ROOT, "bad-unreadable.json") }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before);
+});
+
+test("valid unreadable events are ignored without notifying or deduping", () => {
+  const state = path.join(ROOT, "ignore-unreadable.json");
+  setControl({
+    postStdout: `${JSON.stringify({
+      event: "unreadable",
+      room: "sol",
+      id: "corrupt-stem",
+      reason: "mail",
+    })}\n`,
+  });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(calls(CMUX_CALLS).length, before);
+  assert.equal(fs.existsSync(state), false);
+});
+
+test("seen write refuses a planted predictable legacy temp symlink", () => {
+  const state = path.join(ROOT, "symlink-seen.json");
+  const victim = path.join(ROOT, "symlink-victim.json");
+  fs.writeFileSync(victim, JSON.stringify({ keep: true }));
+  fs.symlinkSync(victim, `${state}.${process.pid}.tmp`);
+  setControl({ postStdout: `${JSON.stringify(MAIL)}\n` });
+  const result = run({ state });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(victim, "utf8")), { keep: true });
+  assert.ok(fs.existsSync(state));
+  assert.deepEqual(JSON.parse(fs.readFileSync(state, "utf8")), {
+    seen: ["sol:20260804-220000-abc123"],
+  });
+});
+
+test("a mixed huge batch bounds total refs and counts both kinds", () => {
+  const state = path.join(ROOT, "mixed-huge.json");
+  const mail = Array.from({ length: 12 }, (_, index) => ({
+    ...MAIL,
+    id: `20260804-220000-${index.toString(16).padStart(6, "0")}`,
+  }));
+  const channels = Array.from({ length: 13 }, (_, index) => ({
+    ...CHANNEL,
+    channel: "build",
+    id: `20260804-220001-000001-${index.toString(16).padStart(6, "0")}`,
+  }));
+  setControl({
+    postStdout: `${[...mail, ...channels].map((e) => JSON.stringify(e)).join("\n")}\n`,
+    herdrGetStdout: JSON.stringify({
+      result: {
+        agent: { name: "sol-buddy", agent_status: "idle", focused: false },
+      },
+    }),
+  });
+  const result = run({ state, herdrAgent: "sol-buddy", channels: "build" });
+  const prompt = calls(HERDR_CALLS).at(-1).at(-1);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(prompt, /12 direct messages and 13 selected channel messages are waiting/);
+  assert.match(prompt, /first 20:/);
+  assert.match(prompt, /\+5 more/);
+  assert.ok(prompt.includes(`sol:${mail[11].id}`));
+  assert.ok(prompt.includes(`#build:${channels[7].id}`));
+  assert.ok(!prompt.includes(channels[12].id));
+  assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).seen.length, 25);
+});
+
+test("failed channel delivery retries without losing eligibility", () => {
+  const state = path.join(ROOT, "channel-retry.json");
+  const build = { ...CHANNEL, channel: "build" };
+  const control = {
+    postStdout: `${JSON.stringify(build)}\n`,
+    herdrGetStdout: JSON.stringify({
+      result: {
+        agent: { name: "sol-buddy", agent_status: "idle", focused: false },
+      },
+    }),
+  };
+  const promptCount = () =>
+    calls(HERDR_CALLS).filter((args) => args[1] === "prompt").length;
+  const before = promptCount();
+  setControl({ ...control, herdrPromptExit: 1 });
+  assert.notEqual(run({ state, herdrAgent: "sol-buddy", channels: "build" }).status, 0);
+  assert.equal(fs.existsSync(state), false);
+
+  setControl(control);
+  assert.equal(run({ state, herdrAgent: "sol-buddy", channels: "build" }).status, 0);
+  assert.equal(promptCount(), before + 2);
+  assert.equal(fs.existsSync(state), true);
 });
