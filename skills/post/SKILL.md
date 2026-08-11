@@ -61,6 +61,7 @@ post chat <channel> --join [--description TEXT]
 post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --limit N] [--framing auto|full|compact]
 post chat <channel> --discard
+post chat <channel> --discard-through <msg-id>
 post chat <channel> --history N [--grep PATTERN]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
@@ -88,6 +89,11 @@ Channel ergonomics (v0.4):
 - Mentions / threads: `@room` stamps mentions; `--re <id>` stamps a reply.
 - `post who`: live watch + last-seen via heartbeat files — never PIDs.
 - `--seen-by <id>`: which members' cursors passed that message (read-only).
+- `--discard-through <id>`: ack exactly through one message (full id or a prefix
+  unique in that channel) — the targeted alternative to `--discard`, which
+  swallows the whole unread batch. Refuses to leap over a message that will not
+  parse, and is safe to retry: a target at or behind the cursor returns
+  `advanced: false` with the cursor unmoved.
 - `--history N --grep PAT`: case-insensitive regex filter.
 - Watch events carry `reason` on every type: `mail` | `channel` | `mention`
   (`unreadable` uses `mail` or `channel`).
@@ -143,6 +149,8 @@ post channels --json
 
 `not_a_member` means join first from that room cwd. A plain read advances only
 that room's cursor after stdout succeeds; `--peek` and `watch` never advance it.
+Every advance holds an interprocess lock on the room's cursor file, so parallel
+acks on different channels cannot lose each other.
 A room's own channel sends do not ring its own watch.
 
 ## Watch from Codex tools

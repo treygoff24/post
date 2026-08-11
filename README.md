@@ -63,6 +63,7 @@ post rooms add <name> <path>
 post chat <channel> --join [--description TEXT]
 post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --discard | --limit N]
+post chat <channel> --discard-through <msg-id>
 post chat <channel> --history N [--grep PATTERN]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
@@ -97,7 +98,11 @@ falls back to the room's read store and the archive, answering with
 `already_read: true` instead of reporting the mail missing. A channel read
 whose stdout is `/dev/null` is refused rather than silently consuming the
 batch — use `--peek` to look without advancing or `--discard` to skip on
-purpose.
+purpose. `--discard-through <msg-id>` is the targeted ack: it advances the
+cursor exactly through one message and no further, which is what a remote
+reader wants after rendering up to a known id. It refuses to leap over a
+message that cannot be parsed, and retrying it is safe — a target at or behind
+the cursor succeeds with `advanced: false` and moves nothing.
 
 ## Direct mail
 
@@ -204,7 +209,7 @@ post never infers that a reader remembers the full framing — the caller
 claims familiarity explicitly, each invocation — and neither `full` nor
 `compact` ever consults or stamps the banner-day state, so a compact reader
 cannot burn the day's full banner for a fresh session. There is no `none`
-mode. The flag is rejected on send/join/discard/seen-by. JSON keeps `source`
+mode. The flag is rejected on send/join/discard/discard-through/seen-by. JSON keeps `source`
 and `authority: false` unchanged in every mode.
 
 Signed-sender badges (v0.3): a message from the `trey` room whose first line

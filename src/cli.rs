@@ -121,6 +121,7 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
      post chat <CHANNEL> --since <ID> [--framing MODE] (messages after ID, cursor untouched)\n       \
      post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
+     post chat <CHANNEL> --discard-through <MSG_ID>  (advance the cursor exactly through MSG_ID)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members' cursors passed MSG_ID)\n       \
      post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n       \
      post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body <TEXT>\n       \
@@ -209,15 +210,27 @@ pub(crate) struct ChatArgs {
     #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"])]
     pub limit: Option<usize>,
 
+    /// Advance this room's cursor exactly through MSG_ID (full id, or a prefix
+    /// unique within the channel) without printing bodies. Idempotent: a target
+    /// at or behind the current cursor succeeds with `advanced: false`. Refuses
+    /// when an unreadable message sits between the cursor and MSG_ID.
+    #[arg(
+        long = "discard-through",
+        value_name = "MSG_ID",
+        value_parser = nonempty_without_controls,
+        conflicts_with_all = ["send", "join", "peek", "discard", "seen_by", "body", "body_file", "file", "history", "since", "limit", "grep", "anyway", "re", "subject", "oversize", "description"]
+    )]
+    pub discard_through: Option<String>,
+
     /// List member rooms whose cursors have advanced past this message (read-only).
     #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
 
     /// Banner form for body-returning reads: auto (default, once-daily full
     /// wall), full (every invocation), or compact (one-line reminder).
-    /// Rejected on send/join/discard/seen-by, which return no bodies and
-    /// must not look like they honored it.
-    #[arg(long, value_enum, default_value_t = FramingMode::Auto, conflicts_with_all = ["send", "join", "discard", "seen_by", "body", "body_file", "file"])]
+    /// Rejected on send/join/discard/discard-through/seen-by, which return no
+    /// bodies and must not look like they honored it.
+    #[arg(long, value_enum, default_value_t = FramingMode::Auto, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file"])]
     pub framing: FramingMode,
 }
 

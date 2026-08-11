@@ -81,7 +81,15 @@ The public language is model-neutral; the default root remains
   successful emit, and only to the last emitted message. `--peek` and `watch`
   never advance channel cursors. A sender's own message is advanced past only
   when the sender was already caught up; unread messages from others keep the
-  cursor back so they still surface.
+  cursor back so they still surface. One room's cursors for every channel live
+  in a single `<root>/<room>/channel-state.json` map, so every advance —
+  read, `--discard`, `--discard-through`, or a sender's own-message skip —
+  takes an exclusive `flock` on `<root>/<room>/.channel-state.lock` and holds
+  it across reload, monotonic check, and atomic replace. Without that lock two
+  processes acking different channels each write back a snapshot taken before
+  the other's write, and the loser's advance is silently lost. Cursors are
+  monotonic under the lock: an advance to an id at or behind the stored cursor
+  leaves it unchanged and is never an error.
 
 ## Commands
 
@@ -178,7 +186,24 @@ results, stderr = diagnostics/errors.
   stdout is the null device is refused before anything is emitted, leaving the
   cursor untouched; `--discard` is the deliberate way to advance past unread
   messages without printing them, and reports
-  `{ok, channel, room, discarded, cursor}`. A plain cursor read defaults to the
+  `{ok, channel, room, discarded, cursor}`.
+  `--discard-through <id>` is the targeted form: it advances this room's cursor
+  exactly through one message and no further, for a reader (such as a phone
+  client) that has rendered up to a known id and wants to ack only that much.
+  `<id>` is a full message id or a prefix unique within that channel, resolved
+  against the channel's message filenames — an id from another channel is
+  `not_found`, an ambiguous prefix is `ambiguous_id`. It refuses with
+  `config_invalid` when an unreadable message sits between the cursor and the
+  target: a message that cannot be rendered has certainly not been read, and
+  the cursor never leaps over it. It is replay-safe — a target at or behind the
+  current cursor is success with `advanced: false` and an unchanged cursor, not
+  an error, so a lost response can simply be retried. JSON is
+  `{ok, channel, room, target, prior_cursor, cursor, advanced, discarded}`;
+  text is a one-line summary. Unlike every body-returning read, this one
+  advances the cursor BEFORE emitting its receipt, because the receipt's whole
+  job is to report the cursor that is now stored; nothing is skipped
+  unreported, since a retry replays as a no-op.
+  A plain cursor read defaults to the
   newest 25 unread when the backlog is larger (`skipped` reports how many older
   ones were neither shown nor rescued; `@mention`s of the reader in the skipped
   range are pulled forward). Explicit `--limit <n>` still works; `--limit 0`
@@ -211,7 +236,8 @@ results, stderr = diagnostics/errors.
   included). Explicit `full` and `compact` never consult or stamp the
   banner-day state (a compact reader must not burn the day's full banner for
   a fresh session), and the flag is rejected on
-  `--send`/`--join`/`--discard`/`--seen-by`, which return no bodies. `--history <n> [--grep <regex>]` and `--since <id>`
+  `--send`/`--join`/`--discard`/`--discard-through`/`--seen-by`, which return
+  no bodies. `--history <n> [--grep <regex>]` and `--since <id>`
   are cursorless; `--grep` is a case-insensitive Rust regex over body/subject/from/id.
 - `post channels [--text]` — read-only listing of channels, members, creation metadata,
   descriptions, and message counts: `{ok, channels, count}`.
