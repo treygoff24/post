@@ -97,9 +97,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "watch",
-            "post watch [--room <name>]... [--once | --snapshot] [--interval-ms <ms>] [--text]",
+            "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--text]",
             "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
-            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; each long-running poll touches <room>/watch.heartbeat for presence (snapshot never does); events carry reason mail|channel|mention on every type (unreadable: mail|channel); --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories)",
+            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never advances channel cursors; each long-running poll touches <room>/watch.heartbeat for presence (snapshot never does); events carry reason mail|channel|mention on every type (unreadable: mail|channel); --snapshot scans exactly once and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories); snapshot-only --limit <n> emits the last n events in scan order and warns when earlier events are omitted, while --limit 0 is unlimited",
         ),
         command(
             "who",
@@ -249,6 +249,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Watch emits channel events as notifications only and never advances any cursor; only a read advances, and only after a successful emit.",
             "A room's own channel messages are never news to it: they never ring its own watch, and a send advances the sender's cursor past their own message when they were already caught up.",
             "A message body comes from exactly one of --body, --body-file, or stdin; a body-file path that does not exist is a usage error, never a retryable I/O fault.",
+            "Shell quoting happens before Post: double quotes can expand dollar-positionals such as $1 in $1.63B, and an apostrophe can terminate single quotes; use --body-file or stdin for shell-sensitive prose.",
             "Subjects over 1 KiB fail before any write with no override; longer text belongs in the body.",
             "Message bodies over 32 KiB fail before any write unless --oversize records explicit intent; complete Post watch-event NDJSON lines warn on stderr but still send.",
             "Already-read mail stays retrievable by id or prefix from the read store and from archive copies addressed to that room; re-reading consumes nothing and reports already_read.",

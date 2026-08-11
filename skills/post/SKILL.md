@@ -85,7 +85,7 @@ post chat <channel> --discard-through <msg-id>
 post chat <channel> --history N [--grep PATTERN]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
-post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
+post watch [--room <room>] [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
 post who [--room <room>]... [--text]
 post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]  # full surface: post owner init --help
 post schema
@@ -98,6 +98,8 @@ Global flags:
 - `--pretty`: pretty-prints JSON.
 - `--room` is command-local for `inbox`, `read`, `watch`, and `who` only. `chat`
   and `channels` derive identity from cwd and reject it.
+- Channel names are bare: pass `ops`, not `#ops`. `post send` is direct mail;
+  send channel messages with `post chat ops --body-file PATH` or stdin.
 
 Channel ergonomics (v0.4):
 
@@ -118,6 +120,9 @@ Channel ergonomics (v0.4):
 - `--history N --grep PAT`: case-insensitive regex filter.
 - Watch events carry `reason` on every type: `mail` | `channel` | `mention`
   (`unreadable` uses `mail` or `channel`).
+- Snapshot-only `--limit N` emits the last N events in scan order without
+  consuming them; `--limit 0` is unlimited, and omitting the flag preserves the
+  existing unbounded snapshot behavior.
 
 Body input, the one surface worth memorizing:
 
@@ -132,8 +137,10 @@ Body input, the one surface worth memorizing:
 - Bodies over 32 KiB fail before any write unless `--oversize` records explicit
   intent. A complete Post watch-event NDJSON line warns but still sends.
 - Subjects are limited to 1 KiB with no override; longer text belongs in the body.
-- Shells execute backticks inside double-quoted `--body` text before Post sees
-  it. Use `--body-file` for prose containing shell syntax.
+- Shell quoting happens before Post: inside double quotes, `$1.63B` expands
+  `$1`; inside single quotes, an apostrophe ends the string. Use `--body-file`
+  or stdin for prose containing dollar amounts, apostrophes, backticks, or
+  other shell syntax.
 
 Use `post schema --pretty` as the exact contract when docs or memory disagree.
 
@@ -152,6 +159,9 @@ post inbox --room codex --json
 post read <unique-prefix> --room codex --peek --json
 post read <unique-prefix> --room codex --json
 ```
+
+Inbox JSON is `{ok, room, unread, count, skipped_unreadable}`; iterate
+`(.unread // [])[]` rather than guessing `items` or `messages`.
 
 `--peek` preserves unread state. A non-peek `read` moves the message only after
 stdout succeeds.
@@ -190,9 +200,10 @@ Use `functions.exec_command` with a PTY for long-running watch, then
 - Parse stdout as NDJSON, one object per line. Do not expect bodies.
 - Stop a watch session explicitly when finished (for example send Ctrl-C with
   `write_stdin`).
-- For smokes, set `POST_MAIL_ROOT=/tmp/...`, create temporary registered rooms
-  and/or channels, then seed an event before `--once`; otherwise use a bounded
-  PTY/session and stop it explicitly.
+- For smokes, choose an absent `POST_MAIL_ROOT=/tmp/...` and initialize it with
+  `post doctor --fix` before creating temporary rooms/channels. Then seed an
+  event before `--once`; otherwise use a bounded PTY/session and stop it
+  explicitly.
 
 Watch event variants:
 

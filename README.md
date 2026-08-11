@@ -68,7 +68,7 @@ post chat <channel> --history N [--grep PATTERN]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
 post who [--room <room>]... [--text]
-post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
+post watch [--room <room>] [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
 post profile [show [<room>]]
 post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
@@ -87,6 +87,10 @@ or stdin — alternatives, never combined. On `post chat`, naming a body implies
 `--send`. The bare positional `FILE` still works but is a **path**, not text:
 `post chat ops --send "hello"` treats `hello` as a filename. When
 `error.details.exact_fix` is present, it holds a command that runs as written.
+Shell quoting happens before Post: inside double quotes, `$1.63B` expands `$1`;
+inside single quotes, an apostrophe ends the string. Use `--body-file` or stdin
+for prose containing dollar amounts, apostrophes, backticks, or other shell
+syntax.
 Bodies over 32 KiB are rejected before any write unless the sender explicitly
 passes `--oversize`. Bodies containing a complete Post watch-event NDJSON line
 send normally but warn on stderr, because shell command substitution can insert
@@ -249,10 +253,16 @@ degrade to stderr warnings). Because lifecycle hooks may fire from any
 directory, a snapshot whose room is not registered warns on stderr, scans
 nothing, and creates no mailbox directories — it never mints a mailbox for an
 arbitrary cwd. `--interval-ms` has no effect in snapshot mode.
+Snapshot-only `--limit N` emits the last N events in scan order and warns on
+stderr when it omits earlier events; `--limit 0` is unlimited. The option changes
+only emitted output: omitted mail and channel messages remain unread because a
+watch never consumes or advances cursors. Omitting `--limit` preserves the
+unbounded snapshot behavior.
 
 ```bash
 post watch --room codex --once
 post watch --room codex --snapshot
+post watch --room codex --snapshot --limit 25
 post watch --room codex --interval-ms 1000
 post watch --room codex --room workspace   # one merged stream, deduplicated
 ```

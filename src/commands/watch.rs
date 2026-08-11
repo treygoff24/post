@@ -25,6 +25,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         room: requested_rooms,
         once,
         snapshot,
+        limit,
         interval_ms,
         text,
     } = args;
@@ -97,6 +98,16 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 &mut target.seen,
                 &mut emitted_channel_ids,
             )?);
+        }
+        if let Some(limit) = limit.filter(|limit| *limit > 0) {
+            let omitted = batch.len().saturating_sub(limit);
+            if omitted > 0 {
+                batch.drain(..omitted);
+                let noun = if omitted == 1 { "event" } else { "events" };
+                eprintln!(
+                    "post: snapshot limit omitted {omitted} earlier {noun} (use --limit 0 for all)"
+                );
+            }
         }
         if !batch.is_empty() {
             emit(&batch, text)?;

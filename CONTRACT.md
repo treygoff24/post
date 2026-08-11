@@ -259,7 +259,7 @@ results, stderr = diagnostics/errors.
   also reports delivered mail with a missing or mismatched archive copy for
   manual reconciliation. Doctor exit dictionary: 0 healthy / 1 findings / 3
   fix-failed.
-- `post watch [--room <name>] [--once | --snapshot] [--interval-ms <ms>]
+- `post watch [--room <name>] [--once | --snapshot [--limit <n>]] [--interval-ms <ms>]
   [--text]` — the
   doorbell: blocks and streams one event per arriving direct mail or joined
   channel message so any harness monitor becomes a notifier. Room resolution as
@@ -314,7 +314,10 @@ results, stderr = diagnostics/errors.
   snapshot whose resolved room is unregistered warns on stderr, scans nothing,
   creates no mailbox directories, and exits 0. Snapshot mode shares every
   other watch invariant: envelope metadata only, no mail moves, no cursor
-  writes.
+  writes. Snapshot-only `--limit <n>` emits the last `n` events in scan order
+  and warns on stderr when earlier events are omitted; `--limit 0` is unlimited.
+  The flag affects emission only — omitted events remain unread — and omitting
+  it preserves the unbounded snapshot behavior.
 
 ## Profiles (amendment, 2026-08-05)
 

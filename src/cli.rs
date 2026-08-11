@@ -93,7 +93,9 @@ pub(crate) struct SendArgs {
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
-    /// Inline message body text.
+    /// Inline message body text. A shell can expand `$1.63B` inside double
+    /// quotes or end single quotes at an apostrophe; use --body-file or stdin
+    /// for shell-sensitive prose.
     #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file"])]
     pub body: Option<String>,
 
@@ -161,7 +163,9 @@ pub(crate) struct ChatArgs {
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
-    /// Inline message body text; implies --send.
+    /// Inline message body text; implies --send. A shell can expand `$1.63B`
+    /// inside double quotes or end single quotes at an apostrophe; use
+    /// --body-file or stdin for shell-sensitive prose.
     #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file", "peek", "discard", "seen_by"])]
     pub body: Option<String>,
 
@@ -429,6 +433,11 @@ pub(crate) struct WatchArgs {
     /// empty scan emits nothing; --interval-ms has no effect.
     #[arg(long, conflicts_with = "once")]
     pub snapshot: bool,
+
+    /// In snapshot mode, emit only the last N events in scan order; 0 means
+    /// unlimited. Omitted events remain unread because watch never consumes.
+    #[arg(long, value_name = "N", requires = "snapshot")]
+    pub limit: Option<usize>,
 
     /// Poll cadence in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = 1000,

@@ -335,7 +335,7 @@ fn help_and_schema_keep_command_contract_visible() {
         .expect("watch command in schema");
     assert_eq!(
         watch.usage,
-        "post watch [--room <name>]... [--once | --snapshot] [--interval-ms <ms>] [--text]"
+        "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--text]"
     );
     assert!(watch.side_effects.contains("deduplicates channel messages"));
     assert!(watch.side_effects.contains("--snapshot"));
@@ -2920,6 +2920,22 @@ fn from_stderr<T: serde::de::DeserializeOwned>(output: &Output) -> T {
     })
 }
 
+#[test]
+fn body_help_steers_shell_sensitive_prose_to_file_or_stdin() {
+    let sandbox = Sandbox::new();
+    for args in [["send", "--help"], ["chat", "--help"]] {
+        let output = sandbox.run(&args);
+        assert_success(&output);
+        let help = stdout(&output);
+        for expected in ["$1.63B", "apostrophe", "--body-file", "stdin"] {
+            assert!(
+                help.contains(expected),
+                "{args:?} help omitted {expected:?}: {help}"
+            );
+        }
+    }
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -3653,10 +3669,83 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
 }
 
 #[test]
+fn watch_snapshot_limit_emits_only_the_last_events_without_consuming_them() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "bounded", &alpha);
+    join_channel(&sandbox, "bounded", &beta);
+    assert_success(&sandbox.run_in(&["chat", "bounded", "--discard", "--json"], None, &beta));
+
+    let mut sent_ids = Vec::new();
+    for body in ["first", "second", "third"] {
+        let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+            &[
+                "chat", "bounded", "--send", "--anyway", "--body", body, "--json",
+            ],
+            None,
+            &alpha,
+        ));
+        sent_ids.push(sent.message.id);
+    }
+
+    let limited = sandbox.run(&["watch", "--room", "beta", "--snapshot", "--limit", "2"]);
+    assert!(
+        limited.status.success(),
+        "status: {:?}\nstdout: {}\nstderr: {}",
+        limited.status.code(),
+        stdout(&limited),
+        stderr(&limited)
+    );
+    let limited_ids: Vec<String> = watch_events(&limited.stdout)
+        .into_iter()
+        .filter_map(|event| match event {
+            WatchEvent::ChannelMessage { id, channel, .. } if channel == "bounded" => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(limited_ids, sent_ids[1..]);
+    assert!(
+        stderr(&limited).contains("omitted 1 earlier event"),
+        "bounded snapshot must disclose omitted events: {}",
+        stderr(&limited)
+    );
+
+    let unlimited = sandbox.run(&["watch", "--room", "beta", "--snapshot", "--limit", "0"]);
+    assert_success(&unlimited);
+    let unlimited_ids: Vec<String> = watch_events(&unlimited.stdout)
+        .into_iter()
+        .filter_map(|event| match event {
+            WatchEvent::ChannelMessage { id, channel, .. } if channel == "bounded" => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unlimited_ids, sent_ids);
+
+    let unread: ChatReadOutput = from_stdout(&sandbox.run_in(
+        &["chat", "bounded", "--peek", "--limit", "0", "--json"],
+        None,
+        &beta,
+    ));
+    assert_eq!(unread.count, 3, "snapshot limit must never consume events");
+}
+
+#[test]
 fn watch_snapshot_conflicts_with_once() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&["watch", "--snapshot", "--once"]);
     assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn watch_limit_requires_snapshot_mode() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["watch", "--limit", "2"]);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--snapshot"),
+        "limit error must name its required mode: {}",
+        stderr(&output)
+    );
 }
 
 #[cfg(unix)]
