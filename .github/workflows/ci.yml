@@ -1,0 +1,29 @@
+# The public clean gate. macOS is the supported OS for v1 (the doorbell
+# adapter is launchd-based and the suite is exercised on macOS); the matrix
+# is deliberately honest rather than aspirational.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --all-targets --all-features
+      - name: Release build
+        run: cargo build --release
+      - name: Hook adapter tests
+        run: node --test skills/post/hooks/*.test.mjs
