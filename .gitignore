@@ -1,1 +1,4 @@
 /target/
+
+# Machine-local agent complaint log — never ships
+.papercuts.jsonl
