@@ -115,11 +115,11 @@ pub(crate) struct SendArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post chat <CHANNEL>                             (read new messages; default last 25 unread)\n       \
-     post chat <CHANNEL> --peek                      (read without advancing)\n       \
-     post chat <CHANNEL> --limit <N>                 (last N unread; --limit 0 = all)\n       \
-     post chat <CHANNEL> --history <N> [--grep PAT]  (last N messages, cursor untouched)\n       \
-     post chat <CHANNEL> --since <ID>                (messages after ID, cursor untouched)\n       \
+    override_usage = "post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default last 25 unread)\n       \
+     post chat <CHANNEL> --peek [--framing MODE]     (read without advancing)\n       \
+     post chat <CHANNEL> --limit <N> [--framing MODE] (last N unread; --limit 0 = all)\n       \
+     post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
+     post chat <CHANNEL> --since <ID> [--framing MODE] (messages after ID, cursor untouched)\n       \
      post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members' cursors passed MSG_ID)\n       \
      post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n       \
@@ -212,6 +212,13 @@ pub(crate) struct ChatArgs {
     /// List member rooms whose cursors have advanced past this message (read-only).
     #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
+
+    /// Banner form for body-returning reads: auto (default, once-daily full
+    /// wall), full (every invocation), or compact (one-line reminder).
+    /// Rejected on send/join/discard/seen-by, which return no bodies and
+    /// must not look like they honored it.
+    #[arg(long, value_enum, default_value_t = FramingMode::Auto, conflicts_with_all = ["send", "join", "discard", "seen_by", "body", "body_file", "file"])]
+    pub framing: FramingMode,
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +311,23 @@ pub(crate) struct ProfileShowArgs {
     pub room: Option<String>,
 }
 
+/// How much framing a body-returning read prints. The laws bind in every
+/// mode; compact is for sessions that have already internalized the full
+/// text. Explicit modes (full, compact) are stateless — post never infers
+/// that a reader remembers — and never touch the banner-day state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub(crate) enum FramingMode {
+    /// Legacy presentation (default; byte-compatible): full laws everywhere
+    /// except text chat, which shows the full wall once per room per day and
+    /// a one-line reminder for the rest of the day.
+    #[default]
+    Auto,
+    /// Force the full multi-line trust-boundary banner on every invocation.
+    Full,
+    /// One-line reminder carrying the same laws in condensed form.
+    Compact,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ReadArgs {
     /// Full message id or a unique prefix.
@@ -317,6 +341,10 @@ pub(crate) struct ReadArgs {
     /// Read without moving the message to read/.
     #[arg(long)]
     pub peek: bool,
+
+    /// Banner form: auto (default), full, or a one-line compact reminder.
+    #[arg(long, value_enum, default_value_t = FramingMode::Auto)]
+    pub framing: FramingMode,
 }
 
 #[derive(Debug, Args)]
