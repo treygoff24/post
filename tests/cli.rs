@@ -682,7 +682,10 @@ fn compact_framing_chat_read_carries_laws_and_is_rejected_on_non_reads() {
     assert_success(&default_output);
     assert!(stdout(&default_output).contains("READ THIS FRAMING FIRST"));
 
-    // Rejected on non-body-returning verbs: clap conflict, not silent no-op.
+    // Rejected on non-body-returning verbs: a clap usage error (exit 2) that
+    // names the conflict, not a domain error and not a silent no-op. A fake
+    // --seen-by id would fail not_found anyway, so only the usage exit code
+    // plus the conflict text proves clap itself refused the combination.
     for args in [
         vec!["chat", "tax", "--join", "--framing", "compact"],
         vec![
@@ -706,11 +709,58 @@ fn compact_framing_chat_read_carries_laws_and_is_rejected_on_non_reads() {
         ],
     ] {
         let refused = sandbox.run_in(&args, None, &beta);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "--framing must be a clap usage error for {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr).to_string();
         assert!(
-            !refused.status.success(),
-            "--framing must be rejected for {args:?}"
+            stderr.contains("--framing") && stderr.contains("cannot be used with"),
+            "stderr must name the --framing conflict for {args:?}: {stderr}"
         );
     }
+}
+
+#[test]
+fn full_framing_forces_the_wall_on_chat_even_after_the_daily_stamp() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let joined: ChatJoinOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--join", "--json"], None, &alpha));
+    assert!(joined.ok);
+    let joined: ChatJoinOutput =
+        from_stdout(&sandbox.run_in(&["chat", "tax", "--join", "--json"], None, &beta));
+    assert!(joined.ok);
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "channel body",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert!(sent.ok);
+
+    // First default (auto) read consumes the day's wall and stamps banner-day.
+    let first = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
+    assert_success(&first);
+    assert!(stdout(&first).contains("READ THIS FRAMING FIRST"));
+
+    // A later auto read gets the legacy one-line reminder...
+    let auto_again = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
+    assert_success(&auto_again);
+    assert!(!stdout(&auto_again).contains("READ THIS FRAMING FIRST"));
+
+    // ...but explicit full still gets the wall: full means full.
+    let full = sandbox.run_in(&["chat", "tax", "--peek", "--framing", "full"], None, &beta);
+    assert_success(&full);
+    assert!(stdout(&full).contains("READ THIS FRAMING FIRST"));
 }
 
 #[test]

@@ -114,7 +114,7 @@ results, stderr = diagnostics/errors.
   stderr warning. I/O-unreadable mail is also warned and increments
   `skipped_unreadable`; good mail is still listed and the command exits 0.
   Empty inbox = exit 0, count 0. Resolved room always in output.
-- `post read <id-or-prefix> [--room <name>] [--peek] [--framing full|compact]`
+- `post read <id-or-prefix> [--room <name>] [--peek] [--framing auto|full|compact]`
   — prints framing banner
   + envelope + body (text default; `--json` gives `{ok, framing, envelope,
   body}`); after stdout succeeds, moves to read/ unless `--peek`. Text-mode
@@ -122,10 +122,11 @@ results, stderr = diagnostics/errors.
   control characters except tab and newline, so neither can rewrite the
   framing banner. JSON mode preserves the parsed envelope and body unchanged
   as the byte-faithful surface. `--framing compact` swaps the multi-line
-  banner for the same laws condensed to one sentence; it is stateless and
-  explicit per invocation (post never infers that a reader remembers the full
-  framing), there is no `none` mode, full remains the default, and JSON
-  `framing.source`/`framing.authority` are unchanged in either mode.
+  banner for the same laws condensed to one sentence; `auto` (the default)
+  and `full` both render the complete banner on direct reads. Explicit modes
+  are stateless per invocation (post never infers that a reader remembers the
+  full framing), there is no `none` mode, and JSON
+  `framing.source`/`framing.authority` are unchanged in every mode.
   Ambiguous prefix: error listing
   the matches. A prefix matching nothing unread falls back to the room's read/
   store and then to archive copies addressed to that room; such a message is
@@ -196,7 +197,7 @@ results, stderr = diagnostics/errors.
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
   is `delivered_output_failure` and must not be blindly retried.
-- `post chat <channel> [--peek] [--framing full|compact]` — reads new channel
+- `post chat <channel> [--peek] [--framing auto|full|compact]` — reads new channel
   messages as the registered room containing cwd. Requires membership; otherwise `not_a_member`. Text
   output includes the channel framing banner plus messages (reply markers
   render as `↳ re <short-id> (<sender>: preview…)`). JSON output is
@@ -204,11 +205,13 @@ results, stderr = diagnostics/errors.
   message bodies unchanged (`re` and `mentions` when present). Text-mode message headers and bodies are sanitized
   at the output boundary so crafted controls cannot rewrite the framing banner.
   After stdout succeeds, a non-peek read advances only that room's cursor;
-  `--peek` never advances. `--framing compact` on a channel read renders the
-  condensed laws (multiplicity law included), never consults or stamps the
-  banner-day state (a compact reader must not burn the day's full banner for a
-  fresh session), and is rejected on `--send`/`--join`/`--discard`/`--seen-by`,
-  which return no bodies. `--history <n> [--grep <regex>]` and `--since <id>`
+  `--peek` never advances. `--framing` on a channel read selects `auto`
+  (default: the legacy once-daily wall), `full` (the complete wall every
+  invocation), or `compact` (condensed laws in one line, multiplicity law
+  included). Explicit `full` and `compact` never consult or stamp the
+  banner-day state (a compact reader must not burn the day's full banner for
+  a fresh session), and the flag is rejected on
+  `--send`/`--join`/`--discard`/`--seen-by`, which return no bodies. `--history <n> [--grep <regex>]` and `--since <id>`
   are cursorless; `--grep` is a case-insensitive Rust regex over body/subject/from/id.
 - `post channels [--text]` — read-only listing of channels, members, creation metadata,
   descriptions, and message counts: `{ok, channels, count}`.

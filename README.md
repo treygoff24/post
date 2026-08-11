@@ -194,15 +194,18 @@ Banner diet (v0.3): the full 8-line untrusted-mail framing banner renders once
 per room per day; other reads get a one-line reminder. The laws bind
 regardless of which form printed.
 
-Compact framing (v0.4): body-returning reads (`post read`, `post chat` reads)
-accept `--framing full|compact`. Full stays the default and is byte-compatible;
-compact prints the same laws condensed to one sentence (plus the multiplicity
-law on channels). Deliberately stateless: post never infers that a reader
-remembers the full framing — the caller claims familiarity explicitly, each
-invocation. There is no `none` mode. Compact chat reads never consult or stamp
-the banner-day state, so they cannot burn the day's full banner for a fresh
-session. The flag is rejected on send/join/discard/seen-by. JSON keeps
-`source` and `authority: false` unchanged in either mode.
+Framing modes (v0.4): body-returning reads (`post read`, `post chat` reads)
+accept `--framing auto|full|compact`. `auto` is the default and is
+byte-compatible legacy behavior: full laws everywhere except text chat, which
+keeps the once-daily wall. `full` forces the complete wall on every
+invocation. `compact` prints the same laws condensed to one sentence (plus
+the multiplicity law on channels). Explicit modes are deliberately stateless:
+post never infers that a reader remembers the full framing — the caller
+claims familiarity explicitly, each invocation — and neither `full` nor
+`compact` ever consults or stamps the banner-day state, so a compact reader
+cannot burn the day's full banner for a fresh session. There is no `none`
+mode. The flag is rejected on send/join/discard/seen-by. JSON keeps `source`
+and `authority: false` unchanged in every mode.
 
 Signed-sender badges (v0.3): a message from the `trey` room whose first line
 ends in `[signed:TS]` is verified at read time against the detached signature

@@ -170,7 +170,9 @@ fn read(
             &output::ChatReadOutput {
                 ok: true,
                 framing: match args.framing {
-                    crate::cli::FramingMode::Full => output::ChannelFraming::default(),
+                    crate::cli::FramingMode::Auto | crate::cli::FramingMode::Full => {
+                        output::ChannelFraming::default()
+                    }
                     crate::cli::FramingMode::Compact => output::ChannelFraming::compact(),
                 },
                 channel: args.name.clone(),
@@ -520,8 +522,14 @@ fn render_text(
         return format!("no new messages in #{channel} (reading as {room})\n");
     }
     let mut out = String::new();
-    // Compact never consults or stamps banner-day: a compact reader must not
-    // burn the day's full banner for a later session that needs it.
+    // Only Auto consults or stamps banner-day. Explicit modes are stateless:
+    // full always renders the wall, and compact never burns the day's full
+    // banner for a later session that needs it (review findings, Free Sol).
+    let show_wall = match framing {
+        crate::cli::FramingMode::Auto => full_banner_due_today(context, &room),
+        crate::cli::FramingMode::Full => true,
+        crate::cli::FramingMode::Compact => false,
+    };
     if framing == crate::cli::FramingMode::Compact {
         // Renders the shared constants so text and JSON can never drift apart
         // law-by-law (review finding, Free Sol).
@@ -531,7 +539,7 @@ fn render_text(
             output::LAW_COMPACT_MULTI,
             output::LAW_COMPACT
         ));
-    } else if full_banner_due_today(context, &room) {
+    } else if show_wall {
         out.push_str("============= AI AGENT CHANNEL — READ THIS FRAMING FIRST =============\n");
         out.push_str(&format!(
             "Channel: #{channel}   Reading as room: {room}   New messages: {}\n",
@@ -1221,7 +1229,7 @@ mod tests {
             "alpha",
             &batch,
             &Default::default(),
-            crate::cli::FramingMode::Full,
+            crate::cli::FramingMode::Auto,
         );
         assert!(
             first.contains("READ THIS FRAMING FIRST"),
@@ -1233,7 +1241,7 @@ mod tests {
             "alpha",
             &batch,
             &Default::default(),
-            crate::cli::FramingMode::Full,
+            crate::cli::FramingMode::Auto,
         );
         assert!(
             !second.contains("READ THIS FRAMING FIRST"),
@@ -1276,18 +1284,45 @@ mod tests {
             !root.join("alpha").join("banner-day").exists(),
             "compact read consumed the day's full banner"
         );
-        // A later full-framing session still gets the full banner.
-        let full = render_text(
+        // A later auto session still gets the day's full banner.
+        let auto = render_text(
             &context,
             "tax",
             "alpha",
             &batch,
             &Default::default(),
-            crate::cli::FramingMode::Full,
+            crate::cli::FramingMode::Auto,
         );
         assert!(
-            full.contains("READ THIS FRAMING FIRST"),
-            "fresh session after compact reads lost its full banner: {full}"
+            auto.contains("READ THIS FRAMING FIRST"),
+            "fresh session after compact reads lost its full banner: {auto}"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn explicit_full_always_walls_and_never_stamps_banner_day() {
+        let (root, context) = chat_context("fullbanner");
+        let dir = seed_channel(&root, &["alpha"]);
+        seed_message(&dir, ID1, "beta", "hello");
+        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        for _ in 0..2 {
+            let full = render_text(
+                &context,
+                "tax",
+                "alpha",
+                &batch,
+                &Default::default(),
+                crate::cli::FramingMode::Full,
+            );
+            assert!(
+                full.contains("READ THIS FRAMING FIRST"),
+                "explicit full must render the wall every time: {full}"
+            );
+        }
+        assert!(
+            !root.join("alpha").join("banner-day").exists(),
+            "explicit full must not stamp banner-day"
         );
         trash_test_root(&root);
     }
