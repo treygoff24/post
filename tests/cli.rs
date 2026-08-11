@@ -178,6 +178,16 @@ impl Drop for Sandbox {
                 "failed to trash test sandbox '{}' (status {status})",
                 self.path.display()
             ),
+            // No `trash` on this machine (CI runners, stranger installs):
+            // remove the sandbox directly — it is a temp dir this test created.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(error) = fs::remove_dir_all(&self.path) {
+                    eprintln!(
+                        "failed to remove test sandbox '{}': {error}",
+                        self.path.display()
+                    );
+                }
+            }
             Err(error) => eprintln!(
                 "failed to run trash for test sandbox '{}': {error}",
                 self.path.display()

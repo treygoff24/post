@@ -38,7 +38,10 @@ fs.writeFileSync(
 );
 
 test.after(() => {
-  spawnSync("trash", [ROOT], { stdio: "ignore" });
+  const cleanup = spawnSync("trash", [ROOT], { stdio: "ignore" });
+  // No `trash` on this machine (CI runners, stranger installs): remove the
+  // temp root directly — this test created it.
+  if (cleanup.error) fs.rmSync(ROOT, { recursive: true, force: true });
 });
 
 let counter = 0;
