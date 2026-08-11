@@ -12,6 +12,7 @@ use crate::mailbox::{
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{DoctorCheck, DoctorOutput, DoctorSeverity};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<CommandResult> {
@@ -593,20 +594,37 @@ fn apply_fixes(context: &Context, fixed: &mut Vec<String>) -> Result<(), AppErro
     Ok(())
 }
 
-/// Walk PATH looking for a regular file named `name` (POSIX empty
-/// components mean the current directory). Metadata only — never executes
-/// the binary, because some tools (bare `ssh-keygen`) prompt to CREATE
-/// state when run interactively instead of acting as a lookup.
+/// Walk PATH looking for an EXECUTABLE regular file named `name` (POSIX
+/// empty components mean the current directory). Symlinks are followed to
+/// their target, which must be a regular file carrying at least one execute
+/// bit — a mode-0644 file or a link to one is not a usable tool. Metadata
+/// only — never executes the binary, because some tools (bare `ssh-keygen`)
+/// prompt to CREATE state when run interactively instead of acting as a
+/// lookup.
 fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path).find_map(|dir| {
-            let candidate = dir.join(name);
-            fs::symlink_metadata(&candidate)
-                .ok()
-                .filter(|metadata| metadata.file_type().is_file())
-                .map(|_| candidate)
-        })
+    std::env::var_os("PATH")
+        .as_deref()
+        .and_then(|path| find_on_path_in(name, path))
+}
+
+/// The env-free core of `find_on_path`: same semantics, explicit PATH
+/// value, so unit tests exercise the probe without mutating the process
+/// environment.
+fn find_on_path_in(name: &str, path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
+        let candidate = dir.join(name);
+        usable_tool(&candidate).then_some(candidate)
     })
+}
+
+/// A usable tool at `candidate`: following symlinks, a regular file with at
+/// least one execute bit. Never executes anything.
+fn usable_tool(candidate: &std::path::Path) -> bool {
+    fs::metadata(candidate)
+        .map(|metadata| {
+            metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0
+        })
+        .unwrap_or(false)
 }
 
 fn create_dir(path: &Path, fixed: &mut Vec<String>) -> Result<(), AppError> {
@@ -761,5 +779,91 @@ fn check(
         message: message.to_owned(),
         fixable,
         suggested_fix: suggested_fix.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_on_path_in;
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    fn path_var(parts: &[&Path]) -> String {
+        // `find_on_path_in` splits with std::env::split_paths; two absolute
+        // parts joined by ':' behave identically to the real PATH grammar.
+        parts
+            .iter()
+            .map(|part| part.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+
+    /// A0b r3 item 2: doctor's keygen probe must require an executable
+    /// regular file and FOLLOW symlinks to their target. The probe is
+    /// metadata-only, so it can never execute the recording stub.
+    #[test]
+    fn keygen_probe_requires_executable_and_follows_symlinks() {
+        let root = test_root("doctor-keygen");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("bin dir");
+        let candidate = bin.join("ssh-keygen");
+        fs::write(&candidate, "#!/bin/sh\necho probe\n").expect("plain file");
+
+        // A regular non-executable file must NOT count: doctor reports
+        // owner.keygen_missing for it.
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o644)).expect("0644");
+        assert_eq!(
+            find_on_path_in("ssh-keygen", std::ffi::OsStr::new(&path_var(&[&bin]))),
+            None,
+            "regular non-executable file is not a usable ssh-keygen"
+        );
+
+        // The same regular file made executable counts.
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).expect("0755");
+        assert_eq!(
+            find_on_path_in("ssh-keygen", std::ffi::OsStr::new(&path_var(&[&bin]))),
+            Some(candidate.clone()),
+            "executable regular file counts as present"
+        );
+
+        // A symlink TO an executable target counts as present.
+        let link_dir = root.join("linkbin");
+        fs::create_dir_all(&link_dir).expect("link dir");
+        std::os::unix::fs::symlink(&candidate, link_dir.join("ssh-keygen")).expect("symlink");
+        assert_eq!(
+            find_on_path_in("ssh-keygen", std::ffi::OsStr::new(&path_var(&[&link_dir]))),
+            Some(link_dir.join("ssh-keygen")),
+            "symlink to an executable target must count as present"
+        );
+
+        // …but a symlink to a NON-executable target must not.
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o644))
+            .expect("non-exec target");
+        assert_eq!(
+            find_on_path_in("ssh-keygen", std::ffi::OsStr::new(&path_var(&[&link_dir]))),
+            None,
+            "symlink to a non-executable target is not a usable ssh-keygen"
+        );
+
+        // A dangling symlink never counts.
+        fs::remove_file(&candidate).expect("remove target");
+        assert_eq!(
+            find_on_path_in("ssh-keygen", std::ffi::OsStr::new(&path_var(&[&link_dir]))),
+            None,
+            "dangling symlink never counts"
+        );
+
+        // A directory named ssh-keygen never counts (not a regular file).
+        let dir_dir = root.join("dirdir");
+        fs::create_dir_all(dir_dir.join("ssh-keygen")).expect("dir named ssh-keygen");
+        assert_eq!(
+            find_on_path_in("ssh-keygen", std::ffi::OsStr::new(&path_var(&[&dir_dir]))),
+            None,
+            "a directory is not a usable tool"
+        );
+
+        trash_test_root(&root);
     }
 }

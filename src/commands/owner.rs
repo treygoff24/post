@@ -92,6 +92,7 @@ fn init(context: &Context, args: OwnerInitArgs, pretty: bool) -> AppResult<Comma
         already_configured: false,
         owner: owner_json(&would_be),
         missing: missing_material(&would_be),
+        note: sidecar_note(&would_be),
         guide: GUIDE,
     };
     Ok(CommandResult::json(&output, pretty)?.registration_committed())
@@ -125,6 +126,7 @@ fn compare_existing(
             already_configured: true,
             owner: owner_json(&existing),
             missing: missing_material(&existing),
+            note: sidecar_note(&existing),
             guide: GUIDE,
         };
         return CommandResult::json(&output, pretty);
@@ -169,11 +171,14 @@ fn diff_owners(left: &ResolvedOwner, right: &ResolvedOwner) -> Vec<String> {
 }
 
 /// What still blocks verification, as a human-readable checklist. Only
-/// observable facts are asserted: post can see the allowed_signers file and
-/// whether signed payloads have arrived, but NEVER the signing key — porch
-/// generates and holds it (possibly on another host), so no on-disk state
-/// here is ever claimed to be a "key pair". Valid-config-missing-key-
-/// material is runtime absence, never ConfigInvalid.
+/// OBSERVABLE prerequisites are asserted: post can see the allowed_signers
+/// file, but NEVER the signing key — porch generates and holds it (possibly
+/// on another host), so no on-disk state here is ever claimed to be a "key
+/// pair". Prior signed payloads are NOT onboarding material: their absence
+/// does not block verifying the first future signed message, and a planted
+/// `.sig` proves nothing, so payloads never appear as missing or as wired
+/// evidence. Valid-config-missing-key-material is runtime absence, never
+/// ConfigInvalid.
 fn missing_material(owner: &ResolvedOwner) -> Vec<String> {
     let mut missing = Vec::new();
     if !owner.allowed_signers.is_file() {
@@ -182,6 +187,14 @@ fn missing_material(owner: &ResolvedOwner) -> Vec<String> {
                 .to_owned(),
         );
     }
+    missing
+}
+
+/// A NON-BLOCKING, purely informational observation for onboarding output:
+/// whether any signed message payloads have arrived yet. Absence implies
+/// nothing about the wiring — porch signs the first message and post
+/// verifies it — so this is never missing material and never evidence.
+fn sidecar_note(owner: &ResolvedOwner) -> Option<&'static str> {
     let sigs = owner.sidecar_dir.join("sigs");
     let has_payloads = fs::read_dir(&sigs)
         .map(|entries| {
@@ -190,13 +203,13 @@ fn missing_material(owner: &ResolvedOwner) -> Vec<String> {
             })
         })
         .unwrap_or(false);
-    if !has_payloads {
-        missing.push(
-            "signed message payloads — evidence signing is wired; post cannot see the key itself, porch generates it from its onboarding and signs messages"
-                .to_owned(),
-        );
+    if has_payloads {
+        None
+    } else {
+        Some(
+            "no signed message payloads observed yet (sigs/ is empty) — not a blocker: porch signs the first message and post verifies it",
+        )
     }
-    missing
 }
 
 /// `post owner show`: the resolved, post-derivation owner as JSON. A
@@ -257,6 +270,10 @@ struct OwnerInitOutput<'a> {
     owner: OwnerJson<'a>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     missing: Vec<String>,
+    /// Non-blocking observation (never missing material): whether any
+    /// signed payloads have arrived yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'static str>,
     guide: &'static str,
 }
 
@@ -362,6 +379,87 @@ mod tests {
             );
         }
         set_pre_commit_hook(None);
+        trash_test_root(&root);
+    }
+
+    /// A0b r3 item 3: `missing` names ONLY observable prerequisites. A
+    /// fresh, fully-provisioned owner (allowed_signers present, no signed
+    /// messages yet) has nothing missing; the empty sigs/ dir is reported as
+    /// a separate NON-BLOCKING note. A planted garbage `.sig` must never
+    /// count as evidence that signing is wired — with allowed_signers
+    /// absent it stays missing, with it present nothing is missing.
+    #[test]
+    fn init_missing_names_only_observable_prerequisites() {
+        let (root, context) = context("missing");
+        let sidecar = root.join(".mara-room");
+        fs::create_dir_all(&sidecar).expect("sidecar");
+        let signers = |content: &str| {
+            fs::write(sidecar.join("allowed_signers"), content).expect("allowed_signers")
+        };
+        let init_json = || -> serde_json::Value {
+            let result = run_init(&context, "mara").expect("init");
+            serde_json::from_str(&result.stdout).expect("init stdout")
+        };
+
+        // Fresh and fully provisioned, before the first send: nothing is
+        // missing; sigs/ emptiness is a non-blocking observation only.
+        signers("mara@porch ssh-ed25519 AAAA\n");
+        let json = init_json();
+        assert_eq!(json["created"], true);
+        assert!(
+            json.get("missing").is_none(),
+            "fully provisioned owner must name nothing missing: {json}"
+        );
+        let note = json["note"].as_str().expect("non-blocking observation");
+        assert!(
+            note.contains("not a blocker"),
+            "the payload observation must be non-blocking: {note}"
+        );
+
+        // A garbage .sig is planted; allowed_signers is now absent. The
+        // planted sidecar must not masquerade as wiring evidence: missing
+        // still names the allowed_signers prerequisite and nothing about
+        // payloads.
+        let sigs = sidecar.join("sigs");
+        fs::create_dir_all(&sigs).expect("sigs dir");
+        fs::write(sigs.join("garbage.sig"), b"not a signature").expect("plant garbage .sig");
+        fs::remove_file(sidecar.join("allowed_signers")).expect("remove allowed_signers");
+        let json = init_json();
+        assert_eq!(json["already_configured"], true);
+        let missing = json["missing"]
+            .as_array()
+            .expect("allowed_signers must be named missing");
+        assert!(
+            missing.iter().any(|item| item
+                .as_str()
+                .expect("string item")
+                .contains("allowed_signers")),
+            "the real prerequisite must stay missing: {missing:?}"
+        );
+        assert!(
+            !missing.iter().any(|item| {
+                let text = item.as_str().expect("string item");
+                text.contains("payload")
+                    || text.contains("signed message")
+                    || text.contains("evidence")
+            }),
+            "a planted .sig must never count as wired evidence: {missing:?}"
+        );
+
+        // Restore allowed_signers with the garbage .sig still in place:
+        // nothing missing again, and the observation note is gone (a
+        // sidecar has been observed — the note only reports emptiness).
+        signers("mara@porch ssh-ed25519 AAAA\n");
+        let json = init_json();
+        assert!(
+            json.get("missing").is_none(),
+            "planted garbage .sig must not count as evidence: {json}"
+        );
+        assert!(
+            json.get("note").is_none(),
+            "a .sig was observed, so the empty-sidecars note must not fire: {json}"
+        );
+
         trash_test_root(&root);
     }
 }

@@ -558,6 +558,25 @@ pub(crate) fn set_pre_commit_hook(hook: Option<PreCommitHook>) {
     PRE_COMMIT_HOOK.with(|slot| *slot.borrow_mut() = hook);
 }
 
+// Deterministic trust-anchor race seam: with a hook installed, every
+// `read_owner_file` runs it (still holding the anchor fd) immediately after
+// open, so a test can swap the path — regular file → symlink/FIFO — and
+// prove the HELD fd, not a second path-based open, is what gets read.
+#[cfg(test)]
+type PostOpenHook = Box<dyn Fn() -> std::io::Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static POST_OPEN_HOOK: std::cell::RefCell<Option<PostOpenHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install or clear the post-open hook (tests only).
+#[cfg(test)]
+pub(crate) fn set_post_open_hook(hook: Option<PostOpenHook>) {
+    POST_OPEN_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
 fn exclusive_atomic_write_with<F>(path: &Path, bytes: &[u8], after_commit: F) -> std::io::Result<()>
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
@@ -924,37 +943,76 @@ pub(crate) fn check_owner_parses(context: &Context) -> AppResult<()> {
     }
 }
 
-/// Parse the raw owner.json and validate every EXPLICIT value. Never follows
-/// a symlinked owner.json and never reads ANY non-regular path (FIFO/socket/
-/// device reads can hang forever at the trust boundary): the trust anchor
-/// must be a regular file, and its size is bounded before reading.
+/// Parse the raw owner.json and validate every EXPLICIT value. The anchor is
+/// opened exactly ONCE, and only the HELD fd is ever consulted: O_NOFOLLOW
+/// refuses a symlink at open time, O_NONBLOCK keeps a FIFO/socket/device
+/// open from hanging at the trust boundary, O_CLOEXEC keeps the fd out of
+/// any spawned child. fstat and the bounded read both go through that same
+/// fd, so a racer swapping the path after open changes nothing — there is no
+/// check-then-reopen window — and the 64KiB cap is enforced WHILE reading
+/// (max+1 bytes from the held fd), not on a stat that a growing file can
+/// invalidate.
 pub(crate) fn read_owner_file(path: &Path) -> AppResult<OwnerFile> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| AppError::io("inspect owner config", path, error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(AppError::config(
-            path,
-            "owner.json is a symlink; a trust anchor must be a regular file — replace the symlink with a real file",
-        ));
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            // O_NOFOLLOW surfaces a symlink as ELOOP; a dangling symlink
+            // surfaces as ENOENT and is only ever classified by metadata
+            // (never opened): a dangling symlink is not "no owner.json", it
+            // is a trust anchor someone replaced, and fails closed as one.
+            Some(libc::ELOOP) | Some(libc::ENOENT) if anchor_is_symlink(path) => {
+                AppError::config(
+                    path,
+                    "owner.json is a symlink; a trust anchor must be a regular file — replace the symlink with a real file",
+                )
+            }
+            _ => AppError::io("inspect owner config", path, error),
+        })?;
+    // Deterministic adversarial-race seam: runs (holding the fd) before any
+    // metadata/read so a test can swap the path and prove the held fd is
+    // the only handle ever used.
+    #[cfg(test)]
+    if let Some(hook) = POST_OPEN_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook().map_err(|error| AppError::io("inspect owner config", path, error))?;
     }
+    // fstat the HELD fd: the type checks apply to the exact inode we read.
+    let metadata = file
+        .metadata()
+        .map_err(|error| AppError::io("inspect owner config", path, error))?;
     if !metadata.file_type().is_file() {
         return Err(AppError::config(
             path,
             "owner.json is not a regular file; a trust anchor must be a regular file — reading a FIFO, socket, or device here is refused",
         ));
     }
-    if metadata.len() > OWNER_CONFIG_MAX_BYTES {
+    // Bounded read from the same fd: at most max+1 bytes are ever pulled, so
+    // an anchor grown past the cap after open is caught by the read count,
+    // never read unbounded.
+    let mut bytes = Vec::new();
+    file.take(OWNER_CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| AppError::config(path, format!("cannot read file: {error}")))?;
+    if bytes.len() as u64 > OWNER_CONFIG_MAX_BYTES {
         return Err(AppError::config(
             path,
             format!("owner.json exceeds the {OWNER_CONFIG_MAX_BYTES} byte trust-anchor size limit"),
         ));
     }
-    let bytes = fs::read(path)
-        .map_err(|error| AppError::config(path, format!("cannot read file: {error}")))?;
     let file: OwnerFile = serde_json::from_slice(&bytes)
         .map_err(|error| AppError::config(path, format!("invalid JSON object: {error}")))?;
     validate_owner_values(path, &file)?;
     Ok(file)
+}
+
+/// Metadata-only classification of an open failure: is the path a symlink
+/// (including a dangling one)? Never opens or follows the path — it only
+/// decides which fail-closed error to report.
+fn anchor_is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 /// Validate the explicit fields of an owner configuration (the values a
@@ -1504,8 +1562,8 @@ mod tests {
 mod owner_tests {
     use super::{
         exclusive_atomic_write, legacy_owner, load_owner, load_owner_with_rooms, read_owner_file,
-        validate_label, validate_marker, validate_owner_values, Context, OwnerFile,
-        OwnerResolution, OwnerSource, ResolvedOwner, LEGACY_OWNER_ROOM,
+        set_post_open_hook, validate_label, validate_marker, validate_owner_values, Context,
+        OwnerFile, OwnerResolution, OwnerSource, ResolvedOwner, LEGACY_OWNER_ROOM,
     };
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
@@ -1889,6 +1947,83 @@ mod owner_tests {
             }
             other => panic!("expected configured, got {other:?}"),
         }
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn owner_json_swapped_after_open_is_still_read_from_the_held_fd() {
+        // The A0b r3 TOCTOU regression, deterministically: the path is
+        // swapped AFTER the anchor fd is open (the post-open seam), so any
+        // implementation that re-opens by path — following a planted symlink,
+        // refusing it, or hanging/refusing on a planted FIFO — diverges. The
+        // fixed reader must finish on the held fd: original bytes in, no
+        // second path-based open anywhere.
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (root, context) = context("swap");
+        let path = root.join("owner.json");
+        fs::write(&path, r#"{"room":"mara","label":"Original"}"#).expect("anchor fixture");
+        fs::write(
+            root.join("decoy.json"),
+            r#"{"room":"mara","label":"Decoy"}"#,
+        )
+        .expect("decoy");
+
+        // Swap 1 — regular file becomes a symlink to DIFFERENT valid owner
+        // content after open. A reopen would either follow it (Decoy bytes)
+        // or refuse it (config error); the held fd must return Original.
+        let swap = path.clone();
+        let decoy = root.join("decoy.json");
+        set_post_open_hook(Some(Box::new(move || {
+            fs::remove_file(&swap).expect("remove anchor");
+            std::os::unix::fs::symlink(&decoy, &swap).expect("plant symlink");
+            Ok(())
+        })));
+        match load_owner(&context).expect("symlink swap must not break the read") {
+            OwnerResolution::Configured(owner) => {
+                assert_eq!(
+                    owner.label, "Original",
+                    "the held fd must win over a symlink planted after open"
+                );
+            }
+            other => panic!("expected configured, got {other:?}"),
+        }
+        set_post_open_hook(None);
+
+        // Swap 2 — the path becomes a FIFO after open. Only a second path
+        // open could hang (plain reopen) or refuse (a fresh O_NOFOLLOW /
+        // type check); the held fd finishes untouched. Runs on a bounded
+        // thread so a regression surfaces as a timeout, not a suite hang.
+        // (The planted symlink must be removed first: fs::write would
+        // otherwise write THROUGH it.)
+        fs::remove_file(&path).expect("remove planted symlink");
+        fs::write(&path, r#"{"room":"mara","label":"Original"}"#).expect("restore anchor");
+        let (tx, rx) = mpsc::channel::<super::AppResult<OwnerResolution>>();
+        let child_context = context.clone();
+        let swap = path.clone();
+        std::thread::spawn(move || {
+            set_post_open_hook(Some(Box::new(move || {
+                let c_path = std::ffi::CString::new(swap.display().to_string()).expect("CString");
+                fs::remove_file(&swap).expect("remove anchor");
+                let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+                assert_eq!(made, 0, "mkfifo must succeed");
+                Ok(())
+            })));
+            let _ = tx.send(load_owner(&child_context));
+        });
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Ok(OwnerResolution::Configured(owner))) => {
+                assert_eq!(
+                    owner.label, "Original",
+                    "a FIFO planted after open must not change or stall the held-fd read"
+                );
+            }
+            Ok(Ok(other)) => panic!("expected configured, got {other:?}"),
+            Ok(Err(error)) => panic!("FIFO swap after open must not refuse the held fd: {error:?}"),
+            Err(_) => panic!("read_owner_file HUNG or the reader thread died on a FIFO swap"),
+        }
+        set_post_open_hook(None);
         trash_test_root(&root);
     }
 }
