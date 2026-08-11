@@ -212,6 +212,12 @@ pub(crate) struct ChatArgs {
     /// List member rooms whose cursors have advanced past this message (read-only).
     #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
+
+    /// Banner form for body-returning reads: full (default) or a one-line
+    /// compact reminder. Rejected on send/join/discard/seen-by, which return
+    /// no bodies and must not look like they honored it.
+    #[arg(long, value_enum, default_value_t = FramingMode::Full, conflicts_with_all = ["send", "join", "discard", "seen_by", "body", "body_file", "file"])]
+    pub framing: FramingMode,
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +310,18 @@ pub(crate) struct ProfileShowArgs {
     pub room: Option<String>,
 }
 
+/// How much framing a body-returning read prints. The laws bind either way;
+/// compact is for sessions that have already internalized the full text.
+/// Deliberately stateless: post never infers that a reader remembers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub(crate) enum FramingMode {
+    /// Full multi-line trust-boundary banner (default; byte-compatible).
+    #[default]
+    Full,
+    /// One-line reminder carrying the same laws in condensed form.
+    Compact,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ReadArgs {
     /// Full message id or a unique prefix.
@@ -317,6 +335,10 @@ pub(crate) struct ReadArgs {
     /// Read without moving the message to read/.
     #[arg(long)]
     pub peek: bool,
+
+    /// Banner form: full (default) or a one-line compact reminder.
+    #[arg(long, value_enum, default_value_t = FramingMode::Full)]
+    pub framing: FramingMode,
 }
 
 #[derive(Debug, Args)]
