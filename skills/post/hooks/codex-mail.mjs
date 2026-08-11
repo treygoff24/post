@@ -30,7 +30,6 @@ import { spawnSync } from "node:child_process";
 
 const THROTTLE_MS = Number(process.env.POST_CODEX_HOOK_THROTTLE_MS ?? 30_000);
 const EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse"]);
-const SEEN_CAP = 2000; // ponytail: FIFO cap bounds state size; enough for any real session
 const LIST_CAP = 20;
 const CONTEXT_MAX = 4096;
 const NAME_MAX = 255;
@@ -366,9 +365,11 @@ function main() {
 
   const seen = new Set(state.seen);
   const fresh = events.filter((event) => !seen.has(eventKey(event)));
-  for (const event of fresh) seen.add(eventKey(event));
+  // Persist the exact current snapshot keys, not prior∪fresh sliced: a cap
+  // below the backlog size would drop a still-unread key each run and re-ring
+  // it forever. Consumed ids leave the snapshot and prune themselves.
   const nextState = {
-    seen: [...seen].slice(-SEEN_CAP),
+    seen: events.map((event) => eventKey(event)),
     failStreak: 0,
   };
   // Written after a successful emit even when nothing is new: the file's mtime

@@ -145,6 +145,9 @@ function run(args, control = OK, env = {}) {
       POST_CODEX_DOORBELL_POST_BIN: POST,
       POST_CODEX_DOORBELL_HERDR_BIN: HERDR,
       POST_CODEX_DOORBELL_LAUNCHCTL_BIN: LAUNCHCTL,
+      // An ambient POST_MAIL_ROOT must never leak into tests; explicit
+      // overrides come through `env`.
+      POST_MAIL_ROOT: undefined,
       ...env,
     },
   });
@@ -578,6 +581,79 @@ test("a non-not-loaded bootout failure is a failure", () => {
   );
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /launchctl bootout failed/);
+});
+
+test("a custom absolute POST_MAIL_ROOT is pinned verbatim into the plist", () => {
+  const home = homeFor("mail-root");
+  const mailRoot = "/custom/mail&root";
+  const result = run(["--room", "ops", "--agent", AGENT], OK, {
+    POST_CODEX_DOORBELL_HOME: home,
+    POST_MAIL_ROOT: mailRoot,
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const plist = fs.readFileSync(plistPath(home), "utf8");
+  assert.ok(plist.includes("<key>POST_MAIL_ROOT</key>"), "mail root key must be pinned");
+  assert.ok(
+    plist.includes(`<string>${escapeXml(mailRoot)}</string>`),
+    "the exact value must be persisted"
+  );
+  assert.ok(!plist.includes(mailRoot), "raw unescaped mail root must not appear");
+});
+
+test("a relative POST_MAIL_ROOT refuses install with nothing written", () => {
+  const home = homeFor("mail-root-relative");
+  const installDir = path.join(ROOT, "hooks-mail-root-relative");
+  const monitor = path.join(installDir, "post-codex-notify-monitor.mjs");
+  const postBefore = calls(POST_CALLS).length;
+  const result = run(["--room", "ops", "--agent", AGENT], OK, {
+    POST_CODEX_DOORBELL_HOME: home,
+    POST_CODEX_DOORBELL_INSTALL_DIR: installDir,
+    POST_MAIL_ROOT: "relative/mail/root",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /POST_MAIL_ROOT must be an absolute path/);
+  assert.ok(!fs.existsSync(plistPath(home)));
+  assert.ok(!fs.existsSync(path.join(home, "Library", "LaunchAgents")));
+  assert.ok(!fs.existsSync(monitor));
+  assert.equal(
+    calls(POST_CALLS).length,
+    postBefore,
+    "refusal happens before any preflight command"
+  );
+});
+
+test("an explicitly empty POST_MAIL_ROOT refuses install with nothing written", () => {
+  const home = homeFor("mail-root-empty");
+  const installDir = path.join(ROOT, "hooks-mail-root-empty");
+  const monitor = path.join(installDir, "post-codex-notify-monitor.mjs");
+  const postBefore = calls(POST_CALLS).length;
+  const result = run(["--room", "ops", "--agent", AGENT], OK, {
+    POST_CODEX_DOORBELL_HOME: home,
+    POST_CODEX_DOORBELL_INSTALL_DIR: installDir,
+    POST_MAIL_ROOT: "",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /POST_MAIL_ROOT must be an absolute path/);
+  assert.ok(!fs.existsSync(plistPath(home)));
+  assert.ok(!fs.existsSync(monitor));
+  assert.equal(
+    calls(POST_CALLS).length,
+    postBefore,
+    "refusal happens before any preflight command"
+  );
+});
+
+test("an unset POST_MAIL_ROOT is omitted from the plist", () => {
+  const home = homeFor("mail-root-unset");
+  const result = run(["--room", "ops", "--agent", AGENT], OK, {
+    POST_CODEX_DOORBELL_HOME: home,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(
+    !fs.readFileSync(plistPath(home), "utf8").includes("POST_MAIL_ROOT"),
+    "the key is omitted when POST_MAIL_ROOT is unset"
+  );
 });
 
 test("uninstall removes only the exact agent files and never touches post or herdr", () => {

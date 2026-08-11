@@ -11,6 +11,10 @@
 // ProcessType Background) under ~/Library/LaunchAgents/, and loads it with
 // launchctl. The job snapshots the exact room and wakes the exact Herdr agent
 // only when it is unfocused and idle/done (see codex-notify-monitor.mjs).
+// When POST_MAIL_ROOT is set at install time it must be absolute and is
+// pinned verbatim into the plist EnvironmentVariables, so launchd runs the
+// monitor against the same mail root the preflight saw; when unset the key
+// is omitted and the monitor's default root applies.
 // Uninstall boots the exact label out, then removes only that agent's plist,
 // state file, and logs; the shared monitor copy is left in place.
 //
@@ -341,7 +345,7 @@ function escapeXml(value) {
     .replace(/'/g, "&apos;");
 }
 
-function plistContent({ agent, room, channels, nodeBin, monitor, postBin, herdrBin, paths }) {
+function plistContent({ agent, room, channels, nodeBin, monitor, postBin, herdrBin, mailRoot, paths }) {
   const xml = escapeXml;
   const envLines = [
     `    <key>HOME</key><string>${xml(paths.home)}</string>`,
@@ -350,6 +354,9 @@ function plistContent({ agent, room, channels, nodeBin, monitor, postBin, herdrB
     `    <key>POST_CODEX_NOTIFY_HERDR_AGENT</key><string>${xml(agent)}</string>`,
     `    <key>POST_CODEX_NOTIFY_STATE</key><string>${xml(paths.state)}</string>`,
   ];
+  if (mailRoot !== undefined) {
+    envLines.push(`    <key>POST_MAIL_ROOT</key><string>${xml(mailRoot)}</string>`);
+  }
   if (channels.length > 0) {
     envLines.push(
       `    <key>POST_CODEX_NOTIFY_CHANNELS</key><string>${xml(channels.join(","))}</string>`
@@ -473,6 +480,16 @@ function bootout(bin, domain, label) {
 
 function install(opts) {
   const nodeBin = process.execPath;
+  // Any PRESENT value counts as set, including empty: the real Post binary
+  // treats an explicitly empty POST_MAIL_ROOT as a relative path (rc 78), so
+  // empty must refuse here rather than silently pass as unset.
+  const mailRoot = process.env.POST_MAIL_ROOT;
+  if (mailRoot !== undefined && !path.isAbsolute(mailRoot)) {
+    fail(
+      `POST_MAIL_ROOT must be an absolute path when set; got ${JSON.stringify(mailRoot)}. ` +
+        "Fix it or unset it, then re-run"
+    );
+  }
   const postBin = resolveBin(
     process.env.POST_CODEX_DOORBELL_POST_BIN,
     path.join(homeDir(), ".local", "bin", "post"),
@@ -515,6 +532,7 @@ function install(opts) {
     monitor,
     postBin,
     herdrBin,
+    mailRoot,
     paths,
   });
   let plistChanged = true;

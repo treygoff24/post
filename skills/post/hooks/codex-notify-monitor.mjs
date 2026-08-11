@@ -17,7 +17,6 @@ const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const NAME_MAX = 255;
 const UNREADABLE_ID_MAX = 255;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-const SEEN_CAP = 2000; // ponytail: enough unread ids for one user; bounds retry state
 const DOORBELL_REF_CAP = 20;
 
 function writeAllSync(fd, data) {
@@ -66,7 +65,7 @@ function writeSeen(file, seen) {
       fs.constants.O_EXCL |
       (fs.constants.O_NOFOLLOW || 0);
     fd = fs.openSync(tmp, flags, 0o600);
-    writeAllSync(fd, JSON.stringify({ seen: seen.slice(-SEEN_CAP) }));
+    writeAllSync(fd, JSON.stringify({ seen }));
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, file);
@@ -303,6 +302,11 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
         if (!seen.has(key)) fresh.push(event);
         seen.add(key);
       }
+      // On delivery, persist the exact current eligible snapshot keys, not
+      // prior∪fresh sliced: a cap below the backlog size would forget a
+      // different still-unread key each run and re-ring it forever. Consumed
+      // ids leave the snapshot and prune themselves on the next delivery.
+      const eligibleKeys = eligible.map((event) => eventKey(event));
       if (fresh.length > 0) {
         let delivered = false;
         if (herdrAgent) {
@@ -372,7 +376,7 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
         }
         if (delivered) {
           try {
-            writeSeen(stateFile, [...seen]);
+            writeSeen(stateFile, eligibleKeys);
           } catch {
             fail("could not save dedupe state; mail may ring again");
           }

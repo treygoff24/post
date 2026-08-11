@@ -31,7 +31,11 @@ for (const [file, calls, kind] of [
       `fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
       `const control = JSON.parse(fs.readFileSync(${JSON.stringify(CONTROL)}, "utf8"));`,
       `if (control.${kind}Stdout) process.stdout.write(control.${kind}Stdout);`,
-      `process.exit(control.${kind}Exit ?? 0);`,
+      // Natural exit when the control exit is 0: process.exit() would drop
+      // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
+      // 64 KiB pipe buffer), truncating the snapshot mid-line.
+      `const exit = control.${kind}Exit ?? 0;`,
+      "if (exit) process.exit(exit);",
       "",
     ].join("\n")
   );
@@ -544,6 +548,79 @@ test("a mixed huge batch bounds total refs and counts both kinds", () => {
   assert.ok(prompt.includes(`#build:${channels[7].id}`));
   assert.ok(!prompt.includes(channels[12].id));
   assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).seen.length, 25);
+});
+
+function overCapMail(count = 2001) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...MAIL,
+    id: `20260804-220000-${index.toString(16).padStart(6, "0")}`,
+  }));
+}
+
+test("an over-cap backlog rings once, then identical snapshots stay silent", () => {
+  const state = path.join(ROOT, "overcap.json");
+  const mail = overCapMail();
+  const snapshot = `${mail.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  setControl({ postStdout: snapshot });
+  assert.equal(run({ state }).status, 0);
+  assert.match(calls(CMUX_CALLS).at(-1).at(-1), /2001 direct messages are waiting/);
+
+  const before = calls(CMUX_CALLS).length;
+  setControl({ postStdout: snapshot });
+  assert.equal(run({ state }).status, 0);
+  assert.equal(
+    calls(CMUX_CALLS).length,
+    before,
+    "identical over-cap snapshots must not ring again"
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(state, "utf8")).seen.length,
+    2001,
+    "state holds the exact eligible snapshot keys"
+  );
+});
+
+test("a new arrival after an over-cap backlog rings with only the new ref", () => {
+  const state = path.join(ROOT, "overcap-arrival.json");
+  const mail = overCapMail();
+  const snapshot = (events) => `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  setControl({ postStdout: snapshot(mail) });
+  assert.equal(run({ state }).status, 0);
+
+  const newcomer = { ...MAIL, id: "20260804-220000-f00d00" };
+  setControl({ postStdout: snapshot([...mail, newcomer]) });
+  const before = calls(CMUX_CALLS).length;
+  assert.equal(run({ state }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+  assert.match(calls(CMUX_CALLS).at(-1).at(-1), /1 direct message is waiting/);
+  const persisted = JSON.parse(fs.readFileSync(state, "utf8"));
+  assert.equal(persisted.seen.length, 2002);
+  assert.ok(persisted.seen.includes(`sol:${newcomer.id}`));
+});
+
+test("consumed ids drop from delivery state while unread ids stay", () => {
+  const state = path.join(ROOT, "overcap-consume.json");
+  const mail = overCapMail();
+  const snapshot = (events) => `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  setControl({ postStdout: snapshot(mail) });
+  assert.equal(run({ state }).status, 0);
+
+  const newcomer = { ...MAIL, id: "20260804-220000-f00b00" };
+  setControl({ postStdout: snapshot([...mail.slice(0, 1500), newcomer]) });
+  const before = calls(CMUX_CALLS).length;
+  assert.equal(run({ state }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+
+  const persisted = JSON.parse(fs.readFileSync(state, "utf8"));
+  assert.equal(persisted.seen.length, 1501);
+  assert.ok(
+    !persisted.seen.includes(`sol:${mail[2000].id}`),
+    "a consumed id must drop from delivery state"
+  );
+  assert.ok(
+    persisted.seen.includes(`sol:${mail[1499].id}`),
+    "a still-unread id must stay"
+  );
 });
 
 test("failed channel delivery retries without losing eligibility", () => {

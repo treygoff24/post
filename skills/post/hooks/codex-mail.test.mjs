@@ -26,7 +26,11 @@ fs.writeFileSync(
     'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + "\\n");',
     'const control = JSON.parse(fs.readFileSync(process.env.STUB_CONTROL, "utf8"));',
     'if (control.stdout) process.stdout.write(control.stdout);',
-    "process.exit(control.exit ?? 0);",
+    // Natural exit when the control exit is 0: process.exit() would drop
+    // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
+    // 64 KiB pipe buffer), truncating the snapshot mid-line.
+    'const exit = control.exit ?? 0;',
+    "if (exit) process.exit(exit);",
     "",
   ].join("\n")
 );
@@ -493,6 +497,86 @@ test("a huge distinct-channel backlog bounds the channel summary", () => {
     run({ hook_event_name: "UserPromptSubmit", session_id: "s-huge-channel" }, { stateDir }),
     {},
     "every channel event must be marked seen after delivery"
+  );
+});
+
+function overCapMail(count = 2001) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...MAIL_A,
+    id: `20260722-010101-${index.toString(16).padStart(6, "0")}`,
+    from: "secret-sender",
+    subject: "SECRET-SUBJECT",
+  }));
+}
+
+test("an over-cap backlog is delivered once, then identical snapshots stay silent", () => {
+  const stateDir = freshStateDir();
+  const mail = overCapMail();
+  setStub({ events: mail });
+  const first = run(
+    { hook_event_name: "SessionStart", session_id: "s-overcap" },
+    { stateDir }
+  );
+  const context = first.hookSpecificOutput.additionalContext;
+  assert.match(context, /\+1981 more/);
+  assert.ok(!context.includes("SECRET"));
+  assert.ok(Buffer.byteLength(context, "utf8") <= 4096);
+
+  setStub({ events: mail });
+  assert.deepEqual(
+    run({ hook_event_name: "UserPromptSubmit", session_id: "s-overcap" }, { stateDir }),
+    {},
+    "2021 identical events must not re-notify"
+  );
+
+  const state = JSON.parse(
+    fs.readFileSync(path.join(stateDir, "session-s-overcap.json"), "utf8")
+  );
+  assert.equal(state.seen.length, 2001, "state holds the exact current snapshot keys");
+});
+
+test("a new arrival after an over-cap backlog still notifies with only the new id", () => {
+  const stateDir = freshStateDir();
+  const mail = overCapMail();
+  setStub({ events: mail });
+  run({ hook_event_name: "SessionStart", session_id: "s-overcap-arrival" }, { stateDir });
+
+  const newcomer = { ...MAIL_A, id: "20260722-040404-ddd444" };
+  setStub({ events: [...mail, newcomer] });
+  const out = run(
+    { hook_event_name: "UserPromptSubmit", session_id: "s-overcap-arrival" },
+    { stateDir }
+  );
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /20260722-040404-ddd444/);
+  assert.ok(!context.includes("20260722-010101-000000"), "no old id re-surfaces");
+});
+
+test("consumed ids drop from state while every still-unread id is kept", () => {
+  const stateDir = freshStateDir();
+  const mail = overCapMail();
+  setStub({ events: mail });
+  run({ hook_event_name: "SessionStart", session_id: "s-overcap-consume" }, { stateDir });
+
+  const remaining = mail.slice(0, 1500); // 501 worst-case ids consumed
+  setStub({ events: remaining });
+  assert.deepEqual(
+    run({ hook_event_name: "UserPromptSubmit", session_id: "s-overcap-consume" }, { stateDir }),
+    {},
+    "the shrunken snapshot is a subset of delivered ids"
+  );
+
+  const state = JSON.parse(
+    fs.readFileSync(path.join(stateDir, "session-s-overcap-consume.json"), "utf8")
+  );
+  assert.equal(state.seen.length, 1500);
+  assert.ok(
+    !state.seen.includes(`mail:codex:${mail[2000].id}`),
+    "a consumed id must drop from state"
+  );
+  assert.ok(
+    state.seen.includes(`mail:codex:${mail[1499].id}`),
+    "a still-unread id must stay"
   );
 });
 
