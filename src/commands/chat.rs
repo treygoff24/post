@@ -3,7 +3,7 @@ use crate::channel_state::ChannelState;
 use crate::cli::ChatArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::Context;
+use crate::mailbox::{signed_status, Context, SignedStatus};
 use crate::model::ChannelMessage;
 use crate::output::{self, ChatSendOutput};
 
@@ -837,14 +837,6 @@ fn full_banner_due_today(context: &Context, room: &str) -> bool {
     true
 }
 
-enum SignedStatus {
-    Verified {
-        ts: String,
-        age_minutes: Option<u64>,
-    },
-    Failed(&'static str),
-}
-
 /// The owner's render identity. The legacy fallback renders byte-identically
 /// to the pre-A0a output ("Trey"); the generic path always carries the
 /// immutable room id, so a configured label can never hide which room signed.
@@ -853,100 +845,6 @@ fn owner_display(owner: &crate::mailbox::ResolvedOwner) -> String {
         crate::mailbox::OwnerSource::Legacy => owner.label.clone(),
         crate::mailbox::OwnerSource::Configured => format!("{} ({})", owner.label, owner.room),
     }
-}
-
-/// Detect and verify a `<marker>🔏 ... [signed:<ts>]` message from the
-/// configured owner room against the owner's sidecar signature. Returns None
-/// for ordinary (unsigned) messages and for every message when no owner is
-/// configured (feature-absent, A0a Decision 2). The channel text must
-/// byte-match the signed payload — a valid sig tag pasted onto a different
-/// body fails loudly. All identity-neutral guards (rename-replay, byte-match,
-/// malformed-tag handling, age) are unchanged.
-fn signed_status(
-    owner: Option<&crate::mailbox::ResolvedOwner>,
-    message: &ChannelMessage,
-    body: &str,
-) -> Option<SignedStatus> {
-    let owner = owner?;
-    if message.from != owner.room {
-        return None;
-    }
-    let first = body.lines().next()?;
-    let rest = first.strip_prefix(&format!("{}🔏 ", owner.marker))?;
-    let (text, tag) = rest.rsplit_once(" [signed:")?;
-    let ts = tag.strip_suffix(']')?;
-    if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return Some(SignedStatus::Failed("malformed signature tag"));
-    }
-    let sigdir = &owner.sidecar_dir;
-    let payload = sigdir.join("sigs").join(format!("{ts}.txt"));
-    let sig = sigdir.join("sigs").join(format!("{ts}.txt.sig"));
-    let Ok(payload_text) = std::fs::read_to_string(&payload) else {
-        return Some(SignedStatus::Failed("no signed payload on disk"));
-    };
-    // The tag must equal the timestamp INSIDE the signed payload — otherwise
-    // copying an old valid sidecar pair to a fresh filename would relabel a
-    // stale signature as brand new (rename-replay; caught in cold review).
-    if payload_text.lines().next() != Some(ts) {
-        return Some(SignedStatus::Failed(
-            "tag does not match the timestamp inside the signed payload — possible rename-replay",
-        ));
-    }
-    if payload_text.lines().nth(1) != Some(text) {
-        return Some(SignedStatus::Failed(
-            "channel text differs from signed payload",
-        ));
-    }
-    let verify = std::process::Command::new("ssh-keygen")
-        .args([
-            "-Y",
-            "verify",
-            "-I",
-            owner.principal.as_str(),
-            "-n",
-            owner.namespace.as_str(),
-        ])
-        .arg("-f")
-        .arg(&owner.allowed_signers)
-        .arg("-s")
-        .arg(&sig)
-        .stdin(std::fs::File::open(&payload).ok()?)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match verify {
-        Ok(status) if status.success() => Some(SignedStatus::Verified {
-            ts: ts.to_owned(),
-            age_minutes: signed_age_minutes(ts),
-        }),
-        Ok(_) => Some(SignedStatus::Failed("cryptographic verification failed")),
-        Err(_) => Some(SignedStatus::Failed("ssh-keygen unavailable")),
-    }
-}
-
-/// Minutes since a compact UTC stamp like 20260805T005320Z, via civil-date
-/// math (no chrono dep). None if the stamp doesn't parse.
-fn signed_age_minutes(ts: &str) -> Option<u64> {
-    let bytes = ts.as_bytes();
-    if bytes.len() != 16 || bytes[8] != b'T' || bytes[15] != b'Z' {
-        return None;
-    }
-    let num = |range: std::ops::Range<usize>| ts.get(range)?.parse::<i64>().ok();
-    let (y, mo, d) = (num(0..4)?, num(4..6)?, num(6..8)?);
-    let (h, mi, s) = (num(9..11)?, num(11..13)?, num(13..15)?);
-    // Howard Hinnant's days_from_civil.
-    let y_adj = if mo <= 2 { y - 1 } else { y };
-    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
-    let yoe = y_adj - era * 400;
-    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let then = days * 86_400 + h * 3_600 + mi * 60 + s;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
-    (now >= then).then(|| ((now - then) / 60) as u64)
 }
 
 fn join(
@@ -1121,6 +1019,7 @@ fn advance_past_own_message(context: &Context, message: &ChannelMessage) -> AppR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mailbox::{signed_age_minutes, signed_status, SignedStatus};
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::path::{Path, PathBuf};

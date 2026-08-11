@@ -46,6 +46,11 @@ pub struct MissedChannelMessage {
     pub subject: String,
     pub sent: String,
     pub body: String,
+    /// Present only on signed-looking messages from the owner room (A0a
+    /// Decision 3): whether the sidecar signature cryptographically verifies
+    /// and the channel text matches the signed payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_verified: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

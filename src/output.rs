@@ -146,9 +146,9 @@ pub struct ChatMessageItem {
     #[serde(flatten)]
     pub message: crate::model::ChannelMessage,
     pub body: String,
-    /// Present only on 🔏-tagged messages from 'trey': true when the sidecar
-    /// signature cryptographically verifies AND the channel text matches the
-    /// signed payload.
+    /// Present only on `<marker>🔏`-tagged messages from the resolved signed
+    /// owner room: true when the sidecar signature cryptographically verifies
+    /// AND the channel text matches the signed payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signed_verified: Option<bool>,
 }
@@ -530,6 +530,35 @@ pub struct OutputShapes {
     pub who: Vec<String>,
 }
 
+/// The resolved signed owner as exposed by `post schema` (A0a Decision 6):
+/// the post-derivation config, never the raw owner.json bytes.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OwnerResolvedSchema {
+    pub room: String,
+    pub sidecar_dir: String,
+    pub allowed_signers: String,
+    pub principal: String,
+    pub namespace: String,
+    pub marker: String,
+    pub label: String,
+}
+
+/// The schema's owner block: resolution state, the parameterized wire
+/// grammar, and the resolved config. Built from the same `load_owner`
+/// resolution every badge-computing command uses, so the documented contract
+/// never drifts from what the binary verifies against (or refuses on).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OwnerSchema {
+    /// configured | legacy | none — the Decision 2 resolution states.
+    pub state: String,
+    /// The signed-wire prefix grammar. Fixed protocol; only <marker> varies.
+    pub wire_grammar: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<OwnerResolvedSchema>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SchemaOutput {
     pub ok: bool,
@@ -544,6 +573,8 @@ pub struct SchemaOutput {
     pub doctor_exit_codes: Vec<ExitSchema>,
     pub laws: Vec<String>,
     pub environment: Vec<String>,
+    /// The resolved signed owner and its wire grammar (A0a Decision 6).
+    pub owner: OwnerSchema,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -551,6 +582,9 @@ pub struct SchemaOutput {
 pub enum DoctorSeverity {
     Warning,
     Error,
+    /// Informational state (for example the owner resolution state): shown
+    /// in checks but never a finding — info-only doctors report healthy.
+    Info,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

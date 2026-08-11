@@ -41,7 +41,13 @@ pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResul
 }
 
 fn report(context: &Context, checks: Vec<DoctorCheck>, fixed: Vec<String>) -> DoctorOutput {
-    let status = if checks.is_empty() {
+    // Info checks (owner state etc.) are surface, not findings: they never
+    // flip ok/status/count, so a healthy configured mailbox still exits 0.
+    let findings = checks
+        .iter()
+        .filter(|check| check.severity != DoctorSeverity::Info)
+        .count();
+    let status = if findings == 0 {
         "healthy"
     } else if checks
         .iter()
@@ -52,10 +58,10 @@ fn report(context: &Context, checks: Vec<DoctorCheck>, fixed: Vec<String>) -> Do
         "degraded"
     };
     DoctorOutput {
-        ok: checks.is_empty(),
+        ok: findings == 0,
         status: status.to_owned(),
         root: context.root.display().to_string(),
-        count: checks.len(),
+        count: findings,
         checks,
         fixed,
         exit_codes: doctor_exit_codes(),
@@ -111,6 +117,13 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
             false,
             "Fix or delete owner.json by hand; `post owner init` recreates it create-only.",
         ));
+    } else {
+        detect_owner_surface(
+            context,
+            &owner_json_path,
+            owner_resolution.as_ref(),
+            &mut checks,
+        );
     }
 
     // profiles.json is optional and presentation-only: delivery never
@@ -588,6 +601,134 @@ fn create_dir(path: &Path, fixed: &mut Vec<String>) -> Result<(), AppError> {
         .map_err(|error| AppError::io("create doctor repair directory", path, error))?;
     fixed.push(path.display().to_string());
     Ok(())
+}
+
+/// A0a Decision 6 surface, emitted only when the trust anchor itself is
+/// usable (owner.invalid owns the broken case): the resolution state, the
+/// existence of the resolved sidecar layout (sigs/, allowed_signers),
+/// ssh-keygen presence, and stored-profile imitation collisions. Never
+/// prints secrets — room names and paths only, no key material.
+fn detect_owner_surface(
+    context: &Context,
+    owner_json_path: &Path,
+    resolution: Option<&AppResult<crate::mailbox::OwnerResolution>>,
+    checks: &mut Vec<DoctorCheck>,
+) {
+    let Some(resolution) = resolution else {
+        // Unknowable (rooms.json unusable and the registry-independent parse
+        // succeeded or the file is absent): no state line to report.
+        return;
+    };
+    let owner = match resolution {
+        Ok(crate::mailbox::OwnerResolution::Configured(owner)) => {
+            checks.push(check(
+                "owner.state",
+                DoctorSeverity::Info,
+                owner_json_path,
+                &format!(
+                    "owner: configured (room '{}'); verification badges follow the resolved owner",
+                    owner.room
+                ),
+                false,
+                "Run `post owner show` for the full resolved configuration.",
+            ));
+            Some(owner)
+        }
+        Ok(crate::mailbox::OwnerResolution::Legacy(owner)) => {
+            checks.push(check(
+                "owner.state",
+                DoctorSeverity::Info,
+                owner_json_path,
+                &format!(
+                    "owner: legacy fallback ({}) — no owner.json; consider `post owner init`",
+                    owner.room
+                ),
+                false,
+                "Run `post owner init --room <name>` to declare a configured owner.",
+            ));
+            Some(owner)
+        }
+        Ok(crate::mailbox::OwnerResolution::None) => {
+            checks.push(check(
+                "owner.state",
+                DoctorSeverity::Info,
+                owner_json_path,
+                "owner: none configured — verification badges are disabled",
+                false,
+                "Run `post owner init --room <name>` to declare a signed owner.",
+            ));
+            None
+        }
+        Err(_) => None, // owner.invalid already carries this case
+    };
+    let Some(owner) = owner else {
+        return;
+    };
+    let sigs = owner.sidecar_dir.join("sigs");
+    if !sigs.is_dir() {
+        checks.push(check(
+            "owner.sig_dir_missing",
+            DoctorSeverity::Warning,
+            &sigs,
+            "signed owner's sigs/ directory does not exist; tagged owner messages render Failed until it does",
+            false,
+            "Run `post owner init` (it creates sigs/) or let porch's onboarding build the sidecar layout.",
+        ));
+    }
+    if !owner.allowed_signers.is_file() {
+        checks.push(check(
+            "owner.allowed_signers_missing",
+            DoctorSeverity::Warning,
+            &owner.allowed_signers,
+            "owner allowed_signers file does not exist; signature verification cannot run",
+            false,
+            "porch's onboarding authors the signer line; until then tagged owner messages render Failed.",
+        ));
+    }
+    if std::process::Command::new("ssh-keygen")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        checks.push(check(
+            "owner.keygen_missing",
+            DoctorSeverity::Warning,
+            owner_json_path,
+            "ssh-keygen is not on PATH; signature verification cannot run",
+            false,
+            "Install OpenSSH or ensure ssh-keygen is reachable on PATH.",
+        ));
+    }
+    // A0a Decision 4: existing profiles that collide with the configured
+    // owner are flagged, never retroactively rejected. Mirrors the
+    // skeleton predicate profile set enforces.
+    if let Ok(profiles) = crate::profile::load_profiles(context) {
+        let owner_skel = crate::profile::skeleton(&owner.room);
+        let profiles_path = context.root.join(crate::profile::PROFILES_FILE);
+        for (room, profile) in &profiles {
+            let collides = profile
+                .name
+                .as_deref()
+                .map(|name| {
+                    !name.trim().is_empty() && crate::profile::skeleton(name.trim()) == owner_skel
+                })
+                .unwrap_or(false);
+            if collides {
+                checks.push(check(
+                    &format!("owner.imitation_collision.{room}"),
+                    DoctorSeverity::Warning,
+                    &profiles_path,
+                    &format!(
+                        "stored display name for room '{room}' imitates the signed owner '{owner_room}' and will never stamp as-is",
+                        owner_room = owner.room
+                    ),
+                    false,
+                    "Re-run `post profile set --name '<other name>'` from that room.",
+                ));
+            }
+        }
+    }
 }
 
 fn check(

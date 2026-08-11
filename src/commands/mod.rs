@@ -31,7 +31,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Rooms(args) => rooms::run(&context, args, cli.pretty),
         Command::Profile(args) => profile::run(&context, args, cli.pretty),
         Command::Owner(args) => owner::run(&context, args, cli.pretty),
-        Command::Schema => schema::run(cli.pretty),
+        Command::Schema => schema::run(&context, cli.pretty),
         Command::Watch(args) => watch::run(&context, args),
         Command::Who(args) => who::run(&context, args, cli.pretty),
     }

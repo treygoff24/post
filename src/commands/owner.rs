@@ -62,13 +62,23 @@ fn init(context: &Context, args: OwnerInitArgs, pretty: bool) -> AppResult<Comma
         Err(error) => return Err(AppError::io("inspect owner config", &path, error)),
     }
 
+    let sigs = would_be.sidecar_dir.join("sigs");
+    // Pre-commit ordering (A0a Decision 5): the sidecar scaffold is created
+    // BEFORE owner.json commits, so a failed install (e.g. an unwritable
+    // sidecar) leaves NO owner.json behind — the retry is a clean first
+    // run, not an "already configured" trap with missing sigs. create_dir_all
+    // is idempotent, so this weakens nothing about create-only semantics;
+    // a refuse path above still returns before anything is created.
+    fs::create_dir_all(&sigs)
+        .map_err(|error| AppError::io("create owner sigs directory", &sigs, error))?;
     let mut bytes = serde_json::to_vec_pretty(&file)
         .map_err(|error| AppError::io("serialize owner config", &path, error))?;
     bytes.push(b'\n');
     // Create-only commit via the no-replace primitive: `create_new` temp,
-    // write+sync, then hard_link to the destination. A destination created
-    // between the precheck above and this commit surfaces as AlreadyExists
-    // and routes to the compare branch — rename would silently REPLACE it.
+    // write+sync (0600), then hard_link to the destination. A destination
+    // created between the precheck above and this commit surfaces as
+    // AlreadyExists and routes to the compare branch — rename would silently
+    // REPLACE it.
     match crate::mailbox::exclusive_atomic_write(&path, &bytes) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -76,10 +86,6 @@ fn init(context: &Context, args: OwnerInitArgs, pretty: bool) -> AppResult<Comma
         }
         Err(error) => return Err(AppError::io("create owner config", &path, error)),
     }
-
-    let sigs = would_be.sidecar_dir.join("sigs");
-    fs::create_dir_all(&sigs)
-        .map_err(|error| AppError::io("create owner sigs directory", &sigs, error))?;
     let output = OwnerInitOutput {
         ok: true,
         created: true,
@@ -107,6 +113,12 @@ fn compare_existing(
     let rooms = context.load_rooms()?;
     let existing = crate::mailbox::resolve_owner_file(context, &existing_file, &rooms)?;
     if existing == *would_be {
+        // Complete a stranded install: an identical retry re-runs the sidecar
+        // scaffold so a retry after a mid-install failure (or a config that
+        // predates A0a) ends fully provisioned, never half-configured.
+        let sigs = existing.sidecar_dir.join("sigs");
+        fs::create_dir_all(&sigs)
+            .map_err(|error| AppError::io("create owner sigs directory", &sigs, error))?;
         let output = OwnerInitOutput {
             ok: true,
             created: false,
@@ -156,25 +168,31 @@ fn diff_owners(left: &ResolvedOwner, right: &ResolvedOwner) -> Vec<String> {
     diffs
 }
 
-/// What still blocks verification, as a human-readable checklist: absent
-/// allowed_signers file and absent signature pair (sigs/ holds no .sig).
-/// Valid-config-missing-key-material is runtime absence, never ConfigInvalid.
+/// What still blocks verification, as a human-readable checklist. Only
+/// observable facts are asserted: post can see the allowed_signers file and
+/// whether signed payloads have arrived, but NEVER the signing key — porch
+/// generates and holds it (possibly on another host), so no on-disk state
+/// here is ever claimed to be a "key pair". Valid-config-missing-key-
+/// material is runtime absence, never ConfigInvalid.
 fn missing_material(owner: &ResolvedOwner) -> Vec<String> {
     let mut missing = Vec::new();
     if !owner.allowed_signers.is_file() {
-        missing.push("allowed_signers file (porch's onboarding writes the signer line)".to_owned());
+        missing.push(
+            "allowed_signers file (porch's onboarding writes the signer line; verification reads it)"
+                .to_owned(),
+        );
     }
     let sigs = owner.sidecar_dir.join("sigs");
-    let has_pair = fs::read_dir(&sigs)
+    let has_payloads = fs::read_dir(&sigs)
         .map(|entries| {
             entries.flatten().any(|entry| {
                 entry.path().extension().and_then(|value| value.to_str()) == Some("sig")
             })
         })
         .unwrap_or(false);
-    if !has_pair {
+    if !has_payloads {
         missing.push(
-            "signing key pair (porch's onboarding generates the key; post only verifies)"
+            "signed message payloads — evidence signing is wired; post cannot see the key itself, porch generates it from its onboarding and signs messages"
                 .to_owned(),
         );
     }

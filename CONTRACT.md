@@ -37,7 +37,9 @@ The public language is model-neutral; the default root remains
 
 ## On-disk format (existing mail must keep working)
 
-- Root `~/.claude-mail/` (override: `POST_MAIL_ROOT` env, for tests).
+- Root `~/.claude-mail/` (override: `POST_MAIL_ROOT` env — a supported
+  first-class root override, r2.1; the value must be absolute, and the
+  harness/agent invoking post sets it deliberately, never for tests only).
 - `rooms.json`: `{name: path-with-tilde}`. `rules.json`: `{"blocked":
   [{"from","to","reason"}]}`. First run creates the original defaults,
   including the agent-memory ARMED INSTRUMENT rule. New config files use mode
@@ -320,7 +322,7 @@ results, stderr = diagnostics/errors.
   — per-room display name + emoji sigil, stored in root `profiles.json`
   (reserved as a room name) under the rooms lock.
 - PRESENTATION ONLY: no profile value may influence identity, auth, routing,
-  blocked routes, cursors, room resolution, or signed-Trey verification. The
+  blocked routes, cursors, room resolution, or signed-owner verification. The
   immutable `(room-id)` suffix is a HARD INVARIANT of every render path that
   shows a display name (chat banners, read, inbox --text, watch --text);
   no future renderer may drop or truncate it. Residual non-NFKC homoglyph

@@ -1,8 +1,39 @@
 use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
-use crate::output::{self, CommandSchema, ErrorSchema, ExitSchema, OutputShapes, SchemaOutput};
+use crate::mailbox::{load_owner, Context, OwnerResolution};
+use crate::output::{
+    self, CommandSchema, ErrorSchema, ExitSchema, OutputShapes, OwnerResolvedSchema, OwnerSchema,
+    SchemaOutput,
+};
 
-pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
+pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
+    // Decision 3 matrix: schema is an anchor-loading surface. A malformed
+    // owner.json is ConfigInvalid here — the schema never partial-renders a
+    // trust anchor it does not understand.
+    let resolution = load_owner(context)?;
+    let owner_block = match &resolution {
+        OwnerResolution::Configured(owner) => OwnerSchema {
+            state: "configured".to_owned(),
+            wire_grammar: format!("<marker:{}>🔏 <text> [signed:<ts>]", owner.marker),
+            note: None,
+            owner: Some(resolved_schema(owner)),
+        },
+        OwnerResolution::Legacy(owner) => OwnerSchema {
+            state: "legacy".to_owned(),
+            wire_grammar: format!("<marker:{}>🔏 <text> [signed:<ts>]", owner.marker),
+            note: Some(format!(
+                "legacy fallback ({}); consider `post owner init`.",
+                owner.room
+            )),
+            owner: Some(resolved_schema(owner)),
+        },
+        OwnerResolution::None => OwnerSchema {
+            state: "none".to_owned(),
+            wire_grammar: "<marker>🔏 <text> [signed:<ts>]".to_owned(),
+            note: Some("no signed owner configured; verification badges are disabled".to_owned()),
+            owner: None,
+        },
+    };
     let commands = vec![
         command(
             "send",
@@ -14,7 +45,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "chat",
             "post chat <channel> [--peek | --limit <n> | --history <n> [--grep <pat>] | --since <id>] [--framing auto|full|compact] | post chat <channel> --discard | post chat <channel> --discard-through <id> | post chat <channel> --seen-by <id> | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --discard-through <id> advances the cursor exactly through one message (full id or a prefix unique in that channel), refuses when an unreadable message sits between the cursor and the target, is replay-safe (a target at or behind the cursor succeeds with advanced=false and an unchanged cursor), and reports prior_cursor and cursor; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing (body-returning reads only, rejected on --send/--join/--discard/--discard-through/--seen-by) selects auto (default: legacy once-daily wall on text, full laws elsewhere), full (the complete wall every invocation), or compact (condensed laws in one line); explicit full and compact are stateless per-invocation and never consult or stamp the banner-day state, JSON framing source/authority are unchanged in every mode, and there is no none mode; messages from the trey room tagged [signed:TS] are verified against ~/.trey-room/sigs/",
+            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --discard-through <id> advances the cursor exactly through one message (full id or a prefix unique in that channel), refuses when an unreadable message sits between the cursor and the target, is replay-safe (a target at or behind the cursor succeeds with advanced=false and an unchanged cursor), and reports prior_cursor and cursor; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing (body-returning reads only, rejected on --send/--join/--discard/--discard-through/--seen-by) selects auto (default: legacy once-daily wall on text, full laws elsewhere), full (the complete wall every invocation), or compact (condensed laws in one line); explicit full and compact are stateless per-invocation and never consult or stamp the banner-day state, JSON framing source/authority are unchanged in every mode, and there is no none mode; channel messages from the OWNER room whose first line matches the signed-wire grammar <marker>🔏 <text> [signed:TS] are verified against the resolved owner's sidecar — see the schema `owner` block for sigs/ + allowed_signers (legacy fallback: a registered 'trey' room, sidecar at its registered path like ~/.trey-room)",
         ),
         command(
             "channels",
@@ -109,6 +140,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "doctor_exit_codes",
             "laws",
             "environment",
+            "owner (state: configured|legacy|none, wire_grammar, note?, owner?: {room, sidecar_dir, allowed_signers, principal, namespace, marker, label})",
         ]),
         send_json: fields(&["ok", "envelope", "archived"]),
         chat_join: fields(&[
@@ -174,7 +206,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
         global_flags: fields(&[
             "--json: switch send/read/chat from text to JSON; inbox/rooms/channels/profile/schema/doctor/who are already JSON",
             "--pretty: pretty-print JSON",
-            "--room <name>: command option for inbox/read/watch/who only; repeat on watch/who to select rooms; chat and channels derive identity from cwd and reject --room",
+            "--room <name>: command option for inbox/read/watch/who only; chat and channels derive identity from cwd and reject --room",
         ]),
         commands,
         output_shapes,
@@ -186,6 +218,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "error.retryable",
             "error.suggested_fix",
         ]),
+        owner: owner_block,
         error_codes: errors,
         exit_codes: vec![
             exit(0, "success, including empty results"),
@@ -227,7 +260,7 @@ pub(super) fn run(pretty: bool) -> AppResult<CommandResult> {
             "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
         ]),
         environment: fields(&[
-            "POST_MAIL_ROOT: absolute mailbox root override; intended for tests",
+            "POST_MAIL_ROOT: absolute mailbox root override — a supported first-class root (r2.1); must be absolute, defaults to $HOME/.claude-mail",
             "HOME: resolves the default ~/.claude-mail root and ~/ room paths",
         ]),
     };
@@ -259,5 +292,17 @@ fn exit(code: i32, meaning: &str) -> ExitSchema {
     ExitSchema {
         code,
         meaning: meaning.to_owned(),
+    }
+}
+
+fn resolved_schema(owner: &crate::mailbox::ResolvedOwner) -> OwnerResolvedSchema {
+    OwnerResolvedSchema {
+        room: owner.room.clone(),
+        sidecar_dir: owner.sidecar_dir.display().to_string(),
+        allowed_signers: owner.allowed_signers.display().to_string(),
+        principal: owner.principal.clone(),
+        namespace: owner.namespace.clone(),
+        marker: owner.marker.clone(),
+        label: owner.label.clone(),
     }
 }

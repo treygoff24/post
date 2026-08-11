@@ -4732,3 +4732,877 @@ fn crossed_send_bounces_on_unreadable_past_cursor() {
     ));
     assert!(forced.ok);
 }
+
+// ---------------------------------------------------------------------------
+// A0a Decision-7 acceptance fixtures (signed owner). Each numbered fixture
+// below maps 1:1 to the contract's fixture list; the helpers build a real
+// owner config and, where the fixture demands real crypto, drive the same
+// ssh-keygen binary post shells out to (macOS ships it; the suite refuses
+// to fake key state).
+// ---------------------------------------------------------------------------
+
+fn owner_show(sandbox: &Sandbox) -> serde_json::Value {
+    let output = sandbox.run(&["owner", "show"]);
+    assert_success(&output);
+    from_stdout(&output)
+}
+
+fn owner_init_json(sandbox: &Sandbox, args: &[&str]) -> (Output, serde_json::Value) {
+    let mut full = vec!["owner", "init"];
+    full.extend_from_slice(args);
+    let output = sandbox.run(&full);
+    assert_success(&output);
+    let value: serde_json::Value = from_stdout(&output);
+    (output, value)
+}
+
+fn owner_peer(sandbox: &Sandbox, name: &str) -> PathBuf {
+    // rooms add canonicalizes every registered workspace; the sandbox's
+    // seed rooms must exist or each add warns on stderr (assert_success
+    // treats any unexpected stderr as a failure).
+    create_default_room_paths(sandbox);
+    let dir = sandbox.path.join(name);
+    fs::create_dir_all(&dir).expect("create owner peer room dir");
+    register_room(sandbox, name, &dir);
+    dir
+}
+
+/// Register `mara` and configure it as the owner with default derivations.
+fn configured_mara(sandbox: &Sandbox) -> (PathBuf, serde_json::Value) {
+    let mara = owner_peer(sandbox, "mara");
+    let (_, shown) = owner_init_json(sandbox, &["--room", "mara"]);
+    assert_eq!(shown["created"], true);
+    (mara, shown)
+}
+
+fn owner_json_path(sandbox: &Sandbox) -> PathBuf {
+    sandbox.mail_root.join("owner.json")
+}
+
+/// Real-sign `<text>` at `<ts>` under the resolved owner: scratch ed25519
+/// key via ssh-keygen, allowed_signers authored from the generated public
+/// key, payload written to <sidecar>/sigs/<ts>.txt and signed to
+/// <ts>.txt.sig — exactly the layout porch's onboarding produces.
+fn sign_for_owner(sandbox: &Sandbox, ts: &str, text: &str) {
+    let shown = owner_show(sandbox);
+    let owner = shown["owner"].as_object().expect("resolved owner in show");
+    let sidecar = PathBuf::from(owner["sidecar_dir"].as_str().expect("sidecar_dir"));
+    let principal = owner["principal"].as_str().expect("principal");
+    let namespace = owner["namespace"].as_str().expect("namespace");
+    let signers = PathBuf::from(owner["allowed_signers"].as_str().expect("allowed_signers"));
+    let keydir = sandbox.path.join("signer-key");
+    fs::create_dir_all(&keydir).expect("key dir");
+    let key = keydir.join("owner_ed25519");
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run ssh-keygen")
+            .success(),
+        "ssh-keygen key generation failed"
+    );
+    let public = fs::read_to_string(key.with_extension("pub")).expect("generated public key");
+    fs::write(
+        &signers,
+        format!("{principal} namespaces=\"{namespace}\" {}\n", public.trim()),
+    )
+    .expect("author allowed_signers");
+    let sigs = sidecar.join("sigs");
+    fs::create_dir_all(&sigs).expect("sigs dir");
+    let payload = sigs.join(format!("{ts}.txt"));
+    fs::write(&payload, format!("{ts}\n{text}\n")).expect("payload");
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-Y", "sign", "-f"])
+            .arg(&key)
+            .arg("-n")
+            .arg(namespace)
+            .arg(&payload)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run ssh-keygen sign")
+            .success(),
+        "ssh-keygen signing failed"
+    );
+}
+
+fn chat_peek_json(sandbox: &Sandbox, channel: &str, cwd: &Path) -> serde_json::Value {
+    from_stdout(&sandbox.run_in(&["chat", channel, "--peek", "--json"], None, cwd))
+}
+
+fn chat_peek_text(sandbox: &Sandbox, channel: &str, cwd: &Path) -> String {
+    stdout(&sandbox.run_in(&["chat", channel, "--peek"], None, cwd))
+}
+
+/// Fixture 1: non-default owner end-to-end with a REAL ssh-keygen key pair.
+/// Assert `trey`-sent 🧔🔏 text gets NO badge under that config.
+#[test]
+fn a0a_f1_non_trey_owner_real_sign_verifies_and_trey_gets_no_badge() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    const TS: &str = "20260101T000000Z";
+    const OWNED: &str = "hello from the signed owner";
+    sign_for_owner(&sandbox, TS, OWNED);
+    join_channel(&sandbox, "owned", &alpha);
+    join_channel(&sandbox, "owned", &mara);
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "owned",
+            "--send",
+            "--body",
+            format!("🧔🔏 {OWNED} [signed:{TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    // A trey-sent message with the same wire shape lands in the same channel.
+    write_channel_message(
+        &sandbox,
+        "owned",
+        "20990101-120000-000001-aaaaaa",
+        "trey",
+        "",
+        "🧔🔏 fake trey wire [signed:X]",
+    );
+    let read = chat_peek_json(&sandbox, "owned", &alpha);
+    let messages = read["messages"].as_array().expect("messages");
+    assert!(
+        messages.iter().any(|message| {
+            message["from"] == "mara"
+                && message.get("signed_verified") == Some(&serde_json::Value::Bool(true))
+        }),
+        "real signature must verify under the non-default owner"
+    );
+    // Join events and the trey fixture message carry no badge: everything
+    // not from the owner room (or not on the signed wire) stays unbadged.
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["from"] != "trey" || message.get("signed_verified").is_none()),
+        "trey-sent text must never badge under owner mara"
+    );
+    // Text render carries the immutable room id for the configured owner.
+    assert!(
+        chat_peek_text(&sandbox, "owned", &alpha).contains("Mara (mara)"),
+        "configured owner render must carry (mara)"
+    );
+}
+
+/// Fixture 2: legacy fallback — no owner.json + a registered trey room
+/// resolves the pre-A0a owner and renders byte-identically (label `Trey`
+/// with no room id).
+#[test]
+fn a0a_f2_legacy_fallback_resolves_trey_byte_identical() {
+    let sandbox = Sandbox::new();
+    let trey = owner_peer(&sandbox, "trey");
+    let other = owner_peer(&sandbox, "other");
+    let shown = owner_show(&sandbox);
+    assert_eq!(shown["state"], "legacy");
+    assert_eq!(shown["owner"]["room"], "trey");
+    assert_eq!(shown["owner"]["principal"], "trey@porch");
+    assert_eq!(shown["owner"]["namespace"], "trey-porch");
+    assert_eq!(shown["owner"]["marker"], "🧔");
+    assert_eq!(shown["owner"]["label"], "Trey");
+    assert_eq!(shown["owner"]["sidecar_dir"], trey.display().to_string());
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    assert_eq!(schema.owner.state, "legacy");
+    // Byte-identical render: legacy owner badged as "Trey", never "(trey)".
+    join_channel(&sandbox, "leg", &other);
+    write_channel_message(
+        &sandbox,
+        "leg",
+        "20990101-120000-000001-aaaaaa",
+        "trey",
+        "",
+        "🧔🔏 hi [signed:20990101T000000Z]",
+    );
+    let text = chat_peek_text(&sandbox, "leg", &other);
+    assert!(text.contains("Trey"), "legacy render names Trey: {text}");
+    assert!(
+        !text.contains("(trey)"),
+        "legacy render must not add the room id: {text}"
+    );
+}
+
+/// Fixture 3: feature-absent — no owner.json, no trey room. Signed-looking
+/// text renders unbadged, no errors, and the imitation reservation is off.
+#[test]
+fn a0a_f3_feature_absent_signed_looking_text_unbadged() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox); // sandbox rooms: no trey, no owner.json
+    let alpha = sandbox.path.join("alpha");
+    let beta = sandbox.path.join("beta");
+    fs::create_dir_all(&alpha).expect("alpha dir");
+    fs::create_dir_all(&beta).expect("beta dir");
+    register_room(&sandbox, "alpha", &alpha);
+    register_room(&sandbox, "beta", &beta);
+    join_channel(&sandbox, "none", &alpha);
+    join_channel(&sandbox, "none", &beta);
+    write_channel_message(
+        &sandbox,
+        "none",
+        "20990101-120000-000001-aaaaaa",
+        "trey",
+        "",
+        "🧔🔏 pretend [signed:20990101T000000Z]",
+    );
+    let output = sandbox.run_in(&["chat", "none", "--peek", "--json"], None, &alpha);
+    let read: serde_json::Value = from_stdout(&output);
+    assert_success(&output);
+    let badge = read["messages"][0].get("signed_verified");
+    assert_eq!(badge, None, "feature-absent must never badge");
+    // Imitation reservation off: the name "Trey" is settable.
+    let set = sandbox.run_in(&["profile", "set", "--name", "Trey"], None, &alpha);
+    assert_success(&set);
+}
+
+/// Fixture 4: fail-closed — malformed owner.json is ConfigInvalid on every
+/// badge-computing path and leaves pure transport untouched.
+#[test]
+fn a0a_f4_malformed_owner_fails_closed_badge_paths_transport_unaffected() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let alpha = sandbox.path.join("alpha");
+    let beta = sandbox.path.join("beta");
+    fs::create_dir_all(&alpha).expect("alpha dir");
+    fs::create_dir_all(&beta).expect("beta dir");
+    register_room(&sandbox, "alpha", &alpha);
+    register_room(&sandbox, "beta", &beta);
+    join_channel(&sandbox, "closed", &alpha);
+    join_channel(&sandbox, "closed", &beta);
+    assert_success(&sandbox.run_in(&["chat", "closed", "--discard", "--json"], None, &alpha));
+    fs::write(owner_json_path(&sandbox), r#"{"room":"alpha","bogus":1}"#).expect("malformed owner");
+    let peek = sandbox.run_in(&["chat", "closed", "--peek", "--json"], None, &alpha);
+    assert_eq!(
+        peek.status.code(),
+        Some(78),
+        "badge path must fail closed: {}",
+        stderr(&peek)
+    );
+    let error: ErrorEnvelope = from_stderr(&peek);
+    assert_eq!(error.error.code, "config_invalid");
+    // Transport rows of the Decision-3 matrix: unaffected.
+    assert_success(&sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "freeform-sender",
+        "--body",
+        "x",
+    ]));
+    assert_success(&sandbox.run_in(&["chat", "other1", "--join", "--json"], None, &alpha));
+    assert_success(&sandbox.run_in(&["chat", "closed", "--discard", "--json"], None, &alpha));
+    assert_success(&sandbox.run(&["rooms"]));
+    assert_success(&sandbox.run(&["inbox", "--room", "alpha"]));
+    assert_success(&sandbox.run(&["watch", "--snapshot", "--room", "alpha"]));
+    let sent: SendOutput = from_stdout(&sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "freeform-sender",
+        "--body",
+        "read me",
+        "--json",
+    ]));
+    assert_success(&sandbox.run(&["read", &sent.envelope.id, "--room", "claude-space"]));
+    let history = sandbox.run_in(
+        &["chat", "closed", "--history", "5", "--json"],
+        None,
+        &alpha,
+    );
+    assert_eq!(
+        history.status.code(),
+        Some(78),
+        "history is badge-computing"
+    );
+}
+
+/// Fixture 5: imitation reservation tracks the configured owner; doctor
+/// flags stored collisions; the skeleton predicate itself is unchanged.
+#[test]
+fn a0a_f5_imitation_tracks_configured_owner_and_doctor_flags_collisions() {
+    let sandbox = Sandbox::new();
+    let alpha = owner_peer(&sandbox, "alpha");
+    configured_mara(&sandbox);
+    for imitative in ["Mara", "mara_", "M A R A", "MARa"] {
+        let set = sandbox.run_in(&["profile", "set", "--name", imitative], None, &alpha);
+        assert_eq!(
+            set.status.code(),
+            Some(2),
+            "name {imitative:?} must be refused as imitative: {}",
+            stderr(&set)
+        );
+    }
+    assert_success(&sandbox.run_in(&["profile", "set", "--name", "Not Mara"], None, &alpha));
+    // A stored collision (hand-edited registry, as if configured after the
+    // profile existed) is flagged by doctor, never retroactively rejected.
+    fs::write(
+        sandbox.mail_root.join("profiles.json"),
+        r#"{"alpha":{"name":"Mara"}}"#,
+    )
+    .expect("colliding profiles.json");
+    let doctor: DoctorOutput = from_stdout(&sandbox.run(&["doctor"]));
+    assert!(
+        doctor
+            .checks
+            .iter()
+            .any(|check| check.id == "owner.imitation_collision.alpha"),
+        "doctor must flag the stored imitation collision: {:?}",
+        doctor
+            .checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Fixture 6: rename-replay and byte-match guards are identity-neutral —
+/// they fire under a non-default owner exactly as under trey.
+#[test]
+fn a0a_f6_rename_replay_and_byte_guards_under_non_default_owner() {
+    let sandbox = Sandbox::new();
+    let (mara, _) = configured_mara(&sandbox);
+    let alpha = owner_peer(&sandbox, "alpha");
+    const TS: &str = "20260101T000000Z";
+    const OWNED: &str = "the genuine text";
+    sign_for_owner(&sandbox, TS, OWNED);
+    join_channel(&sandbox, "guards", &alpha);
+    join_channel(&sandbox, "guards", &mara);
+    // Genuine: verifies.
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "guards",
+            "--send",
+            "--body",
+            format!("🧔🔏 {OWNED} [signed:{TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    // Byte-match guard: same tag, different text.
+    write_channel_message(
+        &sandbox,
+        "guards",
+        "20990101-120000-000002-aaaaaa",
+        "mara",
+        "",
+        &format!("🧔🔏 tampered text [signed:{TS}]"),
+    );
+    // Rename-replay guard: an old valid pair relabeled under a fresh tag.
+    let sigs = mara.join("sigs");
+    let replayed = sigs.join("20990101T000000Z.txt");
+    fs::write(&replayed, format!("{TS}\n{OWNED}\n")).expect("replayed payload");
+    fs::copy(
+        sigs.join(format!("{TS}.txt.sig")),
+        sigs.join("20990101T000000Z.txt.sig"),
+    )
+    .expect("replayed sig");
+    write_channel_message(
+        &sandbox,
+        "guards",
+        "20990101-120000-000003-aaaaaa",
+        "mara",
+        "",
+        "🧔🔏 the genuine text [signed:20990101T000000Z]",
+    );
+    let read = chat_peek_json(&sandbox, "guards", &alpha);
+    let messages = read["messages"].as_array().expect("messages");
+    let verdict = |id: &str| {
+        messages
+            .iter()
+            .find(|message| message["id"] == id)
+            .expect(id)
+            .get("signed_verified")
+            .cloned()
+    };
+    // The genuine message is the one sent through `chat --send`.
+    assert!(
+        messages.iter().any(|message| {
+            message["from"] == "mara"
+                && message.get("signed_verified") == Some(&serde_json::Value::Bool(true))
+        }),
+        "genuine signature must verify under the non-default owner"
+    );
+    assert_eq!(
+        verdict("20990101-120000-000002-aaaaaa"),
+        Some(serde_json::Value::Bool(false)),
+        "byte mismatch must fail"
+    );
+    assert_eq!(
+        verdict("20990101-120000-000003-aaaaaa"),
+        Some(serde_json::Value::Bool(false)),
+        "rename-replay must fail"
+    );
+    let text = chat_peek_text(&sandbox, "guards", &alpha);
+    assert!(
+        text.contains("differs from signed payload"),
+        "byte guard names itself: {text}"
+    );
+    assert!(
+        text.contains("rename-replay"),
+        "replay guard names itself: {text}"
+    );
+}
+
+/// Fixture 7: init mutation semantics — create-only, idempotent-identical,
+/// refusal on different/malformed/symlink, 0600 mode, and the failed-install
+/// recovery (unwritable sidecar leaves NO owner.json; a retry completes).
+#[cfg(unix)]
+#[test]
+fn a0a_f7_owner_init_create_only_and_failed_install_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    let mara = owner_peer(&sandbox, "mara");
+    let path = owner_json_path(&sandbox);
+    let (_, created) = owner_init_json(&sandbox, &["--room", "mara"]);
+    assert_eq!(created["created"], true);
+    assert_eq!(created["already_configured"], false);
+    assert!(
+        fs::metadata(&path)
+            .expect("owner.json")
+            .permissions()
+            .mode()
+            & 0o777
+            == 0o600,
+        "owner.json must be 0600"
+    );
+    // Identical retry: idempotent success.
+    let (_, again) = owner_init_json(&sandbox, &["--room", "mara"]);
+    assert_eq!(again["already_configured"], true);
+    assert_eq!(again["created"], false);
+    // Different existing config: refused, file untouched, diff in reason.
+    let different = sandbox.run(&["owner", "init", "--room", "mara", "--label", "Other"]);
+    assert_eq!(
+        different.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&different)
+    );
+    let error: ErrorEnvelope = from_stderr(&different);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(error
+        .error
+        .details
+        .reason
+        .as_deref()
+        .is_some_and(|r| r.contains("label")));
+    assert_eq!(
+        owner_show(&sandbox)["owner"]["label"],
+        "Mara",
+        "existing file must be untouched"
+    );
+    // Malformed existing config: refused with the parse error.
+    fs::write(&path, "{not json").expect("malformed owner.json");
+    let malformed = sandbox.run(&["owner", "init", "--room", "mara"]);
+    assert_eq!(malformed.status.code(), Some(78));
+    // Symlink at the path: refused, no follow, no replace.
+    fs::remove_file(&path).expect("remove malformed owner");
+    fs::write(sandbox.path.join("target.json"), r#"{"room":"mara"}"#).expect("target");
+    std::os::unix::fs::symlink(sandbox.path.join("target.json"), &path).expect("symlink");
+    let symlinked = sandbox.run(&["owner", "init", "--room", "mara"]);
+    assert_eq!(
+        symlinked.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&symlinked)
+    );
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("metadata")
+            .file_type()
+            .is_symlink(),
+        "the symlink must survive, never be replaced"
+    );
+    fs::remove_file(&path).expect("remove symlink");
+    // Failed-install recovery (Sol's black-box repro): with NO sigs scaffold
+    // yet, an unwritable sidecar aborts BEFORE owner.json commits (rc 75, no
+    // file); retry after the fix completes cleanly with sigs present.
+    fs::remove_dir_all(mara.join("sigs")).expect("model the never-provisioned sidecar");
+    fs::set_permissions(&mara, fs::Permissions::from_mode(0o555)).expect("lock sidecar");
+    let failed = sandbox.run(&["owner", "init", "--room", "mara"]);
+    assert_eq!(
+        failed.status.code(),
+        Some(75),
+        "stderr: {}",
+        stderr(&failed)
+    );
+    assert!(
+        !path.exists(),
+        "a failed install must not strand owner.json"
+    );
+    fs::set_permissions(&mara, fs::Permissions::from_mode(0o755)).expect("unlock sidecar");
+    let (_, recovered) = owner_init_json(&sandbox, &["--room", "mara"]);
+    assert_eq!(recovered["created"], true);
+    assert!(
+        mara.join("sigs").is_dir(),
+        "retry must complete the sigs scaffold"
+    );
+    // Identical retry COMPLETES a half-configured state: a config that
+    // exists with sigs missing (the pre-A0a stranded shape) gets its
+    // sidecar scaffold on the already_configured path.
+    fs::remove_dir_all(mara.join("sigs")).expect("model stranded old install");
+    let (_, completed) = owner_init_json(&sandbox, &["--room", "mara"]);
+    assert_eq!(completed["already_configured"], true);
+    assert!(
+        mara.join("sigs").is_dir(),
+        "identical retry must complete the sigs scaffold"
+    );
+    // Adversarial commit race: a destination created between the precheck
+    // and the hard-link commit routes to the SAME compare branch as a
+    // pre-existing file (the primitive refuses AlreadyExists and never
+    // replaces; compare_existing handles both entries). Prove the observable
+    // contract: a concurrently-created owner.json with different content is
+    // refused and left byte-identical.
+    fs::write(&path, r#"{"room":"mara","label":"Concurrent"}"#).expect("racing writer");
+    let raced = sandbox.run(&["owner", "init", "--room", "mara"]);
+    assert_eq!(raced.status.code(), Some(78));
+    assert_eq!(
+        fs::read_to_string(&path).expect("reread"),
+        r#"{"room":"mara","label":"Concurrent"}"#,
+        "the racing writer's owner.json must be untouched"
+    );
+}
+
+/// Fixture 8: raw `~` in rooms.json — derivation always uses the normalized
+/// resolved path, never a literal `~` sidecar.
+#[test]
+fn a0a_f8_raw_tilde_registry_derives_absolute_sidecar() {
+    let sandbox = Sandbox::new_unseeded();
+    fs::create_dir_all(&sandbox.mail_root).expect("mail root");
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        r#"{"mara": "~/.mara-room"}"#,
+    )
+    .expect("registry with literal tilde");
+    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked":[]}"#).expect("rules");
+    owner_init_json(&sandbox, &["--room", "mara"]);
+    let shown = owner_show(&sandbox);
+    let sidecar = shown["owner"]["sidecar_dir"].as_str().expect("sidecar_dir");
+    assert!(
+        !sidecar.contains('~'),
+        "resolved sidecar leaked a literal tilde: {sidecar}"
+    );
+    assert_eq!(
+        PathBuf::from(sidecar),
+        sandbox.home.join(".mara-room"),
+        "derivation from the registered path"
+    );
+}
+
+/// Fixture 9: immutable-id render — verified output always carries
+/// (<room>) under a configured label, and hostile labels are rejected at
+/// load.
+#[test]
+fn a0a_f9_immutable_room_id_renders_under_every_label_and_hostile_labels_rejected() {
+    let sandbox = Sandbox::new();
+    let (mara, _) = configured_mara(&sandbox);
+    let alpha = owner_peer(&sandbox, "alpha");
+    const TS: &str = "20260101T000000Z";
+    const OWNED: &str = "labelled and verified";
+    sign_for_owner(&sandbox, TS, OWNED);
+    join_channel(&sandbox, "labelled", &alpha);
+    join_channel(&sandbox, "labelled", &mara);
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "labelled",
+            "--send",
+            "--body",
+            format!("🧔🔏 {OWNED} [signed:{TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    let text = chat_peek_text(&sandbox, "labelled", &alpha);
+    assert!(
+        text.contains("[🔏 VERIFIED — Mara (mara), signed"),
+        "generic render must carry the immutable room id: {text}"
+    );
+    // Hostile labels: bidi control, over-long, whitespace-only. Each fails
+    // LOAD validation (the config stays whatever it was).
+    let overlong = "x".repeat(33);
+    for (label, needle) in [
+        ("evil\u{202E}name", "control, bidi"),
+        (overlong.as_str(), "exceeds 32"),
+        ("   ", "whitespace-only"),
+    ] {
+        let init = sandbox.run(&["owner", "init", "--room", "mara", "--label", label]);
+        assert_eq!(
+            init.status.code(),
+            Some(78),
+            "label {label:?}: {}",
+            stderr(&init)
+        );
+        assert!(
+            stderr(&init).contains(needle),
+            "label {label:?} must say {needle:?}: {}",
+            stderr(&init)
+        );
+    }
+    // A non-hostile custom label renders with the room id too (alpha
+    // catches up first so its send is not crossed).
+    assert_success(&sandbox.run_in(&["chat", "labelled", "--discard", "--json"], None, &alpha));
+    assert_success(&sandbox.run_in(
+        &["chat", "labelled", "--send", "--body", "x", "--json"],
+        None,
+        &alpha,
+    ));
+    let text = chat_peek_text(&sandbox, "labelled", &mara);
+    assert!(text.contains("Mara (mara)"));
+}
+
+/// Fixture 10: hostile markers refused at load; each refusal proves the
+/// wire prefix cannot become ambiguous, and a valid custom marker flows
+/// through the real verification path.
+#[test]
+fn a0a_f10_hostile_markers_rejected_and_wire_stays_unambiguous() {
+    let sandbox = Sandbox::new();
+    let mara = owner_peer(&sandbox, "mara");
+    for (marker, exit, needle) in [
+        // ASCII controls are stopped at the CLI parser (rc 2) before the
+        // loader ever sees them; loader-level refusals are ConfigInvalid
+        // (78). Both gates refuse the marker and write nothing.
+        ("\n", 2, "control characters"),
+        ("\u{202E}", 78, "control, bidi"),
+        (".", 78, "non-ASCII"),
+        ("🐳🐋", 78, "one glyph"),
+        ("a\u{200d}b", 78, "one glyph"),
+        ("\u{200d}🐳", 78, "zero-width joiner"),
+        ("👩\u{200d}", 78, "zero-width joiner"),
+    ] {
+        let init = sandbox.run(&["owner", "init", "--room", "mara", "--marker", marker]);
+        assert_eq!(
+            init.status.code(),
+            Some(exit),
+            "marker {marker:?}: {}",
+            stderr(&init)
+        );
+        assert!(
+            stderr(&init).contains(needle),
+            "marker {marker:?} must say {needle:?}: {}",
+            stderr(&init)
+        );
+        assert!(
+            !owner_json_path(&sandbox).exists(),
+            "a refused marker must never write owner.json"
+        );
+    }
+    // A valid marker configures and signs for real.
+    let (_, shown) = owner_init_json(&sandbox, &["--room", "mara", "--marker", "🐳"]);
+    assert_eq!(shown["owner"]["marker"], "🐳");
+    let alpha = owner_peer(&sandbox, "alpha");
+    const TS: &str = "20260101T000000Z";
+    const OWNED: &str = "whale signed";
+    sign_for_owner(&sandbox, TS, OWNED);
+    join_channel(&sandbox, "whale", &alpha);
+    join_channel(&sandbox, "whale", &mara);
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "whale",
+            "--send",
+            "--body",
+            format!("🐳🔏 {OWNED} [signed:{TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    // The default glyph's prefix is NOT a valid wire line under this owner:
+    // no prefix ambiguity survives marker validation.
+    write_channel_message(
+        &sandbox,
+        "whale",
+        "20990101-120000-000001-aaaaaa",
+        "mara",
+        "",
+        "🧔🔏 not our wire [signed:X]",
+    );
+    let read = chat_peek_json(&sandbox, "whale", &alpha);
+    let messages = read["messages"].as_array().expect("messages");
+    assert!(
+        messages.iter().any(|message| {
+            message["from"] != "mara"
+                || message["id"] != "20990101-120000-000001-aaaaaa"
+                    && message.get("signed_verified") == Some(&serde_json::Value::Bool(true))
+        }),
+        "whale marker must verify"
+    );
+    let wrong_prefix = messages
+        .iter()
+        .find(|message| message["id"] == "20990101-120000-000001-aaaaaa")
+        .expect("20990101-120000-000001-aaaaaa")
+        .get("signed_verified");
+    assert_eq!(
+        wrong_prefix, None,
+        "a different glyph's prefix must not parse as this owner's wire"
+    );
+}
+
+/// Fixture 11: every Decision-3 matrix row — transport never loads the
+/// anchor; badge paths fail closed; crossed-send preview refuses with the
+/// draft preserved; missing key material renders FAILED, never ConfigInvalid.
+#[test]
+fn a0a_f11_command_matrix_rows_and_crossed_send_draft_preserved() {
+    let sandbox = Sandbox::new();
+    let alpha = owner_peer(&sandbox, "alpha");
+    let beta = owner_peer(&sandbox, "beta");
+    join_channel(&sandbox, "mat", &alpha);
+    join_channel(&sandbox, "mat", &beta);
+    assert_success(&sandbox.run_in(&["chat", "mat", "--discard", "--json"], None, &alpha));
+    assert_success(&sandbox.run_in(
+        &["chat", "mat", "--send", "--body", "beta unread", "--json"],
+        None,
+        &beta,
+    ));
+    fs::write(owner_json_path(&sandbox), r#"{"room":"alpha"#).expect("truncated owner.json");
+
+    // Badge-computing rows: hard ConfigInvalid.
+    for args in [
+        vec!["chat", "mat", "--peek", "--json"],
+        vec!["chat", "mat", "--history", "5", "--json"],
+        vec!["chat", "mat", "--since", "A", "--json"],
+    ] {
+        let output = sandbox.run_in(&args, None, &alpha);
+        assert_eq!(
+            output.status.code(),
+            Some(78),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid", "{args:?}");
+    }
+    // Crossed-send preview row: refused with the CONFIG error, not
+    // crossed_send; nothing written (draft preserved).
+    let before: Vec<_> = fs::read_dir(sandbox.mail_root.join("channels/mat/messages"))
+        .expect("messages dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    let crossed = sandbox.run_in(
+        &[
+            "chat",
+            "mat",
+            "--send",
+            "--body",
+            "my careful draft",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(
+        crossed.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&crossed)
+    );
+    let error: ErrorEnvelope = from_stderr(&crossed);
+    assert_eq!(
+        error.error.code, "config_invalid",
+        "must not be crossed_send"
+    );
+    let after: Vec<_> = fs::read_dir(sandbox.mail_root.join("channels/mat/messages"))
+        .expect("messages dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "a refused send must write no message (draft preserved)"
+    );
+
+    // profile set row: ConfigInvalid.
+    let profiled = sandbox.run_in(&["profile", "set", "--name", "Anything"], None, &alpha);
+    assert_eq!(
+        profiled.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&profiled)
+    );
+
+    // doctor / schema / owner show rows: report the error, exit nonzero,
+    // never partial-render.
+    let doctor: DoctorOutput = from_stdout(&sandbox.run(&["doctor"]));
+    assert!(
+        doctor
+            .checks
+            .iter()
+            .any(|check| check.id == "owner.invalid"),
+        "doctor must name the broken trust anchor"
+    );
+    assert_eq!(sandbox.run(&["schema"]).status.code(), Some(78));
+    assert_eq!(sandbox.run(&["owner", "show"]).status.code(), Some(78));
+
+    // Transport rows (send/join/discard/rooms/inbox/read/watch): unaffected.
+    assert_success(&sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "freeform-sender",
+        "--body",
+        "t",
+    ]));
+    assert_success(&sandbox.run_in(&["chat", "other2", "--join", "--json"], None, &alpha));
+    assert_success(&sandbox.run_in(&["chat", "mat", "--discard", "--json"], None, &alpha));
+    assert_success(&sandbox.run(&["rooms"]));
+    assert_success(&sandbox.run(&["inbox", "--room", "alpha"]));
+    let sent: SendOutput = from_stdout(&sandbox.run(&[
+        "send",
+        "--to",
+        "claude-space",
+        "--from",
+        "freeform-sender",
+        "--body",
+        "read target",
+        "--json",
+    ]));
+    assert_success(&sandbox.run(&["read", &sent.envelope.id, "--room", "claude-space"]));
+    assert_success(&sandbox.run(&["watch", "--snapshot", "--room", "alpha"]));
+
+    // Missing key material with a VALID config: FAILED badges, never
+    // ConfigInvalid — the send succeeds and reads render loudly.
+    fs::remove_file(owner_json_path(&sandbox)).expect("remove malformed owner");
+    owner_init_json(&sandbox, &["--room", "beta"]);
+    write_channel_message(
+        &sandbox,
+        "mat",
+        "20990101-120000-000004-aaaaaa",
+        "beta",
+        "",
+        "🧔🔏 no key yet [signed:20990101T000000Z]",
+    );
+    let peeked = sandbox.run_in(&["chat", "mat", "--peek", "--json"], None, &alpha);
+    assert_success(&peeked);
+    let read: serde_json::Value = from_stdout(&peeked);
+    let badge = read["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["id"] == "20990101-120000-000004-aaaaaa")
+        .expect("K0001")
+        .get("signed_verified");
+    assert_eq!(
+        badge,
+        Some(&serde_json::Value::Bool(false)),
+        "missing material renders Failed"
+    );
+    let text = chat_peek_text(&sandbox, "mat", &alpha);
+    assert!(
+        text.contains("SIGNATURE FAILED"),
+        "text render must be loud: {text}"
+    );
+}

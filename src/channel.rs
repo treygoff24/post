@@ -430,6 +430,14 @@ fn crossed_send_bounce(
     use crate::channel_state::ChannelState;
     use crate::error::MissedChannelMessage;
 
+    // The parsed message is kept alongside the bounce payload so badge
+    // computation (below) never needs a second parse of the store.
+    struct MissedItem {
+        bounce: MissedChannelMessage,
+        message: crate::model::ChannelMessage,
+        body: String,
+    }
+
     let state = ChannelState::load(context, room)?;
     let cursor = state.cursor(channel);
     let mut missed = Vec::new();
@@ -451,11 +459,17 @@ fn crossed_send_bounce(
         if !unread || parsed.message.from == room || parsed.message.event.is_some() {
             continue;
         }
-        missed.push(MissedChannelMessage {
-            id: parsed.message.id,
-            from: parsed.message.from,
-            subject: parsed.message.subject,
-            sent: parsed.message.sent,
+        let message = parsed.message;
+        missed.push(MissedItem {
+            bounce: MissedChannelMessage {
+                id: message.id.clone(),
+                from: message.from.clone(),
+                subject: message.subject.clone(),
+                sent: message.sent.clone(),
+                body: parsed.body.clone(),
+                signed_verified: None,
+            },
+            message,
             body: parsed.body,
         });
     }
@@ -467,6 +481,8 @@ fn crossed_send_bounce(
         crate::mailbox::shell_quote(channel)
     );
     if unreadable_past && missed.is_empty() {
+        // Renders no messages, so it stays pure transport: the trust anchor
+        // is never loaded (Decision 3 matrix).
         return Ok(Some(
             AppError::new(
                 ErrorCode::CrossedSend,
@@ -483,6 +499,25 @@ fn crossed_send_bounce(
             .reason("unreadable message past sender cursor"),
         ));
     }
+    // A bounce that renders missed conversation is a badge-computing surface
+    // (A0a Decision 3): resolve the owner ONCE — a broken owner.json fails
+    // the send with the config error instead of a crossed_send, and since
+    // nothing has been written yet, the draft is preserved by construction.
+    let owner = crate::mailbox::resolve_owner(context)?;
+    if let Some(owner) = owner.as_ref() {
+        for item in &mut missed {
+            if item.message.from == owner.room {
+                item.bounce.signed_verified = Some(
+                    crate::mailbox::signed_status(Some(owner), &item.message, &item.body)
+                        .is_some_and(|status| {
+                            matches!(status, crate::mailbox::SignedStatus::Verified { .. })
+                        }),
+                );
+            }
+        }
+    }
+    let mut missed: Vec<MissedChannelMessage> =
+        missed.into_iter().map(|item| item.bounce).collect();
     let total = missed.len();
     if missed.len() > 10 {
         missed = missed.split_off(missed.len() - 10);
