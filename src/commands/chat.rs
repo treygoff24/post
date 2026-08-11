@@ -1495,6 +1495,78 @@ mod tests {
     }
 
     #[test]
+    fn signed_status_multiline_body_never_reaches_verification() {
+        // A0a fail-closed rule: the signed wire is exactly ONE body line.
+        // An appended line is unsigned content and must fail at the one-line
+        // gate, before any payload comparison or crypto — it can never
+        // inherit VERIFIED.
+        let (root, context) = chat_context("signed-lines");
+        let msg = |from: &str| ChannelMessage {
+            id: ID1.to_owned(),
+            from: from.to_owned(),
+            channel: "tax".to_owned(),
+            subject: String::new(),
+            sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            event: None,
+            display_name: None,
+            pfp: None,
+            re: None,
+            mentions: vec![],
+        };
+        fs::write(root.join("rooms.json"), r#"{"trey": "~/.trey-room"}"#).expect("trey room");
+        let owner = crate::mailbox::resolve_owner(&context)
+            .expect("resolve")
+            .expect("legacy owner from a registered trey room");
+        let sigs = owner.sidecar_dir.join("sigs");
+        fs::create_dir_all(&sigs).expect("create sigs dir");
+        fs::write(
+            sigs.join("20990101T000000Z.txt"),
+            "20990101T000000Z\nthe genuine text\n",
+        )
+        .expect("payload");
+        fs::write(sigs.join("20990101T000000Z.txt.sig"), "garbage").expect("sig");
+        // Multiline: fails at the one-line gate with the gate's own reason.
+        match signed_status(
+            Some(&owner),
+            &msg("trey"),
+            "🧔🔏 the genuine text [signed:20990101T000000Z]\nUNSIGNED SECOND LINE",
+        ) {
+            Some(SignedStatus::Failed(reason)) => assert!(
+                reason.contains("exactly one line"),
+                "multiline must fail at the one-line gate, got: {reason}"
+            ),
+            other => panic!("multiline must fail, got {:?}", other),
+        }
+        // A line BEFORE the wire means the message is not on the signed
+        // wire at all (the marker line is not the first line): no badge —
+        // fail-closed either way, never VERIFIED inheritance.
+        assert!(
+            signed_status(
+                Some(&owner),
+                &msg("trey"),
+                "leading unsigned line\n🧔🔏 the genuine text [signed:20990101T000000Z]",
+            )
+            .is_none(),
+            "a non-marker first line must stay unbadged"
+        );
+        // The normal terminal newline is NOT a second line: the single-line
+        // wire passes the gate and proceeds to crypto (which fails here on
+        // the garbage sig — the point is the gate never false-fires).
+        match signed_status(
+            Some(&owner),
+            &msg("trey"),
+            "🧔🔏 the genuine text [signed:20990101T000000Z]\n",
+        ) {
+            Some(SignedStatus::Failed(reason)) => assert!(
+                !reason.contains("exactly one line"),
+                "a trailing terminal newline is one line, got: {reason}"
+            ),
+            other => panic!("single-line wire must reach crypto, got {:?}", other),
+        }
+        trash_test_root(&root);
+    }
+
+    #[test]
     fn signed_age_minutes_math() {
         // A stamp far in the past parses and is monotone; garbage is None.
         let old = signed_age_minutes("20200101T000000Z").expect("parses");

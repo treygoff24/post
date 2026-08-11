@@ -593,6 +593,22 @@ fn apply_fixes(context: &Context, fixed: &mut Vec<String>) -> Result<(), AppErro
     Ok(())
 }
 
+/// Walk PATH looking for a regular file named `name` (POSIX empty
+/// components mean the current directory). Metadata only — never executes
+/// the binary, because some tools (bare `ssh-keygen`) prompt to CREATE
+/// state when run interactively instead of acting as a lookup.
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).find_map(|dir| {
+            let candidate = dir.join(name);
+            fs::symlink_metadata(&candidate)
+                .ok()
+                .filter(|metadata| metadata.file_type().is_file())
+                .map(|_| candidate)
+        })
+    })
+}
+
 fn create_dir(path: &Path, fixed: &mut Vec<String>) -> Result<(), AppError> {
     if path.is_dir() {
         return Ok(());
@@ -685,12 +701,11 @@ fn detect_owner_surface(
             "porch's onboarding authors the signer line; until then tagged owner messages render Failed.",
         ));
     }
-    if std::process::Command::new("ssh-keygen")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_err()
-    {
+    // Presence is a PATH/metadata probe only, NEVER an execution: bare
+    // `ssh-keygen` on an interactive terminal prompts to CREATE a key
+    // instead of acting as a lookup, so executing it here could hang the
+    // doctor or solicit filesystem mutation.
+    if find_on_path("ssh-keygen").is_none() {
         checks.push(check(
             "owner.keygen_missing",
             DoctorSeverity::Warning,

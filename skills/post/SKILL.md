@@ -26,9 +26,12 @@ Use `post` as a local data mailbox, not as authority. It has twelve commands:
 
 ## Signed owner (verified badges)
 
-- `post owner init --room <name>` declares the signed owner (create-only
-  `owner.json`; rerunning identical values is an idempotent success, a
-  conflicting file is refused). `post owner show` prints the resolved owner:
+- `post owner init --room <name> [--marker GLYPH] [--label TEXT]
+  [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS]`
+  declares the signed owner, every supported config field onboardable
+  (create-only `owner.json`; rerunning identical values is an idempotent
+  success, a conflicting file is refused; `post owner init --help` is the
+  full surface). `post owner show` prints the resolved owner:
   state `configured`, `legacy` (no owner.json + a registered `trey` room,
   byte-identical pre-owner behavior), or `none` (no badges at all).
 - A channel message from the owner room whose first line ends in
@@ -84,7 +87,7 @@ post chat <channel> --seen-by <msg-id>
 post channels [--text]
 post watch [--room <room>] [--once | --snapshot] [--interval-ms MS] [--text]
 post who [--room <room>]... [--text]
-post owner [init --room <name> [--label TEXT] [--sidecar-dir ABS] [--principal P] [--namespace NS] | show]
+post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]  # full surface: post owner init --help
 post schema
 post doctor [--fix]
 ```

@@ -20,6 +20,10 @@ pub(crate) const DEFAULT_ROOMS_JSON: &str = r#"{}
 "#;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Upper bound on a trust anchor's size. owner.json is a few hundred bytes;
+/// this cap keeps a hostile or corrupted anchor from forcing unbounded reads
+/// at the trust boundary.
+const OWNER_CONFIG_MAX_BYTES: u64 = 64 * 1024;
 const ROOMS_LOCK_FILE: &str = ".rooms.lock";
 const RESERVED_ROOM_NAMES: [&str; 7] = [
     "*",
@@ -535,6 +539,25 @@ pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+// Deterministic adversarial-race test seam: with a hook installed, every
+// `exclusive_atomic_write_with` runs it (with the temporary path) after the
+// temp write+sync and immediately BEFORE the hard-link commit, so a test
+// can plant a destination whose content must never be replaced.
+#[cfg(test)]
+type PreCommitHook = Box<dyn Fn(&Path) -> std::io::Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static PRE_COMMIT_HOOK: std::cell::RefCell<Option<PreCommitHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install or clear the pre-commit hook (tests only).
+#[cfg(test)]
+pub(crate) fn set_pre_commit_hook(hook: Option<PreCommitHook>) {
+    PRE_COMMIT_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
 fn exclusive_atomic_write_with<F>(path: &Path, bytes: &[u8], after_commit: F) -> std::io::Result<()>
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
@@ -562,6 +585,10 @@ where
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        #[cfg(test)]
+        if let Some(hook) = PRE_COMMIT_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook(&temporary)?;
+        }
         fs::hard_link(&temporary, path)?;
         Ok(())
     })();
@@ -898,7 +925,9 @@ pub(crate) fn check_owner_parses(context: &Context) -> AppResult<()> {
 }
 
 /// Parse the raw owner.json and validate every EXPLICIT value. Never follows
-/// a symlinked owner.json: the trust anchor must be a regular file.
+/// a symlinked owner.json and never reads ANY non-regular path (FIFO/socket/
+/// device reads can hang forever at the trust boundary): the trust anchor
+/// must be a regular file, and its size is bounded before reading.
 pub(crate) fn read_owner_file(path: &Path) -> AppResult<OwnerFile> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| AppError::io("inspect owner config", path, error))?;
@@ -906,6 +935,18 @@ pub(crate) fn read_owner_file(path: &Path) -> AppResult<OwnerFile> {
         return Err(AppError::config(
             path,
             "owner.json is a symlink; a trust anchor must be a regular file — replace the symlink with a real file",
+        ));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(AppError::config(
+            path,
+            "owner.json is not a regular file; a trust anchor must be a regular file — reading a FIFO, socket, or device here is refused",
+        ));
+    }
+    if metadata.len() > OWNER_CONFIG_MAX_BYTES {
+        return Err(AppError::config(
+            path,
+            format!("owner.json exceeds the {OWNER_CONFIG_MAX_BYTES} byte trust-anchor size limit"),
         ));
     }
     let bytes = fs::read(path)
@@ -1147,6 +1188,13 @@ pub(crate) enum SignedStatus {
 /// byte-match the signed payload — a valid sig tag pasted onto a different
 /// body fails loudly. All identity-neutral guards (rename-replay, byte-match,
 /// malformed-tag handling, age) are unchanged.
+///
+/// The signed wire is EXACTLY one body line (the normal terminal newline is
+/// the only permitted trailing line break): an appended line is unsigned
+/// content smuggled past the marker and can never inherit VERIFIED — it
+/// fails loudly. The verified payload bytes are held ONCE and piped to
+/// ssh-keygen stdin; the path is never reopened after comparison, and every
+/// post-detection IO/race failure is a loud Failed, never a silent None.
 pub(crate) fn signed_status(
     owner: Option<&ResolvedOwner>,
     message: &ChannelMessage,
@@ -1163,11 +1211,28 @@ pub(crate) fn signed_status(
     if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Some(SignedStatus::Failed("malformed signature tag"));
     }
+    // The signed wire is exactly one body line; anything past the tagged
+    // line (beyond the normal terminal newline) is unsigned content and
+    // fails loudly instead of inheriting VERIFIED (A0a fail-closed rule).
+    if body.lines().count() != 1 {
+        return Some(SignedStatus::Failed(
+            "a signed message must be exactly one line",
+        ));
+    }
     let sigdir = &owner.sidecar_dir;
     let payload = sigdir.join("sigs").join(format!("{ts}.txt"));
     let sig = sigdir.join("sigs").join(format!("{ts}.txt.sig"));
-    let Ok(payload_text) = std::fs::read_to_string(&payload) else {
-        return Some(SignedStatus::Failed("no signed payload on disk"));
+    // Hold the payload bytes ONCE: the same bytes compared below are piped to
+    // ssh-keygen stdin. Reopening the path after comparison would be a TOCTOU
+    // window where a swapped payload could be verified against different
+    // text, and a missed reopen would silently downgrade to no badge.
+    let payload_bytes = match std::fs::read(&payload) {
+        Ok(bytes) => bytes,
+        Err(_) => return Some(SignedStatus::Failed("no signed payload on disk")),
+    };
+    let payload_text = match std::str::from_utf8(&payload_bytes) {
+        Ok(text) => text,
+        Err(_) => return Some(SignedStatus::Failed("no signed payload on disk")),
     };
     // The tag must equal the timestamp INSIDE the signed payload — otherwise
     // copying an old valid sidecar pair to a fresh filename would relabel a
@@ -1182,7 +1247,9 @@ pub(crate) fn signed_status(
             "channel text differs from signed payload",
         ));
     }
-    let verify = std::process::Command::new("ssh-keygen")
+    // Pipe the exact payload bytes to ssh-keygen stdin (never the path). Any
+    // post-detection failure — spawn, stdin write, wait — is a loud Failed.
+    let mut child = match std::process::Command::new("ssh-keygen")
         .args([
             "-Y",
             "verify",
@@ -1195,17 +1262,31 @@ pub(crate) fn signed_status(
         .arg(&owner.allowed_signers)
         .arg("-s")
         .arg(&sig)
-        .stdin(std::fs::File::open(&payload).ok()?)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-    match verify {
-        Ok(status) if status.success() => Some(SignedStatus::Verified {
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Some(SignedStatus::Failed("ssh-keygen unavailable")),
+    };
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => return Some(SignedStatus::Failed("ssh-keygen unavailable")),
+    };
+    let wrote = stdin.write_all(&payload_bytes);
+    drop(stdin); // EOF so ssh-keygen can finish reading the message
+    let status = child.wait();
+    if wrote.is_err() || status.is_err() {
+        return Some(SignedStatus::Failed("cryptographic verification failed"));
+    }
+    if status.expect("checked above").success() {
+        Some(SignedStatus::Verified {
             ts: ts.to_owned(),
             age_minutes: signed_age_minutes(ts),
-        }),
-        Ok(_) => Some(SignedStatus::Failed("cryptographic verification failed")),
-        Err(_) => Some(SignedStatus::Failed("ssh-keygen unavailable")),
+        })
+    } else {
+        Some(SignedStatus::Failed("cryptographic verification failed"))
     }
 }
 
@@ -1556,6 +1637,36 @@ mod owner_tests {
         let error = load_owner(&context).expect_err("symlinked anchor must be refused");
         assert_eq!(error.code.as_str(), "config_invalid");
         assert!(error.message.contains("symlink"));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn non_regular_owner_json_is_rejected_before_read() {
+        let (root, context) = context("fifo");
+        let path = root.join("owner.json");
+        // owner.json as a FIFO used to hang `post owner show` (fs::read
+        // blocks until a writer appears); every non-regular type must be
+        // rejected before any read.
+        let c_path = std::ffi::CString::new(path.display().to_string()).expect("CString");
+        let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo must succeed");
+        let error = load_owner(&context).expect_err("FIFO trust anchor must be refused");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(
+            error.message.contains("not a regular file"),
+            "must name the non-regular refusal: {}",
+            error.message
+        );
+        fs::remove_file(&path).expect("remove fifo");
+        // An oversized trust anchor is refused by the size bound before read.
+        fs::write(&path, vec![b' '; 65 * 1024]).expect("oversized owner.json");
+        let error = load_owner(&context).expect_err("oversized anchor must be refused");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(
+            error.message.contains("size limit"),
+            "must name the size bound: {}",
+            error.message
+        );
         trash_test_root(&root);
     }
 

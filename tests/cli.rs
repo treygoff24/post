@@ -4956,7 +4956,15 @@ fn a0a_f3_feature_absent_signed_looking_text_unbadged() {
     let output = sandbox.run_in(&["chat", "none", "--peek", "--json"], None, &alpha);
     let read: serde_json::Value = from_stdout(&output);
     assert_success(&output);
-    let badge = read["messages"][0].get("signed_verified");
+    // Assert the injected signed-looking trey message itself (messages[0]
+    // is a join event, not the wire line under test).
+    let badge = read["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["id"] == "20990101-120000-000001-aaaaaa")
+        .expect("injected trey signed-looking message")
+        .get("signed_verified");
     assert_eq!(badge, None, "feature-absent must never badge");
     // Imitation reservation off: the name "Trey" is settable.
     let set = sandbox.run_in(&["profile", "set", "--name", "Trey"], None, &alpha);
@@ -5361,6 +5369,36 @@ fn a0a_f9_immutable_room_id_renders_under_every_label_and_hostile_labels_rejecte
     ));
     let text = chat_peek_text(&sandbox, "labelled", &mara);
     assert!(text.contains("Mara (mara)"));
+
+    // A scratch config with a genuinely NON-default label (--label Oracle),
+    // real signed wire, must render "Oracle (mara)" — the verified output
+    // carries the configured label AND the immutable room id.
+    let sandbox = Sandbox::new();
+    let mara = owner_peer(&sandbox, "mara");
+    owner_init_json(&sandbox, &["--room", "mara", "--label", "Oracle"]);
+    let alpha = owner_peer(&sandbox, "alpha");
+    const ORACLE_TS: &str = "20260101T020000Z";
+    const ORACLE_OWNED: &str = "oracle signed line";
+    sign_for_owner(&sandbox, ORACLE_TS, ORACLE_OWNED);
+    join_channel(&sandbox, "oracled", &alpha);
+    join_channel(&sandbox, "oracled", &mara);
+    assert_success(&sandbox.run_in(
+        &[
+            "chat",
+            "oracled",
+            "--send",
+            "--body",
+            format!("🧔🔏 {ORACLE_OWNED} [signed:{ORACLE_TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    let text = chat_peek_text(&sandbox, "oracled", &alpha);
+    assert!(
+        text.contains("[🔏 VERIFIED — Oracle (mara), signed"),
+        "configured label 'Oracle' must render with the room id: {text}"
+    );
 }
 
 /// Fixture 10: hostile markers refused at load; each refusal proves the
@@ -5408,7 +5446,7 @@ fn a0a_f10_hostile_markers_rejected_and_wire_stays_unambiguous() {
     sign_for_owner(&sandbox, TS, OWNED);
     join_channel(&sandbox, "whale", &alpha);
     join_channel(&sandbox, "whale", &mara);
-    assert_success(&sandbox.run_in(
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
         &[
             "chat",
             "whale",
@@ -5432,13 +5470,17 @@ fn a0a_f10_hostile_markers_rejected_and_wire_stays_unambiguous() {
     );
     let read = chat_peek_json(&sandbox, "whale", &alpha);
     let messages = read["messages"].as_array().expect("messages");
-    assert!(
-        messages.iter().any(|message| {
-            message["from"] != "mara"
-                || message["id"] != "20990101-120000-000001-aaaaaa"
-                    && message.get("signed_verified") == Some(&serde_json::Value::Bool(true))
-        }),
-        "whale marker must verify"
+    // Assert the genuine owner message by its real id (an `any()` over
+    // `from != mara` passes on any join event — a false positive).
+    let genuine = messages
+        .iter()
+        .find(|message| message["id"] == sent.message.id)
+        .expect("genuine whale message must be in the channel")
+        .get("signed_verified");
+    assert_eq!(
+        genuine,
+        Some(&serde_json::Value::Bool(true)),
+        "whale marker real signature must verify"
     );
     let wrong_prefix = messages
         .iter()
@@ -5604,5 +5646,292 @@ fn a0a_f11_command_matrix_rows_and_crossed_send_draft_preserved() {
     assert!(
         text.contains("SIGNATURE FAILED"),
         "text render must be loud: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A0b round 2: Sol's continuing packet (items 7-15). Each r2 fixture below
+// maps to one review item; the numbered acceptance fixtures above stay 1:1
+// with the contract.
+// ---------------------------------------------------------------------------
+
+/// A0b r2 items 7+10: the signed wire is exactly ONE body line. With real
+/// crypto in place the one-line wire verifies; the SAME tag+text with an
+/// appended unsigned line fails loudly instead of inheriting VERIFIED (Sol's
+/// live fail-open repro), and the payload bytes must pipe exactly (the
+/// single-line wire proves bytes-once verification end to end).
+#[test]
+fn a0a_r2_multiline_wire_never_inherits_verified_real_crypto() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    const TS: &str = "20260101T000000Z";
+    const OWNED: &str = "the line we signed";
+    sign_for_owner(&sandbox, TS, OWNED);
+    join_channel(&sandbox, "single", &alpha);
+    join_channel(&sandbox, "single", &mara);
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "single",
+            "--send",
+            "--body",
+            format!("🧔🔏 {OWNED} [signed:{TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    // An appended unsigned line with the identical tag and text: the old
+    // code verified the first line and badged the whole message.
+    write_channel_message(
+        &sandbox,
+        "single",
+        "20990101-120000-000002-aaaaaa",
+        "mara",
+        "",
+        &format!("🧔🔏 {OWNED} [signed:{TS}]\nUNSIGNED SECOND LINE"),
+    );
+    let read = chat_peek_json(&sandbox, "single", &alpha);
+    let messages = read["messages"].as_array().expect("messages");
+    let verdict = |id: &str| {
+        messages
+            .iter()
+            .find(|message| message["id"] == id)
+            .expect(id)
+            .get("signed_verified")
+            .cloned()
+    };
+    assert_eq!(
+        verdict(&sent.message.id),
+        Some(serde_json::Value::Bool(true)),
+        "the one-line signed wire must cryptographically verify"
+    );
+    assert_eq!(
+        verdict("20990101-120000-000002-aaaaaa"),
+        Some(serde_json::Value::Bool(false)),
+        "an appended line must fail closed, never inherit VERIFIED"
+    );
+    let text = chat_peek_text(&sandbox, "single", &alpha);
+    assert!(
+        text.contains("exactly one line"),
+        "the failure must name the one-line rule: {text}"
+    );
+}
+
+/// A0b r2 item 12: the crossed-send preview serializes `signed_verified`
+/// ONLY on signed-looking owner messages — ordinary unsigned owner messages
+/// omit the field; signed-but-invalid renders false; signed-valid renders
+/// true.
+#[test]
+fn a0a_r2_crossed_preview_signed_verified_field_contract() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    join_channel(&sandbox, "cross", &alpha);
+    join_channel(&sandbox, "cross", &mara);
+    // Phase 1: an ordinary unsigned owner message.
+    let plain: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &["chat", "cross", "--send", "--body", "plain hello", "--json"],
+        None,
+        &mara,
+    ));
+    // Phase 2: signed-looking but unverifiable (no sidecar for this tag).
+    let invalid: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "🧔🔏 pretend [signed:20990101T000000Z]",
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    // Phase 3: a real signature.
+    const TS: &str = "20260101T010000Z";
+    const OWNED: &str = "genuinely signed";
+    sign_for_owner(&sandbox, TS, OWNED);
+    let valid: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            format!("🧔🔏 {OWNED} [signed:{TS}]").as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    let bounced = sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "my careful draft",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(
+        bounced.status.code(),
+        Some(65),
+        "must bounce crossed_send: {}",
+        stderr(&bounced)
+    );
+    let error: ErrorEnvelope = from_stderr(&bounced);
+    assert_eq!(error.error.code, "crossed_send");
+    let missed = error.error.details.missed.expect("missed messages");
+    let verdict = |id: &str| {
+        missed
+            .iter()
+            .find(|item| item.id == id)
+            .expect("missed owner message")
+            .signed_verified
+    };
+    assert_eq!(
+        verdict(&plain.message.id),
+        None,
+        "unsigned owner message must OMIT signed_verified"
+    );
+    assert_eq!(
+        verdict(&invalid.message.id),
+        Some(false),
+        "signed-looking but invalid must render false"
+    );
+    assert_eq!(
+        verdict(&valid.message.id),
+        Some(true),
+        "real signature must render true"
+    );
+}
+
+/// A0b r2 item 11: doctor's ssh-keygen presence probe is PATH/metadata only
+/// and must NEVER execute ssh-keygen (a bare interactive invocation prompts
+/// to CREATE a key). A recording stub proves non-execution; an empty PATH
+/// proves the missing-check still fires.
+#[cfg(unix)]
+#[test]
+fn a0a_r2_doctor_keygen_probe_never_executes_ssh_keygen() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    configured_mara(&sandbox); // owner surface active
+    let stub_dir = sandbox.path.join("stub-bin");
+    let bare_dir = sandbox.path.join("bare-bin");
+    fs::create_dir_all(&stub_dir).expect("stub dir");
+    fs::create_dir_all(&bare_dir).expect("bare dir");
+    let marker = sandbox.path.join("keygen-executed");
+    let stub = stub_dir.join("ssh-keygen");
+    fs::write(
+        &stub,
+        "#!/bin/sh\necho executed > \"$SSH_KEYGEN_MARKER\"\nexit 0\n",
+    )
+    .expect("stub script");
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("exec stub");
+    let run_doctor = |path: &std::path::Path| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_post"))
+            .args(["doctor"])
+            .current_dir(&sandbox.path)
+            .env("HOME", &sandbox.home)
+            .env("POST_MAIL_ROOT", &sandbox.mail_root)
+            .env("PATH", path)
+            .env("SSH_KEYGEN_MARKER", &marker)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run post doctor with overridden PATH")
+    };
+    // With a stub ssh-keygen on PATH: presence found via metadata, never
+    // executed, so the marker file must not appear.
+    let with_stub = run_doctor(&stub_dir);
+    assert_eq!(
+        with_stub.status.code(),
+        Some(1),
+        "doctor completes with findings (allowed_signers missing), never hangs"
+    );
+    let doctor: DoctorOutput = from_stdout(&with_stub);
+    assert!(
+        !doctor
+            .checks
+            .iter()
+            .any(|check| check.id == "owner.keygen_missing"),
+        "stub on PATH must satisfy the presence probe: {:?}",
+        doctor
+            .checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !marker.exists(),
+        "the presence probe must never EXECUTE ssh-keygen"
+    );
+    // With no ssh-keygen anywhere on PATH: the missing check fires.
+    let empty = run_doctor(&bare_dir);
+    assert_eq!(empty.status.code(), Some(1));
+    let doctor: DoctorOutput = from_stdout(&empty);
+    assert!(
+        doctor
+            .checks
+            .iter()
+            .any(|check| check.id == "owner.keygen_missing"),
+        "absent ssh-keygen must be reported"
+    );
+    assert!(
+        !marker.exists(),
+        "no ssh-keygen exists to run — marker must stay absent"
+    );
+}
+
+/// A0b r2 item 8: owner.json as a FIFO must be rejected before any read —
+/// `post owner show` fails fast with config_invalid instead of hanging.
+/// Bounded wait turns any regression into a fast failure, not a suite hang.
+#[cfg(unix)]
+#[test]
+fn a0a_r2_fifo_owner_json_fails_fast_not_hung() {
+    let sandbox = Sandbox::new();
+    owner_peer(&sandbox, "mara");
+    let path = owner_json_path(&sandbox);
+    let made = Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo must succeed");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["owner", "show"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn post owner show");
+    let started = SystemTime::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        assert!(
+            started.elapsed().expect("clock").as_secs() < 15,
+            "owner show HUNG on a FIFO trust anchor"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().expect("collect output");
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not a regular file"),
+        "must name the non-regular refusal"
     );
 }

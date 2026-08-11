@@ -270,3 +270,98 @@ struct OwnerShowOutput<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use crate::cli::{OwnerArgs, OwnerCommand, OwnerInitArgs};
+    use crate::mailbox::{set_pre_commit_hook, Context};
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn context(label: &str) -> (PathBuf, Context) {
+        let root = test_root(&format!("owner-init-{label}"));
+        fs::write(root.join("rooms.json"), r#"{"mara": "~/.mara-room"}"#).expect("seed rooms");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        context.prepare_first_run().expect("defaults");
+        (root, context)
+    }
+
+    fn init_args(room: &str) -> OwnerInitArgs {
+        OwnerInitArgs {
+            room: room.to_owned(),
+            marker: None,
+            label: None,
+            sidecar_dir: None,
+            allowed_signers: None,
+            principal: None,
+            namespace: None,
+        }
+    }
+
+    fn run_init(
+        context: &Context,
+        room: &str,
+    ) -> crate::error::AppResult<crate::command_result::CommandResult> {
+        run(
+            context,
+            OwnerArgs {
+                command: Some(OwnerCommand::Init(init_args(room))),
+            },
+            false,
+        )
+    }
+
+    /// The ratified adversarial commit race, deterministically: a
+    /// destination is planted AFTER the temp write+sync and BEFORE the
+    /// hard-link commit (via the pre-commit seam in
+    /// `exclusive_atomic_write_with`). The commit must refuse it
+    /// (AlreadyExists), and the init flow must route to the SAME
+    /// compare branch as a pre-existing file for identical, different, and
+    /// malformed planted content — never replace it.
+    #[test]
+    fn owner_init_adversarial_race_plants_destination_before_commit() {
+        let (root, context) = context("race");
+        let path = root.join("owner.json");
+        for (planted, expect_already_configured) in [
+            (r#"{"room":"mara"}"#, true),
+            (r#"{"room":"mara","label":"Other"}"#, false),
+            ("{not json", false),
+        ] {
+            let _ = fs::remove_file(&path);
+            let planted_bytes = planted.as_bytes().to_vec();
+            let hook_path = path.clone();
+            // Plant between the temp write and the hard-link commit.
+            set_pre_commit_hook(Some(Box::new(move |_temporary: &Path| {
+                fs::write(&hook_path, &planted_bytes)
+            })));
+            let outcome = run_init(&context, "mara");
+            set_pre_commit_hook(None);
+            match (outcome, expect_already_configured) {
+                (Ok(result), true) => {
+                    assert_eq!(result.exit_code, 0);
+                    let json: serde_json::Value =
+                        serde_json::from_str(&result.stdout).expect("init stdout");
+                    assert_eq!(json["already_configured"], true);
+                    assert_eq!(json["created"], false);
+                }
+                (Err(error), false) => {
+                    assert_eq!(error.code.as_str(), "config_invalid");
+                }
+                (Ok(_), false) => panic!("raced different/malformed destination must refuse"),
+                (Err(_), true) => panic!("identical raced destination must be idempotent"),
+            }
+            assert_eq!(
+                fs::read_to_string(&path).expect("reread raced owner.json"),
+                planted,
+                "the racing writer's owner.json must be byte-untouched"
+            );
+        }
+        set_pre_commit_hook(None);
+        trash_test_root(&root);
+    }
+}

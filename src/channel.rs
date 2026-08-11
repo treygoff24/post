@@ -507,12 +507,13 @@ fn crossed_send_bounce(
     if let Some(owner) = owner.as_ref() {
         for item in &mut missed {
             if item.message.from == owner.room {
-                item.bounce.signed_verified = Some(
-                    crate::mailbox::signed_status(Some(owner), &item.message, &item.body)
-                        .is_some_and(|status| {
-                            matches!(status, crate::mailbox::SignedStatus::Verified { .. })
-                        }),
-                );
+                // Map, exactly like chat: signed-looking messages carry
+                // Some(verified-bool), ordinary unsigned messages stay
+                // None -> field omitted in JSON (A0a Decision 3).
+                item.bounce.signed_verified =
+                    crate::mailbox::signed_status(Some(owner), &item.message, &item.body).map(
+                        |status| matches!(status, crate::mailbox::SignedStatus::Verified { .. }),
+                    );
             }
         }
     }
