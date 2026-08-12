@@ -6624,3 +6624,114 @@ fn v2_signature_ref_flag_guards() {
         "the refusal must name emptiness"
     );
 }
+
+/// A present locator whose sidecar does not exist is a loud failure, never
+/// silently unsigned (and never a v1 fallback).
+#[test]
+fn v2_present_locator_with_missing_sidecar_fails_loudly() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "nosidecar", &mara);
+    // Establish the trust anchor (key + allowed_signers) but sign nothing.
+    v2_owner_key(&sandbox);
+    let sent = v2_send(
+        &sandbox,
+        "nosidecar",
+        &mara,
+        "20260812T230000Z",
+        "body with\nno sidecar",
+    );
+    assert_success(&sent);
+    let id: String = from_stdout::<serde_json::Value>(&sent)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "nosidecar", &mara, &id),
+        Some(false),
+        "a locator pointing at no sidecar must fail loudly"
+    );
+    let text = chat_peek_text(&sandbox, "nosidecar", &mara);
+    assert!(
+        text.contains("SIGNATURE FAILED"),
+        "text render must fail loudly: {text}"
+    );
+}
+
+/// Channel binding isolated: envelope channel and signed manifest both say
+/// channel A, but the .msg sits in channel B's storage directory. The
+/// binding check must refuse before any sidecar comparison could pass.
+#[test]
+fn v2_envelope_channel_differing_from_storage_directory_fails() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "bind-a", &mara);
+    join_channel(&sandbox, "bind-b", &mara);
+    const TAG: &str = "20260812T230100Z";
+    const BODY: &str = "bound to bind-a";
+    v2_sign(&sandbox, TAG, "bind-a", BODY);
+    // Hand-place a message into bind-b's store whose envelope (and signed
+    // manifest) both claim bind-a — a copied-across-channels .msg file.
+    write_channel_message_with_ref(
+        &sandbox,
+        "bind-b",
+        "20990101-120000-000001-abc001",
+        "mara",
+        BODY,
+        serde_json::json!({"version": 2, "tag": TAG}),
+    );
+    let msg_dir = sandbox
+        .mail_root
+        .join("channels")
+        .join("bind-b")
+        .join("messages");
+    let path = msg_dir.join("20990101-120000-000001-abc001.msg");
+    let raw = fs::read_to_string(&path).expect("read fixture");
+    fs::write(
+        &path,
+        raw.replace("\"channel\": \"bind-b\"", "\"channel\": \"bind-a\""),
+    )
+    .expect("rewrite envelope channel");
+    assert_eq!(
+        v2_read_badge(&sandbox, "bind-b", &mara, "20990101-120000-000001-abc001"),
+        Some(false),
+        "envelope channel differing from the storage directory must fail"
+    );
+}
+
+/// The raw-fidelity corpus, signed: every byte shape post is contractually
+/// required to carry must round-trip compose -> store -> verify as VERIFIED.
+#[test]
+fn v2_signed_fidelity_corpus_round_trips_verified() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "fidelity", &mara);
+    let corpus: Vec<(&str, String)> = vec![
+        ("crlf", "windows\r\nline endings\r\nkept".to_owned()),
+        ("lone-cr", "carriage\rreturn only".to_owned()),
+        ("edge-newlines", "\n\nleading and trailing preserved\n\n".to_owned()),
+        ("trailing-ws", "trailing spaces   \nand a tab\t".to_owned()),
+        ("line-separators", "para\u{2028}sep\u{2029}end".to_owned()),
+        ("controls", "nul\u{0}byte esc\u{1b}[31m vt\u{b} ff\u{c} del\u{7f}".to_owned()),
+        ("nfkc-bait", "ﬁle ①② ﷺ ½ Ⅻ".to_owned()),
+        (
+            "emoji-sequences",
+            "family \u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} flag \u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}".to_owned(),
+        ),
+    ];
+    for (index, (name, body)) in corpus.iter().enumerate() {
+        let tag = format!("20260812T2302{index:02}Z");
+        v2_sign(&sandbox, &tag, "fidelity", body);
+        let sent = v2_send(&sandbox, "fidelity", &mara, &tag, body);
+        assert_success(&sent);
+        let id: String = from_stdout::<serde_json::Value>(&sent)["message"]["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        assert_eq!(
+            v2_read_badge(&sandbox, "fidelity", &mara, &id),
+            Some(true),
+            "fidelity case '{name}' must store byte-exact and verify"
+        );
+    }
+}
