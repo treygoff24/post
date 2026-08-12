@@ -273,6 +273,7 @@ pub(crate) fn join(
             event: Some(JOIN_EVENT),
             re: None,
             mentions: Vec::new(),
+            signature_tag: None,
         },
     )?;
     members.insert(room.clone(), sent);
@@ -343,6 +344,9 @@ pub(crate) struct SendOptions<'a> {
     pub body: &'a str,
     pub anyway: bool,
     pub re: Option<&'a str>,
+    /// Signed-v2 sidecar tag; when present the envelope is stamped with the
+    /// exact locator `{"version": 2, "tag": <tag>}`. Validated at the CLI.
+    pub signature_tag: Option<&'a str>,
 }
 
 pub(crate) fn send(
@@ -411,6 +415,7 @@ pub(crate) fn send(
             event: None,
             re,
             mentions,
+            signature_tag: options.signature_tag,
         },
     )?;
     let file = paths.messages.join(format!("{id}.msg"));
@@ -511,9 +516,10 @@ fn crossed_send_bounce(
                 // Some(verified-bool), ordinary unsigned messages stay
                 // None -> field omitted in JSON (A0a Decision 3).
                 item.bounce.signed_verified =
-                    crate::mailbox::signed_status(Some(owner), &item.message, &item.body).map(
-                        |status| matches!(status, crate::mailbox::SignedStatus::Verified { .. }),
-                    );
+                    crate::mailbox::signed_status(Some(owner), &item.message, &item.body, channel)
+                        .map(|status| {
+                            matches!(status, crate::mailbox::SignedStatus::Verified { .. })
+                        });
             }
         }
     }
@@ -668,6 +674,7 @@ pub(crate) fn write_event(
             event: Some(event),
             re: None,
             mentions: Vec::new(),
+            signature_tag: None,
         },
     )
 }
@@ -680,6 +687,7 @@ struct WriteMessage<'a> {
     event: Option<&'a str>,
     re: Option<String>,
     mentions: Vec<String>,
+    signature_tag: Option<&'a str>,
 }
 
 /// Writes one message with a fresh microsecond-resolution id, retrying on
@@ -709,6 +717,9 @@ fn write_message(
             pfp: profile.pfp.clone(),
             re: opts.re.clone(),
             mentions: opts.mentions.clone(),
+            signature_ref: opts
+                .signature_tag
+                .map(|tag| serde_json::json!({ "version": 2, "tag": tag })),
         };
         validate_channel_message(Path::new("<generated message>"), &message)?;
         let payload = encode_message(&message, opts.body)?;
@@ -1003,6 +1014,7 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         validate_channel_message(Path::new("<test>"), &message).expect("valid id shape");
         trash_test_root(&root);
@@ -1023,6 +1035,7 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("control characters in channel must be refused");
@@ -1042,6 +1055,7 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("second-resolution ids must be refused");
@@ -1069,6 +1083,7 @@ mod tests {
                 event: Some(JOIN_EVENT),
                 re: None,
                 mentions: Vec::new(),
+                signature_tag: None,
             },
         )
         .expect("join event");
@@ -1088,6 +1103,7 @@ mod tests {
                 event: None,
                 re: None,
                 mentions: Vec::new(),
+                signature_tag: None,
             },
         )
         .expect("send");
@@ -1131,6 +1147,7 @@ mod tests {
                 event: None,
                 re: None,
                 mentions: Vec::new(),
+                signature_tag: None,
             },
         )
         .expect("send");
@@ -1152,6 +1169,7 @@ mod tests {
                 event: None,
                 re: None,
                 mentions: Vec::new(),
+                signature_tag: None,
             },
         )
         .expect("send");
@@ -1220,6 +1238,7 @@ mod tests {
                 event: None,
                 re: None,
                 mentions: Vec::new(),
+                signature_tag: None,
             },
         )
         .expect("send");
@@ -1321,6 +1340,7 @@ mod tests {
             pfp: None,
             re: Some("aaaaaaaéx".to_owned()),
             mentions: vec![],
+            signature_ref: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("non-canonical re must be refused");

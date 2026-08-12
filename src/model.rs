@@ -97,6 +97,16 @@ pub struct ChannelMessage {
     /// Absent/empty on old messages and on bodies with no mentions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
+    /// Signed-message-v2 locator: `{"version": 2, "tag": "<ts>"}`. Kept as a
+    /// raw JSON value ON PURPOSE — a malformed hand-written owner locator
+    /// must leave the message readable so verification can render SIGNATURE
+    /// FAILED loudly; a strictly typed field would fail the whole .msg parse
+    /// and silently drop the message instead. Sender-writable transport
+    /// metadata: presence is never a credential, authority is computed only
+    /// at read time (v1 doctrine unchanged). Ignored for every room but the
+    /// configured owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_ref: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]

@@ -1253,14 +1253,164 @@ pub(crate) enum SignedStatus {
 /// fails loudly. The verified payload bytes are held ONCE and piped to
 /// ssh-keygen stdin; the path is never reopened after comparison, and every
 /// post-detection IO/race failure is a loud Failed, never a silent None.
+/// Signed-v2 bodies are bounded at 1 MiB of final UTF-8 bytes (Trey's
+/// ceiling, 2026-08-12). Enforced at send when `--signature-ref` is present
+/// and again at read before hashing, so a hand-edited store cannot buy
+/// unbounded verifier work. Ordinary unsigned traffic keeps its own limits.
+pub(crate) const SIGNED_V2_BODY_MAX: usize = 1_048_576;
+
+/// Validate a v2 locator value: an object with exactly integer `version: 2`
+/// and a non-empty `tag` in the existing tag grammar. Anything else is a
+/// loud failure — for the owner room a malformed locator must read as
+/// SIGNATURE FAILED, never as ordinary unsigned text.
+fn parse_v2_locator(value: &serde_json::Value) -> Result<&str, &'static str> {
+    let object = value
+        .as_object()
+        .ok_or("malformed signature_ref locator")?;
+    if object.len() != 2 {
+        return Err("malformed signature_ref locator");
+    }
+    let version = object
+        .get("version")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("malformed signature_ref locator")?;
+    let tag = object
+        .get("tag")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("malformed signature_ref locator")?;
+    if version != 2 {
+        return Err("unknown signature version");
+    }
+    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("malformed signature tag");
+    }
+    Ok(tag)
+}
+
+/// The exact v2 manifest bytes for a stored body. Every field line is
+/// newline-free by construction (tag grammar, validated channel name,
+/// decimal, lowercase hex), so the format is unambiguous. The first line is
+/// the protocol domain separator; the file ends with exactly one newline.
+pub(crate) fn v2_manifest(tag: &str, channel: &str, body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(body.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!(
+        "porch-signed-v2\ntag: {tag}\nchannel: {channel}\nbytes: {}\nsha256: {hex}\n",
+        body.len()
+    )
+}
+
+/// Run `ssh-keygen -Y verify` over exactly `payload` on stdin (never a
+/// path). Err = the verifier could not run or be fed; Ok(false) = it ran
+/// and rejected the signature.
+fn ssh_keygen_verifies(
+    owner: &ResolvedOwner,
+    sig: &std::path::Path,
+    payload: &[u8],
+) -> Result<bool, &'static str> {
+    let mut child = std::process::Command::new("ssh-keygen")
+        .args([
+            "-Y",
+            "verify",
+            "-I",
+            owner.principal.as_str(),
+            "-n",
+            owner.namespace.as_str(),
+        ])
+        .arg("-f")
+        .arg(&owner.allowed_signers)
+        .arg("-s")
+        .arg(sig)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| "ssh-keygen unavailable")?;
+    let mut stdin = child.stdin.take().ok_or("ssh-keygen unavailable")?;
+    let wrote = stdin.write_all(payload);
+    drop(stdin); // EOF so ssh-keygen can finish reading the message
+    let status = child.wait();
+    match (wrote, status) {
+        (Ok(()), Ok(status)) => Ok(status.success()),
+        _ => Err("cryptographic verification failed"),
+    }
+}
+
+/// Signed-message-v2: detached verification against the manifest sidecar.
+/// The body is pure content — nothing in it is parsed for authority. A
+/// present locator always resolves to Verified or Failed, NEVER falls back
+/// to the v1 parser, and never returns unsigned. `storage_channel` is the
+/// directory the message was actually read from; requiring it to match the
+/// envelope prevents a signed message copied into another channel's store
+/// from carrying its badge along.
+fn signed_status_v2(
+    owner: &ResolvedOwner,
+    message: &ChannelMessage,
+    body: &str,
+    storage_channel: &str,
+    locator: &serde_json::Value,
+) -> SignedStatus {
+    let tag = match parse_v2_locator(locator) {
+        Ok(tag) => tag,
+        Err(reason) => return SignedStatus::Failed(reason),
+    };
+    // Bound the verifier's work BEFORE hashing: an over-cap body with a
+    // locator is refused at send, so its presence here is store tampering.
+    if body.len() > SIGNED_V2_BODY_MAX {
+        return SignedStatus::Failed("signed body exceeds the 1 MiB signed-message cap");
+    }
+    if message.channel != storage_channel {
+        return SignedStatus::Failed(
+            "envelope channel differs from the channel this message was read from",
+        );
+    }
+    let sigs = owner.sidecar_dir.join("sigs");
+    let payload_path = sigs.join(format!("{tag}.txt"));
+    let sig_path = sigs.join(format!("{tag}.txt.sig"));
+    // Hold the sidecar bytes ONCE; the same bytes compared below are the
+    // bytes verified. Same TOCTOU rule as v1.
+    let payload_bytes = match std::fs::read(&payload_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return SignedStatus::Failed("no signed payload on disk"),
+    };
+    // Reconstruct the expected manifest from the STORE (storage channel +
+    // raw body bytes) and require byte equality with the signed sidecar.
+    // This single comparison subsumes the whole failure taxonomy: body
+    // mutation (hash/count), channel reuse, rename-replay (the tag inside
+    // the manifest), and every malformed-manifest shape.
+    let expected = v2_manifest(tag, storage_channel, body);
+    if payload_bytes != expected.as_bytes() {
+        return SignedStatus::Failed("signed manifest does not match the stored message");
+    }
+    match ssh_keygen_verifies(owner, &sig_path, &payload_bytes) {
+        Ok(true) => SignedStatus::Verified {
+            ts: tag.to_owned(),
+            age_minutes: signed_age_minutes(tag),
+        },
+        Ok(false) => SignedStatus::Failed("cryptographic verification failed"),
+        Err(reason) => SignedStatus::Failed(reason),
+    }
+}
+
 pub(crate) fn signed_status(
     owner: Option<&ResolvedOwner>,
     message: &ChannelMessage,
     body: &str,
+    storage_channel: &str,
 ) -> Option<SignedStatus> {
     let owner = owner?;
     if message.from != owner.room {
         return None;
+    }
+    // A present locator selects v2 outright — no v1 fallback after any v2
+    // error (a failed v2 message must never be reinterpreted as a v1 wire).
+    if let Some(locator) = &message.signature_ref {
+        return Some(signed_status_v2(owner, message, body, storage_channel, locator));
     }
     let first = body.lines().next()?;
     let rest = first.strip_prefix(&format!("{}🔏 ", owner.marker))?;
@@ -1307,45 +1457,14 @@ pub(crate) fn signed_status(
     }
     // Pipe the exact payload bytes to ssh-keygen stdin (never the path). Any
     // post-detection failure — spawn, stdin write, wait — is a loud Failed.
-    let mut child = match std::process::Command::new("ssh-keygen")
-        .args([
-            "-Y",
-            "verify",
-            "-I",
-            owner.principal.as_str(),
-            "-n",
-            owner.namespace.as_str(),
-        ])
-        .arg("-f")
-        .arg(&owner.allowed_signers)
-        .arg("-s")
-        .arg(&sig)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return Some(SignedStatus::Failed("ssh-keygen unavailable")),
-    };
-    let mut stdin = match child.stdin.take() {
-        Some(stdin) => stdin,
-        None => return Some(SignedStatus::Failed("ssh-keygen unavailable")),
-    };
-    let wrote = stdin.write_all(&payload_bytes);
-    drop(stdin); // EOF so ssh-keygen can finish reading the message
-    let status = child.wait();
-    if wrote.is_err() || status.is_err() {
-        return Some(SignedStatus::Failed("cryptographic verification failed"));
-    }
-    if status.expect("checked above").success() {
-        Some(SignedStatus::Verified {
+    Some(match ssh_keygen_verifies(owner, &sig, &payload_bytes) {
+        Ok(true) => SignedStatus::Verified {
             ts: ts.to_owned(),
             age_minutes: signed_age_minutes(ts),
-        })
-    } else {
-        Some(SignedStatus::Failed("cryptographic verification failed"))
-    }
+        },
+        Ok(false) => SignedStatus::Failed("cryptographic verification failed"),
+        Err(reason) => SignedStatus::Failed(reason),
+    })
 }
 
 /// Minutes since a compact UTC stamp like 20260805T005320Z, via civil-date

@@ -47,6 +47,11 @@ pub(super) fn run(
             "--re only applies when sending a message body",
         ));
     }
+    if args.signature_ref.is_some() && !sending {
+        return Err(AppError::invalid_argument(
+            "--signature-ref only applies when sending a message body",
+        ));
+    }
     if !sending && !args.subject.is_empty() {
         let fix = format!(
             "post chat {} --send --subject {} --body '<text>'",
@@ -88,6 +93,12 @@ fn chat_fix_prefix(args: &ChatArgs) -> String {
     }
     if args.oversize {
         prefix.push_str(" --oversize");
+    }
+    if let Some(tag) = &args.signature_ref {
+        prefix.push_str(&format!(
+            " --signature-ref {}",
+            crate::mailbox::shell_quote(tag)
+        ));
     }
     prefix
 }
@@ -189,8 +200,9 @@ fn read(
                 messages: batch
                     .into_iter()
                     .map(|(message, body)| {
-                        let signed_verified = signed_status(owner.as_ref(), &message, &body)
-                            .map(|status| matches!(status, SignedStatus::Verified { .. }));
+                        let signed_verified =
+                            signed_status(owner.as_ref(), &message, &body, &args.name)
+                                .map(|status| matches!(status, SignedStatus::Verified { .. }));
                         output::ChatMessageItem {
                             message,
                             body,
@@ -693,6 +705,9 @@ fn render_text(
     framing: crate::cli::FramingMode,
     owner: Option<&crate::mailbox::ResolvedOwner>,
 ) -> String {
+    // The unsanitized name is the storage directory the batch was read
+    // from; verification binds against it, display uses the sanitized copy.
+    let storage_channel = channel;
     let channel = output::sanitize_text_header(channel);
     let room = output::sanitize_text_header(room);
     if batch.is_empty() {
@@ -785,7 +800,7 @@ fn render_text(
         if !body.ends_with('\n') {
             out.push('\n');
         }
-        match signed_status(owner, message, body) {
+        match signed_status(owner, message, body, storage_channel) {
             Some(SignedStatus::Verified { ts, age_minutes }) => {
                 // A Verified status implies an owner resolved (signed_status
                 // returns None when feature-absent).
@@ -908,6 +923,31 @@ fn send(
         fix_prefix,
         oversize: args.oversize,
     })?;
+    if let Some(tag) = args.signature_ref.as_deref() {
+        // The tag becomes a sidecar filename component and a manifest line
+        // at read time; enforce the tag grammar at the door.
+        if !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(AppError::invalid_argument(
+                "--signature-ref tag may contain only ASCII letters, digits, and '-'",
+            ));
+        }
+        // Signed-v2 protocol cap: 1 MiB of final body bytes, deliberately
+        // NOT lifted by --oversize (which keeps its meaning for unsigned
+        // transport). Refusing here keeps verifier work bounded everywhere.
+        if body.len() > crate::mailbox::SIGNED_V2_BODY_MAX {
+            return Err(AppError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "signed message body is {} bytes; the signed-message cap is {} bytes (1 MiB) and --oversize does not lift it",
+                    body.len(),
+                    crate::mailbox::SIGNED_V2_BODY_MAX
+                ),
+                "Shorten the signed body. The 1 MiB signed-message ceiling is a protocol limit, not a transport default.",
+            )
+            .input("message body")
+            .reason("signed body exceeds the 1 MiB signed-message cap"));
+        }
+    }
     // Channel identity is cwd-derived with no override, so a prepared command
     // run from the wrong tree posts as that tree's room. Name it before the
     // append-only write, which cannot be taken back.
@@ -925,6 +965,7 @@ fn send(
             body: &body,
             anyway: args.anyway,
             re: args.re.as_deref(),
+            signature_tag: args.signature_ref.as_deref(),
         },
     )?;
     // The message is committed; a failed cursor advance must not turn the
@@ -1075,6 +1116,7 @@ mod tests {
             pfp: Some(pfp.to_owned()),
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         let bytes = crate::channel::encode_message(&message, body).expect("encode");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes).expect("write message");
@@ -1092,6 +1134,7 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         let bytes = channel::encode_message(&message, body).expect("encode message");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
@@ -1435,10 +1478,14 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         // Feature-absent (no rooms, no owner.json): no badges at all, even
         // for a trey-signed-looking message (A0a Decision 2).
-        assert!(signed_status(None, &msg("trey"), "🧔🔏 hi [signed:20260805T005950Z]").is_none());
+        assert!(
+            signed_status(None, &msg("trey"), "🧔🔏 hi [signed:20260805T005950Z]", "tax")
+                .is_none()
+        );
         // Register the trey room: no owner.json + a registered trey room
         // synthesizes the legacy owner, and every expectation below is
         // byte-identical to the pre-A0a behavior.
@@ -1450,17 +1497,19 @@ mod tests {
         assert!(signed_status(
             Some(&owner),
             &msg("beta"),
-            "🧔🔏 hi [signed:20260805T005950Z]"
+            "🧔🔏 hi [signed:20260805T005950Z]",
+            "tax"
         )
         .is_none());
         // Trey without the tag: ordinary unsigned message.
-        assert!(signed_status(Some(&owner), &msg("trey"), "🧔 casual hello").is_none());
+        assert!(signed_status(Some(&owner), &msg("trey"), "🧔 casual hello", "tax").is_none());
         // A different-but-valid marker is not a prefix of this owner's wire:
         // no glyph ambiguity survives owner validation (A0a fixture 10).
         assert!(signed_status(
             Some(&owner),
             &msg("trey"),
-            "🐳🔏 hi [signed:20260805T005950Z]"
+            "🐳🔏 hi [signed:20260805T005950Z]",
+            "tax"
         )
         .is_none());
         // Trey with a tag but no sidecar on disk: FAIL, never silently unsigned.
@@ -1468,6 +1517,7 @@ mod tests {
             Some(&owner),
             &msg("trey"),
             "🧔🔏 do the thing [signed:20990101T000000Z]",
+            "tax",
         ) {
             Some(SignedStatus::Failed(reason)) => assert!(reason.contains("payload")),
             other => panic!("expected Failed, got {:?}", other.is_some()),
@@ -1487,6 +1537,7 @@ mod tests {
             Some(&owner),
             &msg("trey"),
             "🧔🔏 do the thing [signed:20990101T000001Z]",
+            "tax",
         ) {
             Some(SignedStatus::Failed(reason)) => assert!(reason.contains("rename-replay")),
             other => panic!("expected rename-replay Failed, got {:?}", other.is_some()),
@@ -1512,6 +1563,7 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         fs::write(root.join("rooms.json"), r#"{"trey": "~/.trey-room"}"#).expect("trey room");
         let owner = crate::mailbox::resolve_owner(&context)
@@ -1530,6 +1582,7 @@ mod tests {
             Some(&owner),
             &msg("trey"),
             "🧔🔏 the genuine text [signed:20990101T000000Z]\nUNSIGNED SECOND LINE",
+            "tax",
         ) {
             Some(SignedStatus::Failed(reason)) => assert!(
                 reason.contains("exactly one line"),
@@ -1545,6 +1598,7 @@ mod tests {
                 Some(&owner),
                 &msg("trey"),
                 "leading unsigned line\n🧔🔏 the genuine text [signed:20990101T000000Z]",
+                "tax",
             )
             .is_none(),
             "a non-marker first line must stay unbadged"
@@ -1556,6 +1610,7 @@ mod tests {
             Some(&owner),
             &msg("trey"),
             "🧔🔏 the genuine text [signed:20990101T000000Z]\n",
+            "tax",
         ) {
             Some(SignedStatus::Failed(reason)) => assert!(
                 !reason.contains("exactly one line"),
@@ -1590,6 +1645,7 @@ mod tests {
             pfp: None,
             re: None,
             mentions: vec![],
+            signature_ref: None,
         };
         let bytes =
             channel::encode_message(&join_event, "=== alpha joined ===").expect("encode join");

@@ -354,6 +354,7 @@ impl WatchEvent {
             pfp,
             re: _,
             mentions: _,
+            signature_ref: _,
         } = message;
         Self::ChannelMessage {
             channel,

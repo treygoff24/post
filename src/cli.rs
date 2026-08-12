@@ -182,6 +182,14 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["join", "peek", "discard", "seen_by"])]
     pub oversize: bool,
 
+    /// Signed-message-v2 sidecar tag: stamps the envelope locator
+    /// {"version":2,"tag":<TAG>} on the sent message. A locator, never a
+    /// verdict — authority is computed at read time. Signed bodies are
+    /// capped at 1 MiB regardless of --oversize. Only meaningful when
+    /// sending.
+    #[arg(long = "signature-ref", value_name = "TAG", value_parser = nonempty_without_controls, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
+    pub signature_ref: Option<String>,
+
     /// Deprecated positional spelling of --body-file; requires --send.
     #[arg(
         value_name = "FILE",
