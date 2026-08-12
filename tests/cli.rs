@@ -6434,6 +6434,10 @@ fn v2_malformed_owner_locators_fail_loudly_and_non_owner_locators_are_inert() {
             "float-version",
             serde_json::json!({"version": 2.5, "tag": "20260812T210800Z"}),
         ),
+        // A PRESENT null must fail loudly — plain Option deserialization
+        // would fold it into "no locator" and silently downgrade to
+        // unsigned (Sol's review catch, 20260812-210155).
+        ("present-null", serde_json::json!(null)),
     ];
     for (index, (name, locator)) in cases.iter().enumerate() {
         let id = format!("20990101-120000-00000{index}-aaaaa{index}");
@@ -6462,6 +6466,25 @@ fn v2_malformed_owner_locators_fail_loudly_and_non_owner_locators_are_inert() {
         ),
         None,
         "a non-owner locator must stay unbadged and un-failed"
+    );
+    // Non-owner null locator: equally inert, never a failure badge.
+    write_channel_message_with_ref(
+        &sandbox,
+        "malformed",
+        "20990101-120000-000098-eeeeee",
+        "alpha",
+        "body",
+        serde_json::json!(null),
+    );
+    assert_eq!(
+        v2_read_badge(
+            &sandbox,
+            "malformed",
+            &mara,
+            "20990101-120000-000098-eeeeee"
+        ),
+        None,
+        "a non-owner null locator must stay inert"
     );
 }
 

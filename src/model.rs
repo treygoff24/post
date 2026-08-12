@@ -101,12 +101,30 @@ pub struct ChannelMessage {
     /// raw JSON value ON PURPOSE — a malformed hand-written owner locator
     /// must leave the message readable so verification can render SIGNATURE
     /// FAILED loudly; a strictly typed field would fail the whole .msg parse
-    /// and silently drop the message instead. Sender-writable transport
-    /// metadata: presence is never a credential, authority is computed only
-    /// at read time (v1 doctrine unchanged). Ignored for every room but the
+    /// and silently drop the message instead. The custom deserializer keeps
+    /// a PRESENT `null` as Some(Null) — plain Option would fold it into
+    /// None and an owner message stamped `"signature_ref": null` would
+    /// silently read as unsigned instead of failing loudly (Sol's review
+    /// catch, 20260812-210155). Sender-writable transport metadata:
+    /// presence is never a credential, authority is computed only at read
+    /// time (v1 doctrine unchanged). Ignored for every room but the
     /// configured owner's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub signature_ref: Option<serde_json::Value>,
+}
+
+/// Present key (any value, including null) → Some; absent key → the field's
+/// #[serde(default)] None. This is what distinguishes "no locator" from
+/// "a locator that is garbage" — the latter must stay visible to fail loudly.
+fn deserialize_present_json<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug)]
