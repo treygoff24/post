@@ -1,18 +1,19 @@
 # ADAPTERS — wiring your harness to post
 
 This document is written for the agent doing the wiring. If you are an AI
-agent whose harness (Claude Code, Codex CLI, Cursor, anything with lifecycle
-hooks or a process monitor) should learn about new post mail automatically,
-this is the recipe. A human can follow it too; nothing here requires being a
-model.
+agent whose harness (Claude Code, Codex CLI, Cursor CLI, Grok Build, anything
+with lifecycle hooks or a process monitor) should learn about new post mail
+automatically, this is the recipe. A human can follow it too; nothing here
+requires being a model.
 
 Run relative commands below from the post checkout root.
 
 post itself never pushes. It is files on disk plus a CLI; something in your
 harness has to ask. An **adapter** is the small piece that asks at the right
 moments and injects the answer into your session without violating post's
-laws. Two ready-made adapters ship in `skills/post/hooks/` (Claude Code and
-Codex CLI), plus an out-of-band doorbell for waking idle agents. Everything
+laws. Four ready-made lifecycle adapters ship in `skills/post/hooks/` (Claude
+Code, Codex CLI, Cursor CLI, Grok Build), plus a validating watch-notice
+renderer for native idle wake and an out-of-band Herdr doorbell. Everything
 else is a recipe.
 
 ## The two alerting layers
@@ -28,10 +29,13 @@ for nothing until its next activity.
 **2. Out-of-band wake.** Something outside the session — a launchd job, a
 harness monitor primitive, a controller API — notices mail and *starts a
 turn* in an idle session. This is the only way mail reaches an agent that is
-sitting between turns. The shipped implementation wakes a named Codex agent
-through Herdr's agent-control API. Claude Code's Monitor is an example of the
-controller primitive, but raw watch output is not by itself a safe adapter;
-the validator/deduper/renderer still belongs between post and the wake.
+sitting between turns. The shipped launchd doorbell wakes a named Herdr
+agent through Herdr's agent-control API (the installer is labeled Codex; the
+sink is Herdr and already covers `--kind cursor` and `--kind grok`). Claude
+Code's Monitor, Grok's `monitor` tool, and Cursor's background-task
+completion are native controller primitives — but raw watch output is not by
+itself a safe adapter; `watch-notice.mjs` (or the equivalent validator /
+renderer) still belongs between post and the wake.
 
 Use both layers where the harness supports them. They compose: hooks annotate
 active turns, while the wake layer rings idle ones. Lifecycle-only support is
@@ -43,6 +47,8 @@ still complete mail notification — it is simply activity-gated.
 | Lifecycle hooks | In-session adapter | No; notices arrive on next activity |
 | Claude Code hooks | Shipped lifecycle adapter | Requires a validated Monitor controller; none ships here |
 | Codex CLI hooks | Shipped lifecycle adapter | No native idle wake; shipped macOS option uses external Herdr |
+| Cursor CLI hooks | Shipped lifecycle adapter | Native: wrap `post watch --once` with `watch-notice.mjs` (Cursor starts a turn on background-task completion). Herdr doorbell also wakes `--kind cursor` |
+| Grok Build hooks | Shipped lifecycle adapter (UserPromptSubmit only) | Native: point Grok `monitor` at `watch-notice.mjs`, never at raw `post watch`. Herdr doorbell also wakes `--kind grok` |
 | Addressable session controller | Lifecycle adapter plus controller port | Yes, after controller acceptance |
 
 ## The adapter contract
@@ -91,7 +97,7 @@ style; each one closes a hole that was found the hard way.
    proportional to the live backlog. The tempting alternative — append fresh
    keys to a capped FIFO — re-notifies forever on any backlog larger than the
    cap (each run's slice forgets a different still-unread key). Earlier
-   versions of both shipped adapters had that bug; the test matrix proving
+   versions of the shipped adapters had that bug; the test matrix proving
    the fix (identical-snapshot silence, new-arrival, consumption pruning, at
    cap-plus-one scale) is in the `*.test.mjs` files. Steal it.
 
@@ -175,8 +181,8 @@ is written and its failure path tested, the shipped Claude lifecycle adapter
 is the supported tier.
 
 The same rule applies to harnesses that wake on background-task *exit*:
-`post watch --once` is a detector, not a safe injected payload. Validate and
-render its NDJSON before the task-completion notice reaches model context.
+`post watch --once` is a detector, not a safe injected payload. Wrap it with
+`watch-notice.mjs` before the task-completion notice reaches model context.
 
 ## Shipped adapter: Codex CLI
 
@@ -209,6 +215,106 @@ per-session dedupe, fail-open. Plain Codex without an external controller is
 exactly this lifecycle-only tier: it learns about waiting mail on its next
 session event, but cannot be started from idle by a hook.
 
+## Shipped adapter: Cursor CLI
+
+Files: `skills/post/hooks/cursor-mail.mjs` (+ tests),
+`install-cursor-hooks.mjs`. The installer also copies `watch-notice.mjs`.
+
+```bash
+node skills/post/hooks/install-cursor-hooks.mjs ~/.cursor/hooks.json
+```
+
+The target path is required — the installer never guesses at a live config.
+It registers the adapter for Cursor camelCase events `sessionStart` /
+`beforeSubmitPrompt` / `postToolUse` (Claude PascalCase names are a no-op),
+merges without touching unrelated hooks (existing `audit.sh` entries stay),
+is idempotent on re-run, and copies the reviewed adapter to
+`~/.cursor/hooks/post-cursor-mail.mjs`. Cursor user-level hooks often run
+with cwd `~/.cursor/` and put the project in `workspace_roots`; the adapter
+resolves the room from an absolute `cwd`, else the first absolute
+`workspace_roots[]` entry, and fails open if both are missing. It does
+**not** fall back to `process.cwd()`. Session id is `session_id` or
+`conversation_id`. Native output is `{ additional_context }`; Claude nested
+`hookSpecificOutput` is included so compatibility mode still injects.
+Subagent events (`subagent_id` or `agent_id`) are suppressed;
+`is_background_agent` and `agent_type` are not discriminators. postToolUse
+scans are throttled to one per 30 s; sessionStart resets per-session dedupe.
+
+Tested against Cursor CLI `cursor-agent` 2026.08.11-e8db854. Public docs omit
+`additional_context` on `beforeSubmitPrompt`; the CLI binary accepts it on
+all three events. Treat a Cursor update as a reason to re-run the adapter
+tests.
+
+**Idle wake, Cursor flavor:** Cursor starts a new turn when a background
+shell exits, so `--once` is a real wake if the payload is safe. Do not point
+the background task at raw `post watch --once`. Use the copied renderer:
+
+```bash
+node ~/.cursor/hooks/post-watch-notice.mjs --once
+```
+
+The Herdr doorbell already wakes a named `--kind cursor` agent; do not fork
+`install-codex-doorbell.mjs` for Cursor.
+
+## Shipped adapter: Grok Build
+
+Files: `skills/post/hooks/grok-mail.mjs` (+ tests),
+`install-grok-hooks.mjs`. The installer also copies `watch-notice.mjs`.
+
+```bash
+node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
+```
+
+Use a dedicated `~/.grok/hooks/post-mail.json`. Grok merges every
+`~/.grok/hooks/*.json`; do not edit `cmux-session.json` or `config.toml`.
+The installer writes a matcher-group command **string** (never Claude
+exec-form `args`) and copies the adapter to `~/.grok/hooks/post-grok-mail.mjs`.
+
+**Do not trust Grok's Claude-compat scan of `~/.claude/settings.json`.**
+Even with `compat.claude.hooks = true`, Grok lists the Claude mail hook and
+then drops `args`, so the target becomes bare `node`. Separately, Grok
+ignores SessionStart / PostToolUse stdout. Registering those events and
+committing seen-state there would hide mail the model never saw. This
+adapter is **UserPromptSubmit only** (`UserPromptSubmit` or
+`user_prompt_submit`, plus `GROK_HOOK_EVENT`). The first prompt of a new
+session still surfaces the launch backlog because per-session state starts
+empty. Stdin is camelCase (`hookEventName`, `sessionId`, `cwd` /
+`workspaceRoot`) with snake_case aliases. Output is Claude nested
+`hookSpecificOutput` with `hookEventName: "UserPromptSubmit"`.
+
+Tested against Grok Build `grok` 1.0.3. Treat a Grok update as a reason to
+re-run the adapter tests.
+
+**Idle wake, Grok flavor:** Grok's `monitor` tool treats each stdout line as
+a notification. Point it at the copied renderer, not at raw `post watch`:
+
+```bash
+node ~/.grok/hooks/post-watch-notice.mjs
+```
+
+Long-running is the default (one notice line per flushed batch). `--once` /
+`--snapshot` are single scans. The Herdr doorbell already wakes a named
+`--kind grok` agent; do not fork `install-codex-doorbell.mjs` for Grok.
+
+## Shipped renderer: watch-notice
+
+File: `skills/post/hooks/watch-notice.mjs` (+ tests). Cursor and Grok
+installers copy it to `post-watch-notice.mjs` beside the lifecycle adapter.
+
+```bash
+node skills/post/hooks/watch-notice.mjs [--once | --snapshot] [--room NAME]...
+```
+
+This is the validator/renderer for native idle wake. It runs `post watch`
+(optionally `--once` / `--snapshot`), validates every NDJSON event against
+the same shapes as the lifecycle adapters, and prints **one** bounded
+metadata-only notice line per flushed batch — Grok `monitor` would otherwise
+turn every raw event into a separate notification, and Cursor would inject
+attacker-reachable subjects on task completion. Empty snapshot: no stdout,
+exit 0. Scan failure: one UNKNOWN line, exit 1. A malformed batch is one
+UNKNOWN line with no event fields echoed. It never pins `--room` unless the
+caller passed it. Never `pgrep` / `pkill`.
+
 ## Shipped wake layer: launchd doorbell → Herdr (macOS)
 
 Files: `skills/post/hooks/codex-notify-monitor.mjs`,
@@ -220,6 +326,12 @@ one snapshot for one configured room (and optionally selected channels via
 `--channel`), and — when there is fresh mail and the target agent is
 unfocused and idle/done — wakes exactly one explicitly named agent through
 the controller's public API, delivering a bounded metadata-only ring.
+
+The installer is named for Codex because that is the harness that needed an
+external controller first. The sink is Herdr: `herdr agent get <name>` of a
+`--kind cursor` or `--kind grok` agent is a valid `--agent` target. Reuse
+this installer; do not fork it per harness unless the copy path
+(`~/.codex/hooks/`) becomes a problem.
 
 **Herdr is a separate prerequisite, not part of post.** The shipped monitor
 targets [Herdr](https://herdr.dev) (a multi-agent terminal controller with a
@@ -311,10 +423,11 @@ cwd-bound and has no `--from` override.
   shell: the installer captures `POST_MAIL_ROOT` at install time (absolute
   path required; explicitly empty is refused, matching the binary) and pins
   it into the plist. Change the root → re-run the installer.
-- **Node upgrades can strand every installed adapter.** All three installers
-  pin the installing Node's `process.execPath`: the lifecycle installers put
-  it in their hook command, and the doorbell puts it in the plist. After a
-  Node upgrade that removes the old binary, re-run the relevant installer.
+- **Node upgrades can strand every installed adapter.** Lifecycle installers
+  and the doorbell pin the installing Node's `process.execPath`: the
+  lifecycle installers put it in their hook command, and the doorbell puts
+  it in the plist. After a Node upgrade that removes the old binary, re-run
+  the relevant installer.
 - **Controller restarts invalidate wake targets.** Herdr agent names are
   session-lifetime. After a harness/controller restart, the doorbell's
   `--agent` target must exist again (re-create or re-name the agent, or
