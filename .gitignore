@@ -3,9 +3,6 @@
 # Machine-local agent complaint log — never ships
 .papercuts.jsonl
 
-# Session sitrep for the context hydrator — never ships
-STATE.md
-
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
