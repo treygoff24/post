@@ -280,10 +280,7 @@ impl Context {
         Ok((room, inbox, read))
     }
 
-    pub(crate) fn infer_from_cwd(
-        &self,
-        rooms: &RoomMap,
-    ) -> AppResult<(String, SenderProvenance)> {
+    pub(crate) fn infer_from_cwd(&self, rooms: &RoomMap) -> AppResult<(String, SenderProvenance)> {
         let cwd = std::env::current_dir()
             .map_err(|error| AppError::io("resolve current directory", Path::new("."), error))?;
         let mut matches = Vec::new();

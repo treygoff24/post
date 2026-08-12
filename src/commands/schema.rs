@@ -193,7 +193,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "announced (set/clear; channels that received the change event)",
         ]),
         watch: fields(&[
-            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
+            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp, sender_address, sender_provenance]",
             "unreadable: event, room, id, reason=mail|channel",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
         ]),

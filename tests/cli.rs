@@ -362,7 +362,7 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
+            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp, sender_address, sender_provenance]",
             "unreadable: event, room, id, reason=mail|channel",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
         ]
@@ -6871,7 +6871,10 @@ fn explicit_flag_beats_pin_and_records_declared_flag() {
     );
     assert_success(&output);
     let sent: SendOutput = from_stdout(&output);
-    assert_eq!(sent.envelope.from, "flag-sender", "explicit --from wins in M1");
+    assert_eq!(
+        sent.envelope.from, "flag-sender",
+        "explicit --from wins in M1"
+    );
     let raw = fs::read_to_string(
         sandbox
             .mail_root
@@ -7058,7 +7061,10 @@ fn chat_acting_room_honors_registered_pin_and_refuses_unregistered() {
     assert_eq!(value["message"]["from"], "pact");
     assert_eq!(value["message"]["sender_provenance"], "declared-env");
     let stderr = String::from_utf8_lossy(&send.stderr);
-    assert!(stderr.contains("POST_FROM pin"), "chat stderr names the pin: {stderr}");
+    assert!(
+        stderr.contains("POST_FROM pin"),
+        "chat stderr names the pin: {stderr}"
+    );
 
     // A pin naming an unregistered room refuses with the pin as the named
     // evidence source — never a silent fallback to cwd.
@@ -7151,7 +7157,11 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
         ("declared-env", Some(FROZEN_DECLARED_ENV), "aaaa01"),
         ("declared-flag", Some(FROZEN_DECLARED_FLAG), "aaaa02"),
         ("inferred-cwd", Some(FROZEN_INFERRED_CWD), "aaaa03"),
-        ("inferred-basename", Some(FROZEN_INFERRED_BASENAME), "aaaa04"),
+        (
+            "inferred-basename",
+            Some(FROZEN_INFERRED_BASENAME),
+            "aaaa04",
+        ),
         ("declared-quantum", None, "aaaa05"),
     ];
     for (value, expected, suffix) in cases {
@@ -7252,7 +7262,12 @@ fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
     let messages = value["messages"].as_array().expect("messages array");
     let provs: Vec<_> = messages
         .iter()
-        .map(|m| m["sender_provenance"].as_str().unwrap_or("<absent>").to_owned())
+        .map(|m| {
+            m["sender_provenance"]
+                .as_str()
+                .unwrap_or("<absent>")
+                .to_owned()
+        })
         .collect();
     assert!(provs.contains(&"declared-env".to_owned()));
     assert!(provs.contains(&"inferred-cwd".to_owned()));
@@ -7303,7 +7318,12 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
     // Inbox projection: mail sent under pin+address must surface both fields.
     let sent = sandbox.run_in_env(
         &[
-            "send", "--to", "claude-space", "--body", "projected", "--json",
+            "send",
+            "--to",
+            "claude-space",
+            "--body",
+            "projected",
+            "--json",
         ],
         None,
         &sandbox.path,
@@ -7324,7 +7344,14 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
     let join_b = sandbox.run_in(&["chat", "xbounce", "--join"], None, &home_room);
     assert_success(&join_b);
     let other = sandbox.run_in_env(
-        &["chat", "xbounce", "--send", "--body", "landed first", "--json"],
+        &[
+            "chat",
+            "xbounce",
+            "--send",
+            "--body",
+            "landed first",
+            "--json",
+        ],
         None,
         &sandbox.path,
         &envs,
@@ -7349,11 +7376,7 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
     // Watch NDJSON projection: the channel-message event carries both raw
     // fields (text_line stays compact; the doorbell contract is metadata,
     // and NDJSON is where structured consumers read).
-    let watched = sandbox.run_in(
-        &["watch", "--snapshot", "--json"],
-        None,
-        &home_room,
-    );
+    let watched = sandbox.run_in(&["watch", "--snapshot", "--json"], None, &home_room);
     assert_success(&watched);
     let ndjson = String::from_utf8_lossy(&watched.stdout);
     let channel_event = ndjson
@@ -7363,4 +7386,15 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
         .expect("watch snapshot must surface the xbounce channel message");
     assert_eq!(channel_event["sender_address"], "codex.pact.f00dfeed");
     assert_eq!(channel_event["sender_provenance"], "declared-env");
+
+    // Direct-mail watch events flatten InboxItem, so they carry the same
+    // identity fields (Sol's follow-up, 20260812-234105): the "projected"
+    // mail sent above must surface both on its watch event too.
+    let mail_event = ndjson
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["event"] == "mail" && event["from"] == "pact")
+        .expect("watch snapshot must surface the pinned direct mail");
+    assert_eq!(mail_event["sender_address"], "codex.pact.f00dfeed");
+    assert_eq!(mail_event["sender_provenance"], "declared-env");
 }
