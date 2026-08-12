@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime --hook-json",
+            "command": "bd-prime-slim",
             "type": "command"
           }
         ],
