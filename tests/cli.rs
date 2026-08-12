@@ -6580,4 +6580,24 @@ fn v2_signature_ref_flag_guards() {
         String::from_utf8_lossy(&bad_tag.stderr).contains("ASCII letters, digits"),
         "the refusal must name the grammar"
     );
+    // Empty tag: refused at the flag parser (nonempty_without_controls),
+    // with the in-send charset check as the belt behind it.
+    let empty_tag = sandbox.run_in(
+        &[
+            "chat",
+            "guards",
+            "--send",
+            "--signature-ref",
+            "",
+            "--body",
+            "hello",
+        ],
+        None,
+        &mara,
+    );
+    assert!(!empty_tag.status.success(), "an empty tag must be refused");
+    assert!(
+        String::from_utf8_lossy(&empty_tag.stderr).contains("must not be empty"),
+        "the refusal must name emptiness"
+    );
 }

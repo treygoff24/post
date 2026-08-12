@@ -925,10 +925,13 @@ fn send(
     })?;
     if let Some(tag) = args.signature_ref.as_deref() {
         // The tag becomes a sidecar filename component and a manifest line
-        // at read time; enforce the tag grammar at the door.
-        if !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        // at read time; enforce the tag grammar at the door. Emptiness is
+        // refused upstream by the flag's nonempty_without_controls parser
+        // (this charset check alone would vacuously pass ""); the belt here
+        // keeps the invariant even if the clap layer ever changes.
+        if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err(AppError::invalid_argument(
-                "--signature-ref tag may contain only ASCII letters, digits, and '-'",
+                "--signature-ref tag must be non-empty ASCII letters, digits, and '-'",
             ));
         }
         // Signed-v2 protocol cap: 1 MiB of final body bytes, deliberately
