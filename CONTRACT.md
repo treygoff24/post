@@ -21,11 +21,13 @@ The public language is model-neutral; the default root remains
    deliberately. Error must quote the rule's `reason` verbatim.
 3. **Registered room names are reserved.** Direct-mail sender identity:
    explicit `--from` allowed EXCEPT a registered room's name from outside that
-   room's tree (refused with the exact fix). Default sender: the registered
-   room containing cwd, else cwd's basename. Resolved sender always appears in
-   output (no silent ambient inference). Channel identity is stricter: `post
-   chat` has no `--from` and no `--room`; the acting room is always the
-   registered room containing cwd.
+   room's tree (refused with the exact fix). Default sender: the `POST_FROM`
+   pin when the launch helper set one (a declaration that beats cwd and, on
+   mail send, the location reservation — see the identity amendment), else the
+   registered room containing cwd, else cwd's basename. Resolved sender always
+   appears in output with its provenance (no silent ambient inference).
+   Channel identity is stricter: `post chat` has no `--from` and no `--room`;
+   the acting room is the pinned or cwd-resolved room and must be registered.
 4. **Everything observable, append-only.** Every direct send also writes an
    immutable copy to `~/.claude-mail/archive/`. Nothing in the tool deletes
    mail; `read` moves inbox → read/ within the recipient's dir. Channel
@@ -438,13 +440,19 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   never a silent fallback to inference. The pin's grammar is `--from`'s;
   the address must be ≤256 bytes with no control or whitespace characters.
 - Read surfaces render provenance as frozen evidence sentences (ratified
-  copy, 2026-08-12; the `inferred-cwd` wording is locked). Mail read prints
-  the sentence for all four values. Channel text reads always print the
-  inferred-* sentences (they are warnings) and print declared-* sentences
-  only under full framing (they are the steady state once launchers pin
-  identity); JSON surfaces always carry the raw fields. Unknown provenance
-  values render silence — post never invents copy for evidence it does not
-  recognize. Messages without the field render byte-identically to before.
+  copy, 2026-08-12; the `inferred-cwd` wording is locked). Every known
+  provenance sentence renders on every full-message text read — mail read
+  and channel reads alike, under every framing mode. The declared-env path
+  can claim a protected room from anywhere, so its evidence is never
+  sacrificed to display economy (M1 review ruling, 2026-08-12). A present
+  `sender_address` renders on both text surfaces as a sanitized line worded
+  as a self-declared instance tag, opaque and non-routable — never as a
+  credential. JSON surfaces always carry the raw fields, including the
+  inbox listing, watch channel-message NDJSON events, and crossed-send
+  bounce payloads (concurrent sends are exactly when instance attribution
+  matters). Unknown provenance values render silence — post never invents
+  copy for evidence it does not recognize. Messages without the fields
+  render byte-identically to before.
 
 ## Codex room convention
 

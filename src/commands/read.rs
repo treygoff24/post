@@ -246,6 +246,14 @@ From room: {}   Kind: {}   Sent: {}   Id: {}\n",
     {
         rendered.push_str(&format!("Sender evidence: {sentence}\n"));
     }
+    // Instance attribution, self-declared: worded so it can never read as a
+    // credential (Sol's M1 review, 20260812-233341).
+    if let Some(address) = envelope.sender_address.as_deref() {
+        rendered.push_str(&format!(
+            "Sender address: {} (self-declared instance tag, opaque and non-routable)\n",
+            output::sanitize_text_header(address)
+        ));
+    }
     if already_read {
         rendered.push_str(
             "\nAlready read: served from the read/archive store; nothing was consumed.\n",

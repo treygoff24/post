@@ -796,25 +796,25 @@ fn render_text(
             output::sanitize_text_header(&message.sent),
             output::sanitize_text_header(&message.id)
         ));
-        // Evidence line for how `from` was resolved. Inferred provenance is a
-        // warning and always renders; declared provenance is the steady state
-        // once launchers pin identity, so its sentence renders only under the
-        // full framing wall — every batch repeating an identical declaration
-        // line would train readers to skip evidence entirely. JSON always
-        // carries the raw field; unknown values render silence, never
-        // invented copy. Absent on old messages.
+        // Evidence lines for how `from` was resolved and which instance sent
+        // it. Every known provenance renders on every full-message text read
+        // — the declared-env path can claim a protected room from anywhere,
+        // so it is exactly the evidence a reader must never lose to display
+        // economy (Sol's M1 review, 20260812-233341). Unknown values render
+        // silence, never invented copy. Absent on old messages. The address
+        // is self-declared and worded to never look like a credential.
         if let Some(sentence) = message
             .sender_provenance
             .as_deref()
             .and_then(output::provenance_sentence)
         {
-            let inferred = matches!(
-                message.sender_provenance.as_deref(),
-                Some("inferred-cwd") | Some("inferred-basename")
-            );
-            if inferred || show_wall {
-                out.push_str(&format!("[sender evidence: {sentence}]\n"));
-            }
+            out.push_str(&format!("[sender evidence: {sentence}]\n"));
+        }
+        if let Some(address) = message.sender_address.as_deref() {
+            out.push_str(&format!(
+                "[sender address: {} — self-declared instance tag, opaque and non-routable]\n",
+                output::sanitize_text_header(address)
+            ));
         }
         out.push_str(&output::sanitize_text_body(body));
         if !body.ends_with('\n') {

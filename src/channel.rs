@@ -491,6 +491,8 @@ fn crossed_send_bounce(
                 sent: message.sent.clone(),
                 body: parsed.body.clone(),
                 signed_verified: None,
+                sender_address: message.sender_address.clone(),
+                sender_provenance: message.sender_provenance.clone(),
             },
             message,
             body: parsed.body,

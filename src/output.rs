@@ -254,6 +254,13 @@ pub struct InboxItem {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pfp: Option<String>,
+    /// Identity-layer fields, carried raw so instance attribution survives
+    /// every projection (Sol's M1 review); absent keeps the old shape
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_provenance: Option<String>,
 }
 
 impl From<Envelope> for InboxItem {
@@ -267,8 +274,8 @@ impl From<Envelope> for InboxItem {
             sent,
             display_name,
             pfp,
-            sender_address: _,
-            sender_provenance: _,
+            sender_address,
+            sender_provenance,
         } = envelope;
         Self {
             id,
@@ -278,6 +285,8 @@ impl From<Envelope> for InboxItem {
             sent,
             display_name,
             pfp,
+            sender_address,
+            sender_provenance,
         }
     }
 }
@@ -319,6 +328,12 @@ pub enum WatchEvent {
         display_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pfp: Option<String>,
+        /// Identity-layer fields, carried raw (Sol's M1 review); absent
+        /// keeps the pre-identity NDJSON byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_address: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_provenance: Option<String>,
         /// `"mention"` when the watching room is @mentioned in the body;
         /// otherwise `"channel"`.
         reason: WatchReason,
@@ -381,8 +396,8 @@ impl WatchEvent {
             re: _,
             mentions: _,
             signature_ref: _,
-            sender_address: _,
-            sender_provenance: _,
+            sender_address,
+            sender_provenance,
         } = message;
         Self::ChannelMessage {
             channel,
@@ -392,6 +407,8 @@ impl WatchEvent {
             sent,
             display_name,
             pfp,
+            sender_address,
+            sender_provenance,
             reason,
         }
     }
@@ -772,6 +789,8 @@ mod tests {
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             display_name: display_name.map(str::to_owned),
             pfp: pfp.map(str::to_owned),
+            sender_address: None,
+            sender_provenance: None,
             reason: WatchReason::Channel,
         }
     }
@@ -832,6 +851,8 @@ mod tests {
                 sent: "2026-07-22 01:31:00 -0500".to_owned(),
                 display_name: None,
                 pfp: None,
+                sender_address: None,
+                sender_provenance: None,
             },
         );
         assert_eq!(
@@ -848,6 +869,8 @@ mod tests {
                 sent: "2026-07-22 01:31:00 -0500".to_owned(),
                 display_name: Some("Lantern".to_owned()),
                 pfp: Some("🏮".to_owned()),
+                sender_address: None,
+                sender_provenance: None,
             },
         );
         assert_eq!(

@@ -51,6 +51,13 @@ pub struct MissedChannelMessage {
     /// and the channel text matches the signed payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signed_verified: Option<bool>,
+    /// Identity-layer fields, carried raw: crossed sends are exactly the
+    /// concurrent-instance moment where attribution matters (Sol's M1
+    /// review). Absent keeps the old bounce shape byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_provenance: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -195,7 +195,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         watch: fields(&[
             "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
             "unreadable: event, room, id, reason=mail|channel",
-            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp]",
+            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
         ]),
         who: fields(&["ok", "rooms (room, live_watch, last_seen?)", "count"]),
     };
