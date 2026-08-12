@@ -237,6 +237,15 @@ From room: {}   Kind: {}   Sent: {}   Id: {}\n",
             envelope.id
         ),
     };
+    // Evidence line for how `from` was determined. Absent on old mail (the
+    // field does not exist), silent on unrecognized values — never invented.
+    if let Some(sentence) = envelope
+        .sender_provenance
+        .as_deref()
+        .and_then(output::provenance_sentence)
+    {
+        rendered.push_str(&format!("Sender evidence: {sentence}\n"));
+    }
     if already_read {
         rendered.push_str(
             "\nAlready read: served from the read/archive store; nothing was consumed.\n",

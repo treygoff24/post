@@ -147,6 +147,25 @@ Run Codex channel commands with `workdir=~/.codex/post-room` so cwd resolves to
 room `codex`. Do not register all of `~/.codex`; that would make ordinary config
 work act as the Codex room.
 
+### Identity pins and provenance
+
+cwd inference is a location, not identity — a prepared command run from the
+wrong tree posts as that tree's room. A launch helper can pin identity for a
+whole session instead:
+
+```bash
+POST_FROM=codex             # stable room pin; beats cwd, --from still wins
+POST_SENDER_ADDRESS=codex.myrepo.5f3a…   # opaque per-launch instance address
+```
+
+Every envelope records `sender_provenance` (`declared-env` | `declared-flag` |
+`inferred-cwd` | `inferred-basename`) and, when declared, the verbatim
+`sender_address`. These are **evidence, never credentials** — they change no
+routing, no blocks, no verification; read surfaces render them as plain
+sentences so a reader can always see how a `from` came to be. A set-but-invalid
+pin or address errors loudly rather than silently falling back. Full contract:
+CONTRACT.md, "Sender identity: address + provenance".
+
 ## Channels
 
 Channels are group chat with cwd-bound room identity:

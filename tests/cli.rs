@@ -126,12 +126,32 @@ impl Sandbox {
     }
 
     fn run_in(&self, args: &[&str], input: Option<&str>, cwd: &Path) -> Output {
+        self.run_in_env(args, input, cwd, &[])
+    }
+
+    /// Hermetic runner with explicit identity environment. The two identity
+    /// variables are ALWAYS cleared first so a developer shell that exports
+    /// POST_FROM can never leak into unrelated tests; `envs` re-adds exactly
+    /// what a test declares.
+    fn run_in_env(
+        &self,
+        args: &[&str],
+        input: Option<&str>,
+        cwd: &Path,
+        envs: &[(&str, &str)],
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_post"));
         command
             .args(args)
             .current_dir(cwd)
             .env("HOME", &self.home)
             .env("POST_MAIL_ROOT", &self.mail_root)
+            .env_remove("POST_FROM")
+            .env_remove("POST_SENDER_ADDRESS");
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(if input.is_some() {
@@ -2888,7 +2908,7 @@ fn assert_success(output: &Output) {
 /// consuming commands name the room they resolved to before they act. Every
 /// other line on a successful run is still a test failure.
 fn is_identity_notice(line: &str) -> bool {
-    line.contains("(identity inferred from cwd)")
+    line.contains("(identity inferred from cwd)") || line.contains("(POST_FROM pin)")
 }
 
 fn from_stdout<T: serde::de::DeserializeOwned>(output: &Output) -> T {
@@ -6755,4 +6775,470 @@ fn v2_signed_fidelity_corpus_round_trips_verified() {
             "fidelity case '{name}' must store byte-exact and verify"
         );
     }
+}
+
+// ================= identity M1: address + provenance =================
+//
+// Layer 1 of the identity spec (three-way signed 2026-08-12): envelopes
+// carry self-declared evidence about how `from` was resolved, never a
+// credential. These tests pin: resolution precedence, the loud-failure
+// contract for bad launcher environment, reservation semantics, verbatim
+// address carriage, old-store compatibility, and the frozen evidence
+// sentences on every render surface.
+
+const FROZEN_DECLARED_ENV: &str = "sender identity was taken from the POST_FROM pin in the environment — it is a declaration, not a credential.";
+const FROZEN_DECLARED_FLAG: &str =
+    "sender identity was set with --from — it is a declaration, not a credential.";
+const FROZEN_INFERRED_CWD: &str = "sender identity was inferred from the directory this was sent from — it is a location, not a claim.";
+const FROZEN_INFERRED_BASENAME: &str =
+    "sender identity was taken from the directory name — it is a location, not a claim.";
+
+/// Hand-write a mail fixture with an arbitrary envelope, the way an old (or
+/// foreign) binary would have. Returns the id.
+fn write_mail_fixture(sandbox: &Sandbox, envelope_json: &str, body: &str) -> String {
+    let id: String = serde_json::from_str::<serde_json::Value>(envelope_json)
+        .expect("fixture envelope parses")["id"]
+        .as_str()
+        .expect("fixture id")
+        .to_owned();
+    let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::create_dir_all(&inbox).expect("fixture inbox");
+    fs::write(
+        inbox.join(format!("{id}.mail")),
+        format!("{envelope_json}\n---\n{body}"),
+    )
+    .expect("write mail fixture");
+    id
+}
+
+#[test]
+fn pin_sets_sender_and_provenance_on_mail() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--body",
+            "pinned hello",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_FROM", "pinned-sender")],
+    );
+    assert_success(&output);
+    let sent: SendOutput = from_stdout(&output);
+    assert_eq!(sent.envelope.from, "pinned-sender");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("POST_FROM pin"),
+        "stderr must name the pin as the identity source: {stderr}"
+    );
+    let raw = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join(format!("archive/{}.mail", sent.envelope.id)),
+    )
+    .expect("archived mail");
+    assert!(
+        raw.contains("\"sender_provenance\": \"declared-env\""),
+        "archived envelope must record declared-env: {raw}"
+    );
+    assert!(
+        !raw.contains("sender_address"),
+        "no address was declared, so none may be recorded: {raw}"
+    );
+}
+
+#[test]
+fn explicit_flag_beats_pin_and_records_declared_flag() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "flag-sender",
+            "--body",
+            "flag wins",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_FROM", "pinned-sender")],
+    );
+    assert_success(&output);
+    let sent: SendOutput = from_stdout(&output);
+    assert_eq!(sent.envelope.from, "flag-sender", "explicit --from wins in M1");
+    let raw = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join(format!("archive/{}.mail", sent.envelope.id)),
+    )
+    .expect("archived mail");
+    assert!(raw.contains("\"sender_provenance\": \"declared-flag\""));
+}
+
+#[test]
+fn pin_bypasses_room_reservation_but_flag_does_not() {
+    let sandbox = Sandbox::new();
+    // Control: --from a registered room from outside its tree is refused
+    // (the pre-M1 location guard, unchanged).
+    let refused = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "pact",
+            "--body",
+            "not from pact's tree",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[],
+    );
+    assert!(
+        !refused.status.success(),
+        "--from with a registered room outside its tree must stay refused"
+    );
+    // The pin exists precisely so identity survives a cwd outside the room
+    // tree (specimen 21): same claim through POST_FROM succeeds, and the
+    // declared-env evidence travels on the envelope.
+    let output = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--body",
+            "pinned from outside the tree",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_FROM", "pact")],
+    );
+    assert_success(&output);
+    let sent: SendOutput = from_stdout(&output);
+    assert_eq!(sent.envelope.from, "pact");
+    let raw = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join(format!("archive/{}.mail", sent.envelope.id)),
+    )
+    .expect("archived mail");
+    assert!(raw.contains("\"sender_provenance\": \"declared-env\""));
+}
+
+#[test]
+fn invalid_pin_is_loud_and_never_falls_back() {
+    let sandbox = Sandbox::new();
+    // The pin's grammar is exactly --from's (validate_component): spaces are
+    // legal there, so they are legal here; separators, emptiness, dot-dirs,
+    // and control characters are not.
+    for bad in ["bad/name", "", "..", "ctrl\u{7}pin"] {
+        let output = sandbox.run_in_env(
+            &[
+                "send",
+                "--to",
+                "claude-space",
+                "--body",
+                "should never send",
+                "--json",
+            ],
+            None,
+            &sandbox.path,
+            &[("POST_FROM", bad)],
+        );
+        assert!(
+            !output.status.success(),
+            "invalid pin {bad:?} must refuse, not fall back to inference"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stderr.contains("POST_FROM") || stdout.contains("POST_FROM"),
+            "the error must name POST_FROM for pin {bad:?}: {stderr} {stdout}"
+        );
+    }
+    let archive = sandbox.mail_root.join("archive");
+    let wrote: Vec<_> = fs::read_dir(&archive)
+        .map(|entries| entries.collect())
+        .unwrap_or_default();
+    assert!(wrote.is_empty(), "no mail may be written under a bad pin");
+}
+
+#[test]
+fn sender_address_is_recorded_verbatim_and_validated() {
+    let sandbox = Sandbox::new();
+    let address = "claude-code.post.0123456789abcdef";
+    let output = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "addressed",
+            "--body",
+            "with address",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_SENDER_ADDRESS", address)],
+    );
+    assert_success(&output);
+    let sent: SendOutput = from_stdout(&output);
+    let raw = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join(format!("archive/{}.mail", sent.envelope.id)),
+    )
+    .expect("archived mail");
+    assert!(
+        raw.contains(&format!("\"sender_address\": \"{address}\"")),
+        "address must be recorded verbatim: {raw}"
+    );
+
+    let long = "x".repeat(257);
+    for bad in ["", "has space", "ctrl\u{7}char", long.as_str()] {
+        let output = sandbox.run_in_env(
+            &[
+                "send",
+                "--to",
+                "claude-space",
+                "--from",
+                "addressed",
+                "--body",
+                "should refuse",
+                "--json",
+            ],
+            None,
+            &sandbox.path,
+            &[("POST_SENDER_ADDRESS", bad)],
+        );
+        assert!(
+            !output.status.success(),
+            "invalid address {:?}... must refuse loudly",
+            &bad[..bad.len().min(12)]
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stderr.contains("POST_SENDER_ADDRESS") || stdout.contains("POST_SENDER_ADDRESS"),
+            "the error must name POST_SENDER_ADDRESS"
+        );
+    }
+}
+
+#[test]
+fn chat_acting_room_honors_registered_pin_and_refuses_unregistered() {
+    let sandbox = Sandbox::new();
+    let pin = [("POST_FROM", "pact")];
+    // cwd is the sandbox root — outside pact's tree; only the pin makes
+    // this identity possible for channel operations.
+    let join = sandbox.run_in_env(
+        &["chat", "idm1", "--join", "--json"],
+        None,
+        &sandbox.path,
+        &pin,
+    );
+    assert_success(&join);
+    let send = sandbox.run_in_env(
+        &["chat", "idm1", "--send", "--body", "pinned chat", "--json"],
+        None,
+        &sandbox.path,
+        &pin,
+    );
+    assert_success(&send);
+    let value: serde_json::Value = from_stdout(&send);
+    assert_eq!(value["message"]["from"], "pact");
+    assert_eq!(value["message"]["sender_provenance"], "declared-env");
+    let stderr = String::from_utf8_lossy(&send.stderr);
+    assert!(stderr.contains("POST_FROM pin"), "chat stderr names the pin: {stderr}");
+
+    // A pin naming an unregistered room refuses with the pin as the named
+    // evidence source — never a silent fallback to cwd.
+    let refused = sandbox.run_in_env(
+        &["chat", "idm1", "--send", "--body", "nope", "--json"],
+        None,
+        &sandbox.path,
+        &[("POST_FROM", "ghost-room")],
+    );
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    assert!(
+        stderr.contains("POST_FROM") || stdout.contains("POST_FROM"),
+        "unregistered-pin refusal must name the pin: {stderr} {stdout}"
+    );
+}
+
+#[test]
+fn join_event_carries_provenance_and_address() {
+    let sandbox = Sandbox::new();
+    let join = sandbox.run_in_env(
+        &["chat", "idm1ev", "--join", "--json"],
+        None,
+        &sandbox.path,
+        &[
+            ("POST_FROM", "pact"),
+            ("POST_SENDER_ADDRESS", "codex.pact.deadbeef"),
+        ],
+    );
+    assert_success(&join);
+    let value: serde_json::Value = from_stdout(&join);
+    let event_id = value["event_id"].as_str().expect("join event id");
+    let raw = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join(format!("channels/idm1ev/messages/{event_id}.msg")),
+    )
+    .expect("join event message");
+    assert!(raw.contains("\"sender_provenance\": \"declared-env\""));
+    assert!(raw.contains("\"sender_address\": \"codex.pact.deadbeef\""));
+}
+
+#[test]
+fn old_mail_renders_byte_identically_without_evidence_line() {
+    let sandbox = Sandbox::new();
+    let id = write_mail_fixture(
+        &sandbox,
+        r#"{
+  "id": "20260101-120000-aaaaaa",
+  "from": "old-binary",
+  "to": "claude-space",
+  "kind": "note",
+  "subject": "",
+  "sent": "2026-01-01 12:00:00 -0500"
+}"#,
+        "an envelope from before the identity layer\n",
+    );
+    let home_room = sandbox.home.join("claude-space");
+    fs::create_dir_all(&home_room).expect("room tree");
+    let output = sandbox.run_in(&["read", &id], None, &home_room);
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Sender evidence:"),
+        "old mail must render with no evidence line: {stdout}"
+    );
+}
+
+#[test]
+fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
+    let sandbox = Sandbox::new();
+    let home_room = sandbox.home.join("claude-space");
+    fs::create_dir_all(&home_room).expect("room tree");
+    let cases = [
+        ("declared-env", Some(FROZEN_DECLARED_ENV), "aaaa01"),
+        ("declared-flag", Some(FROZEN_DECLARED_FLAG), "aaaa02"),
+        ("inferred-cwd", Some(FROZEN_INFERRED_CWD), "aaaa03"),
+        ("inferred-basename", Some(FROZEN_INFERRED_BASENAME), "aaaa04"),
+        ("declared-quantum", None, "aaaa05"),
+    ];
+    for (value, expected, suffix) in cases {
+        let id = write_mail_fixture(
+            &sandbox,
+            &format!(
+                r#"{{
+  "id": "20260101-120000-{suffix}",
+  "from": "prov-fixture",
+  "to": "claude-space",
+  "kind": "note",
+  "subject": "",
+  "sent": "2026-01-01 12:00:00 -0500",
+  "sender_provenance": "{value}"
+}}"#
+            ),
+            "body\n",
+        );
+        let output = sandbox.run_in(&["read", &id], None, &home_room);
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        match expected {
+            Some(sentence) => assert!(
+                stdout.contains(&format!("Sender evidence: {sentence}")),
+                "frozen sentence for {value} must render verbatim: {stdout}"
+            ),
+            None => assert!(
+                !stdout.contains("Sender evidence:"),
+                "unknown provenance {value} must render silence, never invented copy: {stdout}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn chat_renders_inferred_always_and_declared_only_under_full_framing() {
+    let sandbox = Sandbox::new();
+    let home_room = sandbox.home.join("claude-space");
+    fs::create_dir_all(&home_room).expect("room tree");
+    let join = sandbox.run_in(&["chat", "idm1r", "--join"], None, &home_room);
+    assert_success(&join);
+
+    // One declared, one inferred message, hand-written the way two different
+    // launchers would have produced them.
+    let store = sandbox.mail_root.join("channels/idm1r/messages");
+    for (id, prov) in [
+        ("20260101-120000-000001-aaaa11", "declared-env"),
+        ("20260101-120000-000002-aaaa22", "inferred-cwd"),
+    ] {
+        fs::write(
+            store.join(format!("{id}.msg")),
+            format!(
+                "{{\n  \"id\": \"{id}\",\n  \"from\": \"pact\",\n  \"channel\": \"idm1r\",\n  \"sent\": \"2026-01-01 12:00:00 -0500\",\n  \"sender_provenance\": \"{prov}\"\n}}\n---\nhello from {prov}"
+            ),
+        )
+        .expect("write channel fixture");
+    }
+
+    let compact = sandbox.run_in(
+        &["chat", "idm1r", "--peek", "--framing", "compact"],
+        None,
+        &home_room,
+    );
+    assert_success(&compact);
+    let compact_text = String::from_utf8_lossy(&compact.stdout);
+    assert!(
+        compact_text.contains(FROZEN_INFERRED_CWD),
+        "inferred evidence is a warning and renders even compactly: {compact_text}"
+    );
+    assert!(
+        !compact_text.contains(FROZEN_DECLARED_ENV),
+        "declared evidence is the steady state and stays out of compact reads: {compact_text}"
+    );
+
+    let full = sandbox.run_in(
+        &["chat", "idm1r", "--peek", "--framing", "full"],
+        None,
+        &home_room,
+    );
+    assert_success(&full);
+    let full_text = String::from_utf8_lossy(&full.stdout);
+    assert!(full_text.contains(FROZEN_INFERRED_CWD));
+    assert!(
+        full_text.contains(FROZEN_DECLARED_ENV),
+        "full framing renders declared evidence too: {full_text}"
+    );
+
+    // JSON always carries the raw fields regardless of framing.
+    let json = sandbox.run_in(
+        &["chat", "idm1r", "--peek", "--json"],
+        None,
+        &home_room,
+    );
+    assert_success(&json);
+    let value: serde_json::Value = from_stdout(&json);
+    let provs: Vec<_> = value["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .map(|m| m["sender_provenance"].as_str().unwrap_or("<absent>").to_owned())
+        .collect();
+    assert!(provs.contains(&"declared-env".to_owned()));
+    assert!(provs.contains(&"inferred-cwd".to_owned()));
 }

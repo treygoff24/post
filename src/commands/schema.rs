@@ -267,10 +267,13 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Plain channel reads default to the newest 25 unread; --limit 0 shows all; @mentions of the reader in a skipped range are never silently dropped.",
             "Channel sends bounce with crossed_send when unread messages from others sit past the sender cursor; --anyway delivers regardless. Direct mail is unaffected.",
             "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
+            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; authority comes only from signature verification, and post never synthesizes either field.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override — a supported first-class root (r2.1); must be absolute, defaults to $HOME/.claude-mail",
             "HOME: resolves the default ~/.claude-mail root and ~/ room paths",
+            "POST_FROM: stable room pin set by the launch helper; beats cwd inference for sender/acting-room resolution (explicit --from/--room still wins), recorded as sender_provenance=declared-env; set-but-invalid is a loud error, never a silent fallback",
+            "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
         ]),
     };
     CommandResult::json(&output, pretty)

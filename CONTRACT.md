@@ -412,6 +412,40 @@ results, stderr = diagnostics/errors.
   reserves nothing — exactly as before, no profile value influences identity,
   auth, routing, blocked routes, cursors, or room resolution.
 
+## Sender identity: address + provenance (amendment, 2026-08-12)
+
+Layer 1 of the three-layer identity design (address / card / authority; spec
+three-way signed 2026-08-12). Post carries evidence, never credentials:
+
+- Envelopes (mail and channel messages) gain two additive optional fields.
+  `sender_address` is an opaque, non-routable per-launch instance address
+  (`harness.repo.uuid`), recorded **verbatim** from `POST_SENDER_ADDRESS` —
+  post never synthesizes one. `sender_provenance` records how `from` was
+  resolved: `declared-env` | `declared-flag` | `inferred-cwd` |
+  `inferred-basename`. Both are self-declared transport metadata; neither
+  affects routing, blocks, cursors, membership, profiles, or signed-message
+  verification. Old mail and old stores keep reading; old binaries ignore the
+  new fields.
+- Resolution precedence: explicit `--from`/`--room` > `POST_FROM` pin >
+  cwd-inside-registered-room > cwd basename. The pin is the launch helper's
+  stable room declaration and **beats cwd by design** — identity is a
+  declaration made at launch, not a location. On mail send the pin bypasses
+  the registered-room cwd-containment reservation (it exists precisely so
+  identity survives a cwd outside the room tree); `--from` and inference keep
+  the location guard unchanged. Channel operations still require the acting
+  room to be registered.
+- A set-but-invalid `POST_FROM` or `POST_SENDER_ADDRESS` is a loud error,
+  never a silent fallback to inference. The pin's grammar is `--from`'s;
+  the address must be ≤256 bytes with no control or whitespace characters.
+- Read surfaces render provenance as frozen evidence sentences (ratified
+  copy, 2026-08-12; the `inferred-cwd` wording is locked). Mail read prints
+  the sentence for all four values. Channel text reads always print the
+  inferred-* sentences (they are warnings) and print declared-* sentences
+  only under full framing (they are the steady state once launchers pin
+  identity); JSON surfaces always carry the raw fields. Unknown provenance
+  values render silence — post never invents copy for evidence it does not
+  recognize. Messages without the field render byte-identically to before.
+
 ## Codex room convention
 
 Codex should use a narrow registered room path, normally

@@ -796,6 +796,26 @@ fn render_text(
             output::sanitize_text_header(&message.sent),
             output::sanitize_text_header(&message.id)
         ));
+        // Evidence line for how `from` was resolved. Inferred provenance is a
+        // warning and always renders; declared provenance is the steady state
+        // once launchers pin identity, so its sentence renders only under the
+        // full framing wall — every batch repeating an identical declaration
+        // line would train readers to skip evidence entirely. JSON always
+        // carries the raw field; unknown values render silence, never
+        // invented copy. Absent on old messages.
+        if let Some(sentence) = message
+            .sender_provenance
+            .as_deref()
+            .and_then(output::provenance_sentence)
+        {
+            let inferred = matches!(
+                message.sender_provenance.as_deref(),
+                Some("inferred-cwd") | Some("inferred-basename")
+            );
+            if inferred || show_wall {
+                out.push_str(&format!("[sender evidence: {sentence}]\n"));
+            }
+        }
         out.push_str(&output::sanitize_text_body(body));
         if !body.ends_with('\n') {
             out.push('\n');
