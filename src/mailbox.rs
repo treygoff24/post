@@ -1264,9 +1264,7 @@ pub(crate) const SIGNED_V2_BODY_MAX: usize = 1_048_576;
 /// loud failure — for the owner room a malformed locator must read as
 /// SIGNATURE FAILED, never as ordinary unsigned text.
 fn parse_v2_locator(value: &serde_json::Value) -> Result<&str, &'static str> {
-    let object = value
-        .as_object()
-        .ok_or("malformed signature_ref locator")?;
+    let object = value.as_object().ok_or("malformed signature_ref locator")?;
     if object.len() != 2 {
         return Err("malformed signature_ref locator");
     }
@@ -1410,7 +1408,13 @@ pub(crate) fn signed_status(
     // A present locator selects v2 outright — no v1 fallback after any v2
     // error (a failed v2 message must never be reinterpreted as a v1 wire).
     if let Some(locator) = &message.signature_ref {
-        return Some(signed_status_v2(owner, message, body, storage_channel, locator));
+        return Some(signed_status_v2(
+            owner,
+            message,
+            body,
+            storage_channel,
+            locator,
+        ));
     }
     let first = body.lines().next()?;
     let rest = first.strip_prefix(&format!("{}🔏 ", owner.marker))?;

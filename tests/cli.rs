@@ -6021,3 +6021,563 @@ fn a0a_r2_fifo_owner_json_fails_fast_not_hung() {
         "must name the non-regular refusal"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Signed message v2 (detached manifest verification; porch-tui
+// docs/plans/2026-08-12-signed-message-v2.md, bead post-dl2). The body is
+// content, not a signature frame: authority comes only from the manifest
+// sidecar + envelope locator, never from anything inside the body. These
+// tests drive real ssh-keygen crypto, and they rebuild the manifest with
+// their own format string so implementation drift cannot hide.
+// ---------------------------------------------------------------------------
+
+const V2_CAP: usize = 1_048_576;
+
+/// The exact manifest bytes — deliberately an independent reimplementation
+/// of src/mailbox.rs::v2_manifest (see dev-dependencies note in Cargo.toml).
+fn v2_manifest_for(tag: &str, channel: &str, body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(body.as_bytes());
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "porch-signed-v2\ntag: {tag}\nchannel: {channel}\nbytes: {}\nsha256: {hex}\n",
+        body.len()
+    )
+}
+
+/// One reusable signing key per sandbox (unlike sign_for_owner, which mints
+/// a fresh key and clobbers allowed_signers per call): v1/v2 coexistence
+/// tests need both signatures valid under the same trust anchor.
+fn v2_owner_key(sandbox: &Sandbox) -> PathBuf {
+    let shown = owner_show(sandbox);
+    let owner = shown["owner"].as_object().expect("resolved owner in show");
+    let principal = owner["principal"].as_str().expect("principal");
+    let namespace = owner["namespace"].as_str().expect("namespace");
+    let signers = PathBuf::from(owner["allowed_signers"].as_str().expect("allowed_signers"));
+    let keydir = sandbox.path.join("signer-key-v2");
+    let key = keydir.join("owner_ed25519");
+    if !key.exists() {
+        fs::create_dir_all(&keydir).expect("key dir");
+        assert!(
+            std::process::Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-N", "", "-f"])
+                .arg(&key)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run ssh-keygen")
+                .success(),
+            "ssh-keygen key generation failed"
+        );
+    }
+    let public = fs::read_to_string(key.with_extension("pub")).expect("generated public key");
+    fs::write(
+        &signers,
+        format!("{principal} namespaces=\"{namespace}\" {}\n", public.trim()),
+    )
+    .expect("author allowed_signers");
+    key
+}
+
+/// Write `payload` to sigs/<tag>.txt and detach-sign it with the sandbox's
+/// reusable owner key. Both v1 wires and v2 manifests go through here.
+fn v2_sign_raw_payload(sandbox: &Sandbox, tag: &str, payload: &str) {
+    let shown = owner_show(sandbox);
+    let owner = shown["owner"].as_object().expect("resolved owner in show");
+    let sidecar = PathBuf::from(owner["sidecar_dir"].as_str().expect("sidecar_dir"));
+    let namespace = owner["namespace"].as_str().expect("namespace");
+    let key = v2_owner_key(sandbox);
+    let sigs = sidecar.join("sigs");
+    fs::create_dir_all(&sigs).expect("sigs dir");
+    let payload_path = sigs.join(format!("{tag}.txt"));
+    fs::write(&payload_path, payload).expect("payload");
+    // ssh-keygen -Y sign refuses to overwrite an existing .sig.
+    let _ = fs::remove_file(sigs.join(format!("{tag}.txt.sig")));
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args(["-Y", "sign", "-f"])
+            .arg(&key)
+            .arg("-n")
+            .arg(namespace)
+            .arg(&payload_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run ssh-keygen sign")
+            .success(),
+        "ssh-keygen signing failed"
+    );
+}
+
+/// Sign the v2 manifest for (tag, channel, body) under the sandbox owner.
+fn v2_sign(sandbox: &Sandbox, tag: &str, channel: &str, body: &str) {
+    v2_sign_raw_payload(sandbox, tag, &v2_manifest_for(tag, channel, body));
+}
+
+/// Send `body` (stdin, so arbitrary bytes and sizes survive argv) to
+/// `channel` as the room at `cwd`, stamping the v2 locator for `tag`.
+fn v2_send(sandbox: &Sandbox, channel: &str, cwd: &Path, tag: &str, body: &str) -> Output {
+    sandbox.run_in(
+        &["chat", channel, "--send", "--signature-ref", tag, "--json"],
+        Some(body),
+        cwd,
+    )
+}
+
+/// Hand-write a .msg carrying an arbitrary signature_ref value — the
+/// tamper/malformed-locator lane that the CLI (correctly) refuses to emit.
+fn write_channel_message_with_ref(
+    sandbox: &Sandbox,
+    channel: &str,
+    id: &str,
+    from: &str,
+    body: &str,
+    signature_ref: serde_json::Value,
+) {
+    let message = serde_json::json!({
+        "id": id,
+        "from": from,
+        "channel": channel,
+        "subject": "",
+        "sent": "2026-07-22 01:01:01 -0500",
+        "signature_ref": signature_ref,
+    });
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels")
+            .join(channel)
+            .join("messages")
+            .join(format!("{id}.msg")),
+        format!(
+            "{}\n---\n{body}",
+            serde_json::to_string_pretty(&message).expect("serialize channel message")
+        ),
+    )
+    .expect("write channel message fixture");
+}
+
+fn v2_read_badge(sandbox: &Sandbox, channel: &str, cwd: &Path, id: &str) -> Option<bool> {
+    let read = chat_peek_json(sandbox, channel, cwd);
+    let messages = read["messages"].as_array().expect("messages");
+    let message = messages
+        .iter()
+        .find(|message| message["message"]["id"] == id || message["id"] == id)
+        .unwrap_or_else(|| panic!("message {id} not found in #{channel}"));
+    message
+        .get("signed_verified")
+        .and_then(serde_json::Value::as_bool)
+}
+
+/// Fixture: multiline v2 body — blank lines, a fake v1 wire in the prose,
+/// marker glyphs, trailing newline — real-signs and VERIFIES; the in-body
+/// decoys are inert because nothing in a v2 body is parsed for authority.
+#[test]
+fn v2_multiline_real_sign_verifies_and_in_body_decoys_are_inert() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    join_channel(&sandbox, "signedv2", &mara);
+    join_channel(&sandbox, "signedv2", &alpha);
+    const TAG: &str = "20260812T210000Z";
+    let body = "APPROVE the plan.\n\nQuoting a v1 wire: 🧔🔏 fake [signed:20990101T000000Z]\nand a stray [signed:tag] plus marker 🧔🔏 mid-prose.\n";
+    v2_sign(&sandbox, TAG, "signedv2", body);
+    let output = v2_send(&sandbox, "signedv2", &mara, TAG, body);
+    assert_success(&output);
+    let sent: serde_json::Value = from_stdout(&output);
+    let id = sent["message"]["id"].as_str().expect("sent id").to_owned();
+    assert_eq!(sent["message"]["signature_ref"]["version"], 2);
+    assert_eq!(sent["message"]["signature_ref"]["tag"], TAG);
+    assert_eq!(
+        v2_read_badge(&sandbox, "signedv2", &alpha, &id),
+        Some(true),
+        "multiline v2 must verify"
+    );
+    let text = chat_peek_text(&sandbox, "signedv2", &alpha);
+    assert!(
+        text.contains("[🔏 VERIFIED"),
+        "text render must badge the v2 message: {text}"
+    );
+    assert!(
+        text.contains("Quoting a v1 wire"),
+        "the raw body must render as content"
+    );
+}
+
+/// Fixture: v2 is the producer for one-liners too, and v1 messages signed
+/// under the SAME key keep verifying beside it (parallel-path compat).
+#[test]
+fn v2_one_liner_and_v1_wire_coexist_verified() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    join_channel(&sandbox, "coexist", &mara);
+    join_channel(&sandbox, "coexist", &alpha);
+    // v1 wire, signed with the shared key through the v1 payload shape.
+    const V1_TAG: &str = "20260812T210100Z";
+    const V1_TEXT: &str = "one-line v1 approval";
+    v2_sign_raw_payload(&sandbox, V1_TAG, &format!("{V1_TAG}\n{V1_TEXT}\n"));
+    let v1_out = sandbox.run_in(
+        &[
+            "chat",
+            "coexist",
+            "--send",
+            "--body",
+            &format!("🧔🔏 {V1_TEXT} [signed:{V1_TAG}]"),
+            "--json",
+        ],
+        None,
+        &mara,
+    );
+    assert_success(&v1_out);
+    let v1_id: String = from_stdout::<serde_json::Value>(&v1_out)["message"]["id"]
+        .as_str()
+        .expect("v1 id")
+        .to_owned();
+    // v2 one-liner under the same key.
+    const V2_TAG: &str = "20260812T210200Z";
+    const V2_BODY: &str = "one-line v2 approval";
+    v2_sign(&sandbox, V2_TAG, "coexist", V2_BODY);
+    let v2_out = v2_send(&sandbox, "coexist", &mara, V2_TAG, V2_BODY);
+    assert_success(&v2_out);
+    let v2_id: String = from_stdout::<serde_json::Value>(&v2_out)["message"]["id"]
+        .as_str()
+        .expect("v2 id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "coexist", &alpha, &v1_id),
+        Some(true),
+        "v1 must keep verifying next to v2"
+    );
+    assert_eq!(
+        v2_read_badge(&sandbox, "coexist", &alpha, &v2_id),
+        Some(true),
+        "v2 one-liner must verify"
+    );
+}
+
+/// Adversarial: a valid tag stolen onto a different body, and onto the same
+/// body in a different channel — both FAIL (hash/channel binding).
+#[test]
+fn v2_stolen_tag_fails_on_different_body_and_different_channel() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "chan-a", &mara);
+    join_channel(&sandbox, "chan-b", &mara);
+    const TAG: &str = "20260812T210300Z";
+    const BODY: &str = "the genuine signed body\nsecond line";
+    v2_sign(&sandbox, TAG, "chan-a", BODY);
+    // Different body, same tag.
+    let stolen = v2_send(&sandbox, "chan-a", &mara, TAG, "an attacker's body");
+    assert_success(&stolen);
+    let stolen_id: String = from_stdout::<serde_json::Value>(&stolen)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "chan-a", &mara, &stolen_id),
+        Some(false),
+        "stolen tag on a different body must fail"
+    );
+    let text = chat_peek_text(&sandbox, "chan-a", &mara);
+    assert!(
+        text.contains("SIGNATURE FAILED"),
+        "text render must fail loudly: {text}"
+    );
+    // Same body, different channel: the manifest binds chan-a.
+    let cross = v2_send(&sandbox, "chan-b", &mara, TAG, BODY);
+    assert_success(&cross);
+    let cross_id: String = from_stdout::<serde_json::Value>(&cross)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "chan-b", &mara, &cross_id),
+        Some(false),
+        "channel binding must refuse cross-channel reuse"
+    );
+}
+
+/// Adversarial: rename-replay (sidecar pair copied to a fresh tag) and
+/// store tampering (body mutated after signing) both FAIL.
+#[test]
+fn v2_rename_replay_and_body_mutation_fail() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "tamper", &mara);
+    const TAG: &str = "20260812T210400Z";
+    const BODY: &str = "signed once\nnever again";
+    v2_sign(&sandbox, TAG, "tamper", BODY);
+    // Rename-replay: the copied manifest still says "tag: <TAG>" inside.
+    let shown = owner_show(&sandbox);
+    let sigs = PathBuf::from(shown["owner"]["sidecar_dir"].as_str().expect("sidecar")).join("sigs");
+    const FRESH: &str = "20260812T210500Z";
+    fs::copy(
+        sigs.join(format!("{TAG}.txt")),
+        sigs.join(format!("{FRESH}.txt")),
+    )
+    .expect("copy");
+    fs::copy(
+        sigs.join(format!("{TAG}.txt.sig")),
+        sigs.join(format!("{FRESH}.txt.sig")),
+    )
+    .expect("copy sig");
+    let replay = v2_send(&sandbox, "tamper", &mara, FRESH, BODY);
+    assert_success(&replay);
+    let replay_id: String = from_stdout::<serde_json::Value>(&replay)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "tamper", &mara, &replay_id),
+        Some(false),
+        "rename-replay must fail: manifest tag disagrees with locator tag"
+    );
+    // Store tampering: mutate the stored body bytes after a genuine send.
+    let genuine = v2_send(&sandbox, "tamper", &mara, TAG, BODY);
+    assert_success(&genuine);
+    let genuine_id: String = from_stdout::<serde_json::Value>(&genuine)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let msg_path = sandbox
+        .mail_root
+        .join("channels")
+        .join("tamper")
+        .join("messages")
+        .join(format!("{genuine_id}.msg"));
+    let mut raw = fs::read_to_string(&msg_path).expect("read stored message");
+    raw.push_str("APPENDED UNSIGNED LINE");
+    fs::write(&msg_path, raw).expect("tamper with stored body");
+    assert_eq!(
+        v2_read_badge(&sandbox, "tamper", &mara, &genuine_id),
+        Some(false),
+        "appended bytes after signing must fail"
+    );
+}
+
+/// Adversarial: a manifest whose byte count is wrong while the sha256 is
+/// right (both lines must bind), and a manifest with format deviations.
+#[test]
+fn v2_wrong_byte_count_and_manifest_deviation_fail() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "manif", &mara);
+    const BODY: &str = "byte-count binding test";
+    // Correct sha, wrong count: sign a hand-built manifest with bytes+1.
+    const TAG_COUNT: &str = "20260812T210600Z";
+    let good = v2_manifest_for(TAG_COUNT, "manif", BODY);
+    let bad_count = good.replace(
+        &format!("bytes: {}\n", BODY.len()),
+        &format!("bytes: {}\n", BODY.len() + 1),
+    );
+    assert_ne!(good, bad_count, "the count line must actually change");
+    v2_sign_raw_payload(&sandbox, TAG_COUNT, &bad_count);
+    let count_out = v2_send(&sandbox, "manif", &mara, TAG_COUNT, BODY);
+    assert_success(&count_out);
+    let count_id: String = from_stdout::<serde_json::Value>(&count_out)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "manif", &mara, &count_id),
+        Some(false),
+        "wrong byte count must fail even with a correct hash"
+    );
+    // Format deviation: a second trailing newline on an otherwise-correct
+    // manifest is not the exact bytes; byte equality must refuse it.
+    const TAG_DEV: &str = "20260812T210700Z";
+    v2_sign_raw_payload(
+        &sandbox,
+        TAG_DEV,
+        &format!("{}\n", v2_manifest_for(TAG_DEV, "manif", BODY)),
+    );
+    let dev_out = v2_send(&sandbox, "manif", &mara, TAG_DEV, BODY);
+    assert_success(&dev_out);
+    let dev_id: String = from_stdout::<serde_json::Value>(&dev_out)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "manif", &mara, &dev_id),
+        Some(false),
+        "manifest format deviation must fail byte equality"
+    );
+}
+
+/// Malformed locators from the owner are LOUD failures (never silently
+/// unsigned); any locator from a non-owner room is inert.
+#[test]
+fn v2_malformed_owner_locators_fail_loudly_and_non_owner_locators_are_inert() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    join_channel(&sandbox, "malformed", &mara);
+    join_channel(&sandbox, "malformed", &alpha);
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "unknown-version",
+            serde_json::json!({"version": 3, "tag": "20260812T210800Z"}),
+        ),
+        ("missing-tag", serde_json::json!({"version": 2})),
+        ("empty-tag", serde_json::json!({"version": 2, "tag": ""})),
+        (
+            "bad-tag-grammar",
+            serde_json::json!({"version": 2, "tag": "../escape"}),
+        ),
+        (
+            "extra-key",
+            serde_json::json!({"version": 2, "tag": "20260812T210800Z", "x": 1}),
+        ),
+        ("non-object", serde_json::json!("20260812T210800Z")),
+        (
+            "float-version",
+            serde_json::json!({"version": 2.5, "tag": "20260812T210800Z"}),
+        ),
+    ];
+    for (index, (name, locator)) in cases.iter().enumerate() {
+        let id = format!("20990101-120000-00000{index}-aaaaa{index}");
+        write_channel_message_with_ref(&sandbox, "malformed", &id, "mara", "body", locator.clone());
+        assert_eq!(
+            v2_read_badge(&sandbox, "malformed", &alpha, &id),
+            Some(false),
+            "owner locator case '{name}' must FAIL loudly, not read as unsigned"
+        );
+    }
+    // Non-owner room with a perfectly shaped locator: ignored entirely.
+    write_channel_message_with_ref(
+        &sandbox,
+        "malformed",
+        "20990101-120000-000099-ffffff",
+        "alpha",
+        "body",
+        serde_json::json!({"version": 2, "tag": "20260812T210900Z"}),
+    );
+    assert_eq!(
+        v2_read_badge(
+            &sandbox,
+            "malformed",
+            &mara,
+            "20990101-120000-000099-ffffff"
+        ),
+        None,
+        "a non-owner locator must stay unbadged and un-failed"
+    );
+}
+
+/// The signed-scope 1 MiB cap: refused at send even with --oversize; the
+/// same body without a locator keeps the ordinary --oversize contract; an
+/// exactly-1-MiB signed body verifies; an over-cap owner message smuggled
+/// into the store fails at read.
+#[test]
+fn v2_signed_cap_enforced_at_send_and_read_while_unsigned_oversize_is_unchanged() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "cap", &mara);
+    let over: String = "x".repeat(V2_CAP + 1);
+    // Signed + --oversize: refused, and the error names the signed cap.
+    let refused = sandbox.run_in(
+        &[
+            "chat",
+            "cap",
+            "--send",
+            "--oversize",
+            "--signature-ref",
+            "20260812T211000Z",
+        ],
+        Some(&over),
+        &mara,
+    );
+    assert!(
+        !refused.status.success(),
+        "an over-cap signed body must be refused at send"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("signed-message cap"),
+        "the refusal must name the signed cap"
+    );
+    // Same bytes, no locator: the ordinary --oversize contract still holds.
+    let unsigned = sandbox.run_in(&["chat", "cap", "--send", "--oversize"], Some(&over), &mara);
+    assert_success(&unsigned);
+    // Exactly 1 MiB, signed: verifies.
+    let exact: String = "y".repeat(V2_CAP);
+    const TAG: &str = "20260812T211100Z";
+    v2_sign(&sandbox, TAG, "cap", &exact);
+    let sent = sandbox.run_in(
+        &[
+            "chat",
+            "cap",
+            "--send",
+            "--oversize",
+            "--signature-ref",
+            TAG,
+            "--json",
+        ],
+        Some(&exact),
+        &mara,
+    );
+    assert_success(&sent);
+    let sent_id: String = from_stdout::<serde_json::Value>(&sent)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "cap", &mara, &sent_id),
+        Some(true),
+        "an exactly-1-MiB signed body must verify"
+    );
+    // Over-cap smuggled into the store with a locator: fails at read,
+    // before any hashing.
+    write_channel_message_with_ref(
+        &sandbox,
+        "cap",
+        "20990101-120000-000001-aaaaaa",
+        "mara",
+        &over,
+        serde_json::json!({"version": 2, "tag": "20260812T211200Z"}),
+    );
+    assert_eq!(
+        v2_read_badge(&sandbox, "cap", &mara, "20990101-120000-000001-aaaaaa"),
+        Some(false),
+        "an over-cap stored signed body must fail at read"
+    );
+}
+
+/// CLI guards: --signature-ref is send-only and its tag grammar is enforced
+/// at the door.
+#[test]
+fn v2_signature_ref_flag_guards() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    join_channel(&sandbox, "guards", &mara);
+    let read = sandbox.run_in(
+        &["chat", "guards", "--signature-ref", "20260812T211300Z"],
+        None,
+        &mara,
+    );
+    assert!(
+        !read.status.success(),
+        "--signature-ref on a read must be refused"
+    );
+    let bad_tag = sandbox.run_in(
+        &[
+            "chat",
+            "guards",
+            "--send",
+            "--signature-ref",
+            "bad/tag",
+            "--body",
+            "hello",
+        ],
+        None,
+        &mara,
+    );
+    assert!(
+        !bad_tag.status.success(),
+        "a tag outside the grammar must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&bad_tag.stderr).contains("ASCII letters, digits"),
+        "the refusal must name the grammar"
+    );
+}

@@ -1482,10 +1482,13 @@ mod tests {
         };
         // Feature-absent (no rooms, no owner.json): no badges at all, even
         // for a trey-signed-looking message (A0a Decision 2).
-        assert!(
-            signed_status(None, &msg("trey"), "🧔🔏 hi [signed:20260805T005950Z]", "tax")
-                .is_none()
-        );
+        assert!(signed_status(
+            None,
+            &msg("trey"),
+            "🧔🔏 hi [signed:20260805T005950Z]",
+            "tax"
+        )
+        .is_none());
         // Register the trey room: no owner.json + a registered trey room
         // synthesizes the legacy owner, and every expectation below is
         // byte-identical to the pre-A0a behavior.

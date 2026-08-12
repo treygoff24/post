@@ -237,10 +237,22 @@ reused tag nor a renamed stale sidecar passes). Verified messages render a
 one-line `[🔏 VERIFIED — <label> (<room>), signed TS, age]` badge
 (`signed_verified` in `--json`); the legacy owner renders as plain `Trey`,
 byte-identical to history. A malformed `owner.json` fails badge-computing
-reads closed rather than rendering silently unsigned. Only the first line is
-parsed: a multiline message never carries a badge, so never read a missing
-badge on multiline text as evidence either way. post only verifies — porch
-generates the signing key pair and authors allowed_signers.
+reads closed rather than rendering silently unsigned. post only verifies —
+porch generates the signing key pair and authors allowed_signers.
+
+Signed message v2 (detached manifest): multiline and arbitrary-length signed
+bodies up to 1 MiB. The body ships exactly as authored — no marker, no tag,
+nothing in it parsed for authority — and the sender stamps a `signature_ref`
+envelope locator (`post chat --send --signature-ref <tag>`). At read time an
+owner message with a locator verifies against `<sidecar>/sigs/<tag>.txt`: the
+sidecar must byte-equal a manifest binding the tag, the storage channel, the
+body's byte count, and its SHA-256, and the detached signature must verify
+over those same bytes. Stolen tags, mutated bodies, cross-channel reuse,
+renamed sidecars, and malformed locators all render `SIGNATURE FAILED` —
+loudly, never silently unsigned — and the 1 MiB signed cap is enforced at
+send (`--oversize` does not lift it) and again at read. v1 one-line wires
+keep verifying unchanged; for v1, only the first line is parsed, so a
+multiline v1-style message never carries a badge.
 
 ## Watch
 

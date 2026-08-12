@@ -19,3 +19,9 @@ unicode-segmentation = "1"
 unicode-normalization = "0.1"
 regex = "1"
 sha2 = "0.10"
+
+[dev-dependencies]
+# The v2 signed-message tests rebuild the manifest INDEPENDENTLY of
+# src/mailbox.rs::v2_manifest so a format drift in either copy fails the
+# byte comparison instead of drifting in lockstep.
+sha2 = "0.10"

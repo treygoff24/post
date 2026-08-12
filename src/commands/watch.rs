@@ -416,6 +416,7 @@ mod tests {
                 pfp: None,
                 re: None,
                 mentions: vec![],
+                signature_ref: None,
             };
             let bytes = encode_message(&message, "body").expect("encode");
             fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)

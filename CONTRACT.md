@@ -374,8 +374,8 @@ results, stderr = diagnostics/errors.
   `config_invalid` on every badge-computing read (fail closed) and reported by
   `post doctor` (`owner.invalid`); it never degrades to legacy or
   feature-absent. `owner.json` is reserved as a room name.
-- Verification: a channel message from the owner room whose first line ends
-  in `[signed:TS]` is verified at read time against
+- Verification (v1, in-body wire): a channel message from the owner room
+  whose first line ends in `[signed:TS]` is verified at read time against
   `<sidecar>/sigs/TS.txt{,.sig}` — ssh-keygen verification against
   allowed_signers (principal/namespace), a byte-compare of the channel text
   against the signed payload, and a tag-vs-payload timestamp match (rename
@@ -385,6 +385,28 @@ results, stderr = diagnostics/errors.
   reads carry `signed_verified`. Failures render loudly; a missing badge is
   never silently unsigned. post never generates keys — porch authors
   allowed_signers and signs.
+- Verification (v2, detached manifest): the body is content, not a signature
+  frame — multiline and arbitrary text up to 1 MiB, with nothing in the body
+  ever parsed for authority. The sender stamps a `signature_ref` envelope
+  locator (`{"version": 2, "tag": "<ts>"}`, via `post chat --send
+  --signature-ref <tag>`); the locator is sender-writable metadata, never a
+  verdict. At read time, for owner-room messages only, a present locator
+  selects v2 outright (no v1 fallback after any error): the locator must be
+  an object with exactly integer `version: 2` and a tag in the v1 tag
+  grammar; the body must be ≤ 1,048,576 bytes (checked before hashing, and
+  the same cap is enforced at send — `--oversize` does not lift it; unsigned
+  transport keeps its ordinary `--oversize` contract); the envelope channel
+  must equal the channel directory the message was read from; then
+  `<sidecar>/sigs/<tag>.txt` must byte-equal the manifest reconstructed from
+  the store — `porch-signed-v2\ntag: <tag>\nchannel: <channel>\nbytes:
+  <decimal>\nsha256: <64 lowercase hex>\n` over the exact stored body bytes
+  — and the detached `.sig` must verify over those same held bytes. Byte
+  equality subsumes the failure taxonomy: body mutation, cross-channel
+  reuse, rename replay (the tag inside the manifest), wrong byte count, and
+  every malformed-manifest shape all fail loudly. A malformed or
+  unknown-version owner locator renders `SIGNATURE FAILED`, never silently
+  unsigned; any locator on a non-owner message is inert. v1 one-line wires
+  keep verifying forever through the unchanged v1 branch.
 - PRESENTATION ONLY: profile display names may not imitate the owner's room
   id — configured owner, or `trey` under the legacy fallback; feature-absent
   reserves nothing — exactly as before, no profile value influences identity,

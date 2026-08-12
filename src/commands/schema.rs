@@ -14,13 +14,19 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let owner_block = match &resolution {
         OwnerResolution::Configured(owner) => OwnerSchema {
             state: "configured".to_owned(),
-            wire_grammar: format!("<marker:{}>🔏 <text> [signed:<ts>]", owner.marker),
+            wire_grammar: format!(
+                "v1: <marker:{}>🔏 <text> [signed:<ts>] | v2: raw body + signature_ref envelope locator",
+                owner.marker
+            ),
             note: None,
             owner: Some(resolved_schema(owner)),
         },
         OwnerResolution::Legacy(owner) => OwnerSchema {
             state: "legacy".to_owned(),
-            wire_grammar: format!("<marker:{}>🔏 <text> [signed:<ts>]", owner.marker),
+            wire_grammar: format!(
+                "v1: <marker:{}>🔏 <text> [signed:<ts>] | v2: raw body + signature_ref envelope locator",
+                owner.marker
+            ),
             note: Some(format!(
                 "legacy fallback ({}); consider `post owner init`.",
                 owner.room
@@ -29,7 +35,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         },
         OwnerResolution::None => OwnerSchema {
             state: "none".to_owned(),
-            wire_grammar: "<marker>🔏 <text> [signed:<ts>]".to_owned(),
+            wire_grammar:
+                "v1: <marker>🔏 <text> [signed:<ts>] | v2: raw body + signature_ref envelope locator"
+                    .to_owned(),
             note: Some("no signed owner configured; verification badges are disabled".to_owned()),
             owner: None,
         },
@@ -45,7 +53,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "chat",
             "post chat <channel> [--peek | --limit <n> | --history <n> [--grep <pat>] | --since <id>] [--framing auto|full|compact] | post chat <channel> --discard | post chat <channel> --discard-through <id> | post chat <channel> --seen-by <id> | post chat <channel> --join [--description <text>] | post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
             "framed text; JSON with --json",
-            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --discard-through <id> advances the cursor exactly through one message (full id or a prefix unique in that channel), refuses when an unreadable message sits between the cursor and the target, is replay-safe (a target at or behind the cursor succeeds with advanced=false and an unchanged cursor), and reports prior_cursor and cursor; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing (body-returning reads only, rejected on --send/--join/--discard/--discard-through/--seen-by) selects auto (default: legacy once-daily wall on text, full laws elsewhere), full (the complete wall every invocation), or compact (condensed laws in one line); explicit full and compact are stateless per-invocation and never consult or stamp the banner-day state, JSON framing source/authority are unchanged in every mode, and there is no none mode; channel messages from the OWNER room whose first line matches the signed-wire grammar <marker>🔏 <text> [signed:TS] are verified against the resolved owner's sidecar — see the schema `owner` block for sigs/ + allowed_signers (legacy fallback: a registered 'trey' room, sidecar at its registered path like ~/.trey-room)",
+            "--join creates the channel on first join and records the join as an event in history; --description (with --join) sets/updates the channel norms carrier (any member, cap 1 KiB); --send atomically writes channels/<name>/messages/<id>.msg, rejects subjects over 1 KiB, implies from --body/--body-file, requires --oversize above 32 KiB, stamps @mentions of registered rooms and optional --re parent id, and by default bounces with crossed_send when unread messages from others sit past the sender cursor (--anyway overrides); a plain read defaults to the newest 25 unread (reports skipped older; --limit 0 = all; @mentions of the reader in the skipped range are never silently dropped) and advances the reader's own cursor only after a successful emit; --peek never advances; --discard advances without emitting bodies; --discard-through <id> advances the cursor exactly through one message (full id or a prefix unique in that channel), refuses when an unreadable message sits between the cursor and the target, is replay-safe (a target at or behind the cursor succeeds with advanced=false and an unchanged cursor), and reports prior_cursor and cursor; --seen-by lists members whose cursors passed an id (read-only); --history/--since are cursorless; --grep filters --history by case-insensitive regex; a cursor-advancing read into /dev/null is refused; the full framing banner renders once per room per day; --framing (body-returning reads only, rejected on --send/--join/--discard/--discard-through/--seen-by) selects auto (default: legacy once-daily wall on text, full laws elsewhere), full (the complete wall every invocation), or compact (condensed laws in one line); explicit full and compact are stateless per-invocation and never consult or stamp the banner-day state, JSON framing source/authority are unchanged in every mode, and there is no none mode; channel messages from the OWNER room whose first line matches the signed-wire grammar <marker>🔏 <text> [signed:TS] are verified against the resolved owner's sidecar — see the schema `owner` block for sigs/ + allowed_signers (legacy fallback: a registered 'trey' room, sidecar at its registered path like ~/.trey-room); signed-v2: --signature-ref <tag> stamps the envelope locator {\"version\":2,\"tag\":<tag>} for detached-manifest verification of the raw body (multiline/arbitrary text; ≤1 MiB final body, a protocol cap --oversize does NOT lift; the locator is metadata, never a verdict — owner v2 messages verify at read against <sidecar>/sigs/<tag>.txt binding tag+channel+bytes+sha256, and any malformed owner locator fails loudly)",
         ),
         command(
             "channels",
