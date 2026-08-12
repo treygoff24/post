@@ -243,6 +243,8 @@ impl From<Envelope> for InboxItem {
             sent,
             display_name,
             pfp,
+            sender_address: _,
+            sender_provenance: _,
         } = envelope;
         Self {
             id,
@@ -355,6 +357,8 @@ impl WatchEvent {
             re: _,
             mentions: _,
             signature_ref: _,
+            sender_address: _,
+            sender_provenance: _,
         } = message;
         Self::ChannelMessage {
             channel,

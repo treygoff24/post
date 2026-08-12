@@ -41,6 +41,19 @@ pub struct Envelope {
     /// Sender's emoji sigil as of send time; same rules as display_name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pfp: Option<String>,
+    /// Opaque per-launch instance address (`harness.repo.uuid`), recorded
+    /// verbatim from POST_SENDER_ADDRESS when the launch helper exported it.
+    /// Non-routable, self-declared, never synthesized by post. Absent on old
+    /// mail and on sends outside the helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    /// How the `from` field was determined at send time: `declared-env`,
+    /// `declared-flag`, `inferred-cwd`, or `inferred-basename`. Evidence, not
+    /// a credential — kept as a plain string so an unknown future value can
+    /// never break message parse (the signature_ref lesson). Renderers only
+    /// speak the four known values; anything else renders silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_provenance: Option<String>,
 }
 
 #[derive(Debug)]
@@ -115,6 +128,41 @@ pub struct ChannelMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub signature_ref: Option<serde_json::Value>,
+    /// Opaque per-launch instance address; same contract as
+    /// `Envelope::sender_address`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    /// Evidence for how `from` was determined; same contract as
+    /// `Envelope::sender_provenance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_provenance: Option<String>,
+}
+
+/// How a sender's `from` was determined at send time. All four are
+/// self-declared evidence about the send, never a credential; authority
+/// remains the signature layer's alone. Serialized as the kebab-case string
+/// in the envelope's `sender_provenance` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SenderProvenance {
+    /// `from` came from the POST_FROM environment pin (launch helper).
+    DeclaredEnv,
+    /// `from` was set explicitly with `--from`.
+    DeclaredFlag,
+    /// `from` was inferred from cwd falling inside a registered room's tree.
+    InferredCwd,
+    /// `from` fell back to the cwd basename (no registered room matched).
+    InferredBasename,
+}
+
+impl SenderProvenance {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredEnv => "declared-env",
+            Self::DeclaredFlag => "declared-flag",
+            Self::InferredCwd => "inferred-cwd",
+            Self::InferredBasename => "inferred-basename",
+        }
+    }
 }
 
 /// Present key (any value, including null) → Some; absent key → the field's

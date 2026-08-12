@@ -2,10 +2,10 @@ use crate::cli::SendArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{
-    closest_room, encode_mail, exclusive_atomic_write, local_timestamp, new_mail_id,
-    validate_envelope, Context,
+    closest_room, declared_env_pin, declared_sender_address, encode_mail, exclusive_atomic_write,
+    local_timestamp, new_mail_id, validate_envelope, Context,
 };
-use crate::model::{Envelope, RoomMap};
+use crate::model::{Envelope, RoomMap, SenderProvenance};
 use crate::output::{self, SendOutput};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
@@ -51,21 +51,37 @@ where
     // Built before `sender` is consumed, so a body-input fix can echo the
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
-    let sender = match args.sender {
-        Some(sender) => sender,
-        None => {
-            let inferred = context.infer_from_cwd(&rooms)?;
-            // Sender identity is derived from cwd, so a prepared command run
-            // from the wrong tree posts as that tree's room. Name the resolved
-            // sender on stderr before anything is written; the success receipt
-            // is otherwise the first place it appears, which is too late.
-            eprintln!(
-                "post: sending as '{inferred}' (identity inferred from cwd); pass --from <NAME> to send as someone else"
-            );
-            inferred
-        }
+    let (sender, provenance) = match args.sender {
+        Some(sender) => (sender, SenderProvenance::DeclaredFlag),
+        None => match declared_env_pin()? {
+            Some(pinned) => {
+                eprintln!(
+                    "post: sending as '{pinned}' (POST_FROM pin); pass --from <NAME> to send as someone else"
+                );
+                (pinned, SenderProvenance::DeclaredEnv)
+            }
+            None => {
+                let (inferred, provenance) = context.infer_from_cwd(&rooms)?;
+                // Sender identity is derived from cwd, so a prepared command run
+                // from the wrong tree posts as that tree's room. Name the resolved
+                // sender on stderr before anything is written; the success receipt
+                // is otherwise the first place it appears, which is too late.
+                eprintln!(
+                    "post: sending as '{inferred}' (identity inferred from cwd); pass --from <NAME> to send as someone else"
+                );
+                (inferred, provenance)
+            }
+        },
     };
-    context.ensure_sender_allowed(&sender, &rooms)?;
+    // The POST_FROM pin deliberately bypasses the cwd-containment
+    // reservation: the pin exists precisely so identity survives a cwd
+    // outside the room's tree (specimen 21). It is still only a declaration —
+    // recorded as `declared-env` and rendered as evidence at read time, never
+    // as a credential. Flag and inference keep the location guard unchanged.
+    if provenance != SenderProvenance::DeclaredEnv {
+        context.ensure_sender_allowed(&sender, &rooms)?;
+    }
+    let sender_address = declared_sender_address()?;
 
     if !rooms.contains_key(&args.to) {
         let suggestion = closest_room(&args.to, &rooms);
@@ -130,6 +146,8 @@ where
             sent: sent.clone(),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
+            sender_address: sender_address.clone(),
+            sender_provenance: Some(provenance.as_str().to_owned()),
         };
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;

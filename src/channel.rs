@@ -15,7 +15,7 @@ use crate::mailbox::{
     ascii_escape_json, atomic_replace, exclusive_atomic_write, local_timestamp_micros, new_mail_id,
     validate_room_name, Context,
 };
-use crate::model::{ChannelMessage, ParsedChannelMessage, RoomMap};
+use crate::model::{ChannelMessage, ParsedChannelMessage, RoomMap, SenderProvenance};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -154,26 +154,42 @@ fn lock_channels(context: &Context) -> AppResult<File> {
     Ok(file)
 }
 
-/// Resolve the acting room for channel operations. Identity is always
-/// inferred from cwd — there is deliberately no --from/--room override on
-/// channel commands, so the only way to act as a room is from inside its
-/// tree. Membership additionally requires the room to be registered:
-/// cursors and join records need a durable identity, and the cwd-basename
-/// fallback is not one.
-pub(crate) fn acting_room(context: &Context, rooms: &RoomMap) -> AppResult<String> {
-    let room = context.infer_from_cwd(rooms)?;
+/// Resolve the acting room for channel operations. Identity comes from the
+/// POST_FROM pin when the launch helper set one, else from cwd — there is
+/// deliberately no --from/--room override on channel commands. Membership
+/// additionally requires the room to be registered: cursors and join records
+/// need a durable identity, and the cwd-basename fallback is not one.
+pub(crate) fn acting_room(
+    context: &Context,
+    rooms: &RoomMap,
+) -> AppResult<(String, SenderProvenance)> {
+    let (room, provenance) = match crate::mailbox::declared_env_pin()? {
+        Some(pinned) => (pinned, SenderProvenance::DeclaredEnv),
+        None => context.infer_from_cwd(rooms)?,
+    };
     if rooms.contains_key(&room) {
-        return Ok(room);
+        return Ok((room, provenance));
     }
+    let (evidence, fix) = if provenance == SenderProvenance::DeclaredEnv {
+        (
+            "the POST_FROM pin names",
+            "Register the pinned room with `post rooms add <name> <path>`, or fix the pin.",
+        )
+    } else {
+        (
+            "cwd resolves to",
+            "Run from inside a registered room tree, or register one with `post rooms add <name> <path>`.",
+        )
+    };
     Err(AppError::new(
         ErrorCode::UnknownRoom,
         format!(
-            "channel operations require a registered room; cwd resolves to '{room}', which is not in rooms.json"
+            "channel operations require a registered room; {evidence} '{room}', which is not in rooms.json"
         ),
-        "Run from inside a registered room tree, or register one with `post rooms add <name> <path>`.",
+        fix,
     )
     .input(room)
-    .reason("cwd is outside every registered room tree"))
+    .reason("acting room is not registered"))
 }
 
 pub(crate) struct JoinOutcome {
@@ -189,7 +205,7 @@ pub(crate) fn join(
     description: Option<&str>,
 ) -> AppResult<JoinOutcome> {
     let rooms = context.load_rooms()?;
-    let room = acting_room(context, &rooms)?;
+    let (room, provenance) = acting_room(context, &rooms)?;
     let paths = ChannelPaths::new(context, channel)?;
     let _lock = lock_channels(context)?;
 
@@ -274,6 +290,7 @@ pub(crate) fn join(
             re: None,
             mentions: Vec::new(),
             signature_tag: None,
+            provenance,
         },
     )?;
     members.insert(room.clone(), sent);
@@ -355,7 +372,7 @@ pub(crate) fn send(
     options: SendOptions<'_>,
 ) -> AppResult<ChannelMessage> {
     let rooms = context.load_rooms()?;
-    let room = acting_room(context, &rooms)?;
+    let (room, provenance) = acting_room(context, &rooms)?;
     let paths = ChannelPaths::new(context, channel)?;
     let quoted = crate::mailbox::shell_quote(channel);
     if !paths.exists() {
@@ -416,6 +433,7 @@ pub(crate) fn send(
             re,
             mentions,
             signature_tag: options.signature_tag,
+            provenance,
         },
     )?;
     let file = paths.messages.join(format!("{id}.msg"));
@@ -662,6 +680,7 @@ pub(crate) fn write_event(
     channel: &str,
     body: &str,
     event: &str,
+    provenance: SenderProvenance,
 ) -> AppResult<String> {
     write_message(
         context,
@@ -675,6 +694,7 @@ pub(crate) fn write_event(
             re: None,
             mentions: Vec::new(),
             signature_tag: None,
+            provenance,
         },
     )
 }
@@ -688,6 +708,8 @@ struct WriteMessage<'a> {
     re: Option<String>,
     mentions: Vec<String>,
     signature_tag: Option<&'a str>,
+    /// How `room` was resolved; stamped as evidence on the envelope.
+    provenance: SenderProvenance,
 }
 
 /// Writes one message with a fresh microsecond-resolution id, retrying on
@@ -703,6 +725,7 @@ fn write_message(
     // is inert as an injection path.
     let rooms = context.load_rooms()?;
     let profile = crate::profile::stamp_for(context, opts.room, &rooms);
+    let sender_address = crate::mailbox::declared_sender_address()?;
     for attempt in 0..256 {
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
@@ -720,6 +743,8 @@ fn write_message(
             signature_ref: opts
                 .signature_tag
                 .map(|tag| serde_json::json!({ "version": 2, "tag": tag })),
+            sender_address: sender_address.clone(),
+            sender_provenance: Some(opts.provenance.as_str().to_owned()),
         };
         validate_channel_message(Path::new("<generated message>"), &message)?;
         let payload = encode_message(&message, opts.body)?;
@@ -1015,6 +1040,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         validate_channel_message(Path::new("<test>"), &message).expect("valid id shape");
         trash_test_root(&root);
@@ -1036,6 +1063,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("control characters in channel must be refused");
@@ -1056,6 +1085,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("second-resolution ids must be refused");
@@ -1084,6 +1115,7 @@ mod tests {
                 re: None,
                 mentions: Vec::new(),
                 signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
             },
         )
         .expect("join event");
@@ -1104,6 +1136,7 @@ mod tests {
                 re: None,
                 mentions: Vec::new(),
                 signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
             },
         )
         .expect("send");
@@ -1148,6 +1181,7 @@ mod tests {
                 re: None,
                 mentions: Vec::new(),
                 signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
             },
         )
         .expect("send");
@@ -1170,6 +1204,7 @@ mod tests {
                 re: None,
                 mentions: Vec::new(),
                 signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
             },
         )
         .expect("send");
@@ -1239,6 +1274,7 @@ mod tests {
                 re: None,
                 mentions: Vec::new(),
                 signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
             },
         )
         .expect("send");
@@ -1341,6 +1377,8 @@ mod tests {
             re: Some("aaaaaaaéx".to_owned()),
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("non-canonical re must be refused");

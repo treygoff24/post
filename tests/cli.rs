@@ -1416,7 +1416,7 @@ fn sent_mail_ascii_escapes_non_ascii_envelopes_like_python_json_dumps() {
     assert_success(&output);
     let sent: SendOutput = from_stdout(&output);
     let expected = format!(
-        "{{\n  \"id\": \"{}\",\n  \"from\": \"python-compatible\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"caf\\u00e9 \\u2615 \\ud83d\\ude00\",\n  \"sent\": \"{}\"\n}}\n---\nbody",
+        "{{\n  \"id\": \"{}\",\n  \"from\": \"python-compatible\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"caf\\u00e9 \\u2615 \\ud83d\\ude00\",\n  \"sent\": \"{}\",\n  \"sender_provenance\": \"declared-flag\"\n}}\n---\nbody",
         sent.envelope.id, sent.envelope.sent
     );
 

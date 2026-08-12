@@ -110,7 +110,7 @@ fn read(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let room = channel::acting_room(context, &rooms)?;
+    let (room, _) = channel::acting_room(context, &rooms)?;
     // --history/--since are cursorless reads: they ignore the unread cursor
     // entirely and NEVER advance it, so they are idempotent and pipe-safe
     // (the cursor-swallow class cannot happen through them).
@@ -459,7 +459,7 @@ fn discard_through(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let room = channel::acting_room(context, &rooms)?;
+    let (room, _) = channel::acting_room(context, &rooms)?;
     let paths = member_channel_paths(context, channel_name, &room)?;
     let target = resolve_message_stem(&paths, channel_name, target_input)?;
 
@@ -852,6 +852,17 @@ fn full_banner_due_today(context: &Context, room: &str) -> bool {
     true
 }
 
+/// Stderr wording for how the acting room was resolved. Explicit-flag never
+/// occurs here (channel commands have no --from/--room by design).
+fn acting_notice(provenance: crate::model::SenderProvenance) -> &'static str {
+    use crate::model::SenderProvenance as P;
+    match provenance {
+        P::DeclaredEnv => "POST_FROM pin",
+        P::DeclaredFlag => "explicit flag",
+        P::InferredCwd | P::InferredBasename => "identity inferred from cwd",
+    }
+}
+
 /// The owner's render identity. The legacy fallback renders byte-identically
 /// to the pre-A0a output ("Trey"); the generic path always carries the
 /// immutable room id, so a configured label can never hide which room signed.
@@ -870,8 +881,11 @@ fn join(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let acting = channel::acting_room(context, &rooms)?;
-    eprintln!("post: joining #{name} as room '{acting}' (identity inferred from cwd)");
+    let (acting, provenance) = channel::acting_room(context, &rooms)?;
+    eprintln!(
+        "post: joining #{name} as room '{acting}' ({})",
+        acting_notice(provenance)
+    );
     let outcome = channel::join(context, name, description)?;
     let rendered = if json_output {
         output::json(
@@ -955,10 +969,11 @@ fn send(
     // run from the wrong tree posts as that tree's room. Name it before the
     // append-only write, which cannot be taken back.
     let rooms = context.load_rooms()?;
-    let acting = channel::acting_room(context, &rooms)?;
+    let (acting, provenance) = channel::acting_room(context, &rooms)?;
     eprintln!(
-        "post: sending to #{} as room '{acting}' (identity inferred from cwd)",
-        args.name
+        "post: sending to #{} as room '{acting}' ({})",
+        args.name,
+        acting_notice(provenance)
     );
     let message = channel::send(
         context,
@@ -1000,7 +1015,7 @@ fn seen_by(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let room = channel::acting_room(context, &rooms)?;
+    let (room, _) = channel::acting_room(context, &rooms)?;
     let paths = member_channel_paths(context, channel_name, &room)?;
     let members = paths.load_members()?;
     let message_id = channel::resolve_message_id(&paths, msg_id_or_prefix)?;
@@ -1120,6 +1135,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         let bytes = crate::channel::encode_message(&message, body).expect("encode");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes).expect("write message");
@@ -1138,6 +1155,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         let bytes = channel::encode_message(&message, body).expect("encode message");
         fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
@@ -1482,6 +1501,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         // Feature-absent (no rooms, no owner.json): no badges at all, even
         // for a trey-signed-looking message (A0a Decision 2).
@@ -1570,6 +1591,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         fs::write(root.join("rooms.json"), r#"{"trey": "~/.trey-room"}"#).expect("trey room");
         let owner = crate::mailbox::resolve_owner(&context)
@@ -1652,6 +1675,8 @@ mod tests {
             re: None,
             mentions: vec![],
             signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
         };
         let bytes =
             channel::encode_message(&join_event, "=== alpha joined ===").expect("encode join");

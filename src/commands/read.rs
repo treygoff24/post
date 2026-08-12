@@ -269,6 +269,8 @@ mod tests {
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             display_name: display_name.map(str::to_owned),
             pfp: pfp.map(str::to_owned),
+            sender_address: None,
+            sender_provenance: None,
         }
     }
 

@@ -39,7 +39,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     // the just-registered room).
     let _lock = context.lock_rooms()?;
     let rooms = context.load_rooms()?;
-    let room = channel::acting_room(context, &rooms)?;
+    let (room, provenance) = channel::acting_room(context, &rooms)?;
     // Decision 3 matrix: profile set loads the trust anchor, so the owner
     // reservation is checked against the SAME registry snapshot the imitation
     // check uses (and a broken owner.json fails this command closed).
@@ -95,7 +95,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
             profile.name.as_deref().unwrap_or(&room)
         ),
     };
-    let announced = announce(context, &room, &line, &targets);
+    let announced = announce(context, &room, &line, &targets, provenance);
 
     let output = ProfileOutput {
         ok: true,
@@ -110,7 +110,7 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
     let rooms = context.load_rooms()?;
     let room = match args.room {
         Some(room) => room,
-        None => channel::acting_room(context, &rooms)?,
+        None => channel::acting_room(context, &rooms)?.0,
     };
     let profiles = load_profiles(context)?;
     let profile = profiles.get(&room).cloned().unwrap_or_default();
@@ -128,7 +128,7 @@ fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     // races a concurrent `rooms add` and can clear a stale room's profile.
     let _lock = context.lock_rooms()?;
     let rooms = context.load_rooms()?;
-    let room = channel::acting_room(context, &rooms)?;
+    let (room, provenance) = channel::acting_room(context, &rooms)?;
     let mut profiles = load_profiles(context)?;
     let existed = profiles.remove(&room).is_some();
     // Same pre-commit ordering as `set`: listing failure aborts before the
@@ -140,7 +140,7 @@ fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     };
     write_profiles(context, &profiles)?;
     let line = format!("=== {room} cleared their profile ===");
-    let announced = announce(context, &room, &line, &targets);
+    let announced = announce(context, &room, &line, &targets, provenance);
     let profile = Profile::default();
     let output = ProfileOutput {
         ok: true,
@@ -164,11 +164,17 @@ fn member_channels(context: &Context, room: &str) -> AppResult<Vec<String>> {
 /// Write the profile event into each target channel. Failures don't roll
 /// back the already-committed registry; they surface as warnings (the
 /// profile is already true, the announcement is courtesy).
-fn announce(context: &Context, room: &str, line: &str, targets: &[String]) -> Vec<String> {
+fn announce(
+    context: &Context,
+    room: &str,
+    line: &str,
+    targets: &[String],
+    provenance: crate::model::SenderProvenance,
+) -> Vec<String> {
     let mut announced = Vec::new();
     for name in targets {
         let result = ChannelPaths::new(context, name).and_then(|paths| {
-            channel::write_event(context, &paths, room, name, line, PROFILE_EVENT)
+            channel::write_event(context, &paths, room, name, line, PROFILE_EVENT, provenance)
         });
         match result {
             Ok(_) => announced.push(name.clone()),

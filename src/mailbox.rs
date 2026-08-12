@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::model::{ChannelMessage, Envelope, ParsedMail, RoomMap, RulesConfig};
+use crate::model::{ChannelMessage, Envelope, ParsedMail, RoomMap, RulesConfig, SenderProvenance};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +25,16 @@ static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// at the trust boundary.
 const OWNER_CONFIG_MAX_BYTES: u64 = 64 * 1024;
 const ROOMS_LOCK_FILE: &str = ".rooms.lock";
+/// Stable room pin exported by the `agent-session` launch helper. Identity
+/// layer 1 (address): a declaration, not a credential — recorded as
+/// `declared-env` provenance so every reader sees the evidence.
+pub(crate) const POST_FROM_ENV: &str = "POST_FROM";
+/// Opaque per-launch instance address exported by the launch helper.
+/// Recorded verbatim on envelopes; post never synthesizes one.
+pub(crate) const POST_SENDER_ADDRESS_ENV: &str = "POST_SENDER_ADDRESS";
+/// Bound on a declared sender address. `harness.repo.uuid` is well under
+/// this; the cap keeps a hostile environment from bloating every envelope.
+const SENDER_ADDRESS_MAX_BYTES: usize = 256;
 const RESERVED_ROOM_NAMES: [&str; 7] = [
     "*",
     "archive",
@@ -228,6 +238,20 @@ impl Context {
         explicit: Option<String>,
         rooms: &RoomMap,
     ) -> AppResult<String> {
+        Ok(self.resolved_room_with_provenance(explicit, rooms)?.0)
+    }
+
+    /// Resolve the acting room and record HOW it was resolved. Precedence:
+    /// explicit argument (`--room`/`--from`) > POST_FROM environment pin >
+    /// cwd-in-registered-room > cwd basename. The pin beats cwd by design —
+    /// identity is a declaration made at launch, not a location (spec v2,
+    /// three-way signed 2026-08-12); the provenance field carries the
+    /// evidence to every reader.
+    pub(crate) fn resolved_room_with_provenance(
+        &self,
+        explicit: Option<String>,
+        rooms: &RoomMap,
+    ) -> AppResult<(String, SenderProvenance)> {
         if let Some(room) = explicit {
             validate_room_name(&room).map_err(|reason| {
                 AppError::new(
@@ -238,7 +262,10 @@ impl Context {
                 .input(room.clone())
                 .reason(reason)
             })?;
-            return Ok(room);
+            return Ok((room, SenderProvenance::DeclaredFlag));
+        }
+        if let Some(pinned) = declared_env_pin()? {
+            return Ok((pinned, SenderProvenance::DeclaredEnv));
         }
         self.infer_from_cwd(rooms)
     }
@@ -253,7 +280,10 @@ impl Context {
         Ok((room, inbox, read))
     }
 
-    pub(crate) fn infer_from_cwd(&self, rooms: &RoomMap) -> AppResult<String> {
+    pub(crate) fn infer_from_cwd(
+        &self,
+        rooms: &RoomMap,
+    ) -> AppResult<(String, SenderProvenance)> {
         let cwd = std::env::current_dir()
             .map_err(|error| AppError::io("resolve current directory", Path::new("."), error))?;
         let mut matches = Vec::new();
@@ -267,7 +297,7 @@ impl Context {
         }
         matches.sort();
         if let Some((_, name)) = matches.pop() {
-            return Ok(name);
+            return Ok((name, SenderProvenance::InferredCwd));
         }
         let basename = cwd
             .file_name()
@@ -293,7 +323,7 @@ impl Context {
             .input(basename)
             .reason(reason)
         })?;
-        Ok(basename.to_owned())
+        Ok((basename.to_owned(), SenderProvenance::InferredBasename))
     }
 
     pub(crate) fn ensure_sender_allowed(&self, sender: &str, rooms: &RoomMap) -> AppResult<()> {
@@ -342,6 +372,65 @@ impl Context {
             .map_err(|error| AppError::io("create read directory", &read, error))?;
         Ok((inbox, read))
     }
+}
+
+/// The POST_FROM pin, validated. Set-but-invalid is a loud error, never a
+/// silent fallback to inference — a launcher that exports a broken pin is a
+/// bug someone must see, and falling back would quietly re-open specimen 21.
+pub(crate) fn declared_env_pin() -> AppResult<Option<String>> {
+    let Some(raw) = std::env::var_os(POST_FROM_ENV) else {
+        return Ok(None);
+    };
+    let value = raw.to_str().ok_or_else(|| {
+        AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("{POST_FROM_ENV} is set but is not valid UTF-8"),
+            format!("Fix or unset {POST_FROM_ENV} in the launching environment."),
+        )
+        .reason("non-UTF-8 environment value")
+    })?;
+    validate_component(value).map_err(|reason| {
+        AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("{POST_FROM_ENV} pin '{value}' is invalid: {reason}"),
+            format!("Fix or unset {POST_FROM_ENV} in the launching environment."),
+        )
+        .input(value)
+        .reason(reason)
+    })?;
+    Ok(Some(value.to_owned()))
+}
+
+/// The POST_SENDER_ADDRESS declaration, validated but otherwise opaque.
+/// Post records it verbatim and never synthesizes one; set-but-invalid is a
+/// loud error for the same reason as the pin.
+pub(crate) fn declared_sender_address() -> AppResult<Option<String>> {
+    let Some(raw) = std::env::var_os(POST_SENDER_ADDRESS_ENV) else {
+        return Ok(None);
+    };
+    let refuse = |reason: &str, shown: &str| {
+        AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("{POST_SENDER_ADDRESS_ENV} is invalid: {reason}"),
+            format!("Fix or unset {POST_SENDER_ADDRESS_ENV} in the launching environment."),
+        )
+        .input(shown.to_owned())
+        .reason(reason.to_owned())
+    };
+    let value = raw
+        .to_str()
+        .ok_or_else(|| refuse("non-UTF-8 environment value", "<non-UTF-8>"))?;
+    if value.is_empty() {
+        return Err(refuse("empty value", value));
+    }
+    if value.len() > SENDER_ADDRESS_MAX_BYTES {
+        let shown: String = value.chars().take(64).collect();
+        return Err(refuse("value exceeds 256 bytes", &shown));
+    }
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(refuse("control or whitespace characters", value));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 pub(crate) fn validate_component(value: &str) -> Result<(), String> {
