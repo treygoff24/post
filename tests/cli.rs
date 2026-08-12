@@ -6626,21 +6626,41 @@ fn v2_signature_ref_flag_guards() {
 }
 
 /// A present locator whose sidecar does not exist is a loud failure, never
-/// silently unsigned (and never a v1 fallback).
+/// silently unsigned — and never a v1 fallback. The body here is a GENUINE
+/// v1 wire whose v1 sidecar exists and would verify: if a broken v2 branch
+/// ever fell back to the v1 parser, this test would see VERIFIED instead of
+/// the required Failed (Sol's fixture correction, 20260812-211400).
 #[test]
-fn v2_present_locator_with_missing_sidecar_fails_loudly() {
+fn v2_present_locator_with_missing_sidecar_fails_loudly_and_never_falls_back_to_v1() {
     let sandbox = Sandbox::new();
     let mara = configured_mara(&sandbox).0;
     join_channel(&sandbox, "nosidecar", &mara);
-    // Establish the trust anchor (key + allowed_signers) but sign nothing.
-    v2_owner_key(&sandbox);
-    let sent = v2_send(
-        &sandbox,
-        "nosidecar",
+    // A REAL v1 signature for the wire below (mara's marker is 🧔 by
+    // default): the v1 path alone would badge this message VERIFIED.
+    const V1_TAG: &str = "20260812T230500Z";
+    const V1_TEXT: &str = "one line that v1 would verify";
+    v2_sign_raw_payload(&sandbox, V1_TAG, &format!("{V1_TAG}\n{V1_TEXT}\n"));
+    let v1_wire = format!("🧔🔏 {V1_TEXT} [signed:{V1_TAG}]");
+    // Sanity: without a locator, the same wire DOES verify through v1.
+    let control = sandbox.run_in(
+        &["chat", "nosidecar", "--send", "--body", &v1_wire, "--json"],
+        None,
         &mara,
-        "20260812T230000Z",
-        "body with\nno sidecar",
     );
+    assert_success(&control);
+    let control_id: String = from_stdout::<serde_json::Value>(&control)["message"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert_eq!(
+        v2_read_badge(&sandbox, "nosidecar", &mara, &control_id),
+        Some(true),
+        "the control wire must verify through v1 without a locator"
+    );
+    // Same wire WITH a locator whose sidecar does not exist: the v2 branch
+    // owns the message outright and must fail — a v1 fallback would have
+    // verified it, which is exactly the smuggling path being forbidden.
+    let sent = v2_send(&sandbox, "nosidecar", &mara, "20260812T230000Z", &v1_wire);
     assert_success(&sent);
     let id: String = from_stdout::<serde_json::Value>(&sent)["message"]["id"]
         .as_str()
@@ -6649,7 +6669,7 @@ fn v2_present_locator_with_missing_sidecar_fails_loudly() {
     assert_eq!(
         v2_read_badge(&sandbox, "nosidecar", &mara, &id),
         Some(false),
-        "a locator pointing at no sidecar must fail loudly"
+        "a locator with no sidecar must fail loudly, never fall back to v1"
     );
     let text = chat_peek_text(&sandbox, "nosidecar", &mara);
     assert!(
@@ -6711,6 +6731,7 @@ fn v2_signed_fidelity_corpus_round_trips_verified() {
         ("lone-cr", "carriage\rreturn only".to_owned()),
         ("edge-newlines", "\n\nleading and trailing preserved\n\n".to_owned()),
         ("trailing-ws", "trailing spaces   \nand a tab\t".to_owned()),
+        ("leading-ws", "   \t leading spaces and tab kept".to_owned()),
         ("line-separators", "para\u{2028}sep\u{2029}end".to_owned()),
         ("controls", "nul\u{0}byte esc\u{1b}[31m vt\u{b} ff\u{c} del\u{7f}".to_owned()),
         ("nfkc-bait", "ﬁle ①② ﷺ ½ Ⅻ".to_owned()),
