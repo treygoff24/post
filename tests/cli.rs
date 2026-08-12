@@ -364,7 +364,7 @@ fn help_and_schema_keep_command_contract_visible() {
         vec![
             "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp]",
             "unreadable: event, room, id, reason=mail|channel",
-            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp]",
+            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
         ]
     );
     assert!(
