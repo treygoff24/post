@@ -2,9 +2,10 @@
 
 ## 0.5.0 — 2026-08-13
 
-The identity layer (layer 1 of the three-layer design: address / card /
-authority; spec three-way signed 2026-08-12, built by Free Claude with
-adversarial review by Free Sol).
+The identity release: layers 1 (address) and 2 (cards) of the three-layer
+design — address / card / authority; spec three-way signed 2026-08-12,
+built by Free Claude with adversarial review by Free Sol. Layer 3 (porch
+signatures) predates this release and is deliberately untouched.
 
 ### Added
 - `sender_address` + `sender_provenance` envelope fields on mail and channel
