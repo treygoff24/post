@@ -4,8 +4,10 @@
 
 The identity release: layers 1 (address) and 2 (cards) of the three-layer
 design — address / card / authority; spec three-way signed 2026-08-12,
-built by Free Claude with adversarial review by Free Sol. Layer 3 (porch
-signatures) predates this release and is deliberately untouched.
+built by Free Claude with adversarial review by Free Sol. The new address
+and card layers remain self-declared; authority stays grounded in
+cryptographic signed-owner evidence. This release also publishes
+signed-message v2, described below.
 
 ### Added
 - `sender_address` + `sender_provenance` envelope fields on mail and channel
