@@ -37,15 +37,29 @@ case "${1:-}" in
 esac
 
 if [ "$mode" = uninstall ]; then
+    # Delete only what this installer owns: unlink a vendor symlink only when
+    # its readlink target is our installed shim, remove only the exact managed
+    # files, and rmdir directories only when empty. Never rm -rf a
+    # caller-controlled prefix.
     for pair in $LINKS; do
         vendor=${pair%%:*}
-        [ -L "$SHIM_LINK_DIR/$vendor" ] && rm "$SHIM_LINK_DIR/$vendor" && \
-            printf 'install: removed %s\n' "$SHIM_LINK_DIR/$vendor"
+        shim=${pair#*:}
+        link="$SHIM_LINK_DIR/$vendor"
+        [ -L "$link" ] || continue
+        current=$(readlink "$link" 2>/dev/null || printf '')
+        if [ "$current" = "$PREFIX/shims/$shim" ]; then
+            rm "$link" && printf 'install: removed %s\n' "$link"
+        else
+            printf 'install: leaving %s (points to %s, not ours)\n' "$link" "$current"
+        fi
     done
-    if [ -d "$PREFIX" ]; then
-        rm -rf "$PREFIX"
-        printf 'install: removed %s\n' "$PREFIX"
-    fi
+    for f in $FILES; do
+        dst="$PREFIX/$f"
+        [ -f "$dst" ] && rm "$dst" && printf 'install: removed %s\n' "$dst"
+    done
+    rmdir "$PREFIX/shims" 2>/dev/null && printf 'install: removed %s\n' "$PREFIX/shims"
+    rmdir "$PREFIX" 2>/dev/null && printf 'install: removed %s\n' "$PREFIX" \
+        || { [ -d "$PREFIX" ] && printf 'install: leaving non-empty %s\n' "$PREFIX"; }
     printf 'install: profile seams in ~/.zshrc and codex-profile fail open when the helper is absent; remove their blocks at leisure\n'
     exit 0
 fi
@@ -72,7 +86,7 @@ for f in $FILES; do
     fi
     if [ "$src_hash" != "$dst_hash" ]; then
         mkdir -p "$(dirname "$dst")" || fail "cannot create $(dirname "$dst")"
-        cp "$src" "$dst" || fail "cannot install $dst"
+        cp -f "$src" "$dst" || fail "cannot install $dst"
         chmod 0755 "$dst" || fail "cannot chmod $dst"
         printf 'install: %s -> %s\n' "$f" "$dst"
     fi
@@ -80,6 +94,19 @@ for f in $FILES; do
 done
 
 if [ "$mode" = check ]; then
+    for pair in $LINKS; do
+        vendor=${pair%%:*}
+        shim=${pair#*:}
+        link="$SHIM_LINK_DIR/$vendor"
+        target="$PREFIX/shims/$shim"
+        current=$(readlink "$link" 2>/dev/null || printf 'absent')
+        if [ "$current" = "$target" ]; then
+            printf 'check: link %s OK -> %s\n' "$vendor" "$target"
+        else
+            printf 'check: link %s DRIFT expected=%s actual=%s\n' "$vendor" "$target" "$current"
+            drift=1
+        fi
+    done
     exit "$drift"
 fi
 
