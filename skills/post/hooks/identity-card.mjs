@@ -97,7 +97,13 @@ export function identityCardContext(env = process.env) {
   let fd;
   try {
     try {
-      fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      // O_NONBLOCK: opening a FIFO read-only would otherwise block forever
+      // waiting for a writer; with it the open returns and fstat rejects the
+      // non-regular type below. Harmless for regular files.
+      fd = fs.openSync(
+        file,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
     } catch (error) {
       if (error?.code === "ENOENT") return null; // absence is silent, first-class
       if (error?.code === "ELOOP" || error?.code === "EMLINK") {

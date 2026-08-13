@@ -191,6 +191,21 @@ if (fs.existsSync(target)) {
 }
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
+// Dependency-ordered: the helper the adapter imports lands first, the
+// adapter that imports it last. A failed helper copy leaves the OLD
+// runnable adapter in place; a helper-only partial is harmless.
+const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
+const helperSource = fs.readFileSync(HELPER_SOURCE);
+let helperChanged = true;
+try {
+  helperChanged = !helperSource.equals(fs.readFileSync(HELPER));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+if (helperChanged) {
+  writeFileAtomic(HELPER, helperSource, 0o644);
+}
+
 const source = fs.readFileSync(SOURCE);
 let adapterChanged = true;
 try {
@@ -203,18 +218,6 @@ if (adapterChanged) {
 }
 const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
 if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
-
-const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
-const helperSource = fs.readFileSync(HELPER_SOURCE);
-let helperChanged = true;
-try {
-  helperChanged = !helperSource.equals(fs.readFileSync(HELPER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
-}
-if (helperChanged) {
-  writeFileAtomic(HELPER, helperSource, 0o644);
-}
 
 const canonicalHook = () => ({ type: "command", command: COMMAND, timeout: 5 });
 

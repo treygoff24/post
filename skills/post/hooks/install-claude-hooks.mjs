@@ -19,6 +19,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -97,24 +98,48 @@ if (typeof config !== "object" || config === null || Array.isArray(config)) conf
 if (typeof config.hooks !== "object" || config.hooks === null) config.hooks = {};
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
-const source = fs.readFileSync(SOURCE);
-let adapterChanged = true;
-try {
-  adapterChanged = !source.equals(fs.readFileSync(ADAPTER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
-}
-if (adapterChanged) {
-  const adapterTmp = `${ADAPTER}.${process.pid}.tmp`;
-  fs.writeFileSync(adapterTmp, source, { mode: 0o755 });
-  fs.renameSync(adapterTmp, ADAPTER);
-}
-const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
-if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
 
-// The adapter statically imports ./identity-card.mjs (M5); the private
-// install must carry it alongside or every installed hook fire crashes
-// with ERR_MODULE_NOT_FOUND.
+// Random-named exclusive temp, O_EXCL|O_NOFOLLOW: a planted predictable
+// symlink can neither be followed nor clobber a victim file.
+function writeFileAtomic(file, bytes, mode) {
+  const tmp = path.join(
+    path.dirname(file),
+    `.${path.basename(file)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
+  );
+  let fd;
+  try {
+    const flags =
+      fs.constants.O_WRONLY |
+      fs.constants.O_CREAT |
+      fs.constants.O_EXCL |
+      (fs.constants.O_NOFOLLOW || 0);
+    fd = fs.openSync(tmp, flags, mode);
+    fs.writeSync(fd, bytes);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Best-effort close before unlink.
+      }
+    }
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Only this process's temp; ignore if create failed first.
+    }
+    throw error;
+  }
+}
+
+// Dependency-ordered: the helper the adapter imports lands first, the
+// adapter that imports it last. A failed helper copy leaves the OLD
+// runnable adapter in place; a helper-only partial is harmless.
+// (The adapter statically imports ./identity-card.mjs since M5; an
+// adapter-without-helper install crashes every hook fire.)
 const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
 const helperSource = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "identity-card.mjs")
@@ -126,10 +151,21 @@ try {
   if (error.code !== "ENOENT") throw error;
 }
 if (helperChanged) {
-  const helperTmp = `${HELPER}.${process.pid}.tmp`;
-  fs.writeFileSync(helperTmp, helperSource, { mode: 0o644 });
-  fs.renameSync(helperTmp, HELPER);
+  writeFileAtomic(HELPER, helperSource, 0o644);
 }
+
+const source = fs.readFileSync(SOURCE);
+let adapterChanged = true;
+try {
+  adapterChanged = !source.equals(fs.readFileSync(ADAPTER));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+if (adapterChanged) {
+  writeFileAtomic(ADAPTER, source, 0o755);
+}
+const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
+if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
 
 const canonicalHook = () => ({ type: "command", command: "node", args: [ADAPTER], timeout: 10 });
 

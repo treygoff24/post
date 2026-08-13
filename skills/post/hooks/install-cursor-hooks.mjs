@@ -186,9 +186,12 @@ if (fs.existsSync(target)) {
 }
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
-const adapterChanged = copyScript(SOURCE, ADAPTER);
-const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
+// Dependency-ordered: the helper the adapter imports lands first, the
+// adapter that imports it last. A failed later copy leaves the OLD
+// runnable adapter in place; a helper-only partial is harmless.
 const helperChanged = copyScript(HELPER_SOURCE, path.join(path.dirname(ADAPTER), "identity-card.mjs"));
+const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
+const adapterChanged = copyScript(SOURCE, ADAPTER);
 
 function unquoteLeadingArg(text) {
   const s = text.trim();

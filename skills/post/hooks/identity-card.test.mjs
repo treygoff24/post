@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import {
   cardPath,
@@ -175,4 +177,25 @@ test("withCard enforces the single merged ceiling", () => {
     "SessionStart"
   );
   assert.equal(dropped.hookSpecificOutput.additionalContext, mail);
+});
+
+test("a FIFO at the card path is rejected without hanging", () => {
+  const sb = sandbox();
+  const made = spawnSync("mkfifo", [sb.file], { encoding: "utf8" });
+  if (made.status !== 0) return; // platform without mkfifo: nothing to prove
+  // Bounded CHILD process: if a flag regression reintroduces the blocking
+  // open, the timeout fails this test instead of hanging the whole suite.
+  const script = `
+    import { identityCardContext } from ${JSON.stringify(
+      new URL("./identity-card.mjs", import.meta.url).href
+    )};
+    process.stdout.write(JSON.stringify(identityCardContext(process.env)));
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    timeout: 5000,
+    env: { ...process.env, ...sb.env },
+  });
+  assert.equal(result.status, 0, `must not hang or die: ${result.stderr} ${result.error ?? ""}`);
+  assert.match(result.stdout, /not a regular file/);
 });

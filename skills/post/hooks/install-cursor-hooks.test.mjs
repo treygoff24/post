@@ -269,3 +269,37 @@ test("installed adapter executes standalone and injects a card (M5 helper ships 
   assert.match(out.hookSpecificOutput.additionalContext, /Identity card stored/);
   assert.match(out.hookSpecificOutput.additionalContext, /installed card/);
 });
+
+test("a failed helper copy leaves the prior adapter bytes untouched (upgrade cannot brick)", () => {
+  // Fresh private dir simulating an EXISTING pre-M5 install: an old runnable
+  // adapter, and the helper path blocked by a directory so the helper copy
+  // fails. Dependency ordering means the installer must die BEFORE touching
+  // the adapter.
+  const installDir = fs.mkdtempSync(path.join(ROOT, "upgrade-"));
+  const adapterPath = path.join(installDir, path.basename(ADAPTER));
+  const oldAdapter = "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({}));\n";
+  fs.writeFileSync(adapterPath, oldAdapter, { mode: 0o755 });
+  fs.mkdirSync(path.join(installDir, "identity-card.mjs"));
+
+  const target = freshTarget();
+  const result = spawnSync(process.execPath, [INSTALLER, target], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      POST_CURSOR_HOOK_INSTALL_DIR: installDir,
+      POST_CURSOR_HOOK_BIN: GOOD_POST,
+    },
+  });
+  assert.notEqual(result.status, 0, "blocked helper copy must fail the install");
+  assert.equal(
+    fs.readFileSync(adapterPath, "utf8"),
+    oldAdapter,
+    "the prior adapter must not be replaced after a failed helper copy"
+  );
+  const rerun = spawnSync(process.execPath, [adapterPath], {
+    input: "{}",
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  assert.equal(rerun.status, 0, "the prior adapter must still execute");
+});
