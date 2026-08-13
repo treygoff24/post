@@ -1,0 +1,98 @@
+#!/bin/sh
+# launcher/install — idempotent installer for the agent-session launcher.
+#
+#   launcher/install            install/refresh, print source+installed hashes
+#   launcher/install --check    verify installed == source, exit 1 on drift
+#   launcher/install --uninstall  remove the installed tree + vendor symlinks
+#
+# Installs COPIES (never symlinks into a mutable checkout) to:
+#   ~/.local/libexec/post-launcher/agent-session
+#   ~/.local/libexec/post-launcher/shims/{claude,codex,cursor,grok}
+# and maintains vendor-named symlinks in ~/.local/agent-shims/ pointing at
+# the INSTALLED shims. Profile seams (zshrc, codex-profile) should reference
+# the installed helper path, so a branch switch or checkout move in the
+# source repo can never change live launch behavior without a re-install.
+set -u
+
+SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PREFIX="${POST_LAUNCHER_PREFIX:-$HOME/.local/libexec/post-launcher}"
+SHIM_LINK_DIR="${POST_AGENT_SHIM_DIR:-$HOME/.local/agent-shims}"
+FILES="agent-session shims/claude shims/codex shims/cursor shims/grok"
+# vendor-name:shim-name pairs for the PATH symlinks
+LINKS="claude:claude codex:codex cursor-agent:cursor grok:grok"
+
+fail() { printf 'install: %s\n' "$1" >&2; exit 1; }
+
+hash_of() {
+    digest=$(shasum -a 256 "$1" 2>/dev/null) || fail "cannot hash $1"
+    printf '%s' "$digest" | cut -d' ' -f1
+}
+
+mode=install
+case "${1:-}" in
+    '') ;;
+    --check) mode=check ;;
+    --uninstall) mode=uninstall ;;
+    *) fail "unknown argument '$1' (usage: install [--check|--uninstall])" ;;
+esac
+
+if [ "$mode" = uninstall ]; then
+    for pair in $LINKS; do
+        vendor=${pair%%:*}
+        [ -L "$SHIM_LINK_DIR/$vendor" ] && rm "$SHIM_LINK_DIR/$vendor" && \
+            printf 'install: removed %s\n' "$SHIM_LINK_DIR/$vendor"
+    done
+    if [ -d "$PREFIX" ]; then
+        rm -rf "$PREFIX"
+        printf 'install: removed %s\n' "$PREFIX"
+    fi
+    printf 'install: profile seams in ~/.zshrc and codex-profile fail open when the helper is absent; remove their blocks at leisure\n'
+    exit 0
+fi
+
+drift=0
+for f in $FILES; do
+    src="$SOURCE_DIR/$f"
+    dst="$PREFIX/$f"
+    [ -f "$src" ] || fail "source file missing: $src"
+    src_hash=$(hash_of "$src")
+    if [ -f "$dst" ]; then
+        dst_hash=$(hash_of "$dst")
+    else
+        dst_hash=absent
+    fi
+    if [ "$mode" = check ]; then
+        if [ "$src_hash" = "$dst_hash" ]; then
+            printf 'check: %s OK %s\n' "$f" "$src_hash"
+        else
+            printf 'check: %s DRIFT source=%s installed=%s\n' "$f" "$src_hash" "$dst_hash"
+            drift=1
+        fi
+        continue
+    fi
+    if [ "$src_hash" != "$dst_hash" ]; then
+        mkdir -p "$(dirname "$dst")" || fail "cannot create $(dirname "$dst")"
+        cp "$src" "$dst" || fail "cannot install $dst"
+        chmod 0755 "$dst" || fail "cannot chmod $dst"
+        printf 'install: %s -> %s\n' "$f" "$dst"
+    fi
+    printf 'hash: %s source=%s installed=%s\n' "$f" "$src_hash" "$(hash_of "$dst")"
+done
+
+if [ "$mode" = check ]; then
+    exit "$drift"
+fi
+
+mkdir -p "$SHIM_LINK_DIR" || fail "cannot create $SHIM_LINK_DIR"
+for pair in $LINKS; do
+    vendor=${pair%%:*}
+    shim=${pair#*:}
+    target="$PREFIX/shims/$shim"
+    link="$SHIM_LINK_DIR/$vendor"
+    current=$(readlink "$link" 2>/dev/null || printf '')
+    if [ "$current" != "$target" ]; then
+        ln -sf "$target" "$link" || fail "cannot link $link"
+        printf 'install: %s -> %s\n' "$link" "$target"
+    fi
+done
+printf 'install: done (prefix %s)\n' "$PREFIX"
