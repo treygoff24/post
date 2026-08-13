@@ -2778,7 +2778,14 @@ fn codex_identity_cannot_impersonate_registered_rooms_but_aliases_remain_allowed
     let project = workspace.join("some-project");
     fs::create_dir(&project).expect("create workspace child");
     let inferred = sandbox.run_in(
-        &["send", "--to", "workspace", "--allow-self", "--body", "from workspace"],
+        &[
+            "send",
+            "--to",
+            "workspace",
+            "--allow-self",
+            "--body",
+            "from workspace",
+        ],
         None,
         &project,
     );
@@ -6899,7 +6906,10 @@ fn pin_flag_disagreement_is_a_hard_error_and_agreement_proceeds() {
     let wrote: Vec<_> = fs::read_dir(sandbox.mail_root.join("archive"))
         .map(|entries| entries.collect())
         .unwrap_or_default();
-    assert!(wrote.is_empty(), "no mail may be written under a pin/flag conflict");
+    assert!(
+        wrote.is_empty(),
+        "no mail may be written under a pin/flag conflict"
+    );
 
     // An AGREEING flag is not a conflict: proceeds as declared-flag.
     let agreed = sandbox.run_in_env(
@@ -7454,7 +7464,14 @@ fn self_send_refusal_writes_nothing_and_its_exact_fix_preserves_kind_and_subject
 
     let refused = sandbox.run_in(
         &[
-            "send", "--to", "alpha", "--kind", "letter", "--subject", subject, "--body",
+            "send",
+            "--to",
+            "alpha",
+            "--kind",
+            "letter",
+            "--subject",
+            subject,
+            "--body",
             "original body",
         ],
         None,
@@ -7500,10 +7517,12 @@ fn self_send_refusal_writes_nothing_and_its_exact_fix_preserves_kind_and_subject
 
     let after = sandbox.run_in(&["inbox"], None, &alpha);
     let listed: InboxOutput = from_stdout(&after);
-    assert_eq!(listed.count, 1, "the executed fix must land exactly one mail");
+    assert_eq!(
+        listed.count, 1,
+        "the executed fix must land exactly one mail"
+    );
     let id = listed.unread[0].id.clone();
-    let read: ReadOutput =
-        from_stdout(&sandbox.run_in(&["read", &id, "--json"], None, &alpha));
+    let read: ReadOutput = from_stdout(&sandbox.run_in(&["read", &id, "--json"], None, &alpha));
     assert_eq!(read.envelope.kind.to_string(), "letter");
     assert_eq!(read.envelope.subject, subject);
     assert_eq!(read.envelope.from, "alpha");
@@ -7512,8 +7531,16 @@ fn self_send_refusal_writes_nothing_and_its_exact_fix_preserves_kind_and_subject
     // The deliberate form succeeds directly as well.
     let deliberate = sandbox.run_in(
         &[
-            "send", "--to", "alpha", "--allow-self", "--kind", "letter", "--subject", subject,
-            "--body", "deliberate self-mail",
+            "send",
+            "--to",
+            "alpha",
+            "--allow-self",
+            "--kind",
+            "letter",
+            "--subject",
+            subject,
+            "--body",
+            "deliberate self-mail",
         ],
         None,
         &alpha,

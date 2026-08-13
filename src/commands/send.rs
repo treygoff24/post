@@ -61,7 +61,15 @@ fn run_with_body<F>(
 where
     F: FnOnce(BodySource<'_>) -> AppResult<String>,
 {
-    run_with_body_and_id(context, args, json_output, pretty, identity, read_body, new_mail_id)
+    run_with_body_and_id(
+        context,
+        args,
+        json_output,
+        pretty,
+        identity,
+        read_body,
+        new_mail_id,
+    )
 }
 
 fn run_with_body_and_id<F, G>(
