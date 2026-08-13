@@ -2,35 +2,46 @@
 # agent-session — identity launch helper (identity layer 1: address).
 #
 # Usage:
-#   agent-session --harness <slug> [--room <name>] -- <vendor command...>
+#   agent-session --harness <slug> [--room <name>] [--shim-self <path>] -- <vendor command...>
 #   agent-session --doctor
 #
 # Mints a fresh 128-bit UUID per launch and execs the vendor command with:
 #   POST_FROM             stable room pin (resolved ONCE, at launch)
 #   POST_SENDER_ADDRESS   <harness>.<repo-key>.<uuid>  (opaque, non-routable)
 #   POST_HARNESS          the harness slug
-#   POST_REPO_KEY         <repo-slug>-<8-hex path hash> of the launch repo
+#   POST_REPO_KEY         <repo-slug>-<8-hex hash of the realpathed repo root>
 #
-# The pin is resolved from --room, else by reverse lookup of the launch cwd
-# against `post rooms` (longest registered path containing cwd wins). When
-# nothing matches, NO pin is exported and the note says so — post then falls
-# back to cwd inference at send time with `inferred-*` provenance. The helper
-# never synthesizes identity it cannot evidence, and a stale inherited
-# POST_FROM/POST_SENDER_ADDRESS is always cleared first: a fresh launch is a
-# fresh instance.
+# The pin is resolved from --room (validated, exported as a declaration —
+# registration is NOT required for direct mail), else by reverse lookup of
+# the launch cwd against `post rooms` (longest registered path containing
+# cwd wins, realpath on both sides). A failed, missing, or unparseable
+# lookup is reported as exactly that — never as "no room matched". When
+# nothing pins, NO pin is exported: post falls back to cwd inference with
+# `inferred-*` provenance. The helper never synthesizes identity, and stale
+# inherited POST_FROM/POST_SENDER_ADDRESS is always cleared first: a fresh
+# launch is a fresh instance.
+#
+# Identity primitives are validated, not trusted: a present-but-broken
+# uuidgen/shasum fails the launch loudly instead of minting garbage or
+# colliding identity. The final address is validated against post's
+# transport bound (≤256 bytes, no whitespace/control) before exec.
+#
+# Shims (launcher/shims/*) are thin descriptors calling this helper with
+# `--shim-self "$0"`. When a shim is installed on PATH UNDER THE VENDOR'S
+# OWN NAME, the helper resolves the vendor by walking PATH and skipping the
+# shim itself plus every wrapper already visited this launch (recursion-safe
+# across wrapper chains, e.g. cmux's own claude/codex wrappers).
 #
 # Everything here is a DECLARATION recorded as `declared-env` provenance —
 # evidence, never a credential; authority stays with porch signatures.
-#
-# Per-harness shims (launcher/shims/*) are one-line descriptors calling this
-# helper. Adding a harness is one descriptor: no post-core change, no daemon,
-# no pane/PID/native-session-id dependency.
 #
 # Env overrides (tests and unusual installs):
 #   AGENT_SESSION_POST_BIN   path to the post binary (default: `post` on PATH)
 set -u
 
 POST_BIN="${AGENT_SESSION_POST_BIN:-post}"
+MAX_SLUG_LEN=32
+MAX_ADDRESS_LEN=256
 
 fail() {
     printf 'agent-session: %s\n' "$1" >&2
@@ -44,30 +55,41 @@ note() {
 valid_slug() {
     case "$1" in
         '' | *[!a-z0-9-]* | -*) return 1 ;;
-        *) return 0 ;;
     esac
+    [ "${#1}" -le "$MAX_SLUG_LEN" ]
 }
 
-# Reverse-lookup the launch cwd in `post rooms` JSON. Node does the JSON
-# parsing (never shell regex); the lookup expands leading '~' with HOME and
-# picks the longest registered path that contains cwd. Prints the room name
-# or nothing.
+# Same component grammar post's --from enforces: nonempty, no control
+# characters, one path component, not '.' or '..'. Validated HERE so a bad
+# explicit --room fails the launch instead of poisoning every later call.
+valid_room() {
+    case "$1" in
+        '' | . | ..) return 1 ;;
+        */* | *\\*) return 1 ;;
+        *[![:print:]]*) return 1 ;;
+    esac
+    return 0
+}
+
+# Reverse-lookup the launch cwd in `post rooms` JSON. Three distinct
+# outcomes, each reported accurately: a match (prints the room, rc 0), a
+# clean no-match (rc 3), or an unavailable/failed/unparseable lookup
+# (rc 4-6). Node does the JSON parsing (never shell regex); paths are
+# realpathed on BOTH sides — process.cwd() is physical while a "~/..."
+# registration may cross a symlink (macOS /var -> /private/var).
 resolve_room_from_cwd() {
-    command -v node >/dev/null 2>&1 || { note "node not found; skipping room pin (post will infer from cwd)"; return 0; }
-    command -v "$POST_BIN" >/dev/null 2>&1 || { note "post not found; skipping room pin (post will infer from cwd)"; return 0; }
-    "$POST_BIN" rooms 2>/dev/null | node -e '
+    command -v node >/dev/null 2>&1 || return 4
+    command -v "$POST_BIN" >/dev/null 2>&1 || return 5
+    listing=$("$POST_BIN" rooms 2>/dev/null) || return 6
+    printf '%s' "$listing" | node -e '
 const fs = require("node:fs");
 const path = require("node:path");
 let parsed;
 try {
   parsed = JSON.parse(fs.readFileSync(0, "utf8"));
 } catch {
-  process.exit(0); // unreadable listing: no pin, honest fallback
+  process.exit(6); // unparseable listing
 }
-const home = process.env.HOME ?? "";
-// realpath both sides: process.cwd() is a physical path, while an expanded
-// "~/..." registration may cross a symlink (macOS /var -> /private/var), and
-// a prefix match across that boundary silently fails.
 function physical(p) {
   try {
     return fs.realpathSync(p);
@@ -75,8 +97,9 @@ function physical(p) {
     return null;
   }
 }
+const home = process.env.HOME ?? "";
 const cwdPhysical = physical(process.cwd());
-if (cwdPhysical === null) process.exit(0);
+if (cwdPhysical === null) process.exit(6);
 const cwd = cwdPhysical + path.sep;
 let best = null;
 for (const room of parsed?.rooms ?? []) {
@@ -91,31 +114,102 @@ for (const room of parsed?.rooms ?? []) {
     if (best === null || p.length > best.path.length) best = { name: room.name, path: p };
   }
 }
-if (best !== null) process.stdout.write(best.name);
+if (best === null) process.exit(3);
+process.stdout.write(best.name);
 '
 }
 
+# Repo key: <repo-slug>-<8 hex of sha256 of the REALPATHED repo root>, so
+# symlink aliases of one repo share one key (M5 reuses this for the one
+# canonical card path). The slug is bounded; the hash is validated.
 repo_key() {
-    # Repo root: git toplevel when inside a work tree, else the launch cwd.
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         root=$(git rev-parse --show-toplevel)
     else
         root=$PWD
     fi
+    # Physical path: symlinked checkouts must not mint distinct keys.
+    root=$(cd "$root" 2>/dev/null && pwd -P) || fail "cannot resolve repo root '$root'"
     base=$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')
-    # Trim leading/trailing '-' runs and collapse doubles; never empty.
-    base=$(printf '%s' "$base" | sed 's/--*/-/g; s/^-//; s/-$//')
+    base=$(printf '%s' "$base" | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-32)
+    base=$(printf '%s' "$base" | sed 's/-$//')
     [ -n "$base" ] || base=repo
-    hash=$(printf '%s' "$root" | shasum -a 256 | cut -c1-8)
+    hash=$(printf '%s' "$root" | shasum -a 256 2>/dev/null | cut -c1-8)
+    case "$hash" in
+        *[!0-9a-f]* | '') fail "shasum produced no valid hash for the repo key (got '${hash}')" ;;
+    esac
+    [ "${#hash}" -eq 8 ] || fail "shasum produced no valid hash for the repo key (got '${hash}')"
     printf '%s-%s' "$base" "$hash"
 }
 
+# Canonical lowercase UUID, validated whichever primitive minted it. A
+# present-but-broken uuidgen is a loud failure, never silent garbage: the
+# whole point of the address is per-launch freshness.
 mint_uuid() {
     if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]'
+        uuid=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
     else
-        od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+        raw=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+        case "$raw" in
+            *[!0-9a-f]* | '') uuid='' ;;
+            *)
+                if [ "${#raw}" -eq 32 ]; then
+                    uuid=$(printf '%s-%s-%s-%s-%s' \
+                        "$(printf '%s' "$raw" | cut -c1-8)" \
+                        "$(printf '%s' "$raw" | cut -c9-12)" \
+                        "$(printf '%s' "$raw" | cut -c13-16)" \
+                        "$(printf '%s' "$raw" | cut -c17-20)" \
+                        "$(printf '%s' "$raw" | cut -c21-32)")
+                else
+                    uuid=''
+                fi
+                ;;
+        esac
     fi
+    case "$uuid" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+            printf '%s' "$uuid"
+            ;;
+        *) fail "uuid primitive produced invalid output (got '${uuid}'); refusing to launch with degraded identity freshness" ;;
+    esac
+}
+
+# Recursion-safe vendor resolution for shim installs. When the command word
+# is bare and --shim-self was given, walk PATH and pick the first executable
+# whose physical path is neither the shim itself nor any wrapper already
+# visited this launch (AGENT_SESSION_VISITED, colon-separated physical
+# paths). Wrapper chains (cmux) re-enter here with VISITED grown, so mutual
+# wrapper loops terminate in a loud failure instead of forking forever.
+resolve_vendor() {
+    word=$1
+    case "$word" in
+        */*) printf '%s' "$word"; return 0 ;;
+    esac
+    self_physical=''
+    if [ -n "$shim_self" ]; then
+        self_physical=$(cd "$(dirname "$shim_self")" 2>/dev/null && pwd -P)/$(basename "$shim_self")
+    fi
+    old_ifs=$IFS
+    IFS=:
+    for dir in $PATH; do
+        IFS=$old_ifs
+        [ -n "$dir" ] || continue
+        candidate="$dir/$word"
+        [ -f "$candidate" ] && [ -x "$candidate" ] || { IFS=:; continue; }
+        physical=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)/$(basename "$candidate")
+        if [ -n "$self_physical" ] && [ "$physical" = "$self_physical" ]; then
+            IFS=:; continue
+        fi
+        case ":${AGENT_SESSION_VISITED:-}:" in
+            *:"$physical":*) IFS=:; continue ;;
+        esac
+        AGENT_SESSION_VISITED="${AGENT_SESSION_VISITED:+$AGENT_SESSION_VISITED:}$physical"
+        export AGENT_SESSION_VISITED
+        printf '%s' "$physical"
+        return 0
+    done
+    IFS=$old_ifs
+    return 1
 }
 
 doctor() {
@@ -139,7 +233,7 @@ process.exit((parsed?.rooms ?? []).some((r) => r?.name === pin) ? 0 : 1);
 ' ; then
                 printf 'agent-session doctor: pin names a registered room\n'
             else
-                printf 'agent-session doctor: WARNING — pin does not name a registered room; channel commands will refuse\n'
+                printf 'agent-session doctor: WARNING — pin does not name a registered room; channel commands will refuse (direct mail still works)\n'
                 rc=1
             fi
         fi
@@ -151,6 +245,8 @@ process.exit((parsed?.rooms ?? []).some((r) => r?.name === pin) ? 0 : 1);
 
 harness=''
 room=''
+room_set=0
+shim_self=''
 saw_dashes=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -163,6 +259,12 @@ while [ $# -gt 0 ]; do
         --room)
             [ $# -ge 2 ] || fail "--room needs a value"
             room=$2
+            room_set=1
+            shift 2
+            ;;
+        --shim-self)
+            [ $# -ge 2 ] || fail "--shim-self needs a value"
+            shim_self=$2
             shift 2
             ;;
         --)
@@ -176,31 +278,63 @@ done
 
 [ "$saw_dashes" -eq 1 ] || fail "missing '--' before the vendor command"
 [ $# -gt 0 ] || fail "missing vendor command after '--'"
-valid_slug "$harness" || fail "--harness must be lowercase [a-z0-9-], not starting with '-' (got '${harness}')"
+valid_slug "$harness" || fail "--harness must be lowercase [a-z0-9-], not starting with '-', at most ${MAX_SLUG_LEN} chars (got '${harness}')"
+if [ "$room_set" -eq 1 ]; then
+    valid_room "$room" || fail "--room '$room' is not a valid room name (one nonempty printable path-safe component, not '.' or '..')"
+fi
 
 # A fresh launch is a fresh instance: stale inherited identity never survives.
 unset POST_FROM POST_SENDER_ADDRESS
 
 if [ -n "$room" ]; then
     pin=$room
+    pin_note="pinned room '$pin' for this session (explicit --room; a declaration, registration not required for direct mail)"
 else
     pin=$(resolve_room_from_cwd)
+    lookup_rc=$?
+    case "$lookup_rc" in
+        0) pin_note="pinned room '$pin' for this session" ;;
+        3)
+            pin=''
+            pin_note="no registered room contains this directory; no pin exported (post will infer from cwd, provenance inferred-*)"
+            ;;
+        4)
+            pin=''
+            pin_note="room lookup unavailable (node not found); no pin exported (post will infer from cwd, provenance inferred-*)"
+            ;;
+        5)
+            pin=''
+            pin_note="room lookup unavailable (post not found); no pin exported (post will infer from cwd, provenance inferred-*)"
+            ;;
+        *)
+            pin=''
+            pin_note="room lookup FAILED (post rooms errored or returned unparseable output); no pin exported (post will infer from cwd, provenance inferred-*)"
+            ;;
+    esac
 fi
 
-key=$(repo_key)
-uuid=$(mint_uuid)
+# fail() inside $() exits only the subshell — propagate explicitly.
+key=$(repo_key) || exit 64
+uuid=$(mint_uuid) || exit 64
 address="${harness}.${key}.${uuid}"
+
+# Transport bound, validated before exec: a launch that would poison every
+# later send refuses here instead.
+[ "${#address}" -le "$MAX_ADDRESS_LEN" ] || fail "minted address exceeds ${MAX_ADDRESS_LEN} bytes (${#address}); this is a helper bug — report it"
+case "$address" in
+    *[![:graph:]]*) fail "minted address contains whitespace or control characters; this is a helper bug — report it" ;;
+esac
 
 if [ -n "$pin" ]; then
     POST_FROM=$pin
     export POST_FROM
-    note "pinned room '$pin' for this session"
-else
-    note "no registered room contains this directory; no pin exported (post will infer from cwd, provenance inferred-*)"
 fi
+note "$pin_note"
 POST_SENDER_ADDRESS=$address
 POST_HARNESS=$harness
 POST_REPO_KEY=$key
 export POST_SENDER_ADDRESS POST_HARNESS POST_REPO_KEY
 
-exec "$@"
+vendor=$(resolve_vendor "$1") || fail "cannot resolve vendor command '$1' on PATH without recursing into the shim; is the real binary installed?"
+shift
+exec "$vendor" "$@"

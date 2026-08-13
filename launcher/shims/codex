@@ -1,5 +1,17 @@
 #!/bin/sh
 # Thin descriptor: launch codex through the identity helper as harness
 # 'codex'. Adding a harness is one file like this one — nothing else.
-dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec "$dir/../agent-session" --harness codex -- codex "$@"
+# A PATH install of this shim is a symlink or copy, possibly under the
+# vendor's own name: the helper is located through the shim's PHYSICAL
+# location (symlinks resolved), and --shim-self keeps vendor resolution
+# recursion-safe.
+self=$0
+while [ -L "$self" ]; do
+    target=$(readlink "$self") || break
+    case "$target" in
+        /*) self=$target ;;
+        *) self=$(dirname "$self")/$target ;;
+    esac
+done
+dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
+exec "$dir/../agent-session" --harness codex --shim-self "$0" -- codex "$@"

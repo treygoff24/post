@@ -50,9 +50,10 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
 4. **Everything is observable and append-only.** Direct mail is archived under
    `archive/`; channel history is append-only under `channels/`.
 5. **Identity stays bound to rooms.** Direct `--from` may use free-form names,
-   but registered room names can only be claimed from inside that room's tree.
-   Channel identity has no `--from` or `--room`: it is the registered room that
-   contains the command cwd.
+   but registered room names can only be claimed from inside that room's tree
+   (or by a `POST_FROM` launch pin, which is recorded as `declared-env`
+   evidence on every envelope). Channel identity has no `--from` or `--room`:
+   it is the pinned or cwd-resolved registered room.
 
 ## Commands
 
@@ -189,6 +190,16 @@ harness stays fallback-tier, honestly labeled by its `inferred-*` provenance.
 Verify a given launcher by running `agent-session --doctor` inside a session
 it spawned: exit 0 with a registered pin means the seam is wired; exit 1
 names exactly what is missing.
+
+The supported install route is a **PATH install**: symlink the shims into a
+directory early on PATH — even under the vendor's own name. Vendor
+resolution is recursion-safe (`--shim-self` plus a visited-wrapper list), so
+a shim named `codex` finds the real `codex` instead of forking forever, and
+wrapper chains from other session managers (cmux-style) terminate loudly if
+no real vendor exists. Launchers that hard-code canonical executables with
+no PATH participation need their own change to exec the shim; until a
+launcher passes `--doctor`, its sessions are fallback-tier — which the
+provenance field reports honestly rather than hiding.
 
 ## Channels
 

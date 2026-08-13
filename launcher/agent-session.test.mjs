@@ -292,3 +292,233 @@ test("doctor: green inside a helper launch, red outside", () => {
     fs.rmSync(sb.work, { recursive: true, force: true });
   }
 });
+
+// ---- M3 review round 1 (Sol, 20260813-010357): five findings pinned ----
+
+test("boundary: a very long launch path still mints a <=256-byte address that sends", () => {
+  const sb = sandbox();
+  try {
+    // A legal, deeply obnoxious directory name (230 chars in the basename).
+    const longName = "x".repeat(230);
+    const longDir = path.join(sb.work, longName);
+    fs.mkdirSync(longDir);
+    fs.mkdirSync(path.join(sb.home, "receiver-room"), { recursive: true });
+    fs.writeFileSync(
+      path.join(sb.mail, "rooms.json"),
+      JSON.stringify({ receiver: "~/receiver-room" }) + "\n"
+    );
+    const result = spawnSync(
+      HELPER,
+      [
+        "--harness",
+        "claude-code",
+        "--room",
+        "long-sender",
+        "--",
+        "sh",
+        "-c",
+        `'${BIN}' send --to receiver --body 'from the long path' --json`,
+      ],
+      {
+        cwd: longDir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: sb.home,
+          POST_MAIL_ROOT: sb.mail,
+          AGENT_SESSION_POST_BIN: BIN,
+        },
+        timeout: 15000,
+      }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const sent = JSON.parse(result.stdout);
+    assert.ok(
+      sent.envelope.sender_address.length <= 256,
+      `address must fit the transport bound: ${sent.envelope.sender_address.length}`
+    );
+    assert.match(sent.envelope.sender_address, ADDRESS_RE);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("repo key is stable across symlink aliases of the same directory", () => {
+  const sb = sandbox();
+  try {
+    const real = path.join(sb.work, "real-repo");
+    const alias = path.join(sb.work, "alias-repo");
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, alias);
+    const fromReal = launch(["--harness", "codex"], { cwd: real, sb });
+    const fromAlias = launch(["--harness", "codex"], { cwd: alias, sb });
+    assert.equal(fromReal.status, 0);
+    assert.equal(fromAlias.status, 0);
+    assert.equal(
+      fromReal.env.POST_REPO_KEY,
+      fromAlias.env.POST_REPO_KEY,
+      "symlink aliases must share one canonical repo key (M5 card path depends on it)"
+    );
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("broken identity primitives fail the launch loudly, never silently degrade", () => {
+  const sb = sandbox();
+  try {
+    const shadow = path.join(sb.work, "shadow-bin");
+    fs.mkdirSync(shadow);
+    // uuidgen present but emitting garbage.
+    fs.writeFileSync(path.join(shadow, "uuidgen"), "#!/bin/sh\necho GARBAGE-NOT-A-UUID\n");
+    fs.chmodSync(path.join(shadow, "uuidgen"), 0o755);
+    const badUuid = spawnSync(HELPER, ["--harness", "ok", "--room", "r", "--", "true"], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        PATH: `${shadow}:${process.env.PATH}`,
+      },
+      timeout: 15000,
+    });
+    assert.equal(badUuid.status, 64, badUuid.stderr);
+    assert.match(badUuid.stderr, /uuid primitive produced invalid output/);
+
+    // shasum present but emitting nothing.
+    fs.writeFileSync(path.join(shadow, "shasum"), "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(path.join(shadow, "shasum"), 0o755);
+    fs.rmSync(path.join(shadow, "uuidgen"));
+    const badHash = spawnSync(HELPER, ["--harness", "ok", "--room", "r", "--", "true"], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        PATH: `${shadow}:${process.env.PATH}`,
+      },
+      timeout: 15000,
+    });
+    assert.equal(badHash.status, 64, badHash.stderr);
+    assert.match(badHash.stderr, /shasum produced no valid hash/);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("invalid explicit --room fails at the helper boundary", () => {
+  const sb = sandbox();
+  try {
+    for (const bad of ["bad/name", "..", ".", "back\\slash", ""]) {
+      const result = spawnSync(HELPER, ["--harness", "ok", "--room", bad, "--", "true"], {
+        cwd: sb.roomDir,
+        encoding: "utf8",
+        env: { ...process.env, HOME: sb.home, POST_MAIL_ROOT: sb.mail },
+        timeout: 15000,
+      });
+      assert.equal(result.status, 64, `--room ${JSON.stringify(bad)} must be refused`);
+      assert.match(result.stderr, /--room/);
+    }
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("lookup failure is reported as failure, never as a clean no-match", () => {
+  const sb = sandbox();
+  try {
+    // post binary missing entirely.
+    const missing = launch(["--harness", "ok"], {
+      cwd: sb.roomDir,
+      sb,
+      env: { AGENT_SESSION_POST_BIN: path.join(sb.work, "does-not-exist") },
+    });
+    assert.equal(missing.status, 0);
+    assert.match(missing.stderr, /lookup unavailable \(post not found\)/);
+    assert.doesNotMatch(missing.stderr, /no registered room contains/);
+
+    // post present but erroring.
+    const broken = path.join(sb.work, "broken-post");
+    fs.writeFileSync(broken, "#!/bin/sh\nexit 1\n");
+    fs.chmodSync(broken, 0o755);
+    const failing = launch(["--harness", "ok"], {
+      cwd: sb.roomDir,
+      sb,
+      env: { AGENT_SESSION_POST_BIN: broken },
+    });
+    assert.equal(failing.status, 0);
+    assert.match(failing.stderr, /room lookup FAILED/);
+    assert.doesNotMatch(failing.stderr, /no registered room contains/);
+
+    // Control: the genuine no-match wording still exists.
+    const outside = path.join(sb.work, "elsewhere");
+    fs.mkdirSync(outside);
+    const nomatch = launch(["--harness", "ok"], { cwd: outside, sb });
+    assert.equal(nomatch.status, 0);
+    assert.match(nomatch.stderr, /no registered room contains/);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("shim installed under the vendor's own name does not recurse", () => {
+  const sb = sandbox();
+  try {
+    // PATH layout: <shimdir>/codex is OUR shim (earlier), <vendordir>/codex
+    // is the "real" vendor (later). Executing `codex` from PATH must run the
+    // vendor exactly once, with the identity env set.
+    const shimDir = path.join(sb.work, "shim-on-path");
+    const vendorDir = path.join(sb.work, "vendor-bin");
+    fs.mkdirSync(shimDir);
+    fs.mkdirSync(vendorDir);
+    // Install the shim under the vendor name by copying the descriptor with
+    // a corrected relative helper path (a PATH install is exactly a copy or
+    // symlink; use a symlink like a real install would).
+    fs.symlinkSync(path.join(LAUNCHER_DIR, "shims", "codex"), path.join(shimDir, "codex"));
+    const marker = path.join(sb.work, "vendor-ran");
+    fs.writeFileSync(
+      path.join(vendorDir, "codex"),
+      `#!/bin/sh\nprintf 'ran=%s addr=%s\\n' "$((\$(cat '${marker}' 2>/dev/null || echo 0) + 1))" "\$POST_SENDER_ADDRESS" > '${marker}'\n`
+    );
+    fs.chmodSync(path.join(vendorDir, "codex"), 0o755);
+    const result = spawnSync("codex", [], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        AGENT_SESSION_POST_BIN: BIN,
+        PATH: `${shimDir}:${vendorDir}:${process.env.PATH}`,
+      },
+      timeout: 15000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const record = fs.readFileSync(marker, "utf8");
+    assert.match(record, /^ran=1 /, `vendor must run exactly once: ${record}`);
+    assert.match(record, /addr=codex\./, `vendor must see the identity env: ${record}`);
+
+    // No real vendor anywhere: loud failure, not a fork loop.
+    fs.rmSync(path.join(vendorDir, "codex"));
+    const noVendor = spawnSync("codex", [], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        AGENT_SESSION_POST_BIN: BIN,
+        // System utility dirs stay (sh needs readlink/dirname); neither
+        // carries a codex binary, so no vendor is resolvable.
+        PATH: `${shimDir}:/usr/bin:/bin`,
+      },
+      timeout: 15000,
+    });
+    assert.equal(noVendor.status, 64, noVendor.stderr);
+    assert.match(noVendor.stderr, /cannot resolve vendor command/);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
