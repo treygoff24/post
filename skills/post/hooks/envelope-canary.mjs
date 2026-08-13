@@ -38,6 +38,8 @@ process.env.POST_FROM = "ambient-ghost";
 process.env.POST_SENDER_ADDRESS = "ambient.ghost.deadbeef";
 
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "post-m2-canary-"));
+// Cleanup is guaranteed (try/finally around main) and scoped to the exact
+// mkdtemp result — never a computed or overridable path.
 const SANDBOX = path.join(WORK, "home");
 const MAIL = path.join(WORK, "mail");
 const WATCHER_DIR = path.join(SANDBOX, "watcher-room");
@@ -79,6 +81,21 @@ function run(cmd, args, { cwd = WORK, env = cleanEnv(), input } = {}) {
   return result;
 }
 
+/// Consumer invocation: expected text + a nonzero exit is still a failure.
+/// Returns the result; records a receipt failure with bounded diagnostics
+/// when the child did not exit 0.
+function runChecked(cmd, args, label, opts = {}) {
+  const result = run(cmd, args, opts);
+  receipt(
+    result.status === 0,
+    `${label}: exited 0`,
+    `rc=${result.status} stderr=${String(result.stderr).slice(0, 200)} stdout=${String(
+      result.stdout
+    ).slice(0, 200)}`
+  );
+  return result;
+}
+
 function post(args, opts = {}) {
   const result = run(BIN, args, opts);
   if (result.status !== 0) {
@@ -87,139 +104,145 @@ function post(args, opts = {}) {
   return result;
 }
 
-// ---- setup (clean env: watcher-side and registry operations) ----
-post(["rooms", "add", "watcher", "~/watcher-room"]);
-post(["rooms", "add", "sender", "~/sender-room"]);
-post(["chat", "m2canary", "--join"], { cwd: WATCHER_DIR });
+function main() {
+  // ---- setup (clean env: watcher-side and registry operations) ----
+  post(["rooms", "add", "watcher", "~/watcher-room"]);
+  post(["rooms", "add", "sender", "~/sender-room"]);
+  post(["chat", "m2canary", "--join"], { cwd: WATCHER_DIR });
 
-// ---- the three deliberate sender commands (declared identity, cwd OUTSIDE
-// the sender room tree — only the pin makes this identity possible) ----
-const senderEnv = cleanEnv({ POST_FROM: "sender", POST_SENDER_ADDRESS: ADDRESS });
-post(["chat", "m2canary", "--join"], { env: senderEnv });
-const mailSend = post(
-  ["send", "--to", "watcher", "--body", "m2 canary mail", "--json"],
-  { env: senderEnv }
-);
-const mailId = JSON.parse(mailSend.stdout).envelope.id;
-const chatSend = post(
-  ["chat", "m2canary", "--send", "--body", "m2 canary message @watcher", "--json"],
-  { env: senderEnv }
-);
-const chatId = JSON.parse(chatSend.stdout).message.id;
+  // ---- the three deliberate sender commands (declared identity, cwd OUTSIDE
+  // the sender room tree — only the pin makes this identity possible) ----
+  const senderEnv = cleanEnv({ POST_FROM: "sender", POST_SENDER_ADDRESS: ADDRESS });
+  post(["chat", "m2canary", "--join"], { env: senderEnv });
+  const mailSend = post(
+    ["send", "--to", "watcher", "--body", "m2 canary mail", "--json"],
+    { env: senderEnv }
+  );
+  const mailId = JSON.parse(mailSend.stdout).envelope.id;
+  const chatSend = post(
+    ["chat", "m2canary", "--send", "--body", "m2 canary message @watcher", "--json"],
+    { env: senderEnv }
+  );
+  const chatId = JSON.parse(chatSend.stdout).message.id;
 
-// ---- receipt 0: exact event classes in the parsed snapshot ----
-const snapshot = post(["watch", "--snapshot"], { cwd: WATCHER_DIR });
-const events = snapshot.stdout
-  .split("\n")
-  .filter((line) => line.trim())
-  .map((line) => JSON.parse(line));
+  // ---- receipt 0: exact event classes in the parsed snapshot ----
+  const snapshot = post(["watch", "--snapshot"], { cwd: WATCHER_DIR });
+  const events = snapshot.stdout
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
 
-const mailEvents = events.filter((e) => e.event === "mail");
-receipt(
-  mailEvents.length === 1 &&
-    mailEvents[0].id === mailId &&
-    mailEvents[0].from === "sender" &&
-    mailEvents[0].sender_address === ADDRESS &&
-    mailEvents[0].sender_provenance === "declared-env",
-  "direct-mail event: from sender, both identity fields, exact id",
-  JSON.stringify(mailEvents)
-);
-const mention = events.find((e) => e.event === "channel_message" && e.id === chatId);
-receipt(
-  mention !== undefined &&
-    mention.from === "sender" &&
-    mention.reason === "mention" &&
-    mention.sender_address === ADDRESS &&
-    mention.sender_provenance === "declared-env",
-  "ordinary channel message: mention reason, both identity fields, exact id",
-  JSON.stringify(mention)
-);
-receipt(
-  events.every((e) => e.from !== "ambient-ghost") &&
-    events.every((e) => e.sender_address !== AMBIENT_ADDRESS),
-  "poisoned ambient identity reached no envelope"
-);
+  const mailEvents = events.filter((e) => e.event === "mail");
+  receipt(
+    mailEvents.length === 1 &&
+      mailEvents[0].id === mailId &&
+      mailEvents[0].from === "sender" &&
+      mailEvents[0].sender_address === ADDRESS &&
+      mailEvents[0].sender_provenance === "declared-env",
+    "direct-mail event: from sender, both identity fields, exact id",
+    JSON.stringify(mailEvents)
+  );
+  const mention = events.find((e) => e.event === "channel_message" && e.id === chatId);
+  receipt(
+    mention !== undefined &&
+      mention.from === "sender" &&
+      mention.reason === "mention" &&
+      mention.sender_address === ADDRESS &&
+      mention.sender_provenance === "declared-env",
+    "ordinary channel message: mention reason, both identity fields, exact id",
+    JSON.stringify(mention)
+  );
+  receipt(
+    events.every((e) => e.from !== "ambient-ghost") &&
+      events.every((e) => e.sender_address !== AMBIENT_ADDRESS),
+    "poisoned ambient identity reached no envelope"
+  );
 
-// ---- adapters: each must produce its NORMAL notice types ----
-function adapterContext(stdout, label) {
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    receipt(false, `${label}: output is JSON`, stdout.slice(0, 200));
-    return "";
+  // ---- adapters: each must produce its NORMAL notice types ----
+  function adapterContext(stdout, label) {
+    let parsed;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch {
+      receipt(false, `${label}: output is JSON`, stdout.slice(0, 200));
+      return "";
+    }
+    // All four adapters nest the notice under hookSpecificOutput; Cursor also
+    // emits a native field, but the nested one is common to all.
+    const context = parsed?.hookSpecificOutput?.additionalContext;
+    if (typeof context !== "string" || context === "") {
+      receipt(false, `${label}: emitted a notice (not the empty/diagnostic path)`, stdout.slice(0, 200));
+      return "";
+    }
+    return context;
   }
-  // All four adapters nest the notice under hookSpecificOutput; Cursor also
-  // emits a native field, but the nested one is common to all.
-  const context = parsed?.hookSpecificOutput?.additionalContext;
-  if (typeof context !== "string" || context === "") {
-    receipt(false, `${label}: emitted a notice (not the empty/diagnostic path)`, stdout.slice(0, 200));
-    return "";
+
+  function assertNotice(context, label) {
+    if (context === "") return; // already failed above
+    receipt(
+      context.includes(`Direct mail id(s): ${mailId}`) || context.includes("Direct mail: 1 item(s)"),
+      `${label}: direct-mail notice present with the canary mail`
+    );
+    receipt(
+      /channel message\(s\)/i.test(context) && context.includes("#m2canary (2)"),
+      `${label}: channel notice counts both m2canary messages`,
+      context
+    );
+    receipt(
+      !context.includes("Manual check") && !context.includes("could not"),
+      `${label}: no failure diagnostic`
+    );
   }
-  return context;
+
+  const claudeOut = runChecked("node", [path.join(HOOKS, "claude-mail.mjs")], "claude", {
+    env: cleanEnv({ POST_CLAUDE_HOOK_BIN: BIN, POST_CLAUDE_HOOK_STATE_DIR: path.join(WORK, "st-claude") }),
+    input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "m2", cwd: WATCHER_DIR }),
+  });
+  assertNotice(adapterContext(claudeOut.stdout, "claude"), "claude");
+
+  const codexOut = runChecked("node", [path.join(HOOKS, "codex-mail.mjs")], "codex", {
+    env: cleanEnv({ POST_CODEX_HOOK_BIN: BIN, POST_CODEX_HOOK_STATE_DIR: path.join(WORK, "st-codex") }),
+    input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "m2", cwd: WATCHER_DIR }),
+  });
+  assertNotice(adapterContext(codexOut.stdout, "codex"), "codex");
+
+  const cursorOut = runChecked("node", [path.join(HOOKS, "cursor-mail.mjs")], "cursor", {
+    env: cleanEnv({ POST_CURSOR_HOOK_BIN: BIN, POST_CURSOR_HOOK_STATE_DIR: path.join(WORK, "st-cursor") }),
+    input: JSON.stringify({ hook_event_name: "sessionStart", session_id: "m2", cwd: WATCHER_DIR }),
+  });
+  assertNotice(adapterContext(cursorOut.stdout, "cursor"), "cursor");
+
+  const grokOut = runChecked("node", [path.join(HOOKS, "grok-mail.mjs")], "grok", {
+    env: cleanEnv({ POST_GROK_HOOK_BIN: BIN, POST_GROK_HOOK_STATE_DIR: path.join(WORK, "st-grok") }),
+    input: JSON.stringify({ hookEventName: "UserPromptSubmit", sessionId: "m2", cwd: WATCHER_DIR }),
+  });
+  assertNotice(adapterContext(grokOut.stdout, "grok"), "grok");
+
+  // ---- watch-notice (Monitor lane): text lines for both event classes ----
+  const notice = runChecked("node", [path.join(HOOKS, "watch-notice.mjs"), "--snapshot"], "watch-notice", {
+    cwd: WATCHER_DIR,
+    env: cleanEnv({ POST_WATCH_NOTICE_BIN: BIN }),
+  });
+  // watch-notice renders the same summary-notice format as the adapters (not
+  // raw per-event lines): assert both notice types with exact values.
+  const noticeText = `${notice.stdout}${notice.stderr}`;
+  receipt(
+    noticeText.includes(`Direct mail id(s): ${mailId}`),
+    "watch-notice: direct-mail notice with the exact canary mail id",
+    noticeText
+  );
+  receipt(
+    noticeText.includes("#m2canary (2)"),
+    "watch-notice: channel notice counts both m2canary messages",
+    noticeText
+  );
 }
 
-function assertNotice(context, label) {
-  if (context === "") return; // already failed above
-  receipt(
-    context.includes(`Direct mail id(s): ${mailId}`) || context.includes("Direct mail: 1 item(s)"),
-    `${label}: direct-mail notice present with the canary mail`
-  );
-  receipt(
-    /channel message\(s\)/i.test(context) && context.includes("#m2canary (2)"),
-    `${label}: channel notice counts both m2canary messages`,
-    context
-  );
-  receipt(
-    !context.includes("Manual check") && !context.includes("could not"),
-    `${label}: no failure diagnostic`
-  );
+try {
+  main();
+} finally {
+  fs.rmSync(WORK, { recursive: true, force: true });
 }
-
-const claudeOut = run("node", [path.join(HOOKS, "claude-mail.mjs")], {
-  env: cleanEnv({ POST_CLAUDE_HOOK_BIN: BIN, POST_CLAUDE_HOOK_STATE_DIR: path.join(WORK, "st-claude") }),
-  input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "m2", cwd: WATCHER_DIR }),
-});
-assertNotice(adapterContext(claudeOut.stdout, "claude"), "claude");
-
-const codexOut = run("node", [path.join(HOOKS, "codex-mail.mjs")], {
-  env: cleanEnv({ POST_CODEX_HOOK_BIN: BIN, POST_CODEX_HOOK_STATE_DIR: path.join(WORK, "st-codex") }),
-  input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "m2", cwd: WATCHER_DIR }),
-});
-assertNotice(adapterContext(codexOut.stdout, "codex"), "codex");
-
-const cursorOut = run("node", [path.join(HOOKS, "cursor-mail.mjs")], {
-  env: cleanEnv({ POST_CURSOR_HOOK_BIN: BIN, POST_CURSOR_HOOK_STATE_DIR: path.join(WORK, "st-cursor") }),
-  input: JSON.stringify({ hook_event_name: "sessionStart", session_id: "m2", cwd: WATCHER_DIR }),
-});
-assertNotice(adapterContext(cursorOut.stdout, "cursor"), "cursor");
-
-const grokOut = run("node", [path.join(HOOKS, "grok-mail.mjs")], {
-  env: cleanEnv({ POST_GROK_HOOK_BIN: BIN, POST_GROK_HOOK_STATE_DIR: path.join(WORK, "st-grok") }),
-  input: JSON.stringify({ hookEventName: "UserPromptSubmit", sessionId: "m2", cwd: WATCHER_DIR }),
-});
-assertNotice(adapterContext(grokOut.stdout, "grok"), "grok");
-
-// ---- watch-notice (Monitor lane): text lines for both event classes ----
-const notice = run("node", [path.join(HOOKS, "watch-notice.mjs"), "--snapshot"], {
-  cwd: WATCHER_DIR,
-  env: cleanEnv({ POST_WATCH_NOTICE_BIN: BIN }),
-});
-// watch-notice renders the same summary-notice format as the adapters (not
-// raw per-event lines): assert both notice types with exact values.
-const noticeText = `${notice.stdout}${notice.stderr}`;
-receipt(
-  noticeText.includes(`Direct mail id(s): ${mailId}`),
-  "watch-notice: direct-mail notice with the exact canary mail id",
-  noticeText
-);
-receipt(
-  noticeText.includes("#m2canary (2)"),
-  "watch-notice: channel notice counts both m2canary messages",
-  noticeText
-);
-
-fs.rmSync(WORK, { recursive: true, force: true });
 if (failures > 0) {
   console.error(`M2 CANARY FAIL: ${failures} receipt(s) failed`);
   process.exit(1);
