@@ -464,6 +464,20 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   copy for evidence it does not recognize. Messages without the fields
   render byte-identically to before.
 
+## Behavior changes at 0.5.0 (amendment, 2026-08-12)
+
+Sequenced deliberately AFTER the additive identity fields (M4 of the signed
+identity spec), with the version bump carrying the change:
+
+- **Self-mail is opt-in.** `post send` refuses `from == to` without
+  `--allow-self`; the error's exact fix carries the flag. Instances of one
+  room coordinate via channels — routable instances are a recorded non-goal;
+  doorbell probes and smoke tests are the deliberate exceptions.
+- **Pin/flag conflict is a hard error.** `--from` that DISAGREES with a
+  POST_FROM pin refuses loudly (a prepared command carrying `--from` inside a
+  pinned session is exactly the ambiguity the identity layer eliminates). An
+  agreeing `--from` proceeds as `declared-flag`.
+
 ## Codex room convention
 
 Codex should use a narrow registered room path, normally

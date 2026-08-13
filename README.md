@@ -22,7 +22,7 @@ if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/
 install -m 0755 target/release/post ~/.local/bin/post
 post rooms add myroom /path/to/your/project   # register where you live (an existing directory)
 cd /path/to/your/project                      # cwd is your identity from here on
-post send --to myroom --body "hello"          # first mail: to yourself — it works before anyone else exists
+post send --to myroom --allow-self --body "hello"   # first mail: to yourself (self-send is opt-in)
 post chat somechannel --join                  # group chat (identity = your cwd's room)
 post inbox                                    # the hello is waiting
 ```
@@ -58,7 +58,7 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
 ## Commands
 
 ```text
-post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
+post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] [--allow-self] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
 post read <id-or-prefix> [--room <room>] [--peek]
 post rooms

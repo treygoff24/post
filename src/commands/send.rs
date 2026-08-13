@@ -52,7 +52,26 @@ where
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
     let (sender, provenance) = match args.sender {
-        Some(sender) => (sender, SenderProvenance::DeclaredFlag),
+        Some(sender) => {
+            // Pin vs flag DISAGREEMENT is a hard error (M4): a prepared
+            // command carrying --from inside a pinned session is exactly the
+            // ambiguity the identity layer exists to eliminate. An AGREEING
+            // flag is not a conflict and proceeds as declared-flag.
+            if let Some(pinned) = declared_env_pin()? {
+                if pinned != sender {
+                    return Err(AppError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "--from '{sender}' conflicts with the POST_FROM pin '{pinned}' set by this session's launcher"
+                        ),
+                        "Drop --from to send as the pinned identity, or unset POST_FROM if this shell should not be pinned.",
+                    )
+                    .input(sender)
+                    .reason("explicit sender disagrees with the environment pin"));
+                }
+            }
+            (sender, SenderProvenance::DeclaredFlag)
+        }
         None => match declared_env_pin()? {
             Some(pinned) => {
                 eprintln!(
@@ -82,6 +101,23 @@ where
         context.ensure_sender_allowed(&sender, &rooms)?;
     }
     let sender_address = declared_sender_address()?;
+
+    // Self-mail refusal (M4): instances of one room coordinate via channels;
+    // routable instances are a recorded non-goal. --allow-self is the
+    // deliberate exception for doorbell probes and smoke tests.
+    if sender == args.to && !args.allow_self {
+        let fix = format!("{fix_prefix} --allow-self --body '<text>'");
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("refusing to send mail from '{sender}' to itself"),
+            format!(
+                "Instances of one room coordinate via channels. For a deliberate self-send (doorbell probe, smoke test), run `{fix}`."
+            ),
+        )
+        .exact_fix(fix)
+        .input(args.to.clone())
+        .reason("from == to without --allow-self"));
+    }
 
     if !rooms.contains_key(&args.to) {
         let suggestion = closest_room(&args.to, &rooms);
@@ -263,6 +299,9 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
     }
     if args.oversize {
         prefix.push_str(" --oversize");
+    }
+    if args.allow_self {
+        prefix.push_str(" --allow-self");
     }
     prefix
 }
@@ -458,6 +497,7 @@ mod tests {
                 body: None,
                 body_file: None,
                 oversize: false,
+                allow_self: false,
                 file: None,
             },
             false,
@@ -503,6 +543,7 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
+                allow_self: false,
                 file: None,
             },
             false,
@@ -545,6 +586,7 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
+                allow_self: false,
                 file: None,
             },
             false,
@@ -600,6 +642,7 @@ mod tests {
                 body: Some("new delivery".to_owned()),
                 body_file: None,
                 oversize: false,
+                allow_self: false,
                 file: None,
             },
             false,
@@ -642,6 +685,7 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
+                allow_self: false,
                 file: None,
             },
             false,

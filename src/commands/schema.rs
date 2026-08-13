@@ -45,9 +45,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "send",
-            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | stdin)",
+            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] [--allow-self] (--body <text> | --body-file <path> | stdin)",
             "text; JSON with --json",
-            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; subjects over 1 KiB fail, the three body forms are mutually exclusive alternatives, omitting all of them reads stdin, and bodies over 32 KiB require --oversize",
+            "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; subjects over 1 KiB fail, the three body forms are mutually exclusive alternatives, omitting all of them reads stdin, bodies over 32 KiB require --oversize, from==to requires --allow-self (instances of one room coordinate via channels), and --from that disagrees with a POST_FROM pin is a hard conflict error",
         ),
         command(
             "chat",

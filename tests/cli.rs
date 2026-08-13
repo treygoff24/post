@@ -535,6 +535,7 @@ fn reserved_sender_refuses_but_free_form_and_cwd_basename_work() {
             "claude-space",
             "--from",
             "claude-space",
+            "--allow-self",
             "--body",
             "inside room",
         ],
@@ -2772,7 +2773,7 @@ fn codex_identity_cannot_impersonate_registered_rooms_but_aliases_remain_allowed
     let project = workspace.join("some-project");
     fs::create_dir(&project).expect("create workspace child");
     let inferred = sandbox.run_in(
-        &["send", "--to", "workspace", "--body", "from workspace"],
+        &["send", "--to", "workspace", "--allow-self", "--body", "from workspace"],
         None,
         &project,
     );
@@ -6852,9 +6853,11 @@ fn pin_sets_sender_and_provenance_on_mail() {
 }
 
 #[test]
-fn explicit_flag_beats_pin_and_records_declared_flag() {
+fn pin_flag_disagreement_is_a_hard_error_and_agreement_proceeds() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run_in_env(
+    // Disagreement refuses loudly (M4): a prepared command carrying --from
+    // inside a pinned session is exactly the ambiguity the pin eliminates.
+    let refused = sandbox.run_in_env(
         &[
             "send",
             "--to",
@@ -6862,19 +6865,44 @@ fn explicit_flag_beats_pin_and_records_declared_flag() {
             "--from",
             "flag-sender",
             "--body",
-            "flag wins",
+            "conflicted",
             "--json",
         ],
         None,
         &sandbox.path,
         &[("POST_FROM", "pinned-sender")],
     );
-    assert_success(&output);
-    let sent: SendOutput = from_stdout(&output);
-    assert_eq!(
-        sent.envelope.from, "flag-sender",
-        "explicit --from wins in M1"
+    assert!(!refused.status.success());
+    let combined = format!("{}{}", stdout(&refused), stderr(&refused));
+    assert!(
+        combined.contains("conflicts with the POST_FROM pin"),
+        "conflict must be named: {combined}"
     );
+    // No mail written under a refused conflict.
+    let wrote: Vec<_> = fs::read_dir(sandbox.mail_root.join("archive"))
+        .map(|entries| entries.collect())
+        .unwrap_or_default();
+    assert!(wrote.is_empty(), "no mail may be written under a pin/flag conflict");
+
+    // An AGREEING flag is not a conflict: proceeds as declared-flag.
+    let agreed = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--from",
+            "pinned-sender",
+            "--body",
+            "agreed",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_FROM", "pinned-sender")],
+    );
+    assert_success(&agreed);
+    let sent: SendOutput = from_stdout(&agreed);
+    assert_eq!(sent.envelope.from, "pinned-sender");
     let raw = fs::read_to_string(
         sandbox
             .mail_root

@@ -112,6 +112,12 @@ pub(crate) struct SendArgs {
     #[arg(long)]
     pub oversize: bool,
 
+    /// Allow sending mail to yourself (from == to). Instances of one room
+    /// coordinate via channels; self-mail is the deliberate exception
+    /// (doorbell probes, quickstart smoke tests).
+    #[arg(long = "allow-self")]
+    pub allow_self: bool,
+
     /// Deprecated positional spelling of --body-file; omit every body source to read stdin.
     #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub file: Option<PathBuf>,
