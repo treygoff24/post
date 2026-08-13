@@ -19,7 +19,35 @@ pub(super) fn run(
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
-    run_with_body(context, args, json_output, pretty, read_body)
+    // Process env is read exactly once, at the public entry; everything
+    // below takes resolved identity as an input. Unit tests inject
+    // EnvIdentity::none() so a live launcher pin in the developer's shell
+    // can never leak into a parallel test process's shared environment.
+    let identity = EnvIdentity::from_env()?;
+    run_with_body(context, args, json_output, pretty, identity, read_body)
+}
+
+/// Identity resolved from the process environment, injected downward.
+pub(super) struct EnvIdentity {
+    pub pin: Option<String>,
+    pub address: Option<String>,
+}
+
+impl EnvIdentity {
+    fn from_env() -> AppResult<Self> {
+        Ok(Self {
+            pin: declared_env_pin()?,
+            address: declared_sender_address()?,
+        })
+    }
+
+    #[cfg(test)]
+    const fn none() -> Self {
+        Self {
+            pin: None,
+            address: None,
+        }
+    }
 }
 
 fn run_with_body<F>(
@@ -27,12 +55,13 @@ fn run_with_body<F>(
     args: SendArgs,
     json_output: bool,
     pretty: bool,
+    identity: EnvIdentity,
     read_body: F,
 ) -> AppResult<CommandResult>
 where
     F: FnOnce(BodySource<'_>) -> AppResult<String>,
 {
-    run_with_body_and_id(context, args, json_output, pretty, read_body, new_mail_id)
+    run_with_body_and_id(context, args, json_output, pretty, identity, read_body, new_mail_id)
 }
 
 fn run_with_body_and_id<F, G>(
@@ -40,6 +69,7 @@ fn run_with_body_and_id<F, G>(
     mut args: SendArgs,
     json_output: bool,
     pretty: bool,
+    identity: EnvIdentity,
     read_body: F,
     mut next_id: G,
 ) -> AppResult<CommandResult>
@@ -57,7 +87,7 @@ where
             // command carrying --from inside a pinned session is exactly the
             // ambiguity the identity layer exists to eliminate. An AGREEING
             // flag is not a conflict and proceeds as declared-flag.
-            if let Some(pinned) = declared_env_pin()? {
+            if let Some(pinned) = identity.pin.as_deref() {
                 if pinned != sender {
                     return Err(AppError::new(
                         ErrorCode::InvalidArgument,
@@ -72,7 +102,7 @@ where
             }
             (sender, SenderProvenance::DeclaredFlag)
         }
-        None => match declared_env_pin()? {
+        None => match identity.pin {
             Some(pinned) => {
                 // M4 made a disagreeing --from a hard error, so the old
                 // "pass --from to send as someone else" advice would name a
@@ -103,7 +133,7 @@ where
     if provenance != SenderProvenance::DeclaredEnv {
         context.ensure_sender_allowed(&sender, &rooms)?;
     }
-    let sender_address = declared_sender_address()?;
+    let sender_address = identity.address;
 
     // Self-mail refusal (M4): instances of one room coordinate via channels;
     // routable instances are a recorded non-goal. --allow-self is the
@@ -465,7 +495,7 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{run_with_body, run_with_body_and_id};
+    use super::{run_with_body, run_with_body_and_id, EnvIdentity};
     use crate::cli::SendArgs;
     use crate::mailbox::Context;
     use crate::model::MailKind;
@@ -508,6 +538,7 @@ mod tests {
             },
             false,
             false,
+            EnvIdentity::none(),
             |_| {
                 fs::write(
                     root.join("rules.json"),
@@ -554,6 +585,7 @@ mod tests {
             },
             false,
             false,
+            EnvIdentity::none(),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(ids.next().expect("test provides two ids").to_owned()),
         )
@@ -597,6 +629,7 @@ mod tests {
             },
             false,
             false,
+            EnvIdentity::none(),
             |source| Ok(source.inline.expect("inline body")),
             |_, attempt| {
                 if attempt == 1 {
@@ -653,6 +686,7 @@ mod tests {
             },
             false,
             false,
+            EnvIdentity::none(),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
@@ -696,6 +730,7 @@ mod tests {
             },
             false,
             false,
+            EnvIdentity::none(),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );

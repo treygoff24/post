@@ -118,7 +118,7 @@ impl Sandbox {
     /// Run with stdout pointed at the null device: the shape that used to
     /// consume a channel's unread batch without ever showing it.
     fn run_in_discarding_stdout(&self, args: &[&str], cwd: &Path) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_post"))
+        post_command()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &self.home)
@@ -145,7 +145,7 @@ impl Sandbox {
         cwd: &Path,
         envs: &[(&str, &str)],
     ) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_post"));
+        let mut command = post_command();
         command
             .args(args)
             .current_dir(cwd)
@@ -2330,7 +2330,7 @@ fn inbox_lists_multiple_messages_oldest_first() {
 #[test]
 fn missing_home_and_relative_mail_root_fail_before_writing() {
     let sandbox = Sandbox::new();
-    let missing_home = Command::new(env!("CARGO_BIN_EXE_post"))
+    let missing_home = post_command()
         .arg("rooms")
         .current_dir(&sandbox.path)
         .env_remove("HOME")
@@ -2342,7 +2342,7 @@ fn missing_home_and_relative_mail_root_fail_before_writing() {
     assert_eq!(error.error.code, "config_invalid");
     assert_eq!(error.error.details.input.as_deref(), Some("HOME"));
 
-    let relative_root = Command::new(env!("CARGO_BIN_EXE_post"))
+    let relative_root = post_command()
         .arg("rooms")
         .current_dir(&sandbox.path)
         .env("HOME", &sandbox.home)
@@ -2450,7 +2450,7 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
     }));
 
     let _: ChatReadOutput = from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &alpha));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["watch", "--room", "alpha", "--interval-ms", "100"])
         .current_dir(&sandbox.path)
         .env("HOME", &sandbox.home)
@@ -2501,7 +2501,7 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
         None,
         &beta,
     ));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["watch", "--room", "beta", "--interval-ms", "100"])
         .current_dir(&sandbox.path)
         .env("HOME", &sandbox.home)
@@ -2888,6 +2888,18 @@ fn write_bad_channel(
     if messages_dir {
         fs::create_dir_all(dir.join("messages")).expect("create bad channel messages dir");
     }
+}
+
+/// Every direct spawn of the binary under test routes through here: the two
+/// identity variables are cleared up front, so a developer shell launched
+/// through agent-session (which pins POST_FROM) can never leak into a test.
+/// Tests that need a pin re-add it explicitly via run_in_env/env().
+fn post_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_post"));
+    command
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS");
+    command
 }
 
 fn assert_success(output: &Output) {
@@ -3453,7 +3465,7 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
         .iter()
         .zip(&targets)
         .map(|(channel, target)| {
-            Command::new(env!("CARGO_BIN_EXE_post"))
+            post_command()
                 .args(["chat", channel, "--discard-through", target, "--json"])
                 .current_dir(&beta)
                 .env("HOME", &sandbox.home)
@@ -3528,7 +3540,7 @@ fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {
 fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
     let sandbox = Sandbox::new();
     let first = sandbox.send_json("watcher-test", "WATCH-SECRET-BODY-A");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["watch", "--room", "claude-space", "--interval-ms", "100"])
         .current_dir(&sandbox.path)
         .env("HOME", &sandbox.home)
@@ -4005,7 +4017,7 @@ fn watch_survives_the_mailbox_disappearing_and_rings_after_it_returns() {
     assert_success(&sandbox.run(&["rooms"]));
     let room_dir = sandbox.mail_root.join("claude-space");
     fs::create_dir_all(room_dir.join("inbox")).expect("create inbox");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["watch", "--room", "claude-space", "--interval-ms", "100"])
         .current_dir(&sandbox.path)
         .env("HOME", &sandbox.home)
@@ -4277,7 +4289,7 @@ fn who_reports_live_watch_without_pids() {
     let before: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
     assert_eq!(before.rooms.len(), 1);
     assert!(!before.rooms[0].live_watch);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["watch", "--room", "alpha", "--interval-ms", "100"])
         .current_dir(&alpha)
         .env("HOME", &sandbox.home)
@@ -4508,7 +4520,7 @@ fn who_reports_live_for_ten_second_interval_watch() {
     let sandbox = Sandbox::new();
     let (alpha, _) = register_alpha_beta(&sandbox);
     assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["watch", "--room", "alpha", "--interval-ms", "10000"])
         .current_dir(&alpha)
         .env("HOME", &sandbox.home)
@@ -5945,7 +5957,7 @@ fn a0a_r2_doctor_keygen_probe_never_executes_ssh_keygen() {
     .expect("stub script");
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("exec stub");
     let run_doctor = |path: &std::path::Path| -> Output {
-        Command::new(env!("CARGO_BIN_EXE_post"))
+        post_command()
             .args(["doctor"])
             .current_dir(&sandbox.path)
             .env("HOME", &sandbox.home)
@@ -6014,7 +6026,7 @@ fn a0a_r2_fifo_owner_json_fails_fast_not_hung() {
         .status()
         .expect("run mkfifo");
     assert!(made.success(), "mkfifo must succeed");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+    let mut child = post_command()
         .args(["owner", "show"])
         .current_dir(&sandbox.path)
         .env("HOME", &sandbox.home)
