@@ -166,6 +166,30 @@ sentences so a reader can always see how a `from` came to be. A set-but-invalid
 pin or address errors loudly rather than silently falling back. Full contract:
 CONTRACT.md, "Sender identity: address + provenance".
 
+The pins are meant to be set by `launcher/agent-session`, not by hand:
+
+```bash
+launcher/agent-session --harness claude-code -- claude   # or a shim:
+launcher/shims/claude                                     # same thing
+```
+
+The helper resolves the room pin ONCE at launch (explicit `--room`, else the
+registered room containing the launch directory — realpath-safe), mints a
+fresh per-launch UUID, exports `POST_FROM`, `POST_SENDER_ADDRESS`
+(`<harness>.<repo-key>.<uuid>`), `POST_HARNESS`, and `POST_REPO_KEY`, then
+`exec`s the unchanged vendor command. When no registered room contains the
+launch directory it exports **no** pin and says so — post falls back to cwd
+inference with `inferred-*` provenance; nothing is ever synthesized. A stale
+inherited pin never survives a fresh launch. Adding a harness is one shim
+file in `launcher/shims/`; no daemon, no PID or pane tracking.
+
+**Install-seam check (named check, per launcher):** a session manager
+(Herdr, cmux, anything that spawns harnesses) must exec the shim — or that
+harness stays fallback-tier, honestly labeled by its `inferred-*` provenance.
+Verify a given launcher by running `agent-session --doctor` inside a session
+it spawned: exit 0 with a registered pin means the seam is wired; exit 1
+names exactly what is missing.
+
 ## Channels
 
 Channels are group chat with cwd-bound room identity:

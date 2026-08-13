@@ -1,0 +1,5 @@
+#!/bin/sh
+# Thin descriptor: launch claude through the identity helper as harness
+# 'claude-code'. Adding a harness is one file like this one — nothing else.
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$dir/../agent-session" --harness claude-code -- claude "$@"

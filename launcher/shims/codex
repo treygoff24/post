@@ -1,0 +1,5 @@
+#!/bin/sh
+# Thin descriptor: launch codex through the identity helper as harness
+# 'codex'. Adding a harness is one file like this one — nothing else.
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$dir/../agent-session" --harness codex -- codex "$@"

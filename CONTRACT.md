@@ -439,6 +439,16 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
 - A set-but-invalid `POST_FROM` or `POST_SENDER_ADDRESS` is a loud error,
   never a silent fallback to inference. The pin's grammar is `--from`'s;
   the address must be ≤256 bytes with no control or whitespace characters.
+- The environment is set by the `launcher/agent-session` helper (or a
+  per-harness shim in `launcher/shims/`): pin resolved once at launch
+  (explicit `--room`, else the registered room containing the launch cwd,
+  realpath-safe), fresh 128-bit UUID per launch, address
+  `<harness>.<repo-key>.<uuid>` where repo-key is
+  `<repo-slug>-<8-hex path hash>`. No match → no pin exported (honest
+  fallback to `inferred-*`); stale inherited identity is cleared on every
+  launch; `agent-session --doctor` is the named install-seam check a session
+  manager must pass (exit 0 inside a session it spawned) for its harness to
+  count as pinned rather than fallback-tier.
 - Read surfaces render provenance as frozen evidence sentences (ratified
   copy, 2026-08-12; the `inferred-cwd` wording is locked). Every known
   provenance sentence renders on every full-message text read — mail read

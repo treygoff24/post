@@ -1,0 +1,206 @@
+#!/bin/sh
+# agent-session — identity launch helper (identity layer 1: address).
+#
+# Usage:
+#   agent-session --harness <slug> [--room <name>] -- <vendor command...>
+#   agent-session --doctor
+#
+# Mints a fresh 128-bit UUID per launch and execs the vendor command with:
+#   POST_FROM             stable room pin (resolved ONCE, at launch)
+#   POST_SENDER_ADDRESS   <harness>.<repo-key>.<uuid>  (opaque, non-routable)
+#   POST_HARNESS          the harness slug
+#   POST_REPO_KEY         <repo-slug>-<8-hex path hash> of the launch repo
+#
+# The pin is resolved from --room, else by reverse lookup of the launch cwd
+# against `post rooms` (longest registered path containing cwd wins). When
+# nothing matches, NO pin is exported and the note says so — post then falls
+# back to cwd inference at send time with `inferred-*` provenance. The helper
+# never synthesizes identity it cannot evidence, and a stale inherited
+# POST_FROM/POST_SENDER_ADDRESS is always cleared first: a fresh launch is a
+# fresh instance.
+#
+# Everything here is a DECLARATION recorded as `declared-env` provenance —
+# evidence, never a credential; authority stays with porch signatures.
+#
+# Per-harness shims (launcher/shims/*) are one-line descriptors calling this
+# helper. Adding a harness is one descriptor: no post-core change, no daemon,
+# no pane/PID/native-session-id dependency.
+#
+# Env overrides (tests and unusual installs):
+#   AGENT_SESSION_POST_BIN   path to the post binary (default: `post` on PATH)
+set -u
+
+POST_BIN="${AGENT_SESSION_POST_BIN:-post}"
+
+fail() {
+    printf 'agent-session: %s\n' "$1" >&2
+    exit 64
+}
+
+note() {
+    printf 'agent-session: %s\n' "$1" >&2
+}
+
+valid_slug() {
+    case "$1" in
+        '' | *[!a-z0-9-]* | -*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Reverse-lookup the launch cwd in `post rooms` JSON. Node does the JSON
+# parsing (never shell regex); the lookup expands leading '~' with HOME and
+# picks the longest registered path that contains cwd. Prints the room name
+# or nothing.
+resolve_room_from_cwd() {
+    command -v node >/dev/null 2>&1 || { note "node not found; skipping room pin (post will infer from cwd)"; return 0; }
+    command -v "$POST_BIN" >/dev/null 2>&1 || { note "post not found; skipping room pin (post will infer from cwd)"; return 0; }
+    "$POST_BIN" rooms 2>/dev/null | node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(0); // unreadable listing: no pin, honest fallback
+}
+const home = process.env.HOME ?? "";
+// realpath both sides: process.cwd() is a physical path, while an expanded
+// "~/..." registration may cross a symlink (macOS /var -> /private/var), and
+// a prefix match across that boundary silently fails.
+function physical(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+const cwdPhysical = physical(process.cwd());
+if (cwdPhysical === null) process.exit(0);
+const cwd = cwdPhysical + path.sep;
+let best = null;
+for (const room of parsed?.rooms ?? []) {
+  if (typeof room?.name !== "string" || typeof room?.path !== "string") continue;
+  let p = room.path;
+  if (p === "~" || p.startsWith("~/")) p = home + p.slice(1);
+  if (!path.isAbsolute(p)) continue;
+  p = physical(path.resolve(p));
+  if (p === null) continue; // unresolvable registration cannot pin
+  const prefix = p + path.sep;
+  if (cwd === prefix || cwd.startsWith(prefix)) {
+    if (best === null || p.length > best.path.length) best = { name: room.name, path: p };
+  }
+}
+if (best !== null) process.stdout.write(best.name);
+'
+}
+
+repo_key() {
+    # Repo root: git toplevel when inside a work tree, else the launch cwd.
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        root=$(git rev-parse --show-toplevel)
+    else
+        root=$PWD
+    fi
+    base=$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')
+    # Trim leading/trailing '-' runs and collapse doubles; never empty.
+    base=$(printf '%s' "$base" | sed 's/--*/-/g; s/^-//; s/-$//')
+    [ -n "$base" ] || base=repo
+    hash=$(printf '%s' "$root" | shasum -a 256 | cut -c1-8)
+    printf '%s-%s' "$base" "$hash"
+}
+
+mint_uuid() {
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    else
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
+
+doctor() {
+    rc=0
+    for var in POST_HARNESS POST_REPO_KEY POST_SENDER_ADDRESS; do
+        eval "value=\${$var:-}"
+        if [ -n "$value" ]; then
+            printf 'agent-session doctor: %s=%s\n' "$var" "$value"
+        else
+            printf 'agent-session doctor: %s is NOT set — this session was not launched through agent-session\n' "$var"
+            rc=1
+        fi
+    done
+    if [ -n "${POST_FROM:-}" ]; then
+        printf 'agent-session doctor: POST_FROM=%s (pin)\n' "$POST_FROM"
+        if command -v "$POST_BIN" >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+            if "$POST_BIN" rooms 2>/dev/null | node -e '
+const parsed = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+const pin = process.env.POST_FROM;
+process.exit((parsed?.rooms ?? []).some((r) => r?.name === pin) ? 0 : 1);
+' ; then
+                printf 'agent-session doctor: pin names a registered room\n'
+            else
+                printf 'agent-session doctor: WARNING — pin does not name a registered room; channel commands will refuse\n'
+                rc=1
+            fi
+        fi
+    else
+        printf 'agent-session doctor: POST_FROM is not set (fallback tier: post infers identity from cwd at send time)\n'
+    fi
+    exit "$rc"
+}
+
+harness=''
+room=''
+saw_dashes=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --doctor) doctor ;;
+        --harness)
+            [ $# -ge 2 ] || fail "--harness needs a value"
+            harness=$2
+            shift 2
+            ;;
+        --room)
+            [ $# -ge 2 ] || fail "--room needs a value"
+            room=$2
+            shift 2
+            ;;
+        --)
+            saw_dashes=1
+            shift
+            break
+            ;;
+        *) fail "unknown argument '$1' (usage: agent-session --harness <slug> [--room <name>] -- <command...>)" ;;
+    esac
+done
+
+[ "$saw_dashes" -eq 1 ] || fail "missing '--' before the vendor command"
+[ $# -gt 0 ] || fail "missing vendor command after '--'"
+valid_slug "$harness" || fail "--harness must be lowercase [a-z0-9-], not starting with '-' (got '${harness}')"
+
+# A fresh launch is a fresh instance: stale inherited identity never survives.
+unset POST_FROM POST_SENDER_ADDRESS
+
+if [ -n "$room" ]; then
+    pin=$room
+else
+    pin=$(resolve_room_from_cwd)
+fi
+
+key=$(repo_key)
+uuid=$(mint_uuid)
+address="${harness}.${key}.${uuid}"
+
+if [ -n "$pin" ]; then
+    POST_FROM=$pin
+    export POST_FROM
+    note "pinned room '$pin' for this session"
+else
+    note "no registered room contains this directory; no pin exported (post will infer from cwd, provenance inferred-*)"
+fi
+POST_SENDER_ADDRESS=$address
+POST_HARNESS=$harness
+POST_REPO_KEY=$key
+export POST_SENDER_ADDRESS POST_HARNESS POST_REPO_KEY
+
+exec "$@"
