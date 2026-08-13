@@ -130,6 +130,54 @@ test("uninstall with a receipt bound to another prefix deletes no files", () => 
   assert.ok(fs.existsSync(path.join(sb.prefix, "agent-session")), "files survive");
 });
 
+test("never-installed uninstall preserves links even when they point at the prefix", () => {
+  const sb = sandbox();
+  // Never installed: foreign managed filenames AND a link aimed at our
+  // would-be shim path (Sol's round-3 mutation).
+  fs.mkdirSync(path.join(sb.prefix, "shims"), { recursive: true });
+  fs.writeFileSync(path.join(sb.prefix, "shims", "codex"), "foreign\n");
+  fs.mkdirSync(sb.links, { recursive: true });
+  const link = path.join(sb.links, "codex");
+  fs.symlinkSync(path.join(sb.prefix, "shims", "codex"), link);
+
+  const un = run(sb, "--uninstall");
+  assert.equal(un.status, 0);
+  assert.match(un.stdout, /deleting nothing/);
+  assert.ok(fs.lstatSync(link), "link survives without receipt proof");
+  assert.ok(fs.existsSync(path.join(sb.prefix, "shims", "codex")), "file survives");
+});
+
+test("--check goes red when the receipt is missing or rebound", () => {
+  const sb = sandbox();
+  assert.equal(run(sb).status, 0);
+  const receipt = path.join(sb.prefix, ".install-receipt");
+
+  const rebound = fs
+    .readFileSync(receipt, "utf8")
+    .replace(/^prefix .*$/m, "prefix /somewhere/else");
+  fs.writeFileSync(receipt, rebound);
+  let check = run(sb, "--check");
+  assert.equal(check.status, 1);
+  assert.match(check.stdout, /check: receipt DRIFT bound to \/somewhere\/else/);
+
+  fs.unlinkSync(receipt);
+  check = run(sb, "--check");
+  assert.equal(check.status, 1);
+  assert.match(check.stdout, /check: receipt MISSING/);
+
+  assert.equal(run(sb).status, 0); // re-install re-mints
+  assert.equal(run(sb, "--check").status, 0);
+});
+
+test("--check flags receipt hash drift for a tampered file", () => {
+  const sb = sandbox();
+  assert.equal(run(sb).status, 0);
+  fs.writeFileSync(path.join(sb.prefix, "shims", "grok"), "tampered\n");
+  const check = run(sb, "--check");
+  assert.equal(check.status, 1);
+  assert.match(check.stdout, /check: receipt shims\/grok DRIFT/);
+});
+
 test("--check flags vendor-link drift and passes when clean", () => {
   const sb = sandbox();
   assert.equal(run(sb).status, 0);
