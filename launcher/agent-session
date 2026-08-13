@@ -134,7 +134,11 @@ repo_key() {
     base=$(printf '%s' "$base" | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-32)
     base=$(printf '%s' "$base" | sed 's/-$//')
     [ -n "$base" ] || base=repo
-    hash=$(printf '%s' "$root" | shasum -a 256 2>/dev/null | cut -c1-8)
+    # Exit status checked BEFORE the output is trusted: a primitive that
+    # prints a plausible digest and exits nonzero is still a failure.
+    digest=$(printf '%s' "$root" | shasum -a 256 2>/dev/null) ||
+        fail "shasum failed (nonzero exit) while deriving the repo key"
+    hash=$(printf '%s' "$digest" | cut -c1-8)
     case "$hash" in
         *[!0-9a-f]* | '') fail "shasum produced no valid hash for the repo key (got '${hash}')" ;;
     esac
@@ -147,18 +151,26 @@ repo_key() {
 # whole point of the address is per-launch freshness.
 mint_uuid() {
     if command -v uuidgen >/dev/null 2>&1; then
-        uuid=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        # Status checked before output: plausible output + nonzero exit is
+        # still a failure, never trusted.
+        uuid=$(uuidgen 2>/dev/null) ||
+            fail "uuidgen failed (nonzero exit); refusing to launch with degraded identity freshness"
+        uuid=$(printf '%s' "$uuid" | tr '[:upper:]' '[:lower:]')
     else
-        raw=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+        raw=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') ||
+            fail "cannot read /dev/urandom for the uuid fallback"
         case "$raw" in
             *[!0-9a-f]* | '') uuid='' ;;
             *)
                 if [ "${#raw}" -eq 32 ]; then
-                    uuid=$(printf '%s-%s-%s-%s-%s' \
+                    # A real UUIDv4: force the version nibble to 4 and the
+                    # variant nibble to 8 (10xx), rather than calling
+                    # arbitrary 128 bits a UUID.
+                    uuid=$(printf '%s-%s-4%s-8%s-%s' \
                         "$(printf '%s' "$raw" | cut -c1-8)" \
                         "$(printf '%s' "$raw" | cut -c9-12)" \
-                        "$(printf '%s' "$raw" | cut -c13-16)" \
-                        "$(printf '%s' "$raw" | cut -c17-20)" \
+                        "$(printf '%s' "$raw" | cut -c14-16)" \
+                        "$(printf '%s' "$raw" | cut -c18-20)" \
                         "$(printf '%s' "$raw" | cut -c21-32)")
                 else
                     uuid=''
@@ -175,16 +187,27 @@ mint_uuid() {
 }
 
 # Recursion-safe vendor resolution for shim installs. When the command word
-# is bare and --shim-self was given, walk PATH and pick the first executable
-# whose physical path is neither the shim itself nor any wrapper already
-# visited this launch (AGENT_SESSION_VISITED, colon-separated physical
-# paths). Wrapper chains (cmux) re-enter here with VISITED grown, so mutual
-# wrapper loops terminate in a loud failure instead of forking forever.
+# is bare, walk PATH and pick the first executable whose physical path is
+# neither the shim itself nor any wrapper already visited in THIS exec
+# chain. Chain state (AGENT_SESSION_VISITED) is bound to the current PID via
+# AGENT_SESSION_CHAIN: exec preserves the PID, so wrapper hops share state,
+# while a fresh launch (new PID) DISCARDS any ambient/poisoned visited list
+# instead of trusting it. Mutual wrapper loops terminate in a loud failure.
+#
+# Sets caller-scope $resolved_vendor (NOT a $()-captured echo: command
+# substitution runs in a subshell, and the visited-list export would be lost
+# — Sol's round-2 reproduction).
 resolve_vendor() {
     word=$1
     case "$word" in
-        */*) printf '%s' "$word"; return 0 ;;
+        */*) resolved_vendor=$word; return 0 ;;
     esac
+    if [ "${AGENT_SESSION_CHAIN:-}" != "$$" ]; then
+        # New exec chain: ambient visited state is not ours; drop it.
+        AGENT_SESSION_VISITED=''
+        AGENT_SESSION_CHAIN=$$
+        export AGENT_SESSION_CHAIN
+    fi
     self_physical=''
     if [ -n "$shim_self" ]; then
         self_physical=$(cd "$(dirname "$shim_self")" 2>/dev/null && pwd -P)/$(basename "$shim_self")
@@ -205,7 +228,7 @@ resolve_vendor() {
         esac
         AGENT_SESSION_VISITED="${AGENT_SESSION_VISITED:+$AGENT_SESSION_VISITED:}$physical"
         export AGENT_SESSION_VISITED
-        printf '%s' "$physical"
+        resolved_vendor=$physical
         return 0
     done
     IFS=$old_ifs
@@ -283,6 +306,16 @@ if [ "$room_set" -eq 1 ]; then
     valid_room "$room" || fail "--room '$room' is not a valid room name (one nonempty printable path-safe component, not '.' or '..')"
 fi
 
+# One fresh address per harness session, not per wrapper hop: a re-entry
+# WITHIN the current exec chain (shim -> wrapper -> shim) keeps the already
+# minted identity and only re-resolves the vendor. A fresh launch (new PID)
+# clears stale inherited identity as before.
+if [ "${AGENT_SESSION_CHAIN:-}" = "$$" ] && [ -n "${POST_SENDER_ADDRESS:-}" ]; then
+    resolve_vendor "$1" || fail "cannot resolve vendor command '$1' on PATH without recursing into the shim; is the real binary installed?"
+    shift
+    exec "$resolved_vendor" "$@"
+fi
+
 # A fresh launch is a fresh instance: stale inherited identity never survives.
 unset POST_FROM POST_SENDER_ADDRESS
 
@@ -335,6 +368,6 @@ POST_HARNESS=$harness
 POST_REPO_KEY=$key
 export POST_SENDER_ADDRESS POST_HARNESS POST_REPO_KEY
 
-vendor=$(resolve_vendor "$1") || fail "cannot resolve vendor command '$1' on PATH without recursing into the shim; is the real binary installed?"
+resolve_vendor "$1" || fail "cannot resolve vendor command '$1' on PATH without recursing into the shim; is the real binary installed?"
 shift
-exec "$vendor" "$@"
+exec "$resolved_vendor" "$@"

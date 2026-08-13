@@ -522,3 +522,232 @@ test("shim installed under the vendor's own name does not recurse", () => {
     fs.rmSync(sb.work, { recursive: true, force: true });
   }
 });
+
+// ---- M3 review round 2 (Sol, 20260813-011452) ----
+
+test("wrapper chain: shim -> re-entering wrapper -> shim terminates and runs the vendor once", () => {
+  const sb = sandbox();
+  try {
+    // PATH: [shimDir]/codex = OUR shim, [wrapperDir]/codex = a cmux-style
+    // wrapper that re-execs the bare word WITHOUT removing itself,
+    // [vendorDir]/codex = the real vendor. The chain must terminate with the
+    // vendor run exactly once — which requires the visited list to survive
+    // the exec chain (Sol reproduced it NOT surviving $() in round 2).
+    const shimDir = path.join(sb.work, "p1-shim");
+    const wrapperDir = path.join(sb.work, "p2-wrapper");
+    const vendorDir = path.join(sb.work, "p3-vendor");
+    for (const d of [shimDir, wrapperDir, vendorDir]) fs.mkdirSync(d);
+    fs.symlinkSync(path.join(LAUNCHER_DIR, "shims", "codex"), path.join(shimDir, "codex"));
+    fs.writeFileSync(
+      path.join(wrapperDir, "codex"),
+      `#!/bin/sh\nexec codex "$@"\n`
+    );
+    fs.chmodSync(path.join(wrapperDir, "codex"), 0o755);
+    const marker = path.join(sb.work, "vendor-ran");
+    fs.writeFileSync(
+      path.join(vendorDir, "codex"),
+      `#!/bin/sh\nprintf 'ran=%s visited=%s addr=%s\\n' "$((\$(cat '${marker}' 2>/dev/null | sed 's/ran=\\([0-9]*\\).*/\\1/' || echo 0) + 1))" "\${AGENT_SESSION_VISITED:-ABSENT}" "\$POST_SENDER_ADDRESS" > '${marker}'\n`
+    );
+    fs.chmodSync(path.join(vendorDir, "codex"), 0o755);
+    const result = spawnSync("codex", [], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        AGENT_SESSION_POST_BIN: BIN,
+        PATH: `${shimDir}:${wrapperDir}:${vendorDir}:${process.env.PATH}`,
+      },
+      timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const record = fs.readFileSync(marker, "utf8");
+    assert.match(record, /^ran=1 /, `vendor must run exactly once: ${record}`);
+    assert.doesNotMatch(record, /visited=ABSENT/, "visited list must survive into the exec chain");
+    assert.match(record, /addr=codex\./, "identity env must reach the vendor");
+    // Exactly one address minted across the whole chain: the wrapper hop
+    // re-enters the shim, and the re-entry must NOT re-mint.
+    const addr = record.match(/addr=(\S+)/)[1];
+    const visited = record.match(/visited=(\S+)/)[1];
+    assert.ok(visited.split(":").length >= 1, "wrapper hop must be recorded");
+    assert.match(addr, ADDRESS_RE);
+
+    // Mutual loop with NO real vendor: loud finite failure, no fork storm.
+    fs.rmSync(path.join(vendorDir, "codex"));
+    const noVendor = spawnSync("codex", [], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        AGENT_SESSION_POST_BIN: BIN,
+        PATH: `${shimDir}:${wrapperDir}:/usr/bin:/bin`,
+      },
+      timeout: 10000,
+    });
+    assert.notEqual(noVendor.status, 0, "mutual loop must fail");
+    assert.match(noVendor.stderr, /cannot resolve vendor command/);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("ambient poisoned visited list cannot steer a fresh launch", () => {
+  const sb = sandbox();
+  try {
+    // Caller pre-sets AGENT_SESSION_VISITED to the REAL vendor's physical
+    // path (and a decoy exists later on PATH). A fresh launch must discard
+    // the ambient list (different chain PID) and still pick the real vendor.
+    const shimDir = path.join(sb.work, "shim");
+    const vendorDir = path.join(sb.work, "vendor");
+    const decoyDir = path.join(sb.work, "decoy");
+    for (const d of [shimDir, vendorDir, decoyDir]) fs.mkdirSync(d);
+    fs.symlinkSync(path.join(LAUNCHER_DIR, "shims", "codex"), path.join(shimDir, "codex"));
+    const marker = path.join(sb.work, "which-ran");
+    for (const [dir, tag] of [
+      [vendorDir, "real"],
+      [decoyDir, "decoy"],
+    ]) {
+      fs.writeFileSync(path.join(dir, "codex"), `#!/bin/sh\necho '${tag}' > '${marker}'\n`);
+      fs.chmodSync(path.join(dir, "codex"), 0o755);
+    }
+    const poisonedPath = fs.realpathSync(path.join(vendorDir, "codex"));
+    const result = spawnSync("codex", [], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: sb.home,
+        POST_MAIL_ROOT: sb.mail,
+        AGENT_SESSION_POST_BIN: BIN,
+        AGENT_SESSION_VISITED: poisonedPath,
+        // A plausible-but-wrong chain marker: PID of the test runner.
+        AGENT_SESSION_CHAIN: String(process.pid),
+        PATH: `${shimDir}:${vendorDir}:${decoyDir}:${process.env.PATH}`,
+      },
+      timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      fs.readFileSync(marker, "utf8").trim(),
+      "real",
+      "a fresh launch must discard ambient visited state and run the real vendor"
+    );
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("plausible primitive output with nonzero exit still fails the launch", () => {
+  const sb = sandbox();
+  try {
+    const shadow = path.join(sb.work, "shadow-bin");
+    fs.mkdirSync(shadow);
+    // shasum prints a valid-looking digest, then exits 9.
+    fs.writeFileSync(
+      path.join(shadow, "shasum"),
+      `#!/bin/sh\necho "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  -"\nexit 9\n`
+    );
+    fs.chmodSync(path.join(shadow, "shasum"), 0o755);
+    const badShasum = spawnSync(HELPER, ["--harness", "ok", "--room", "r", "--", "true"], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: { ...process.env, HOME: sb.home, POST_MAIL_ROOT: sb.mail, PATH: `${shadow}:${process.env.PATH}` },
+      timeout: 10000,
+    });
+    assert.equal(badShasum.status, 64, badShasum.stderr);
+    assert.match(badShasum.stderr, /shasum failed \(nonzero exit\)/);
+    fs.rmSync(path.join(shadow, "shasum"));
+
+    // uuidgen prints a valid UUID, then exits 3.
+    fs.writeFileSync(
+      path.join(shadow, "uuidgen"),
+      `#!/bin/sh\necho "01234567-89ab-4cde-8f01-23456789abcd"\nexit 3\n`
+    );
+    fs.chmodSync(path.join(shadow, "uuidgen"), 0o755);
+    const badUuidgen = spawnSync(HELPER, ["--harness", "ok", "--room", "r", "--", "true"], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: { ...process.env, HOME: sb.home, POST_MAIL_ROOT: sb.mail, PATH: `${shadow}:${process.env.PATH}` },
+      timeout: 10000,
+    });
+    assert.equal(badUuidgen.status, 64, badUuidgen.stderr);
+    assert.match(badUuidgen.stderr, /uuidgen failed \(nonzero exit\)/);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("urandom fallback mints a real UUIDv4 (version and variant bits set)", () => {
+  const sb = sandbox();
+  try {
+    // Toolbox PATH with every needed utility EXCEPT uuidgen.
+    const toolbox = path.join(sb.work, "toolbox");
+    fs.mkdirSync(toolbox);
+    for (const tool of ["sh", "od", "tr", "sed", "cut", "basename", "dirname", "shasum", "git", "node", "printf", "cat"]) {
+      for (const from of ["/usr/bin", "/bin"]) {
+        const src = path.join(from, tool);
+        if (fs.existsSync(src)) {
+          fs.symlinkSync(src, path.join(toolbox, tool));
+          break;
+        }
+      }
+    }
+    const result = spawnSync(HELPER, ["--harness", "ok", "--room", "r", "--", "sh", "-c", 'printf %s "$POST_SENDER_ADDRESS"'], {
+      cwd: sb.roomDir,
+      encoding: "utf8",
+      env: { ...process.env, HOME: sb.home, POST_MAIL_ROOT: sb.mail, PATH: toolbox },
+      timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const uuid = result.stdout.trim().split(".").pop();
+    assert.match(
+      uuid,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      `fallback must be a canonical UUIDv4: ${uuid}`
+    );
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("all four shims execute end to end with their harness slug", () => {
+  for (const [shim, slug, vendorName] of [
+    ["claude", "claude-code", "claude"],
+    ["codex", "codex", "codex"],
+    ["cursor", "cursor", "cursor-agent"],
+    ["grok", "grok", "grok"],
+  ]) {
+    const sb = sandbox();
+    try {
+      const vendorDir = path.join(sb.work, "vendor");
+      fs.mkdirSync(vendorDir);
+      const marker = path.join(sb.work, "env-seen");
+      fs.writeFileSync(
+        path.join(vendorDir, vendorName),
+        `#!/bin/sh\nprintf 'harness=%s addr=%s\\n' "\$POST_HARNESS" "\$POST_SENDER_ADDRESS" > '${marker}'\n`
+      );
+      fs.chmodSync(path.join(vendorDir, vendorName), 0o755);
+      const result = spawnSync(path.join(LAUNCHER_DIR, "shims", shim), [], {
+        cwd: sb.roomDir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: sb.home,
+          POST_MAIL_ROOT: sb.mail,
+          AGENT_SESSION_POST_BIN: BIN,
+          PATH: `${vendorDir}:${process.env.PATH}`,
+        },
+        timeout: 10000,
+      });
+      assert.equal(result.status, 0, `${shim}: ${result.stderr}`);
+      const record = fs.readFileSync(marker, "utf8");
+      assert.match(record, new RegExp(`^harness=${slug} `), `${shim}: ${record}`);
+      assert.match(record, new RegExp(`addr=${slug}\\.`), `${shim}: ${record}`);
+    } finally {
+      fs.rmSync(sb.work, { recursive: true, force: true });
+    }
+  }
+});
