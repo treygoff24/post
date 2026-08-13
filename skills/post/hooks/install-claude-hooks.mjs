@@ -114,7 +114,15 @@ function writeFileAtomic(file, bytes, mode) {
       fs.constants.O_EXCL |
       (fs.constants.O_NOFOLLOW || 0);
     fd = fs.openSync(tmp, flags, mode);
-    fs.writeSync(fd, bytes);
+    // Full-write loop: writeSync may write fewer than bytes.length, and
+    // renaming after a short write would atomically install a truncated file.
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    let offset = 0;
+    while (offset < buf.length) {
+      const n = fs.writeSync(fd, buf, offset, buf.length - offset);
+      if (n <= 0) throw new Error("short write");
+      offset += n;
+    }
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, file);
