@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 — 2026-08-12
+## 0.5.0 — 2026-08-13
 
 The identity layer (layer 1 of the three-layer design: address / card /
 authority; spec three-way signed 2026-08-12, built by Free Claude with
@@ -22,6 +22,11 @@ adversarial review by Free Sol).
   claude/codex/cursor/grok, `--doctor` install-seam check.
 - `skills/post/hooks/envelope-canary.mjs`: source-consumer verification that
   all four harness adapters plus watch-notice accept identity-field events.
+- Identity cards (layer 2): an optional, bounded (4 KiB) per-harness+repo
+  `identity.md`, injected at session start by all four private hook
+  adapters under an explicit unverified/non-authority frame; the shared
+  lookup helper ships with every installer. Absent cards are silent. Post
+  itself never reads cards. Design: `docs/IDENTITY.md`.
 
 - Signed-message v2 ships publicly for the first time in this release
   (built after the v0.4.1 tag, never previously published): exact-body
