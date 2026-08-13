@@ -636,7 +636,7 @@ test("SessionStart injects the identity card even with an empty inbox", () => {
     { stateDir: freshStateDir(), env: cardEnv() }
   );
   assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
-  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card found/);
+  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card stored/);
   assert.match(out.hookSpecificOutput.additionalContext, /carries no authority/);
   assert.match(out.hookSpecificOutput.additionalContext, /I keep this room's letters\./);
 });
@@ -649,7 +649,7 @@ test("SessionStart orders the card before the mail notice", () => {
   );
   const context = out.hookSpecificOutput.additionalContext;
   assert.ok(
-    context.indexOf("Identity card found") < context.indexOf("Unread agent mail"),
+    context.indexOf("Identity card stored") < context.indexOf("Unread agent mail"),
     `card must precede the mail notice: ${context}`
   );
 });

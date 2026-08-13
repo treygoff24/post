@@ -154,3 +154,35 @@ test("updates a stale registration in place instead of duplicating", () => {
   assert.deepEqual(ours[0].args, [ADAPTER]);
   assert.ok(flat.some((h) => h.command === "other-tool"), "sibling hook preserved");
 });
+
+test("installed adapter executes standalone and injects a card (M5 helper ships alongside)", () => {
+  const target = freshSettings();
+  const installed = run(target);
+  assert.equal(installed.status, 0, installed.stderr);
+  const helper = path.join(INSTALL_DIR, "identity-card.mjs");
+  assert.ok(fs.existsSync(helper), "identity-card.mjs must install beside the adapter");
+
+  const data = fs.mkdtempSync(path.join(ROOT, "cards-"));
+  const dir = path.join(data, "agent-identities", "claude", "post-1a2b3c4d");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "identity.md"), "installed card\n");
+
+  // Execute the INSTALLED copy, not the source adapter: empty mail (stub
+  // prints no events) plus a card must inject the card context.
+  const result = spawnSync(process.execPath, [ADAPTER], {
+    input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "installed", cwd: ROOT }),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      POST_CLAUDE_HOOK_BIN: GOOD_POST,
+      POST_CLAUDE_HOOK_STATE_DIR: path.join(ROOT, "installed-state"),
+      XDG_DATA_HOME: data,
+      POST_HARNESS: "claude",
+      POST_REPO_KEY: "post-1a2b3c4d",
+    },
+  });
+  assert.equal(result.status, 0, `installed adapter must run standalone: ${result.stderr}`);
+  const out = JSON.parse(result.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /Identity card stored/);
+  assert.match(out.hookSpecificOutput.additionalContext, /installed card/);
+});

@@ -13,7 +13,9 @@
 // - strictly fail-open: any internal error emits `{}` and exits 0;
 // - injected context carries valid direct-mail ids and count-only summaries
 //   for channel/unreadable mail — no subject, sender, body, or filename data;
-// - listed ids/channel names are capped; additionalContext stays under 4 KiB;
+// - listed ids/channel names are capped; the mail notice stays under 4 KiB,
+//   and with an identity card the merged context stays under
+//   MERGED_CONTEXT_MAX (8448 bytes, one ceiling across all four adapters);
 // - dedupe/fail-streak state commits only after a successful synchronous
 //   stdout write of the final JSON payload (all bytes on fd 1).
 

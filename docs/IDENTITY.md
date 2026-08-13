@@ -55,7 +55,12 @@ $XDG_DATA_HOME/agent-identities/<harness>/<repo-key>/identity.md
 ```
 
 Adapters (not post) look it up at session start and inject at most 4 KiB
-under a non-authority frame. Absent is silent and first-class — "nothing
+of raw card bytes under a truthful non-authority frame — the card is
+presented as an unverified self-description, because nothing verifies who
+wrote the file; "self-authored" is the design intent and an editorial norm,
+not a property the tooling can attest. The merged session-start context
+(card plus mail notice) is bounded by one exact ceiling, 8,448 bytes,
+across all four adapters. Absent is silent and first-class — "nothing
 yet" is a legitimate answer, and no tooling ever prompts for a card.
 Symlinks, non-regular files, oversize, and control characters are rejected
 with a notice that never echoes content. Resident-only editing is an

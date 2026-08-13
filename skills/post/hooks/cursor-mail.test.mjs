@@ -698,7 +698,7 @@ test("sessionStart injects the identity card even with an empty inbox", () => {
     { stateDir: freshStateDir(), env: cardEnv() }
   );
   assert.equal(out.hookSpecificOutput.hookEventName, "sessionStart");
-  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card found/);
+  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card stored/);
 });
 
 test("the card never rides beforeSubmitPrompt or an unlaunched session", () => {

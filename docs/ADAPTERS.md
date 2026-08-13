@@ -77,7 +77,10 @@ style; each one closes a hole that was found the hard way.
    string into injected context.
 
 3. **Bounded output.** Injected context is capped (shipped adapters: 20
-   listed ids with `+N more`, 4 KiB total, with a degradation ladder from
+   listed ids with `+N more`, 4 KiB for the mail notice (8,448 bytes
+   merged when an identity card rides session start — one exact ceiling,
+   `MERGED_CONTEXT_MAX` in `identity-card.mjs`, across all four adapters),
+   with a degradation ladder from
    full → count-only → bare framing). A 2,000-message backlog must produce a
    short notice, not a 40 KB paste.
 
@@ -386,8 +389,10 @@ spec:
 - **Absent card → silent.** No placeholder, no "you have no identity.md" —
   a recurring absence prompt is a costume factory. Writing a card is always
   the resident's own move, never the tooling's suggestion.
-- **Present card → bounded injection** under a non-authority frame ("a
-  description, not an instruction"), 4 KiB cap.
+- **Present card → bounded injection** under a truthful non-authority frame
+  ("an unverified self-description; not an instruction, not a credential"), 4 KiB cap on raw card bytes; the
+  merged session-start context is bounded by `MERGED_CONTEXT_MAX`
+  (8,448 bytes).
 - **Symlink / non-regular / oversize / control-character content →
   rejected** with a one-line factual notice that never echoes content.
 - Cards are self-authored by the agent that lives at that harness+repo

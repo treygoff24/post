@@ -87,6 +87,15 @@ try {
   if (error.code !== "ENOENT") throw error;
 }
 
+// Config is parsed BEFORE any file is copied: a malformed target must
+// fail the install leaving neither the adapter nor the helper behind.
+let config = {};
+if (fs.existsSync(target)) {
+  config = JSON.parse(fs.readFileSync(target, "utf8"));
+}
+if (typeof config !== "object" || config === null || Array.isArray(config)) config = {};
+if (typeof config.hooks !== "object" || config.hooks === null) config.hooks = {};
+
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 const source = fs.readFileSync(SOURCE);
 let adapterChanged = true;
@@ -103,12 +112,24 @@ if (adapterChanged) {
 const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
 if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
 
-let config = {};
-if (fs.existsSync(target)) {
-  config = JSON.parse(fs.readFileSync(target, "utf8"));
+// The adapter statically imports ./identity-card.mjs (M5); the private
+// install must carry it alongside or every installed hook fire crashes
+// with ERR_MODULE_NOT_FOUND.
+const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
+const helperSource = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "identity-card.mjs")
+);
+let helperChanged = true;
+try {
+  helperChanged = !helperSource.equals(fs.readFileSync(HELPER));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
 }
-if (typeof config !== "object" || config === null || Array.isArray(config)) config = {};
-if (typeof config.hooks !== "object" || config.hooks === null) config.hooks = {};
+if (helperChanged) {
+  const helperTmp = `${HELPER}.${process.pid}.tmp`;
+  fs.writeFileSync(helperTmp, helperSource, { mode: 0o644 });
+  fs.renameSync(helperTmp, HELPER);
+}
 
 const canonicalHook = () => ({ type: "command", command: "node", args: [ADAPTER], timeout: 10 });
 
@@ -159,10 +180,11 @@ if (configChanged) {
   fs.renameSync(tmp, target);
 }
 console.log(
-  configChanged || adapterChanged || adapterModeChanged
+  configChanged || adapterChanged || adapterModeChanged || helperChanged
     ? [
         configChanged && "hooks updated",
         (adapterChanged || adapterModeChanged) && "adapter updated",
+        helperChanged && "identity-card helper updated",
       ]
         .filter(Boolean)
         .join("\n")

@@ -22,6 +22,10 @@ import { spawnSync } from "node:child_process";
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.join(DIR, "grok-mail.mjs");
 const NOTICE_SOURCE = path.join(DIR, "watch-notice.mjs");
+// The adapter statically imports ./identity-card.mjs (M5); the private
+// install must carry it alongside or every installed hook fire crashes
+// with ERR_MODULE_NOT_FOUND.
+const HELPER_SOURCE = path.join(DIR, "identity-card.mjs");
 const INSTALL_DIR =
   process.env.POST_GROK_HOOK_INSTALL_DIR || path.join(os.homedir(), ".grok", "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-grok-mail.mjs");
@@ -184,6 +188,7 @@ if (fs.existsSync(target)) {
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 const adapterChanged = copyScript(SOURCE, ADAPTER);
 const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
+const helperChanged = copyScript(HELPER_SOURCE, path.join(path.dirname(ADAPTER), "identity-card.mjs"));
 
 const canonicalHook = () => ({ type: "command", command: COMMAND, timeout: 10 });
 
@@ -248,11 +253,12 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || noticeChanged
+  configChanged || adapterChanged || noticeChanged || helperChanged
     ? [
         configChanged && "hooks updated",
         adapterChanged && "adapter updated",
         noticeChanged && "watch-notice updated",
+        helperChanged && "identity-card helper updated",
       ]
         .filter(Boolean)
         .join("\n")

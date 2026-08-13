@@ -23,6 +23,13 @@ import { spawnSync } from "node:child_process";
 // POST_CODEX_HOOK_INSTALL_DIR is a test override; live installs use the
 // default.
 const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
+// The adapter statically imports ./identity-card.mjs (M5); the private
+// install must carry it alongside or every installed hook fire crashes
+// with ERR_MODULE_NOT_FOUND.
+const HELPER_SOURCE = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "identity-card.mjs"
+);
 const ADAPTER = path.join(
   process.env.POST_CODEX_HOOK_INSTALL_DIR || path.join(os.homedir(), ".codex", "hooks"),
   "post-codex-mail.mjs"
@@ -197,6 +204,18 @@ if (adapterChanged) {
 const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
 if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
 
+const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
+const helperSource = fs.readFileSync(HELPER_SOURCE);
+let helperChanged = true;
+try {
+  helperChanged = !helperSource.equals(fs.readFileSync(HELPER));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+if (helperChanged) {
+  writeFileAtomic(HELPER, helperSource, 0o644);
+}
+
 const canonicalHook = () => ({ type: "command", command: COMMAND, timeout: 5 });
 
 function unquoteLeadingArg(text) {
@@ -261,10 +280,11 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || adapterModeChanged
+  configChanged || adapterChanged || adapterModeChanged || helperChanged
     ? [
         configChanged && "hooks updated",
         (adapterChanged || adapterModeChanged) && "adapter updated",
+        helperChanged && "identity-card helper updated",
       ]
         .filter(Boolean)
         .join("\n")

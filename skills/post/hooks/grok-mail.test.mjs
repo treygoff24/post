@@ -666,7 +666,7 @@ test("the card rides the FIRST prompt once, then never repeats", () => {
     { stateDir, env }
   );
   assert.equal(first.hookSpecificOutput.hookEventName, "UserPromptSubmit");
-  assert.match(first.hookSpecificOutput.additionalContext, /^\[post\] Identity card found/);
+  assert.match(first.hookSpecificOutput.additionalContext, /^\[post\] Identity card stored/);
   const second = run(
     { ...BASE, hookEventName: "UserPromptSubmit", sessionId: "card-once" },
     { stateDir, env }
