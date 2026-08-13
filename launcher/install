@@ -28,6 +28,32 @@ hash_of() {
     printf '%s' "$digest" | cut -d' ' -f1
 }
 
+# Ownership receipt: written by install, required by uninstall. Binds the
+# PHYSICAL prefix path and the exact sha256 of every installed file, so
+# uninstall can prove it created what it is about to delete. No receipt, or
+# a receipt bound to a different prefix, means no file deletion at all.
+RECEIPT_NAME=.install-receipt
+
+physical_path() {
+    (cd "$1" 2>/dev/null && pwd -P)
+}
+
+write_receipt() {
+    phys=$(physical_path "$PREFIX") || fail "cannot resolve physical prefix for receipt"
+    {
+        printf 'prefix %s\n' "$phys"
+        for f in $FILES; do
+            printf 'file %s %s\n' "$f" "$(hash_of "$PREFIX/$f")"
+        done
+    } > "$PREFIX/$RECEIPT_NAME" || fail "cannot write receipt"
+}
+
+# Look up $1 in the receipt's file entries; print the recorded hash.
+receipt_hash_for() {
+    awk -v name="$1" '$1 == "file" && $2 == name { print $3; exit }' \
+        "$PREFIX/$RECEIPT_NAME" 2>/dev/null
+}
+
 mode=install
 case "${1:-}" in
     '') ;;
@@ -53,10 +79,29 @@ if [ "$mode" = uninstall ]; then
             printf 'install: leaving %s (points to %s, not ours)\n' "$link" "$current"
         fi
     done
-    for f in $FILES; do
-        dst="$PREFIX/$f"
-        [ -f "$dst" ] && rm "$dst" && printf 'install: removed %s\n' "$dst"
-    done
+    if [ -f "$PREFIX/$RECEIPT_NAME" ]; then
+        recorded_prefix=$(awk '$1 == "prefix" { $1=""; sub(/^ /,""); print; exit }' "$PREFIX/$RECEIPT_NAME")
+        actual_prefix=$(physical_path "$PREFIX" || printf '')
+        if [ "$recorded_prefix" = "$actual_prefix" ] && [ -n "$actual_prefix" ]; then
+            for f in $FILES; do
+                dst="$PREFIX/$f"
+                [ -f "$dst" ] || continue
+                owned=$(receipt_hash_for "$f")
+                current=$(shasum -a 256 "$dst" 2>/dev/null | cut -d' ' -f1)
+                if [ -n "$owned" ] && [ "$owned" = "$current" ]; then
+                    rm "$dst" && printf 'install: removed %s\n' "$dst"
+                else
+                    printf 'install: leaving %s (modified since install; not ours to delete)\n' "$dst"
+                fi
+            done
+            rm "$PREFIX/$RECEIPT_NAME"
+        else
+            printf 'install: receipt is bound to %s, not %s; leaving all files\n' \
+                "${recorded_prefix:-<unreadable>}" "${actual_prefix:-<unresolvable>}"
+        fi
+    else
+        printf 'install: no install receipt in %s; leaving all files (never installed here, or pre-receipt install — re-run install once to mint one)\n' "$PREFIX"
+    fi
     rmdir "$PREFIX/shims" 2>/dev/null && printf 'install: removed %s\n' "$PREFIX/shims"
     rmdir "$PREFIX" 2>/dev/null && printf 'install: removed %s\n' "$PREFIX" \
         || { [ -d "$PREFIX" ] && printf 'install: leaving non-empty %s\n' "$PREFIX"; }
@@ -109,6 +154,8 @@ if [ "$mode" = check ]; then
     done
     exit "$drift"
 fi
+
+write_receipt
 
 mkdir -p "$SHIM_LINK_DIR" || fail "cannot create $SHIM_LINK_DIR"
 for pair in $LINKS; do

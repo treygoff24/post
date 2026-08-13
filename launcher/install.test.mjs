@@ -78,14 +78,56 @@ test("uninstall leaves replacement vendor symlinks it no longer owns", () => {
   assert.match(un.stdout, /leaving .*claude \(points to/);
 });
 
-test("uninstall with a hostile prefix deletes nothing foreign", () => {
+test("uninstall of a never-installed prefix is a total no-op, even at managed names", () => {
   const sb = sandbox();
-  // Never installed: prefix dir full of someone else's files.
-  fs.mkdirSync(sb.prefix, { recursive: true });
-  const sentinel = path.join(sb.prefix, "precious");
-  fs.writeFileSync(sentinel, "data\n");
-  assert.equal(run(sb, "--uninstall").status, 0);
-  assert.ok(fs.existsSync(sentinel), "hostile-prefix contents untouched");
+  // Never installed: foreign files occupy every managed filename plus one.
+  fs.mkdirSync(path.join(sb.prefix, "shims"), { recursive: true });
+  const foreign = [
+    "agent-session",
+    "shims/claude",
+    "shims/codex",
+    "shims/cursor",
+    "shims/grok",
+    "precious",
+  ].map((f) => path.join(sb.prefix, f));
+  for (const f of foreign) fs.writeFileSync(f, "not yours\n");
+
+  const un = run(sb, "--uninstall");
+  assert.equal(un.status, 0);
+  assert.match(un.stdout, /no install receipt/);
+  for (const f of foreign) assert.ok(fs.existsSync(f), `${f} survives`);
+  assert.ok(fs.existsSync(path.join(sb.prefix, "shims")), "shims dir survives");
+  assert.ok(fs.existsSync(sb.prefix), "prefix survives");
+});
+
+test("uninstall preserves managed files tampered after install", () => {
+  const sb = sandbox();
+  assert.equal(run(sb).status, 0);
+  const tampered = path.join(sb.prefix, "shims", "codex");
+  fs.writeFileSync(tampered, "#!/bin/sh\nreplaced by someone else\n");
+
+  const un = run(sb, "--uninstall");
+  assert.equal(un.status, 0);
+  assert.ok(fs.existsSync(tampered), "tampered file survives");
+  assert.match(un.stdout, /leaving .*shims\/codex \(modified since install/);
+  assert.ok(!fs.existsSync(path.join(sb.prefix, "agent-session")), "untampered file removed");
+  assert.ok(fs.existsSync(sb.prefix), "prefix left (still holds the tampered file)");
+});
+
+test("uninstall with a receipt bound to another prefix deletes no files", () => {
+  const sb = sandbox();
+  assert.equal(run(sb).status, 0);
+  // Simulate a moved/copied prefix: rebind the receipt to another path.
+  const receipt = path.join(sb.prefix, ".install-receipt");
+  const rebound = fs
+    .readFileSync(receipt, "utf8")
+    .replace(/^prefix .*$/m, "prefix /somewhere/else");
+  fs.writeFileSync(receipt, rebound);
+
+  const un = run(sb, "--uninstall");
+  assert.equal(un.status, 0);
+  assert.match(un.stdout, /receipt is bound to \/somewhere\/else/);
+  assert.ok(fs.existsSync(path.join(sb.prefix, "agent-session")), "files survive");
 });
 
 test("--check flags vendor-link drift and passes when clean", () => {
