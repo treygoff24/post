@@ -34,6 +34,8 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
+import { identityCardContext, withCard } from "./identity-card.mjs";
+
 const THROTTLE_MS = Number(process.env.POST_CURSOR_HOOK_THROTTLE_MS ?? 30_000);
 const EVENTS = new Set(["sessionStart", "beforeSubmitPrompt", "postToolUse"]);
 const LIST_CAP = 20;
@@ -332,6 +334,9 @@ function main() {
     }
   }
 
+  // Identity card (M5): injected once, at sessionStart, riding every payload
+  // branch below.
+  const card = eventName === "sessionStart" ? identityCardContext() : null;
   const state = eventName === "sessionStart" ? { seen: [], failStreak: 0 } : readState(stateFile);
 
   const result = spawnSync(postBinary(), ["watch", "--snapshot"], {
@@ -344,7 +349,7 @@ function main() {
   if (result.error || result.status !== 0) {
     const nextState = { ...state, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    deliverThenCommit(stateFile, withCard(payload, card, eventName), nextState);
     return;
   }
 
@@ -363,7 +368,7 @@ function main() {
   if (malformed) {
     const nextState = { ...state, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    deliverThenCommit(stateFile, withCard(payload, card, eventName), nextState);
     return;
   }
 
@@ -374,7 +379,7 @@ function main() {
     failStreak: 0,
   };
   const payload = fresh.length === 0 ? {} : noticePayload(eventName, contextFor(fresh));
-  deliverThenCommit(stateFile, payload, nextState);
+  deliverThenCommit(stateFile, withCard(payload, card, eventName), nextState);
 }
 
 try {

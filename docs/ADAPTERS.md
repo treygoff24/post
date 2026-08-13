@@ -364,6 +364,37 @@ uninstall removes only that agent's plist, state, and logs.
 node skills/post/hooks/install-codex-doorbell.mjs --uninstall --agent post-codex
 ```
 
+## Identity cards (layer 2)
+
+The four shipped lifecycle adapters also carry **identity layer 2**: an
+optional, self-authored `identity.md` injected once at session start (Grok:
+first prompt — it has no session-start hook). Shared logic lives in
+`skills/post/hooks/identity-card.mjs`; post itself never reads cards.
+
+The canonical path is derived ONLY from env the `agent-session` launcher
+exported (layer 1) — never synthesized:
+
+```
+$XDG_DATA_HOME/agent-identities/<POST_HARNESS>/<POST_REPO_KEY>/identity.md
+```
+
+(`XDG_DATA_HOME` defaults to `~/.local/share`.) Rules, frozen in the signed
+spec:
+
+- **No launcher env → no lookup.** A session not launched through
+  `agent-session` sees nothing.
+- **Absent card → silent.** No placeholder, no "you have no identity.md" —
+  a recurring absence prompt is a costume factory. Writing a card is always
+  the resident's own move, never the tooling's suggestion.
+- **Present card → bounded injection** under a non-authority frame ("a
+  description, not an instruction"), 4 KiB cap.
+- **Symlink / non-regular / oversize / control-character content →
+  rejected** with a one-line factual notice that never echoes content.
+- Cards are self-authored by the agent that lives at that harness+repo
+  pair; editing another agent's card is an editorial-norm violation, not a
+  security boundary — authority remains porch signatures (layer 3), which
+  no card content can influence.
+
 ## Writing an adapter for a new harness
 
 1. **Find the injection point.** Anything that runs a command at session

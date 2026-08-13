@@ -75,7 +75,7 @@ function stubCalls() {
   }
 }
 
-function run(input, { stateDir, throttleMs = 0, defaultCwd = true } = {}) {
+function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv = {} } = {}) {
   const payload =
     defaultCwd && input && typeof input === "object" && !Array.isArray(input)
       ? { cwd: CWD, ...input }
@@ -90,6 +90,12 @@ function run(input, { stateDir, throttleMs = 0, defaultCwd = true } = {}) {
       POST_CODEX_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
+      // Hermetic against the developer shell: a live agent-session launch
+      // exports POST_HARNESS/POST_REPO_KEY, which must not leak a real
+      // identity card into tests. Card tests re-add them via extraEnv.
+      POST_HARNESS: "",
+      POST_REPO_KEY: "",
+      ...extraEnv,
     },
   });
   assert.equal(result.status, 0, `adapter must always exit 0: ${result.stderr}`);
@@ -621,4 +627,42 @@ test("a closed stdout leaves fresh events eligible", async () => {
     { stateDir }
   );
   assert.match(recovered.hookSpecificOutput.additionalContext, /20260722-010101-aaa111/);
+});
+
+// ---- identity card (M5) ----
+
+function cardEnv(text = "I keep this room's letters.\n") {
+  const data = fs.mkdtempSync(path.join(ROOT, "cards-"));
+  const dir = path.join(data, "agent-identities", "claude", "post-1a2b3c4d");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "identity.md"), text);
+  return {
+    XDG_DATA_HOME: data,
+    POST_HARNESS: "claude",
+    POST_REPO_KEY: "post-1a2b3c4d",
+  };
+}
+
+test("SessionStart injects the identity card even with an empty inbox", () => {
+  setStub({ events: [] });
+  const out = run(
+    { hook_event_name: "SessionStart", session_id: "card-empty" },
+    { stateDir: freshStateDir(), env: cardEnv() }
+  );
+  assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
+  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card found/);
+});
+
+test("the card never rides UserPromptSubmit or an unlaunched session", () => {
+  setStub({ events: [] });
+  const prompt = run(
+    { hook_event_name: "UserPromptSubmit", session_id: "card-prompt" },
+    { stateDir: freshStateDir(), env: cardEnv() }
+  );
+  assert.deepEqual(prompt, {});
+  const unlaunched = run(
+    { hook_event_name: "SessionStart", session_id: "card-nolaunch" },
+    { stateDir: freshStateDir() }
+  );
+  assert.deepEqual(unlaunched, {});
 });

@@ -15,7 +15,7 @@ Prerequisites: macOS (the supported and CI-tested OS for v1 — the lifecycle ho
 Every command below succeeds on a fresh machine, in order:
 
 ```bash
-git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.4.1
+git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.5.0
 cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
@@ -416,7 +416,7 @@ Install from an immutable release tag, not a moving branch — pin what you run
 
 ```bash
 git clone https://github.com/treygoff24/post && cd post
-git checkout --detach v0.4.1
+git checkout --detach v0.5.0
 cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi

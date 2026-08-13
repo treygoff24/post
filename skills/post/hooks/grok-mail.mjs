@@ -31,6 +31,8 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
+import { identityCardContext, withCard } from "./identity-card.mjs";
+
 const CANONICAL_EVENT = "UserPromptSubmit";
 const EVENTS = new Set(["UserPromptSubmit", "user_prompt_submit"]);
 const LIST_CAP = 20;
@@ -75,9 +77,10 @@ function readState(file) {
     return {
       seen: Array.isArray(parsed.seen) ? parsed.seen.filter((k) => typeof k === "string") : [],
       failStreak: Number.isInteger(parsed.failStreak) ? parsed.failStreak : 0,
+      cardShown: parsed.cardShown === true,
     };
   } catch {
-    return { seen: [], failStreak: 0 };
+    return { seen: [], failStreak: 0, cardShown: false };
   }
 }
 
@@ -319,6 +322,11 @@ function main() {
   const stateFile = path.join(stateDir(), `session-${sessionId}.json`);
   const state = readState(stateFile);
 
+  // Identity card (M5): Grok has no SessionStart hook, so the card rides the
+  // FIRST prompt of the session; state.cardShown commits only after a
+  // successful emit, matching the dedupe discipline.
+  const card = state.cardShown ? null : identityCardContext();
+
   const result = spawnSync(postBinary(), ["watch", "--snapshot"], {
     cwd,
     encoding: "utf8",
@@ -327,9 +335,13 @@ function main() {
   });
 
   if (result.error || result.status !== 0) {
-    const nextState = { ...state, failStreak: state.failStreak + 1 };
+    const nextState = {
+      ...state,
+      failStreak: state.failStreak + 1,
+      cardShown: state.cardShown || card !== null,
+    };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    deliverThenCommit(stateFile, withCard(payload, card, CANONICAL_EVENT), nextState);
     return;
   }
 
@@ -346,9 +358,13 @@ function main() {
     }
   }
   if (malformed) {
-    const nextState = { ...state, failStreak: state.failStreak + 1 };
+    const nextState = {
+      ...state,
+      failStreak: state.failStreak + 1,
+      cardShown: state.cardShown || card !== null,
+    };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    deliverThenCommit(stateFile, withCard(payload, card, CANONICAL_EVENT), nextState);
     return;
   }
 
@@ -357,6 +373,7 @@ function main() {
   const nextState = {
     seen: events.map((event) => eventKey(event)),
     failStreak: 0,
+    cardShown: state.cardShown || card !== null,
   };
   const payload =
     fresh.length === 0
@@ -367,7 +384,7 @@ function main() {
             additionalContext: contextFor(fresh),
           },
         };
-  deliverThenCommit(stateFile, payload, nextState);
+  deliverThenCommit(stateFile, withCard(payload, card, CANONICAL_EVENT), nextState);
 }
 
 try {

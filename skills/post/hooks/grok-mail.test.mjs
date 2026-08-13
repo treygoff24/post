@@ -63,7 +63,7 @@ function stubCalls() {
   }
 }
 
-function run(input, { stateDir } = {}) {
+function run(input, { stateDir, env: extraEnv = {} } = {}) {
   const result = spawnSync(process.execPath, [ADAPTER], {
     input: typeof input === "string" ? input : JSON.stringify(input),
     encoding: "utf8",
@@ -73,6 +73,12 @@ function run(input, { stateDir } = {}) {
       POST_GROK_HOOK_STATE_DIR: stateDir,
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
+      // Hermetic against the developer shell: a live agent-session launch
+      // exports POST_HARNESS/POST_REPO_KEY, which must not leak a real
+      // identity card into tests. Card tests re-add them via extraEnv.
+      POST_HARNESS: "",
+      POST_REPO_KEY: "",
+      ...extraEnv,
     },
   });
   assert.equal(result.status, 0, `adapter must always exit 0: ${result.stderr}`);
@@ -635,4 +641,44 @@ test("a closed stdout leaves fresh events and failure eligibility intact", async
     /UNKNOWN/,
     "an undelivered failure diagnostic must not advance the streak"
   );
+});
+
+// ---- identity card (M5) ----
+
+function cardEnv(text = "I keep this room's letters.\n") {
+  const data = fs.mkdtempSync(path.join(ROOT, "cards-"));
+  const dir = path.join(data, "agent-identities", "claude", "post-1a2b3c4d");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "identity.md"), text);
+  return {
+    XDG_DATA_HOME: data,
+    POST_HARNESS: "claude",
+    POST_REPO_KEY: "post-1a2b3c4d",
+  };
+}
+
+test("the card rides the FIRST prompt once, then never repeats", () => {
+  setStub({ events: [] });
+  const stateDir = freshStateDir();
+  const env = cardEnv();
+  const first = run(
+    { ...BASE, hookEventName: "UserPromptSubmit", sessionId: "card-once" },
+    { stateDir, env }
+  );
+  assert.equal(first.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+  assert.match(first.hookSpecificOutput.additionalContext, /^\[post\] Identity card found/);
+  const second = run(
+    { ...BASE, hookEventName: "UserPromptSubmit", sessionId: "card-once" },
+    { stateDir, env }
+  );
+  assert.deepEqual(second, {}, "cardShown must persist across prompts");
+});
+
+test("an unlaunched session stays silent", () => {
+  setStub({ events: [] });
+  const out = run(
+    { ...BASE, hookEventName: "UserPromptSubmit", sessionId: "card-nolaunch" },
+    { stateDir: freshStateDir() }
+  );
+  assert.deepEqual(out, {});
 });
