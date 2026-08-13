@@ -103,6 +103,11 @@ impl Sandbox {
             .current_dir(cwd)
             .env("HOME", &self.home)
             .env("POST_MAIL_ROOT", &self.mail_root)
+            // Hermetic like run_in_env: a developer shell launched through
+            // agent-session exports POST_FROM, which must never leak into a
+            // fix executed under test.
+            .env_remove("POST_FROM")
+            .env_remove("POST_SENDER_ADDRESS")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -2909,7 +2914,7 @@ fn assert_success(output: &Output) {
 /// consuming commands name the room they resolved to before they act. Every
 /// other line on a successful run is still a test failure.
 fn is_identity_notice(line: &str) -> bool {
-    line.contains("(identity inferred from cwd)") || line.contains("(POST_FROM pin)")
+    line.contains("(identity inferred from cwd)") || line.contains("(POST_FROM pin")
 }
 
 fn from_stdout<T: serde::de::DeserializeOwned>(output: &Output) -> T {
@@ -7425,4 +7430,81 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
         .expect("watch snapshot must surface the pinned direct mail");
     assert_eq!(mail_event["sender_address"], "codex.pact.f00dfeed");
     assert_eq!(mail_event["sender_provenance"], "declared-env");
+}
+
+#[test]
+fn self_send_refusal_writes_nothing_and_its_exact_fix_preserves_kind_and_subject() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    // Shell-sensitive subject: apostrophe + $ prove the fix is quoted for a
+    // real shell, not just for display.
+    let subject = "it's a $5 probe";
+
+    let refused = sandbox.run_in(
+        &[
+            "send", "--to", "alpha", "--kind", "letter", "--subject", subject, "--body",
+            "original body",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(refused.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "invalid_argument");
+
+    // Refusal must write nothing anywhere in the mail root.
+    let empty = sandbox.run_in(&["inbox"], None, &alpha);
+    assert_success(&empty);
+    let inbox: InboxOutput = from_stdout(&empty);
+    assert_eq!(inbox.count, 0, "refused send must not deliver");
+    assert!(
+        !sandbox.mail_root.join("archive").exists()
+            || fs::read_dir(sandbox.mail_root.join("archive"))
+                .expect("list archive")
+                .next()
+                .is_none(),
+        "refused send must not archive"
+    );
+
+    // The exact fix must carry the original kind AND subject, and must run
+    // as written through a real shell.
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .as_deref()
+        .expect("self-send refusal must supply exact_fix")
+        .to_string();
+    assert!(
+        fix.contains("--kind letter"),
+        "exact_fix must preserve the non-default kind: {fix}"
+    );
+    assert!(
+        fix.contains("--allow-self"),
+        "exact_fix must carry --allow-self: {fix}"
+    );
+    let fixed = sandbox.run_fix(&fix, &alpha);
+    assert_success(&fixed);
+
+    let after = sandbox.run_in(&["inbox"], None, &alpha);
+    let listed: InboxOutput = from_stdout(&after);
+    assert_eq!(listed.count, 1, "the executed fix must land exactly one mail");
+    let id = listed.unread[0].id.clone();
+    let read: ReadOutput =
+        from_stdout(&sandbox.run_in(&["read", &id, "--json"], None, &alpha));
+    assert_eq!(read.envelope.kind.to_string(), "letter");
+    assert_eq!(read.envelope.subject, subject);
+    assert_eq!(read.envelope.from, "alpha");
+    assert_eq!(read.envelope.to, "alpha");
+
+    // The deliberate form succeeds directly as well.
+    let deliberate = sandbox.run_in(
+        &[
+            "send", "--to", "alpha", "--allow-self", "--kind", "letter", "--subject", subject,
+            "--body", "deliberate self-mail",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&deliberate);
 }

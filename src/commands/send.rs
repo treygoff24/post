@@ -74,8 +74,11 @@ where
         }
         None => match declared_env_pin()? {
             Some(pinned) => {
+                // M4 made a disagreeing --from a hard error, so the old
+                // "pass --from to send as someone else" advice would name a
+                // command guaranteed to fail. Tell the truth instead.
                 eprintln!(
-                    "post: sending as '{pinned}' (POST_FROM pin); pass --from <NAME> to send as someone else"
+                    "post: sending as '{pinned}' (POST_FROM pin; the pin governs this session — to send as another identity, use a shell without POST_FROM set)"
                 );
                 (pinned, SenderProvenance::DeclaredEnv)
             }
@@ -291,6 +294,9 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
     if let Some(sender) = &args.sender {
         prefix.push_str(&format!(" --from {}", crate::mailbox::shell_quote(sender)));
     }
+    // --kind always survives into the fix: an exact-fix that silently
+    // dropped a non-default kind would retry the send as a `note`.
+    prefix.push_str(&format!(" --kind {}", args.kind.as_str()));
     if !args.subject.is_empty() {
         prefix.push_str(&format!(
             " --subject {}",

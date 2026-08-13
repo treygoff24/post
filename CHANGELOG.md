@@ -23,6 +23,11 @@ adversarial review by Free Sol).
 - `skills/post/hooks/envelope-canary.mjs`: source-consumer verification that
   all four harness adapters plus watch-notice accept identity-field events.
 
+- Signed-message v2 ships publicly for the first time in this release
+  (built after the v0.4.1 tag, never previously published): exact-body
+  signing over multiline bodies, 1 MiB signed-body bound, and full
+  read-time compatibility with legacy v1 signatures.
+
 ### Changed (behavior, the reason this is 0.5.0)
 - `post send` refuses `from == to` without `--allow-self`. Instances of one
   room coordinate via channels; doorbell probes and smoke tests opt in.
@@ -31,6 +36,6 @@ adversarial review by Free Sol).
 
 ## 0.4.1 and earlier
 
-Pre-changelog releases: signed-message v2 (detached manifests, multiline
-bodies), signed owner, profiles, channels, watch, adapters. History lives in
-the git log and CONTRACT.md amendments.
+Pre-changelog releases, as actually tagged: signed messages (v1), signed
+owner, profiles, channels, watch, adapters. History lives in the git log
+and CONTRACT.md amendments.
