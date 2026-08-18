@@ -200,8 +200,37 @@ test("usage errors reject unknown, missing, duplicate, and invalid arguments", (
       match: /--channel is not valid with --uninstall/,
     },
     {
+      args: ["--uninstall", "--agent", AGENT, "--interval-seconds", "30"],
+      match: /--interval-seconds is not valid with --uninstall/,
+    },
+    {
       args: ["--room", "ops", "--agent", AGENT, "--channel", "bad channel!"],
       match: /invalid channel name/,
+    },
+    {
+      args: ["--room", "ops", "--agent", AGENT, "--interval-seconds"],
+      match: /--interval-seconds requires a value/,
+    },
+    {
+      args: [
+        "--room",
+        "ops",
+        "--agent",
+        AGENT,
+        "--interval-seconds",
+        "30",
+        "--interval-seconds",
+        "60",
+      ],
+      match: /duplicate --interval-seconds/,
+    },
+    {
+      args: ["--room", "ops", "--agent", AGENT, "--interval-seconds", "0"],
+      match: /positive integer/,
+    },
+    {
+      args: ["--room", "ops", "--agent", AGENT, "--interval-seconds", "1.5"],
+      match: /positive integer/,
     },
     { args: ["--room", "ops", "--agent", AGENT, "--"], match: /unknown argument/ },
   ];
@@ -210,6 +239,19 @@ test("usage errors reject unknown, missing, duplicate, and invalid arguments", (
     assert.equal(result.status, 2, `${c.args.join(" ")} -> ${result.stderr}`);
     assert.match(result.stderr, c.match);
   }
+});
+
+test("an explicit interval is written to StartInterval", () => {
+  const home = homeFor("interval");
+  const result = run(
+    ["--room", "ops", "--agent", AGENT, "--interval-seconds", "30"],
+    OK,
+    { POST_CODEX_DOORBELL_HOME: home }
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const plist = fs.readFileSync(plistPath(home), "utf8");
+  assert.ok(plist.includes("<integer>30</integer>"), "explicit StartInterval");
+  assert.ok(!plist.includes("<integer>5</integer>"), "default interval must be replaced");
 });
 
 test("installs a machine-independent launch agent with the exact per-agent state", () => {

@@ -390,8 +390,8 @@ inject metadata-only new-mail notices into live agent sessions:
 `codex-notify-monitor.mjs` plus `install-codex-doorbell.mjs` are the idle-wake
 layer for a harness with no monitor primitive: a per-agent launchd job that
 snapshots one room (and optionally selected channels via repeated `--channel`)
-every 5 seconds and, when the named Herdr agent is safely backgrounded at
-`idle`/`done`, submits one fixed `[post-doorbell:v1]` notice with at most 20
+every 5 seconds by default and, when the named Herdr agent is safely
+backgrounded at `idle`/`done`, submits one fixed `[post-doorbell:v1]` notice with at most 20
 validated refs. It never includes mail bodies, senders, subjects, or claimed
 authority, and it records dedupe state only after the controller accepts the
 prompt. Herdr is a separate prerequisite (a multi-agent terminal controller),

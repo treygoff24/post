@@ -2,12 +2,12 @@
 // Install or remove a launchd "doorbell" job that wakes one explicitly named
 // background Herdr agent about fresh direct post mail.
 //
-//   node install-codex-doorbell.mjs --room <room> --agent <unique-herdr-name> [--channel <name>]...
+//   node install-codex-doorbell.mjs --room <room> --agent <unique-herdr-name> [--channel <name>]... [--interval-seconds <n>]
 //   node install-codex-doorbell.mjs --uninstall --agent <unique-herdr-name>
 //
 // macOS only. Install copies the adjacent codex-notify-monitor.mjs to
 // ~/.codex/hooks/post-codex-notify-monitor.mjs (0755), writes a per-agent
-// LaunchAgent (dev.post.codex-doorbell.<agent>, 5s StartInterval, RunAtLoad,
+// LaunchAgent (dev.post.codex-doorbell.<agent>, configurable StartInterval,
 // ProcessType Background) under ~/Library/LaunchAgents/, and loads it with
 // launchctl. The job snapshots the exact room and wakes the exact Herdr agent
 // only when it is unfocused and idle/done (see codex-notify-monitor.mjs).
@@ -63,6 +63,7 @@ function usageError(message) {
   console.error(
     `install-codex-doorbell: ${message}\n` +
       "usage: node install-codex-doorbell.mjs --room <room> --agent <unique-herdr-name> [--channel <name>]...\n" +
+      "       [--interval-seconds <positive-integer>]\n" +
       "       node install-codex-doorbell.mjs --uninstall --agent <unique-herdr-name>"
   );
   process.exit(2);
@@ -107,7 +108,13 @@ function safeName(value) {
 }
 
 function parseArgs(argv) {
-  const opts = { uninstall: false, room: null, agent: null, channels: [] };
+  const opts = {
+    uninstall: false,
+    room: null,
+    agent: null,
+    channels: [],
+    intervalSeconds: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--uninstall") {
@@ -130,6 +137,17 @@ function parseArgs(argv) {
       if (value === undefined || value.startsWith("-")) usageError("--channel requires a value");
       opts.channels.push(value);
       i += 1;
+    } else if (arg === "--interval-seconds") {
+      if (opts.intervalSeconds !== null) usageError("duplicate --interval-seconds flag");
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        usageError("--interval-seconds requires a value");
+      }
+      if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+        usageError("--interval-seconds must be a positive integer");
+      }
+      opts.intervalSeconds = Number(value);
+      i += 1;
     } else {
       usageError(`unknown argument: ${arg}`);
     }
@@ -141,10 +159,14 @@ function validate(opts) {
   if (opts.uninstall) {
     if (opts.room !== null) usageError("--room is not valid with --uninstall");
     if (opts.channels.length > 0) usageError("--channel is not valid with --uninstall");
+    if (opts.intervalSeconds !== null) {
+      usageError("--interval-seconds is not valid with --uninstall");
+    }
     if (opts.agent === null) usageError("--uninstall requires --agent <unique-herdr-name>");
   } else if (opts.room === null || opts.agent === null) {
     usageError("install requires --room <room> and --agent <unique-herdr-name>");
   }
+  if (opts.intervalSeconds === null) opts.intervalSeconds = 5;
   if (opts.room !== null && !safeName(opts.room)) {
     usageError(`invalid room name: ${opts.room}`);
   }
@@ -345,7 +367,18 @@ function escapeXml(value) {
     .replace(/'/g, "&apos;");
 }
 
-function plistContent({ agent, room, channels, nodeBin, monitor, postBin, herdrBin, mailRoot, paths }) {
+function plistContent({
+  agent,
+  room,
+  channels,
+  intervalSeconds,
+  nodeBin,
+  monitor,
+  postBin,
+  herdrBin,
+  mailRoot,
+  paths,
+}) {
   const xml = escapeXml;
   const envLines = [
     `    <key>HOME</key><string>${xml(paths.home)}</string>`,
@@ -380,7 +413,7 @@ function plistContent({ agent, room, channels, nodeBin, monitor, postBin, herdrB
     ...envLines,
     "  </dict>",
     "  <key>StartInterval</key>",
-    "  <integer>5</integer>",
+    `  <integer>${intervalSeconds}</integer>`,
     "  <key>RunAtLoad</key>",
     "  <true/>",
     "  <key>ProcessType</key>",
@@ -528,6 +561,7 @@ function install(opts) {
     agent: opts.agent,
     room: opts.room,
     channels: opts.channels,
+    intervalSeconds: opts.intervalSeconds,
     nodeBin,
     monitor,
     postBin,

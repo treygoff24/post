@@ -324,9 +324,9 @@ Files: `skills/post/hooks/codex-notify-monitor.mjs`,
 `install-codex-doorbell.mjs` (+ tests).
 
 This is the worked example of out-of-band wake for a harness with **no**
-monitor primitive (Codex CLI). A launchd LaunchAgent ticks every 5 s, runs
-one snapshot for one configured room (and optionally selected channels via
-`--channel`), and — when there is fresh mail and the target agent is
+monitor primitive (Codex CLI). A launchd LaunchAgent ticks every 5 s by
+default, runs one snapshot for one configured room (and optionally selected
+channels via `--channel`), and — when there is fresh mail and the target agent is
 unfocused and idle/done — wakes exactly one explicitly named agent through
 the controller's public API, delivering a bounded metadata-only ring.
 
@@ -350,7 +350,9 @@ controller that can answer those two questions is a bounded edit of
 herdr agent list
 herdr agent rename <target-from-list> post-codex
 herdr agent get post-codex
-node skills/post/hooks/install-codex-doorbell.mjs --room <room> --agent post-codex [--channel <name>]...
+node skills/post/hooks/install-codex-doorbell.mjs \
+  --room <room> --agent post-codex \
+  [--channel <name>]... [--interval-seconds <n>]
 ```
 
 The target must already exist: the installer refuses to write anything unless
@@ -358,6 +360,8 @@ The target must already exist: the installer refuses to write anything unless
 lowercase letter and contain only lowercase letters, digits, `_`, or `-`
 (maximum 32 characters). Repeat `--channel <name>` for each joined channel
 that should ring; omit it for direct mail only.
+`--interval-seconds` accepts a positive integer and defaults to 5. Increase it
+when lower process churn matters more than immediate wake latency.
 
 Install copies the monitor to `~/.codex/hooks/`, writes a per-agent
 LaunchAgent (`dev.post.codex-doorbell.<agent>`), and loads it. Idempotent;
