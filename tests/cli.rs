@@ -3,10 +3,12 @@ use post::output::{
     ChatSendOutput, DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput,
     SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +110,7 @@ impl Sandbox {
             // fix executed under test.
             .env_remove("POST_FROM")
             .env_remove("POST_SENDER_ADDRESS")
+            .env_remove("POST_ARX_GENERATION")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -152,7 +155,8 @@ impl Sandbox {
             .env("HOME", &self.home)
             .env("POST_MAIL_ROOT", &self.mail_root)
             .env_remove("POST_FROM")
-            .env_remove("POST_SENDER_ADDRESS");
+            .env_remove("POST_SENDER_ADDRESS")
+            .env_remove("POST_ARX_GENERATION");
         for (key, value) in envs {
             command.env(key, value);
         }
@@ -1129,6 +1133,10 @@ fn rooms_add_rejects_mail_root_reserved_names() {
         "ROOMS.JSON",
         ".ROOMS.LOCK",
         ".ROOMS.JSON.123.0.TMP",
+        ".post-arx.json",
+        ".post-arx.lock",
+        "..post-arx.json.123.0.tmp",
+        "..POST-ARX.JSON.123.0.TMP",
     ] {
         let output = sandbox.run(&[
             "rooms",
@@ -2793,6 +2801,90 @@ fn codex_identity_cannot_impersonate_registered_rooms_but_aliases_remain_allowed
     assert!(stdout(&inferred).contains("workspace -> workspace"));
 }
 
+fn seed_fence_store(sandbox: &Sandbox, state: &str) {
+    fs::create_dir_all(&sandbox.mail_root).expect("fence root");
+    fs::create_dir_all(sandbox.home.join("dest")).expect("fence room path");
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        r#"{"dest":"~/dest"}
+"#,
+    )
+    .expect("fence rooms");
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[]}
+"#,
+    )
+    .expect("fence rules");
+    fs::write(sandbox.mail_root.join(".post-arx.json"), state).expect("fence state");
+    fs::write(sandbox.mail_root.join(".post-arx.lock"), b"").expect("fence lock");
+}
+
+fn seed_channel_fixture(sandbox: &Sandbox) {
+    let channel = sandbox.mail_root.join("channels/tax");
+    fs::create_dir_all(channel.join("messages")).expect("channel messages");
+    fs::write(
+        channel.join("channel.json"),
+        r#"{"name":"tax","created":"2026-08-20 12:00:00 -0500","created_by":"dest"}"#,
+    )
+    .expect("channel info");
+    fs::write(
+        channel.join("members.json"),
+        r#"{"dest":"2026-08-20 12:00:00 -0500"}"#,
+    )
+    .expect("channel members");
+    fs::write(
+        channel.join("messages/20260820-120000-000001-aaaaaa.msg"),
+        "{\"id\":\"20260820-120000-000001-aaaaaa\",\"from\":\"other\",\"channel\":\"tax\",\"subject\":\"\",\"sent\":\"2026-08-20 12:00:00 -0500\"}\n---\nfixture\n",
+    )
+    .expect("channel message");
+}
+
+#[cfg(unix)]
+fn fence_under_external_lock(sandbox: &Sandbox, generation: u64) -> std::time::SystemTime {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(sandbox.mail_root.join(".post-arx.lock"))
+        .expect("open migration lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let heartbeat = sandbox.mail_root.join("dest/watch.heartbeat");
+    let before = fs::metadata(&heartbeat)
+        .expect("heartbeat exists under transition lock")
+        .modified()
+        .expect("heartbeat mtime");
+    write_fence_state_locked(&sandbox.mail_root, generation);
+    drop(lock);
+    before
+}
+
+#[cfg(unix)]
+fn write_fence_state_locked(root: &Path, generation: u64) {
+    let temporary = root.join(format!(
+        "..post-arx.json.{}.tmp",
+        TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut state = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)
+        .expect("create fence temp");
+    writeln!(
+        state,
+        "{{\"state\":\"fenced\",\"generation\":{generation}}}"
+    )
+    .expect("write fence temp");
+    state.sync_all().expect("sync fence temp");
+    fs::rename(&temporary, root.join(".post-arx.json")).expect("commit fence");
+    File::open(root)
+        .expect("open mailbox root")
+        .sync_all()
+        .expect("sync mailbox root");
+}
+
 fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
     let envelope = serde_json::json!({
         "id": id,
@@ -2905,7 +2997,8 @@ fn post_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_post"));
     command
         .env_remove("POST_FROM")
-        .env_remove("POST_SENDER_ADDRESS");
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("POST_ARX_GENERATION");
     command
 }
 
@@ -2926,6 +3019,21 @@ fn assert_success(output: &Output) {
         unexpected.is_empty(),
         "unexpected stderr: {}",
         unexpected.join("\n")
+    );
+}
+
+fn assert_migration_refused(output: &Output) {
+    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(output));
+    let error: ErrorEnvelope = from_stderr(output);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(
+        error
+            .error
+            .message
+            .to_ascii_lowercase()
+            .contains("migration fence"),
+        "missing migration-fence refusal: {}",
+        error.error.message
     );
 }
 
@@ -4058,6 +4166,675 @@ fn watch_survives_the_mailbox_disappearing_and_rings_after_it_returns() {
         )),
         "watch must ring for mail delivered after the mailbox returns"
     );
+}
+
+#[test]
+fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
+    // A fresh legacy read still performs the original first-run setup, so a
+    // later ordinary send sees the normal defaults and never creates a fence
+    // lock.
+    let fresh = Sandbox::new_unseeded();
+    assert_success(&fresh.run(&["inbox", "--room", "dest"]));
+    assert!(fresh.mail_root.join("rooms.json").is_file());
+    assert!(fresh.mail_root.join("rules.json").is_file());
+    fs::create_dir_all(fresh.home.join("dest")).expect("fresh room path");
+    fs::write(
+        fresh.mail_root.join("rooms.json"),
+        r#"{"dest":"~/dest"}
+"#,
+    )
+    .expect("register fresh room");
+    assert_success(&fresh.run(&[
+        "send",
+        "--to",
+        "dest",
+        "--from",
+        "sender",
+        "--body",
+        "legacy send",
+    ]));
+    assert!(!fresh.mail_root.join(".post-arx.lock").exists());
+
+    let fenced = Sandbox::new_unseeded();
+    seed_fence_store(&fenced, r#"{"state":"fenced","generation":7}"#);
+    let state_before = fs::read(fenced.mail_root.join(".post-arx.json")).expect("state");
+    let lock_inode = fs::metadata(fenced.mail_root.join(".post-arx.lock"))
+        .expect("lock")
+        .ino();
+    seed_channel_fixture(&fenced);
+
+    let refused_watch = fenced.run(&["watch", "--room", "dest", "--interval-ms", "100"]);
+    assert_migration_refused(&refused_watch);
+    assert!(!fenced.mail_root.join("dest").exists());
+    assert!(!fenced.mail_root.join("archive").exists());
+    assert!(!fenced.mail_root.join("dest/watch.heartbeat").exists());
+
+    let inbox = fenced.run(&["inbox", "--room", "dest"]);
+    assert_success(&inbox);
+    assert_success(&fenced.run(&["schema"]));
+    let chat = fenced.run_in(&["chat", "tax", "--peek"], None, &fenced.home.join("dest"));
+    assert_success(&chat);
+    assert!(
+        stdout(&chat).contains("READ THIS FRAMING FIRST"),
+        "non-empty text chat must render its read framing"
+    );
+    assert!(!fenced.mail_root.join("dest").exists());
+    assert!(!fenced.mail_root.join("archive").exists());
+    assert!(!fenced.mail_root.join("dest/channel-state.json").exists());
+    assert!(!fenced.mail_root.join("dest/banner-day").exists());
+
+    let refused = fenced.run(&[
+        "send",
+        "--to",
+        "dest",
+        "--from",
+        "sender",
+        "--body",
+        "must refuse",
+    ]);
+    assert_migration_refused(&refused);
+    assert_eq!(
+        fs::read(fenced.mail_root.join(".post-arx.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        fs::metadata(fenced.mail_root.join(".post-arx.lock"))
+            .expect("lock remains")
+            .ino(),
+        lock_inode
+    );
+    assert!(!fenced.mail_root.join("archive").exists());
+    assert!(!fenced.mail_root.join("dest").exists());
+
+    // Read paths ignore even malformed writer declarations, while every
+    // writer declaration error remains loud.
+    assert_success(&fenced.run_in_env(
+        &["inbox", "--room", "dest"],
+        None,
+        &fenced.path,
+        &[("POST_ARX_GENERATION", "not-a-generation")],
+    ));
+    for generation in ["6", "", "0", "not-a-generation"] {
+        let envs = if generation.is_empty() {
+            &[][..]
+        } else {
+            &[("POST_ARX_GENERATION", generation)][..]
+        };
+        let output = fenced.run_in_env(
+            &[
+                "send", "--to", "dest", "--from", "sender", "--body", "refused",
+            ],
+            None,
+            &fenced.path,
+            envs,
+        );
+        assert_migration_refused(&output);
+    }
+
+    let active = Sandbox::new_unseeded();
+    seed_fence_store(&active, r#"{"state":"active","generation":7}"#);
+    assert_success(&active.run_in_env(
+        &[
+            "send",
+            "--to",
+            "dest",
+            "--from",
+            "sender",
+            "--body",
+            "active exact",
+        ],
+        None,
+        &active.path,
+        &[("POST_ARX_GENERATION", "7")],
+    ));
+
+    // A bounded stdout stall keeps the original writer admission held until
+    // the after-stdout cursor move; reacquiring in the callback would let the
+    // external cutover flock slip through while this process is blocked.
+    seed_channel_fixture(&active);
+    let large_body = "x".repeat(128 * 1024);
+    fs::write(
+        active
+            .mail_root
+            .join("channels/tax/messages/20260820-120000-000001-aaaaaa.msg"),
+        format!(
+            "{{\"id\":\"20260820-120000-000001-aaaaaa\",\"from\":\"other\",\"channel\":\"tax\",\"subject\":\"\",\"sent\":\"2026-08-20 12:00:00 -0500\"}}\n---\n{large_body}\n"
+        ),
+    )
+    .expect("large channel message");
+    let mut blocked_read = post_command()
+        .args(["chat", "tax"])
+        .current_dir(active.home.join("dest"))
+        .env("HOME", &active.home)
+        .env("POST_MAIL_ROOT", &active.mail_root)
+        .env("POST_ARX_GENERATION", "7")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn blocked stdout reader");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let cutover_probe = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(active.mail_root.join(".post-arx.lock"))
+        .expect("open cutover probe");
+    let probe_errno =
+        unsafe { libc::flock(cutover_probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let probe_error = std::io::Error::last_os_error().raw_os_error();
+    drop(cutover_probe);
+    assert_eq!(
+        probe_errno, -1,
+        "stdout stall released the writer admission"
+    );
+    assert_eq!(probe_error, Some(libc::EWOULDBLOCK));
+    let mut blocked_stdout = blocked_read.stdout.take().expect("blocked stdout pipe");
+    let mut drained = Vec::new();
+    blocked_stdout
+        .read_to_end(&mut drained)
+        .expect("drain blocked stdout");
+    assert!(blocked_read.wait().expect("wait blocked stdout").success());
+    assert!(
+        fs::read_to_string(active.mail_root.join("dest/channel-state.json"))
+            .expect("advanced channel cursor")
+            .contains("20260820-120000-000001-aaaaaa")
+    );
+    for args in [
+        &["read", "missing", "--room", "dest"][..],
+        &["chat", "tax", "--discard"][..],
+        &["profile", "set", "--name", "blocked"][..],
+        &["owner", "init", "--room", "dest"][..],
+        &["doctor", "--fix"][..],
+        &["rooms", "add", "extra", "~/dest"][..],
+    ] {
+        let output = active.run_in_env(
+            args,
+            None,
+            &active.home.join("dest"),
+            &[("POST_ARX_GENERATION", "6")],
+        );
+        assert_migration_refused(&output);
+    }
+
+    // A generation declaration cannot enroll a root without state, and a
+    // malformed, symlinked, hard-linked, or duplicate state file fails before
+    // an admission lock is created.
+    let missing = Sandbox::new_unseeded();
+    fs::create_dir_all(&missing.mail_root).expect("missing-state root");
+    fs::write(
+        missing.mail_root.join("rooms.json"),
+        r#"{"dest":"~/dest"}
+"#,
+    )
+    .expect("missing-state rooms");
+    fs::write(
+        missing.mail_root.join("rules.json"),
+        r#"{"blocked":[]}
+"#,
+    )
+    .expect("missing-state rules");
+    let output = missing.run_in_env(
+        &[
+            "send",
+            "--to",
+            "dest",
+            "--from",
+            "sender",
+            "--body",
+            "missing state",
+        ],
+        None,
+        &missing.path,
+        &[("POST_ARX_GENERATION", "7")],
+    );
+    assert!(!output.status.success());
+    assert!(!missing.mail_root.join(".post-arx.lock").exists());
+
+    for label in ["symlink", "hardlink", "ambiguous"] {
+        let broken = Sandbox::new_unseeded();
+        seed_fence_store(&broken, r#"{"state":"active","generation":7}"#);
+        let state = broken.mail_root.join(".post-arx.json");
+        match label {
+            "symlink" => {
+                let target = broken.path.join("state-target");
+                fs::rename(&state, &target).expect("move state target");
+                std::os::unix::fs::symlink(&target, &state).expect("state symlink");
+            }
+            "hardlink" => {
+                fs::hard_link(&state, broken.path.join("state-copy")).expect("state hardlink");
+            }
+            "ambiguous" => {
+                fs::write(
+                    &state,
+                    br#"{"state":"active","state":"fenced","generation":7}"#,
+                )
+                .expect("ambiguous state");
+            }
+            _ => unreachable!(),
+        }
+        let output = broken.run_in_env(
+            &[
+                "send",
+                "--to",
+                "dest",
+                "--from",
+                "sender",
+                "--body",
+                "broken state",
+            ],
+            None,
+            &broken.path,
+            &[("POST_ARX_GENERATION", "7")],
+        );
+        assert!(!output.status.success(), "{label} state admitted");
+        assert!(!broken.mail_root.join("archive").exists());
+    }
+
+    // A running watch must stop at the next admission check after cutover.
+    let watched = Sandbox::new_unseeded();
+    seed_fence_store(&watched, r#"{"state":"active","generation":7}"#);
+    fs::create_dir_all(watched.mail_root.join("dest")).expect("existing enrolled room");
+    let mut child = post_command()
+        .args(["watch", "--room", "dest", "--interval-ms", "100"])
+        .current_dir(watched.home.join("dest"))
+        .env("HOME", &watched.home)
+        .env("POST_MAIL_ROOT", &watched.mail_root)
+        .env("POST_ARX_GENERATION", "7")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn watch");
+    let heartbeat = watched.mail_root.join("dest/watch.heartbeat");
+    for _ in 0..60 {
+        if heartbeat.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        heartbeat.exists(),
+        "watch never admitted its first heartbeat"
+    );
+    let started = std::time::Instant::now();
+    assert_success(&watched.run_in_env(
+        &[
+            "send",
+            "--to",
+            "dest",
+            "--from",
+            "sender",
+            "--body",
+            "concurrent admitted send",
+        ],
+        None,
+        &watched.path,
+        &[("POST_ARX_GENERATION", "7")],
+    ));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "heartbeat admission blocked an ordinary writer"
+    );
+    let fence_mtime = fence_under_external_lock(&watched, 7);
+    let mut status = None;
+    for _ in 0..100 {
+        if let Some(value) = child.try_wait().expect("poll watch") {
+            status = Some(value);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if status.is_none() {
+        child.kill().expect("stop stuck watch");
+        let _ = child.wait();
+    }
+    assert!(status.is_some_and(|value| !value.success()));
+    assert_eq!(
+        fs::metadata(&heartbeat)
+            .expect("heartbeat remains")
+            .modified()
+            .expect("heartbeat mtime"),
+        fence_mtime,
+        "watch heartbeat landed after fence commit"
+    );
+}
+
+#[test]
+fn migration_fence_existing_root_never_recreates_missing_config() {
+    for missing in ["rules.json", "rooms.json"] {
+        let sandbox = Sandbox::new_unseeded();
+        fs::create_dir_all(&sandbox.mail_root).expect("root");
+        fs::write(
+            sandbox.mail_root.join("rooms.json"),
+            r#"{"dest":"~/dest"}
+"#,
+        )
+        .expect("rooms");
+        fs::write(
+            sandbox.mail_root.join("rules.json"),
+            r#"{"blocked":[]}
+"#,
+        )
+        .expect("rules");
+        fs::create_dir_all(sandbox.home.join("dest")).expect("dest");
+        fs::remove_file(sandbox.mail_root.join(missing)).expect("remove config");
+
+        let output = sandbox.run(&[
+            "send",
+            "--to",
+            "dest",
+            "--from",
+            "sender",
+            "--body",
+            "must fail closed",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(78),
+            "stderr: {}",
+            stderr(&output)
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid");
+        assert!(error.error.message.contains(missing));
+        assert!(!sandbox.mail_root.join(missing).exists());
+        assert!(!sandbox.mail_root.join(".post-arx.lock").exists());
+    }
+}
+
+#[test]
+fn migration_fence_enrolled_missing_root_read_surfaces_are_non_mutating() {
+    let sandbox = Sandbox::new_unseeded();
+    assert!(!sandbox.mail_root.exists());
+    for args in [
+        &["inbox", "--room", "dest"][..],
+        &["channels"][..],
+        &["rooms"][..],
+        &["profile", "show", "dest"][..],
+        &["owner", "show"][..],
+        &["schema"][..],
+        &["watch", "--snapshot", "--room", "dest"][..],
+    ] {
+        let output = sandbox.run_in_env(
+            args,
+            None,
+            &sandbox.home,
+            &[("POST_ARX_GENERATION", "not-a-generation")],
+        );
+        assert!(
+            output.status.success(),
+            "read surface failed for {args:?}: {}",
+            stderr(&output)
+        );
+    }
+    assert!(!sandbox.mail_root.exists(), "read surfaces minted the root");
+    let writer = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "dest",
+            "--from",
+            "sender",
+            "--body",
+            "must not mint an enrolled root",
+        ],
+        None,
+        &sandbox.home,
+        &[("POST_ARX_GENERATION", "7")],
+    );
+    assert_migration_refused(&writer);
+    assert!(
+        !sandbox.mail_root.exists(),
+        "writer minted an enrolled root"
+    );
+}
+
+#[test]
+fn migration_fence_read_only_states_stay_available_while_writers_refuse() {
+    for (label, state) in [
+        (
+            "duplicate",
+            br#"{"state":"active","state":"fenced"}"#.as_slice(),
+        ),
+        (
+            "unknown",
+            br#"{"state":"inactive","generation":7}"#.as_slice(),
+        ),
+        ("zero", br#"{"state":"active","generation":0}"#.as_slice()),
+        ("missing-generation", br#"{"state":"active"}"#.as_slice()),
+        ("missing-state", &[][..]),
+        (
+            "missing-lock",
+            br#"{"state":"active","generation":7}"#.as_slice(),
+        ),
+    ] {
+        let sandbox = Sandbox::new_unseeded();
+        seed_fence_store(&sandbox, r#"{"state":"active","generation":7}"#);
+        if label == "missing-state" {
+            fs::remove_file(sandbox.mail_root.join(".post-arx.json")).expect("remove state");
+        } else if label == "missing-lock" {
+            fs::remove_file(sandbox.mail_root.join(".post-arx.lock")).expect("remove lock");
+        } else {
+            fs::write(sandbox.mail_root.join(".post-arx.json"), state).expect("state");
+        }
+        let mut before = fs::read_dir(&sandbox.mail_root)
+            .expect("root")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        before.sort();
+        let read = sandbox.run_in_env(
+            &["inbox", "--room", "dest"],
+            None,
+            &sandbox.path,
+            &[("POST_ARX_GENERATION", "not-a-generation")],
+        );
+        assert_success(&read);
+        assert!(!sandbox.mail_root.join("dest").exists());
+        let write = sandbox.run_in_env(
+            &[
+                "send", "--to", "dest", "--from", "sender", "--body", "refused",
+            ],
+            None,
+            &sandbox.path,
+            &[("POST_ARX_GENERATION", "7")],
+        );
+        assert_migration_refused(&write);
+        let mut after = fs::read_dir(&sandbox.mail_root)
+            .expect("root")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        after.sort();
+        assert_eq!(
+            before, after,
+            "{label} changed the store while reading/writing"
+        );
+    }
+}
+
+#[test]
+fn migration_fence_snapshot_never_mints_presence_or_room_state() {
+    for state in [
+        r#"{"state":"fenced","generation":7}"#,
+        r#"{"state":"active","generation":7}"#,
+    ] {
+        let sandbox = Sandbox::new_unseeded();
+        seed_fence_store(&sandbox, state);
+        let output = sandbox.run_in_env(
+            &["watch", "--snapshot", "--room", "dest"],
+            None,
+            &sandbox.path,
+            &[("POST_ARX_GENERATION", "not-a-generation")],
+        );
+        assert_success(&output);
+        assert!(!sandbox.mail_root.join("dest").exists());
+        assert!(!sandbox.mail_root.join("archive").exists());
+        assert!(!sandbox.mail_root.join("dest/watch.heartbeat").exists());
+        assert!(!sandbox.mail_root.join("dest/channel-state.json").exists());
+    }
+}
+
+#[test]
+fn migration_fence_cross_process_lock_waits_then_observes_fence() {
+    let sandbox = Sandbox::new_unseeded();
+    seed_fence_store(&sandbox, r#"{"state":"active","generation":7}"#);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(sandbox.mail_root.join(".post-arx.lock"))
+        .expect("open migration lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let mut child = post_command()
+        .args([
+            "send",
+            "--to",
+            "dest",
+            "--from",
+            "sender",
+            "--body",
+            "blocked until cutover",
+        ])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_ARX_GENERATION", "7")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blocked writer");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(child.try_wait().expect("probe blocked writer").is_none());
+
+    write_fence_state_locked(&sandbox.mail_root, 7);
+    drop(lock);
+    let output = child.wait_with_output().expect("collect blocked writer");
+    assert_migration_refused(&output);
+    assert!(!sandbox.mail_root.join("archive").exists());
+    assert!(!sandbox.mail_root.join("dest").exists());
+}
+
+#[test]
+fn migration_fence_enrolled_long_watch_absent_room_refuses_without_creating() {
+    let sandbox = Sandbox::new_unseeded();
+    seed_fence_store(&sandbox, r#"{"state":"active","generation":7}"#);
+    let output = sandbox.run_in_env(
+        &["watch", "--room", "absent-room", "--interval-ms", "100"],
+        None,
+        &sandbox.path,
+        &[("POST_ARX_GENERATION", "7")],
+    );
+    assert!(!output.status.success(), "watch on absent room must refuse");
+    assert_eq!(
+        output.status.code(),
+        Some(66),
+        "stderr: {}",
+        stderr(&output)
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "not_found");
+    assert!(error.error.message.contains("absent-room"));
+    assert!(
+        !sandbox.mail_root.join("absent-room").exists(),
+        "must not create absent room directory"
+    );
+    assert!(
+        !sandbox
+            .mail_root
+            .join("absent-room/watch.heartbeat")
+            .exists(),
+        "must not write heartbeat for absent room"
+    );
+}
+
+#[test]
+fn migration_fence_empty_and_malformed_generation_fail_closed_against_legacy_store() {
+    for (label, bad_gen) in [
+        ("empty-string", ""),
+        ("malformed-alpha", "not-a-number"),
+        ("zero", "0"),
+        ("negative", "-7"),
+        ("whitespace", "   "),
+    ] {
+        let sandbox = Sandbox::new_unseeded();
+        assert!(!sandbox.mail_root.exists(), "{label}: store starts empty");
+
+        // 1. Writer command: must fail closed and must not perform first-run or mutate.
+        let writer_output = sandbox.run_in_env(
+            &[
+                "send",
+                "--to",
+                "dest",
+                "--from",
+                "sender",
+                "--body",
+                "attempted send",
+            ],
+            None,
+            &sandbox.path,
+            &[("POST_ARX_GENERATION", bad_gen)],
+        );
+        assert!(
+            !writer_output.status.success(),
+            "{label}: writer must fail for bad generation {bad_gen:?}"
+        );
+        assert_eq!(
+            writer_output.status.code(),
+            Some(78),
+            "{label}: expected config invalid exit code, stderr: {}",
+            stderr(&writer_output)
+        );
+        let error: ErrorEnvelope = from_stderr(&writer_output);
+        assert_eq!(
+            error.error.code, "config_invalid",
+            "{label}: expected config_invalid error code"
+        );
+        assert!(
+            error.error.message.contains("POST_ARX_GENERATION"),
+            "{label}: error message must mention POST_ARX_GENERATION"
+        );
+        assert!(
+            !sandbox.mail_root.join(".post-arx.lock").exists(),
+            "{label}: lock must not be created"
+        );
+        assert!(
+            !sandbox.mail_root.join("rooms.json").exists(),
+            "{label}: first-run defaults must not be created on failed writer"
+        );
+        assert!(
+            !sandbox.mail_root.join("dest").exists(),
+            "{label}: room directory must not be created"
+        );
+        assert!(
+            !sandbox.mail_root.join("archive").exists(),
+            "{label}: archive must not be created"
+        );
+
+        // 2. Read commands with bad generation against a legacy store must also be non-mutating.
+        for args in [
+            &["inbox", "--room", "dest"][..],
+            &["rooms"][..],
+            &["channels"][..],
+            &["schema"][..],
+        ] {
+            let read_output = sandbox.run_in_env(
+                args,
+                None,
+                &sandbox.path,
+                &[("POST_ARX_GENERATION", bad_gen)],
+            );
+            assert!(
+                read_output.status.success(),
+                "{label}: read command {args:?} should succeed without mutation"
+            );
+            assert!(
+                !sandbox.mail_root.join("rooms.json").exists(),
+                "{label}: read command {args:?} must not mint first-run defaults"
+            );
+            assert!(
+                !sandbox.mail_root.join(".post-arx.lock").exists(),
+                "{label}: read command {args:?} must not create lock"
+            );
+        }
+    }
 }
 
 // --- v0.4 channel ergonomics -------------------------------------------------

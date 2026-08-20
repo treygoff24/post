@@ -274,6 +274,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "HOME: resolves the default ~/.claude-mail root and ~/ room paths",
             "POST_FROM: stable room pin set by the launch helper; beats cwd inference for sender/acting-room resolution (explicit --from/--room still wins), recorded as sender_provenance=declared-env; set-but-invalid is a loud error, never a silent fallback",
             "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
+            "POST_ARX_GENERATION: positive migration generation for writers only; reads never parse or reject it. Missing/zero/stale/malformed declarations refuse enrolled writers before mutation; absent state plus an unset declaration preserves legacy writes. Enrolled reads are non-mutating. The enrollment-owned .post-arx.json state, existing solitary .post-arx.lock flock anchor, and actual ..post-arx.json.<pid>.<nonce>.tmp atomic temp namespace are reserved room names; no lock temp namespace is produced; the lock inode is never unlinked or recreated",
         ]),
     };
     CommandResult::json(&output, pretty)

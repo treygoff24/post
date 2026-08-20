@@ -11,6 +11,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_segmentation::UnicodeSegmentation;
 
+thread_local! {
+    static READ_ONLY_COMMAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) struct ReadOnlyCommandGuard(bool);
+
+pub(crate) fn enter_read_only_command(read_only: bool) -> ReadOnlyCommandGuard {
+    let prior = READ_ONLY_COMMAND.with(|slot| slot.replace(read_only));
+    ReadOnlyCommandGuard(prior)
+}
+
+impl Drop for ReadOnlyCommandGuard {
+    fn drop(&mut self) {
+        READ_ONLY_COMMAND.with(|slot| slot.set(self.0));
+    }
+}
+
+pub(crate) fn read_only_command() -> bool {
+    READ_ONLY_COMMAND.with(std::cell::Cell::get)
+}
+
 pub(crate) const DEFAULT_RULES_JSON: &str = r#"{
   "blocked": []
 }
@@ -35,7 +56,7 @@ pub(crate) const POST_SENDER_ADDRESS_ENV: &str = "POST_SENDER_ADDRESS";
 /// Bound on a declared sender address. `harness.repo.uuid` is well under
 /// this; the cap keeps a hostile environment from bloating every envelope.
 const SENDER_ADDRESS_MAX_BYTES: usize = 256;
-const RESERVED_ROOM_NAMES: [&str; 7] = [
+const RESERVED_ROOM_NAMES: [&str; 9] = [
     "*",
     "archive",
     "rooms.json",
@@ -43,6 +64,8 @@ const RESERVED_ROOM_NAMES: [&str; 7] = [
     "profiles.json",
     "owner.json",
     ROOMS_LOCK_FILE,
+    crate::migration_fence::STATE_FILE,
+    crate::migration_fence::LOCK_FILE,
 ];
 
 /// One refusal predicate for every profile-text enforcement point (both
@@ -101,11 +124,18 @@ impl Context {
     }
 
     pub(crate) fn prepare_first_run(&self) -> AppResult<()> {
-        if self.root.exists() {
-            return Ok(());
-        }
         fs::create_dir_all(&self.root)
             .map_err(|error| AppError::io("create mailbox root", &self.root, error))?;
+        let mut entries = fs::read_dir(&self.root)
+            .map_err(|error| AppError::io("inspect mailbox root", &self.root, error))?;
+        if entries
+            .next()
+            .transpose()
+            .map_err(|error| AppError::io("inspect mailbox root entry", &self.root, error))?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_default_if_missing("rules.json", DEFAULT_RULES_JSON)?;
         self.write_default_if_missing("rooms.json", DEFAULT_ROOMS_JSON)?;
         Ok(())
@@ -127,8 +157,18 @@ impl Context {
 
     pub(crate) fn load_rooms(&self) -> AppResult<RoomMap> {
         let path = self.root.join("rooms.json");
-        let bytes = fs::read(&path)
-            .map_err(|error| AppError::config(&path, format!("cannot read file: {error}")))?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && read_only_command() => {
+                return Ok(RoomMap::new());
+            }
+            Err(error) => {
+                return Err(AppError::config(
+                    &path,
+                    format!("cannot read file: {error}"),
+                ));
+            }
+        };
         let rooms: RoomMap = serde_json::from_slice(&bytes)
             .map_err(|error| AppError::config(&path, format!("invalid JSON object: {error}")))?;
         // An empty map is the legitimate fresh-install state (defaults ship
@@ -181,8 +221,20 @@ impl Context {
 
     pub(crate) fn load_rules(&self, rooms: &RoomMap) -> AppResult<RulesConfig> {
         let path = self.root.join("rules.json");
-        let bytes = fs::read(&path)
-            .map_err(|error| AppError::config(&path, format!("cannot read file: {error}")))?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && read_only_command() => {
+                return Ok(RulesConfig {
+                    blocked: Vec::new(),
+                });
+            }
+            Err(error) => {
+                return Err(AppError::config(
+                    &path,
+                    format!("cannot read file: {error}"),
+                ));
+            }
+        };
         let rules: RulesConfig = serde_json::from_slice(&bytes)
             .map_err(|error| AppError::config(&path, format!("invalid JSON shape: {error}")))?;
         for (index, rule) in rules.blocked.iter().enumerate() {
@@ -363,6 +415,9 @@ impl Context {
         let directory = self.root.join(room);
         let inbox = directory.join("inbox");
         let read = directory.join("read");
+        if read_only_command() {
+            return Ok((inbox, read));
+        }
         fs::create_dir_all(&inbox)
             .map_err(|error| AppError::io("create inbox directory", &inbox, error))?;
         fs::create_dir_all(&read)
@@ -458,6 +513,7 @@ pub(crate) fn validate_room_name(value: &str) -> Result<(), String> {
     let folded = value.to_ascii_lowercase();
     if RESERVED_ROOM_NAMES.contains(&folded.as_str())
         || (folded.starts_with(".rooms.json.") && folded.ends_with(".tmp"))
+        || (folded.starts_with("..post-arx.json.") && folded.ends_with(".tmp"))
     {
         return Err(format!(
             "name '{value}' is reserved by mailbox storage or wildcard semantics"
@@ -555,8 +611,15 @@ pub(crate) fn validate_envelope(path: &Path, envelope: &Envelope) -> AppResult<(
 
 pub(crate) fn mail_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let entries = fs::read_dir(directory)
-        .map_err(|error| AppError::io("list mailbox directory", directory, error))?;
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && read_only_command() => {
+            return Ok(files)
+        }
+        Err(error) => {
+            return Err(AppError::io("list mailbox directory", directory, error));
+        }
+    };
     for entry in entries {
         let entry = entry.map_err(|error| AppError::io("read mailbox entry", directory, error))?;
         let path = entry.path();

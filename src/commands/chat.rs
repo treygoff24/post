@@ -718,6 +718,7 @@ fn render_text(
     // full always renders the wall, and compact never burns the day's full
     // banner for a later session that needs it (review findings, Free Sol).
     let show_wall = match framing {
+        crate::cli::FramingMode::Auto if crate::mailbox::read_only_command() => true,
         crate::cli::FramingMode::Auto => full_banner_due_today(context, &room),
         crate::cli::FramingMode::Full => true,
         crate::cli::FramingMode::Compact => false,

@@ -4,8 +4,9 @@ use crate::channel::{
 };
 use crate::cli::WatchArgs;
 use crate::command_result::CommandResult;
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
+use crate::migration_fence;
 use crate::output::{InboxItem, WatchEvent, WatchReason};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -62,6 +63,14 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             );
         }
         let (inbox, _) = context.mailbox_dirs(&room)?;
+        let room_dir = context.root.join(&room);
+        if !snapshot && crate::mailbox::read_only_command() && !room_dir.is_dir() {
+            return Err(AppError::new(
+                ErrorCode::NotFound,
+                format!("room directory '{}' does not exist", room_dir.display()),
+                "Enrolled long watch does not create mailboxes; create or initialize the room directory before watching.",
+            ));
+        }
         targets.push(WatchTarget {
             floors: load_channel_floors(context, &room),
             room,
@@ -119,6 +128,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         // Snapshot never reaches here. Stamp carries interval_ms so liveness
         // scales with --interval-ms instead of a fixed LIVE_SECS window.
         for target in &targets {
+            let _admission = migration_fence::admit(context, true)?;
             crate::presence::touch_heartbeat(context, &target.room, interval_ms);
         }
         // A doorbell that dies is silently useless: transient scan failures

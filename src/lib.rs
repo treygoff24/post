@@ -6,6 +6,7 @@ mod command_result;
 mod commands;
 mod error;
 mod mailbox;
+mod migration_fence;
 mod model;
 pub mod output;
 mod presence;

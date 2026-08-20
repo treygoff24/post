@@ -46,6 +46,34 @@ The public language is model-neutral; the default root remains
   [{"from","to","reason"}]}`. First run creates the original defaults,
   including the agent-memory ARMED INSTRUMENT rule. New config files use mode
   `0600`.
+- Migration fence (enrollment-owned): `POST_ARX_GENERATION` is parsed only for
+  writers. A missing declaration is the ordinary legacy writer mode only while
+  `.post-arx.json` is absent; an enrolled writer must present the positive
+  generation matching the `active` state. Missing, zero, stale, malformed, or
+  non-UTF-8 declarations refuse before any mailbox mutation. Reads do not parse
+  or reject this variable. `.post-arx.json` contains exactly `{"state":"fenced"
+  |"active","generation":<positive integer>}` and any state file arms
+  read-only protection; `.post-arx.lock` is its solitary regular-file flock
+  anchor. Legacy writes with no state and no generation skip that lock, while
+  enrolled writers require the existing trusted lock; refusal never creates it.
+  Enrolled ordinary writes hold the root flock through mutation. A long
+  non-snapshot watch holds it only around each heartbeat. The lock inode is
+  never unlinked or recreated. External cutover must quiesce and drain legacy
+  writers, take the same flock, fence, wait out enrolled writers by lock
+  ownership, then copy and activate; a writer's slow stdout and its
+  after-stdout cursor or read move remain inside the same lock hold, so slow
+  stdout can block the lock; operator quiesce and timeout handling must bound
+  that drain. Neither state nor lock may be deleted. The state, lock, and
+  actual state atomic temporary-name namespace
+  are reserved room names; the actual `.post-arx.json` temporary name is
+  `..post-arx.json.<pid>.<nonce>.tmp`, and no lock temporary namespace is
+  produced or reserved.
+- Under an enrolled/fenced store, all reads remain available and non-mutating:
+  no root/room directory, banner-day, heartbeat, or cursor writes. A long
+  non-snapshot watch re-admits before every heartbeat and exits nonzero if the
+  fence or generation changes. Snapshot remains read-only only under the
+  enrolled/fence guard; legacy snapshot behavior is unchanged except that it
+  never touches a heartbeat.
 - `post rooms add` takes an advisory exclusive flock on `.rooms.lock`, then
   reloads, validates, and atomically replaces `rooms.json` while preserving its
   mode. It never writes `rules.json`. A symlinked `rooms.json` is refused rather
@@ -160,7 +188,8 @@ results, stderr = diagnostics/errors.
   invalid names; ASCII-case-folded
   collisions with existing names; the ASCII-case-insensitive reserved names
   `*`, `archive`, `rooms.json`, `rules.json`, `.rooms.lock`, and the
-  `.rooms.json.*.tmp` atomic-write namespace; paths with control characters;
+  `.rooms.json.*.tmp`, `.post-arx.json`, `.post-arx.lock`, and
+  `..post-arx.json.*.tmp` atomic-write namespace; paths with control characters;
   missing/non-directory paths; and any registration targeted by a blocking rule
   (including `to: "*"`), quoting the rule's reason verbatim.
   Validation and replacement are one flock-protected transaction. It never
