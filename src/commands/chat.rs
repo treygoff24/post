@@ -491,25 +491,35 @@ fn discard_through(
             pretty,
         )?
     } else {
-        let channel = output::sanitize_text_header(channel_name);
-        let prior = match &outcome.prior {
-            Some(prior) => output::sanitize_text_header(prior),
-            None => "none".to_owned(),
-        };
-        if outcome.advanced {
-            format!(
-                "post: #{channel} cursor advanced through {} (was {prior}; {discarded} message(s) skipped)\n",
-                output::sanitize_text_header(&outcome.cursor)
-            )
-        } else {
-            format!(
-                "post: #{channel} cursor already at or past {} (cursor {}); nothing advanced\n",
-                output::sanitize_text_header(&target),
-                output::sanitize_text_header(&outcome.cursor)
-            )
-        }
+        discard_through_text(channel_name, &target, &outcome)
     };
     Ok(CommandResult::success(rendered))
+}
+
+/// Human receipt for `--discard-through`. `advanced` means the seen-set
+/// changed — not that any max-seen summary moved: a bridged late arrival
+/// below the newest seen id replays with prior == cursor, so the honest
+/// wording counts what was newly recorded instead of claiming an advance.
+fn discard_through_text(
+    channel_name: &str,
+    target: &str,
+    outcome: &crate::channel_state::CursorAdvance,
+) -> String {
+    let channel = output::sanitize_text_header(channel_name);
+    if outcome.advanced {
+        format!(
+            "post: #{channel} marked {} additional message(s) seen (through {}; cursor {})\n",
+            outcome.marked,
+            output::sanitize_text_header(target),
+            output::sanitize_text_header(&outcome.cursor)
+        )
+    } else {
+        format!(
+            "post: #{channel} cursor already at or past {} (cursor {}); nothing advanced\n",
+            output::sanitize_text_header(target),
+            output::sanitize_text_header(&outcome.cursor)
+        )
+    }
 }
 
 /// Channel paths after the existence and membership checks every cursor-facing
@@ -1951,6 +1961,40 @@ mod tests {
         .expect("member read");
         assert_eq!(beta_batch.len(), 1);
         assert_eq!(beta_batch[0].0.id, ID1);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn discard_through_replay_reports_marked_not_advanced_from_cursor_to_cursor() {
+        // The exact Sol replay: seen {T3}, a late unseen T2 below it, ack
+        // through T3. The seen-set changes (T2 is recorded), so advanced is
+        // true — but the max-seen summaries never moved, and the human text
+        // must say what actually happened instead of "advanced from T3 to T3".
+        let (root, context) = chat_context("through-replay");
+        let dir = seed_channel(&root, &["alpha"]);
+        ChannelState::mark_seen(&context, "alpha", "tax", [ID3.to_owned()]).expect("seen T3");
+        seed_message(&dir, ID2, "beta", "bridged late arrival");
+
+        let outcome =
+            ChannelState::mark_seen_through(&context, "alpha", "tax", ID3).expect("ack through T3");
+        assert!(outcome.advanced, "the seen-set changed");
+        assert_eq!(outcome.marked, 1);
+        assert_eq!(
+            outcome.prior.as_deref(),
+            Some(ID3),
+            "max-seen summary stays"
+        );
+        assert_eq!(outcome.cursor, ID3, "max-seen summary stays");
+
+        let text = discard_through_text("tax", ID3, &outcome);
+        assert!(
+            text.contains("marked 1 additional message(s) seen"),
+            "honest wording required: {text}"
+        );
+        assert!(
+            !text.contains("advanced"),
+            "must not claim an advance from T3 to T3: {text}"
+        );
         trash_test_root(&root);
     }
 }
