@@ -65,8 +65,10 @@
   external cutover must first quiesce and drain them; after conversion, those
   binaries refuse v2 channel state with `config_invalid` instead of misreading
   it. Post 0.6.0 has no enrollment or cutover CLI.
-- Exact seen-state grows linearly with channel history. Writes warn when a
-  channel reaches 50,000 seen ids. A watermark-plus-exceptions compaction is
+- Exact seen-state grows linearly with channel history (about 40 bytes per
+  id; measured on a release build: ~30 ms reads at 10,000 messages of
+  history, ~0.3 s at 100,000, full-channel discard 0.18 s and 1.8 s). Writes
+  warn when a channel reaches 50,000 seen ids. A watermark-plus-exceptions compaction is
   unsafe because a later backfill below the watermark would disappear; the
   documented policy defers compaction until a durable arrival-sequence fence
   exists.
