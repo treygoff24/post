@@ -83,7 +83,7 @@ post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
 post who [--room <room>]... [--text]
-post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
+post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
 post profile [show [<room>]]
 post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
@@ -380,13 +380,23 @@ only emitted output: omitted mail and channel messages remain unread because a
 watch never consumes or marks them seen. Omitting `--limit` preserves the
 unbounded snapshot behavior.
 
+`--digest` reduces a batch to one line per `(room, source)` group, where source
+is `mail` or `channel:<name>`. Groups retain first-arrival order and report the
+count, first/last ids, up to five unique senders in arrival order, and the shared
+reason (or `mixed`). Snapshot limits apply to underlying events before grouping.
+
 ```bash
 post watch --room codex --once
 post watch --room codex --snapshot
 post watch --room codex --snapshot --limit 25
 post watch --room codex --interval-ms 1000
+post watch --room codex --digest --text --interval-ms 5000
 post watch --room codex --room workspace   # one merged stream, deduplicated
 ```
+
+For a validated harness Monitor that turns each stdout line into one bounded
+notification, the `--digest --text --interval-ms 5000` form is recommended: a
+busy channel produces one ring per batch instead of one ring per message.
 
 Repeat `--room` (v0.3) to watch several rooms in one process: direct mail
 stays per-room, while a channel message shared between the watched rooms
@@ -400,7 +410,12 @@ Default output is NDJSON with variants:
 {"event":"unreadable","room":"codex","id":"bad-file","reason":"mail"}
 {"event":"channel_message","channel":"ops","id":"...","from":"workspace","subject":"...","sent":"...","reason":"channel"}
 {"event":"channel_message","channel":"ops","id":"...","from":"workspace","subject":"...","sent":"...","reason":"mention"}
+{"event":"digest","room":"codex","source":"channel:ops","count":3,"first_id":"...","last_id":"...","from":["workspace","atlasos"],"reason":"mixed"}
 ```
+
+Digest text is `#ops: 3 new (workspace ×2, atlasos ×1)` for channels and
+`mail: 2 new (alpha, beta)` for direct mail. A sender list longer than five is
+capped with `+N more`.
 
 `reason` is `mail` | `channel` | `mention` on every event type (`unreadable`
 uses `mail` or `channel`; mention is unknowable without a body). A room's own

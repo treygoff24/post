@@ -464,6 +464,11 @@ pub(crate) struct WatchArgs {
     /// Emit human-readable lines instead of the default NDJSON events.
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
+
+    /// Emit one summary per room/source group in each batch instead of one
+    /// line per event. Composes with JSON/text and all watch modes.
+    #[arg(long)]
+    pub digest: bool,
 }
 
 #[derive(Debug, Args)]

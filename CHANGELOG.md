@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- `post watch --digest` emits one JSON or text line per room/source group in
+  each batch, with counts, id bounds, a capped arrival-ordered sender list, and
+  shared-or-mixed reason. It composes with long-running, `--once`, `--snapshot`,
+  `--limit`, and `--text`; snapshot limits still apply before grouping.
+
 ## 0.6.0 — 2026-08-22
 
 ### Added

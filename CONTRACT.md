@@ -318,7 +318,7 @@ diagnostics/errors.
   line, conflicts with `--json`, and preserves the doctor exit dictionary:
   0 healthy / 1 findings / 3 fix-failed.
 - `post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>]
-  [--text]` — the
+  [--digest] [--text]` — the
   doorbell: blocks and streams one event per arriving direct mail or joined
   channel message so any harness monitor becomes a notifier. Room resolution as
   `inbox` (unregistered explicit rooms are accepted with a one-line stderr
@@ -345,6 +345,14 @@ diagnostics/errors.
   `{"event":"channel_message", channel, id, from, subject, sent, reason}` where
   `reason` is `channel` or `mention` (the watching room is @mentioned). A room's
   own channel messages are never news to it and never ring its own watch.
+  With `--digest`, each batch instead emits one object per `(room, source)`
+  group, ordered by the first underlying event:
+  `{"event":"digest", room, source, count, first_id, last_id, from, reason}`.
+  `source` is `mail` or `channel:<name>`; `from` de-duplicates senders in
+  arrival order and caps them at five followed by `"+N more"`; `reason` is the
+  shared per-event reason or `mixed`. Digest text is `#<channel>: N new
+  (<sender> ×<count>, ...)` or `mail: N new (...)`, omitting sender counts
+  when all are one and omitting the parenthesized list when no sender parsed.
   Each long-running poll touches `<room>/watch.heartbeat` (`<unix-secs>
   <interval-ms>`) when the room directory already exists, so `post who` can
   report live watches without PIDs. Snapshot mode never writes heartbeats.
@@ -381,10 +389,11 @@ diagnostics/errors.
   snapshot whose resolved room is unregistered warns on stderr, scans nothing,
   creates no mailbox directories, and exits 0. Snapshot mode shares every
   other watch invariant: envelope metadata only, no mail moves, no cursor
-  writes. Snapshot-only `--limit <n>` emits the last `n` events in scan order
+  writes. Snapshot-only `--limit <n>` admits the last `n` underlying events in scan order
   and warns on stderr when earlier events are omitted; `--limit 0` is unlimited.
-  The flag affects emission only — omitted events remain unread — and omitting
-  it preserves the unbounded snapshot behavior.
+  Optional digest grouping happens after that limit. The flag affects emission
+  only — omitted events remain unread — and omitting it preserves the unbounded
+  snapshot behavior.
 
 ## Profiles (amendment, 2026-08-05)
 

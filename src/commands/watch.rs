@@ -7,6 +7,7 @@ use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::migration_fence;
 use crate::output::{InboxItem, WatchEvent, WatchReason};
 use notify::{RecursiveMode, Watcher};
+use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
@@ -30,6 +31,166 @@ struct WatchTarget {
     scan_failing: bool,
 }
 
+struct WatchDelivery {
+    room: String,
+    source: String,
+    event: WatchEvent,
+}
+
+impl WatchDelivery {
+    fn mail(room: &str, event: WatchEvent) -> Self {
+        Self {
+            room: room.to_owned(),
+            source: "mail".to_owned(),
+            event,
+        }
+    }
+
+    fn channel(room: &str, channel: &str, event: WatchEvent) -> Self {
+        Self {
+            room: room.to_owned(),
+            source: format!("channel:{channel}"),
+            event,
+        }
+    }
+
+    fn id(&self) -> &str {
+        match &self.event {
+            WatchEvent::Mail { item, .. } => &item.id,
+            WatchEvent::Unreadable { id, .. } | WatchEvent::ChannelMessage { id, .. } => id,
+        }
+    }
+
+    fn sender(&self) -> Option<&str> {
+        match &self.event {
+            WatchEvent::Mail { item, .. } => Some(&item.from),
+            WatchEvent::ChannelMessage { from, .. } => Some(from),
+            WatchEvent::Unreadable { .. } => None,
+        }
+    }
+
+    fn reason(&self) -> WatchReason {
+        match &self.event {
+            WatchEvent::Mail { reason, .. }
+            | WatchEvent::Unreadable { reason, .. }
+            | WatchEvent::ChannelMessage { reason, .. } => *reason,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct WatchDigest {
+    event: &'static str,
+    room: String,
+    source: String,
+    count: usize,
+    first_id: String,
+    last_id: String,
+    from: Vec<String>,
+    reason: String,
+    #[serde(skip)]
+    sender_counts: Vec<(String, usize)>,
+}
+
+impl WatchDigest {
+    fn text_line(&self) -> String {
+        let label = self
+            .source
+            .strip_prefix("channel:")
+            .map_or_else(|| self.source.clone(), |channel| format!("#{channel}"));
+        if self.sender_counts.is_empty() {
+            return format!("{label}: {} new\n", self.count);
+        }
+        let show_counts = self.sender_counts.iter().any(|(_, count)| *count > 1);
+        let mut senders = self
+            .sender_counts
+            .iter()
+            .take(5)
+            .map(|(sender, count)| {
+                let sender = crate::output::sanitize_text_header(sender);
+                if show_counts {
+                    format!("{sender} ×{count}")
+                } else {
+                    sender
+                }
+            })
+            .collect::<Vec<_>>();
+        let omitted = self.sender_counts.len().saturating_sub(5);
+        if omitted > 0 {
+            senders.push(format!("+{omitted} more"));
+        }
+        format!("{label}: {} new ({})\n", self.count, senders.join(", "))
+    }
+}
+
+fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
+    let mut group_indexes = HashMap::<(String, String), usize>::new();
+    let mut digests = Vec::<WatchDigest>::new();
+    for delivery in batch {
+        let key = (delivery.room.clone(), delivery.source.clone());
+        let index = match group_indexes.get(&key) {
+            Some(index) => *index,
+            None => {
+                let index = digests.len();
+                group_indexes.insert(key, index);
+                digests.push(WatchDigest {
+                    event: "digest",
+                    room: delivery.room.clone(),
+                    source: delivery.source.clone(),
+                    count: 0,
+                    first_id: delivery.id().to_owned(),
+                    last_id: delivery.id().to_owned(),
+                    from: Vec::new(),
+                    reason: delivery.reason().as_str().to_owned(),
+                    sender_counts: Vec::new(),
+                });
+                index
+            }
+        };
+        let digest = &mut digests[index];
+        digest.count += 1;
+        digest.last_id = delivery.id().to_owned();
+        if digest.reason != delivery.reason().as_str() {
+            digest.reason = "mixed".to_owned();
+        }
+        if let Some(sender) = delivery.sender() {
+            if let Some((_, count)) = digest
+                .sender_counts
+                .iter_mut()
+                .find(|(existing, _)| existing == sender)
+            {
+                *count += 1;
+            } else {
+                digest.sender_counts.push((sender.to_owned(), 1));
+            }
+        }
+    }
+    for digest in &mut digests {
+        digest.from = digest
+            .sender_counts
+            .iter()
+            .take(5)
+            .map(|(sender, _)| sender.clone())
+            .collect();
+        let omitted = digest.sender_counts.len().saturating_sub(5);
+        if omitted > 0 {
+            digest.from.push(format!("+{omitted} more"));
+        }
+    }
+    digests
+}
+
+fn apply_snapshot_limit(batch: &mut Vec<WatchDelivery>, limit: Option<usize>) -> usize {
+    let Some(limit) = limit.filter(|limit| *limit > 0) else {
+        return 0;
+    };
+    let omitted = batch.len().saturating_sub(limit);
+    if omitted > 0 {
+        batch.drain(..omitted);
+    }
+    omitted
+}
+
 pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult> {
     let WatchArgs {
         room: requested_rooms,
@@ -38,6 +199,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         limit,
         interval_ms,
         text,
+        digest,
     } = args;
     let rooms = context.load_rooms()?;
     let requested_rooms = if requested_rooms.is_empty() {
@@ -120,18 +282,15 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 &mut emitted_channel_ids,
             )?);
         }
-        if let Some(limit) = limit.filter(|limit| *limit > 0) {
-            let omitted = batch.len().saturating_sub(limit);
-            if omitted > 0 {
-                batch.drain(..omitted);
-                let noun = if omitted == 1 { "event" } else { "events" };
-                eprintln!(
-                    "post: snapshot limit omitted {omitted} earlier {noun} (use --limit 0 for all)"
-                );
-            }
+        let omitted = apply_snapshot_limit(&mut batch, limit);
+        if omitted > 0 {
+            let noun = if omitted == 1 { "event" } else { "events" };
+            eprintln!(
+                "post: snapshot limit omitted {omitted} earlier {noun} (use --limit 0 for all)"
+            );
         }
         if !batch.is_empty() {
-            emit(&batch, text)?;
+            emit(&batch, text, digest)?;
         }
         return Ok(CommandResult::success(String::new()));
     }
@@ -171,6 +330,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         interval_ms,
         once,
         text,
+        digest,
         &mut wake,
         slow_period,
     )
@@ -188,13 +348,14 @@ fn run_watch_loop(
     interval_ms: u64,
     once: bool,
     text: bool,
+    digest: bool,
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
 ) -> AppResult<CommandResult> {
     touch_heartbeats(context, targets, interval_ms)?;
     let mut batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
     if !batch.is_empty() {
-        emit(&batch, text)?;
+        emit(&batch, text, digest)?;
         if once {
             return Ok(CommandResult::success(String::new()));
         }
@@ -257,7 +418,7 @@ fn run_watch_loop(
             batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
         }
         if !batch.is_empty() {
-            emit(&batch, text)?;
+            emit(&batch, text, digest)?;
             if once {
                 return Ok(CommandResult::success(String::new()));
             }
@@ -281,7 +442,7 @@ fn scan_targets(
     targets: &mut [WatchTarget],
     emitted_channel_ids: &mut HashSet<String>,
     selected: impl Fn(&WatchTarget) -> bool,
-) -> Vec<WatchEvent> {
+) -> Vec<WatchDelivery> {
     let mut batch = Vec::new();
     for target in targets.iter_mut().filter(|target| selected(target)) {
         match scan_batch(
@@ -517,14 +678,17 @@ fn scan_batch(
     channel_seen: &HashMap<String, BTreeSet<String>>,
     seen: &mut HashSet<PathBuf>,
     emitted_channel_ids: &mut HashSet<String>,
-) -> AppResult<Vec<WatchEvent>> {
+) -> AppResult<Vec<WatchDelivery>> {
     let mut batch = Vec::new();
     for path in mail_files(inbox)? {
         if !seen.insert(path.clone()) {
             continue;
         }
         match parse_mail(&path) {
-            Ok(mail) => batch.push(WatchEvent::mail(room, InboxItem::from(mail.envelope))),
+            Ok(mail) => batch.push(WatchDelivery::mail(
+                room,
+                WatchEvent::mail(room, InboxItem::from(mail.envelope)),
+            )),
             // Consumed by a concurrent read between scan and parse: no longer unread.
             Err(_) if !path.exists() => {}
             Err(error) => {
@@ -543,7 +707,10 @@ fn scan_batch(
                     .and_then(|value| value.to_str())
                     .unwrap_or("<non-utf8 filename>")
                     .to_owned();
-                batch.push(WatchEvent::unreadable(room, id, WatchReason::Mail));
+                batch.push(WatchDelivery::mail(
+                    room,
+                    WatchEvent::unreadable(room, id, WatchReason::Mail),
+                ));
             }
         }
     }
@@ -573,7 +740,11 @@ fn scan_batch(
             Ok(parsed) if parsed.message.from == room => {}
             Ok(parsed) => {
                 emitted_channel_ids.insert(parsed.message.id.clone());
-                batch.push(WatchEvent::channel_message(parsed.message, room));
+                batch.push(WatchDelivery::channel(
+                    room,
+                    &channel,
+                    WatchEvent::channel_message(parsed.message, room),
+                ));
             }
             // Channel messages are append-only and never moved, but a send
             // caught mid-write can momentarily fail to parse; ring anyway,
@@ -587,7 +758,11 @@ fn scan_batch(
                 );
                 let id = message_id.unwrap_or("<non-utf8 filename>").to_owned();
                 emitted_channel_ids.insert(dedupe_id);
-                batch.push(WatchEvent::unreadable(room, id, WatchReason::Channel));
+                batch.push(WatchDelivery::channel(
+                    room,
+                    &channel,
+                    WatchEvent::unreadable(room, id, WatchReason::Channel),
+                ));
             }
         }
     }
@@ -730,19 +905,33 @@ pub(super) fn load_channel_seen(
     }
 }
 
-fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {
+fn emit(batch: &[WatchDelivery], text: bool, digest: bool) -> AppResult<()> {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
-    for event in batch {
-        let line = if text {
-            event.text_line()
-        } else {
-            crate::output::json(event, false)?
-        };
+    let mut write_line = |line: String| {
         output
             .write_all(line.as_bytes())
             .and_then(|_| output.flush())
-            .map_err(|error| AppError::io("write watch event", Path::new("<stdout>"), error))?;
+            .map_err(|error| AppError::io("write watch event", Path::new("<stdout>"), error))
+    };
+    if digest {
+        for digest in digest_batch(batch) {
+            let line = if text {
+                digest.text_line()
+            } else {
+                crate::output::json(&digest, false)?
+            };
+            write_line(line)?;
+        }
+    } else {
+        for delivery in batch {
+            let line = if text {
+                delivery.event.text_line()
+            } else {
+                crate::output::json(&delivery.event, false)?
+            };
+            write_line(line)?;
+        }
     }
     Ok(())
 }
@@ -751,9 +940,154 @@ fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {
 mod tests {
     use super::*;
     use crate::channel::encode_message;
-    use crate::model::ChannelMessage;
+    use crate::model::{ChannelMessage, MailKind};
+    use crate::output::InboxItem;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
+
+    fn mail_delivery(room: &str, id: &str, from: &str) -> WatchDelivery {
+        WatchDelivery::mail(
+            room,
+            WatchEvent::mail(
+                room,
+                InboxItem {
+                    id: id.to_owned(),
+                    from: from.to_owned(),
+                    kind: MailKind::Note,
+                    subject: String::new(),
+                    sent: "2026-08-22 00:00:00 +0000".to_owned(),
+                    display_name: None,
+                    pfp: None,
+                    sender_address: None,
+                    sender_provenance: None,
+                },
+            ),
+        )
+    }
+
+    fn channel_delivery(
+        room: &str,
+        channel: &str,
+        id: &str,
+        from: &str,
+        reason: WatchReason,
+    ) -> WatchDelivery {
+        WatchDelivery::channel(
+            room,
+            channel,
+            WatchEvent::ChannelMessage {
+                channel: channel.to_owned(),
+                id: id.to_owned(),
+                from: from.to_owned(),
+                subject: String::new(),
+                sent: "2026-08-22 00:00:00 +0000".to_owned(),
+                display_name: None,
+                pfp: None,
+                sender_address: None,
+                sender_provenance: None,
+                reason,
+            },
+        )
+    }
+
+    #[test]
+    fn digest_groups_two_channels_and_mail_in_first_arrival_order() {
+        let batch = vec![
+            channel_delivery("alpha", "ops", "c1", "sol", WatchReason::Channel),
+            mail_delivery("alpha", "m1", "beta"),
+            channel_delivery("alpha", "ops", "c2", "atlasos", WatchReason::Mention),
+            channel_delivery("alpha", "build", "c3", "sol", WatchReason::Channel),
+        ];
+
+        let digests = digest_batch(&batch);
+
+        assert_eq!(
+            digests
+                .iter()
+                .map(|digest| {
+                    (
+                        digest.room.as_str(),
+                        digest.source.as_str(),
+                        digest.count,
+                        digest.reason.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("alpha", "channel:ops", 2, "mixed"),
+                ("alpha", "mail", 1, "mail"),
+                ("alpha", "channel:build", 1, "channel"),
+            ]
+        );
+        assert_eq!(digests[0].first_id, "c1");
+        assert_eq!(digests[0].last_id, "c2");
+    }
+
+    #[test]
+    fn digest_sender_list_is_deduplicated_in_order_and_capped() {
+        let batch = [
+            "alpha", "beta", "alpha", "gamma", "delta", "epsilon", "zeta", "eta",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, from)| {
+            channel_delivery(
+                "room",
+                "ops",
+                &format!("c{index}"),
+                from,
+                WatchReason::Channel,
+            )
+        })
+        .collect::<Vec<_>>();
+
+        let digests = digest_batch(&batch);
+
+        assert_eq!(
+            digests[0].from,
+            vec!["alpha", "beta", "gamma", "delta", "epsilon", "+2 more"]
+        );
+    }
+
+    #[test]
+    fn digest_text_renders_sender_counts_and_singletons() {
+        let repeated = digest_batch(&[
+            channel_delivery("room", "ops", "c1", "sol", WatchReason::Channel),
+            channel_delivery("room", "ops", "c2", "sol", WatchReason::Channel),
+            channel_delivery("room", "ops", "c3", "atlasos", WatchReason::Channel),
+        ]);
+        let singletons = digest_batch(&[
+            mail_delivery("room", "m1", "alpha"),
+            mail_delivery("room", "m2", "beta"),
+        ]);
+
+        assert_eq!(
+            repeated[0].text_line(),
+            "#ops: 3 new (sol ×2, atlasos ×1)\n"
+        );
+        assert_eq!(singletons[0].text_line(), "mail: 2 new (alpha, beta)\n");
+    }
+
+    #[test]
+    fn snapshot_limit_is_applied_before_digest_grouping() {
+        let mut batch = vec![
+            channel_delivery("room", "ops", "c1", "alpha", WatchReason::Channel),
+            channel_delivery("room", "ops", "c2", "beta", WatchReason::Channel),
+            channel_delivery("room", "ops", "c3", "beta", WatchReason::Channel),
+        ];
+
+        assert_eq!(apply_snapshot_limit(&mut batch, Some(2)), 1);
+        let digests = digest_batch(&batch);
+
+        assert_eq!(digests[0].count, 2);
+        assert_eq!(digests[0].first_id, "c2");
+        assert_eq!(digests[0].last_id, "c3");
+    }
+
+    #[test]
+    fn empty_batch_produces_no_digest() {
+        assert!(digest_batch(&[]).is_empty());
+    }
 
     #[test]
     fn scan_batch_never_rings_for_the_rooms_own_messages() {
@@ -812,7 +1146,7 @@ mod tests {
         .expect("scan");
         let froms: Vec<&str> = batch
             .iter()
-            .filter_map(|event| match event {
+            .filter_map(|delivery| match &delivery.event {
                 WatchEvent::ChannelMessage { from, .. } => Some(from.as_str()),
                 _ => None,
             })
@@ -912,6 +1246,7 @@ body
             1000,
             true,
             false,
+            false,
             &mut wake,
             Duration::from_secs(3600),
         )
@@ -991,6 +1326,7 @@ body
             &mut emitted_channel_ids,
             1000,
             true,
+            false,
             false,
             &mut wake,
             Duration::from_secs(0),

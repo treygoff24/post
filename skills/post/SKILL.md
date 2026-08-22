@@ -88,7 +88,7 @@ post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
 post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
-post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
+post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
 post who [--room <room>]... [--text]
 post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]  # full surface: post owner init --help
 post schema
@@ -128,6 +128,8 @@ Channel ergonomics (v0.4):
 - Snapshot-only `--limit N` emits the last N events in scan order without
   consuming them; `--limit 0` is unlimited, and omitting the flag preserves the
   existing unbounded snapshot behavior.
+- `--digest` emits one line per room/source group in each batch; source is
+  `mail` or `channel:<name>`, and snapshot limits apply before grouping.
 
 Body input, the one surface worth memorizing:
 
@@ -214,9 +216,16 @@ with a PTY, then `functions.write_stdin` to poll or send Ctrl-C.)
   direct-mail scan failure is a nonzero error, never a false empty;
   `--interval-ms` has no effect. This is the primitive for lifecycle hooks.
 - Long-running: `post watch --room <room> --interval-ms 1000` in a PTY.
+- Validated Monitor doorbell: `post watch --room <room> --digest --text
+  --interval-ms 5000`. Digest mode keeps a busy channel to one notification
+  line per batch instead of one per message; keep the validator/bounded-notice
+  adapter between stdout and injected context.
 - Long-running watch uses inotify on Linux or FSEvents on macOS for wake hints,
   with full scans as truth and polling at `--interval-ms` as the fallback.
 - Parse stdout as NDJSON, one object per line. Do not expect bodies.
+- Digest NDJSON is `{event:"digest", room, source, count, first_id, last_id,
+  from, reason}`. `from` is unique sender ids in arrival order, capped at five
+  plus `"+N more"`; `reason` is shared or `mixed`.
 - For smokes, choose an absent `POST_MAIL_ROOT=/tmp/...` and initialize it with
   `post doctor --fix` before creating temporary rooms/channels. Then seed an
   event before `--once`; otherwise use a bounded PTY/session and stop it

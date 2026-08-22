@@ -105,9 +105,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "watch",
-            "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--text]",
-            "NDJSON event union (mail | unreadable | channel_message), one per line; text with --text",
-            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never mutates channel seen-sets; scans are the truth source and a native filesystem watcher (inotify/FSEvents) only supplies wake hints, with a slow periodic re-registration pass and poll fallback at --interval-ms; each long-running poll touches <room>/watch.heartbeat for presence (snapshot never does); events carry reason mail|channel|mention on every type (unreadable: mail|channel); --snapshot scans exactly once (unread direct mail plus joined-channel messages outside the seen-set) and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories); snapshot-only --limit <n> emits the last n events in scan order and warns when earlier events are omitted, while --limit 0 is unlimited",
+            "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--digest] [--text]",
+            "NDJSON event union (mail | unreadable | channel_message), one per line; --digest emits one digest per room/source group; text with --text",
+            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; reads envelopes only — never moves or alters mail, never emits body content, never mutates channel seen-sets; scans are the truth source and a native filesystem watcher (inotify/FSEvents) only supplies wake hints, with a slow periodic re-registration pass and poll fallback at --interval-ms; each long-running poll touches <room>/watch.heartbeat for presence (snapshot never does); events carry reason mail|channel|mention on every type (unreadable: mail|channel); --digest groups each batch by room and source (mail or channel:<name>) in first-arrival order; --snapshot scans exactly once (unread direct mail plus joined-channel messages outside the seen-set) and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories); snapshot-only --limit <n> admits the last n underlying events before optional digest grouping and warns when earlier events are omitted, while --limit 0 is unlimited",
         ),
         command(
             "who",
@@ -196,6 +196,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp, sender_address, sender_provenance]",
             "unreadable: event, room, id, reason=mail|channel",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
+            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed",
         ]),
         who: fields(&["ok", "rooms (room, live_watch, last_seen?)", "count"]),
     };

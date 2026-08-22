@@ -15,7 +15,7 @@ harness monitor can notify its agent without reading message bodies.
 ## Command
 
 ```
-post watch [--room <name>]... [--once | --snapshot [--limit <N>]] [--interval-ms <N>] [--text]
+post watch [--room <name>]... [--once | --snapshot [--limit <N>]] [--interval-ms <N>] [--digest] [--text]
 ```
 
 - Room resolution is identical to `inbox` (explicit `--room`, else the
@@ -36,6 +36,9 @@ post watch [--room <name>]... [--once | --snapshot [--limit <N>]] [--interval-ms
 - `--snapshot`: scan exactly once and exit. `--limit N` emits only the last N
   events from that scan; zero is unlimited. Watch never consumes omitted
   events.
+- `--digest`: emit one line per `(room, source)` group in each batch instead of
+  one line per event. It composes with long-running, once, snapshot, limit,
+  JSON, and text modes.
 - Otherwise runs until killed. Stdout is flushed after every batch (a
   monitor must never wait on a buffered line).
 
@@ -50,6 +53,25 @@ Event shapes:
 Text mode: `<id>  [<kind>] from <from>  "subject"` (inbox's line format,
 subject debug-quoted so control characters render escaped, never raw), a
 channel-prefixed message line, or `<id>  [?] unreadable envelope`.
+
+### Digest
+
+Digest mode groups the underlying events in first-arrival order by room and
+source: `mail` for direct mail and `channel:<name>` for channel messages. Each
+group reports its event count, first and last ids, and de-duplicated senders in
+arrival order. The `from` list is capped at five senders with a final
+`"+N more"` entry when needed. `reason` is the shared event reason, or `mixed`
+when a group contains different reasons.
+
+```json
+{"event":"digest","room":"devbox-linux-devbox","source":"channel:machineroom-devbox","count":3,"first_id":"...","last_id":"...","from":["sol-devbox","atlasos"],"reason":"mixed"}
+```
+
+Text mode renders `#machineroom-devbox: 3 new (sol-devbox ×2, atlasos ×1)`
+for a channel or `mail: 2 new (alpha, beta)` for direct mail. Snapshot limits
+still select underlying events first, so a digest describes only the events
+admitted by `--limit`; the omitted-events warning is unchanged. An empty batch
+emits nothing, and `--once` still exits only after a non-empty underlying batch.
 
 ## Lens (a): the framing boundary
 

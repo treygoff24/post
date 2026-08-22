@@ -363,7 +363,7 @@ fn help_and_schema_keep_command_contract_visible() {
         .expect("watch command in schema");
     assert_eq!(
         watch.usage,
-        "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--text]"
+        "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--digest] [--text]"
     );
     assert!(watch.side_effects.contains("deduplicates channel messages"));
     assert!(watch.side_effects.contains("--snapshot"));
@@ -376,6 +376,7 @@ fn help_and_schema_keep_command_contract_visible() {
             "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp, sender_address, sender_provenance]",
             "unreadable: event, room, id, reason=mail|channel",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
+            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed",
         ]
     );
     assert!(
@@ -3896,6 +3897,69 @@ fn watch_snapshot_limit_emits_only_the_last_events_without_consuming_them() {
         &beta,
     ));
     assert_eq!(unread.count, 3, "snapshot limit must never consume events");
+}
+
+#[test]
+fn watch_snapshot_limit_digest_summarizes_only_admitted_events() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "bounded-digest", &alpha);
+    join_channel(&sandbox, "bounded-digest", &beta);
+    assert_success(&sandbox.run_in(
+        &["chat", "bounded-digest", "--discard", "--json"],
+        None,
+        &beta,
+    ));
+
+    let mut sent_ids = Vec::new();
+    for body in ["first", "second", "third"] {
+        let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+            &[
+                "chat",
+                "bounded-digest",
+                "--send",
+                "--anyway",
+                "--body",
+                body,
+                "--json",
+            ],
+            None,
+            &alpha,
+        ));
+        sent_ids.push(sent.message.id);
+    }
+
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "beta",
+        "--snapshot",
+        "--limit",
+        "2",
+        "--digest",
+    ]);
+    assert!(
+        output.status.success(),
+        "status: {:?}\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        stdout(&output),
+        stderr(&output)
+    );
+    let rendered = stdout(&output);
+    let lines = rendered.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "one source must produce one digest line");
+    let digest: serde_json::Value = serde_json::from_str(lines[0]).expect("digest JSON");
+    assert_eq!(digest["event"], "digest");
+    assert_eq!(digest["room"], "beta");
+    assert_eq!(digest["source"], "channel:bounded-digest");
+    assert_eq!(digest["count"], 2);
+    assert_eq!(digest["first_id"], sent_ids[1]);
+    assert_eq!(digest["last_id"], sent_ids[2]);
+    assert!(
+        stderr(&output).contains("omitted 1 earlier event"),
+        "underlying-event limit warning must stay unchanged: {}",
+        stderr(&output)
+    );
 }
 
 #[test]
