@@ -1,14 +1,12 @@
-use crate::channel::{
-    channel_state_path, message_files, parse_channel_message, ChannelPaths, ChannelStateMap,
-    CHANNELS_DIR,
-};
+use crate::channel::{message_files, parse_channel_message, ChannelPaths, CHANNELS_DIR};
+use crate::channel_state::ChannelState;
 use crate::cli::WatchArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::migration_fence;
 use crate::output::{InboxItem, WatchEvent, WatchReason};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,7 +14,10 @@ use std::time::Duration;
 struct WatchTarget {
     room: String,
     inbox: PathBuf,
-    floors: HashMap<String, String>,
+    /// Per-channel seen-sets, read-only: the startup floor for the doorbell.
+    /// A missing or unreadable state file means "nothing seen": ring for
+    /// everything, the safe direction for a doorbell.
+    channel_seen: HashMap<String, BTreeSet<String>>,
     seen: HashSet<PathBuf>,
     scan_failing: bool,
 }
@@ -72,20 +73,21 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             ));
         }
         targets.push(WatchTarget {
-            floors: load_channel_floors(context, &room),
+            channel_seen: load_channel_seen(context, &room),
             room,
             inbox,
             seen: HashSet::new(),
             scan_failing: false,
         });
     }
-    // Ring for anything not yet handled. Load each channel's cursor as a
-    // read-only floor — watch NEVER writes a cursor — and emit messages with
-    // id > floor. A doorbell rings until handled: reading advances the real
-    // cursor, so a handled backlog never re-rings, but a REPLACEMENT doorbell
-    // after the original dies mid-session (as ours did, repeatedly) still
-    // surfaces anything that landed in the gap, instead of silently priming
-    // past it. The room inbox keeps its own surface-on-startup behavior.
+    // Ring for anything not yet handled. Load each channel's seen-set as a
+    // read-only floor — watch NEVER writes one — and emit unseen messages. A
+    // doorbell rings until handled: reading marks messages seen, so a handled
+    // backlog never re-rings, but a REPLACEMENT doorbell after the original
+    // dies mid-session (as ours did, repeatedly) still surfaces anything that
+    // landed in the gap — including an id sorting BELOW the newest handled id
+    // (the bridged late arrival) — instead of silently priming past it. The
+    // room inbox keeps its own surface-on-startup behavior.
     // Grows for the life of the watch (like each target's seen set): bounded
     // by total channel messages, a few bytes each — deliberate, not a leak.
     let mut emitted_channel_ids = HashSet::new();
@@ -103,7 +105,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 context,
                 &target.room,
                 &target.inbox,
-                &target.floors,
+                &target.channel_seen,
                 &mut target.seen,
                 &mut emitted_channel_ids,
             )?);
@@ -141,7 +143,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 context,
                 &target.room,
                 &target.inbox,
-                &target.floors,
+                &target.channel_seen,
                 &mut target.seen,
                 &mut emitted_channel_ids,
             ) {
@@ -180,7 +182,7 @@ fn scan_batch(
     context: &Context,
     room: &str,
     inbox: &Path,
-    floors: &HashMap<String, String>,
+    channel_seen: &HashMap<String, BTreeSet<String>>,
     seen: &mut HashSet<PathBuf>,
     emitted_channel_ids: &mut HashSet<String>,
 ) -> AppResult<Vec<WatchEvent>> {
@@ -220,10 +222,10 @@ fn scan_batch(
             continue;
         }
         let message_id = path.file_stem().and_then(|value| value.to_str());
-        // At or below the reader's cursor = already read before watch
-        // started; skip without parsing (the filename stem is the id).
-        if let (Some(floor), Some(id)) = (floors.get(&channel), message_id) {
-            if id <= floor.as_str() {
+        // Already seen = read before watch started; skip without parsing
+        // (the filename stem is the id).
+        if let (Some(seen_set), Some(id)) = (channel_seen.get(&channel), message_id) {
+            if seen_set.contains(id) {
                 continue;
             }
         }
@@ -352,21 +354,23 @@ fn room_channel_message_paths(context: &Context, room: &str) -> Vec<(String, Pat
     paths
 }
 
-/// Each channel's last-read id for `room`, read-only — the startup floor for
-/// the doorbell. Reading the cursor to decide what is unhandled never writes
-/// it (the watch invariant). A missing or unreadable state file means "no
-/// floor": ring for everything, the safe direction for a doorbell.
-fn load_channel_floors(context: &Context, room: &str) -> HashMap<String, String> {
-    let mut floors = HashMap::new();
-    let Ok(state_path) = channel_state_path(context, room) else {
-        return floors;
-    };
-    if let Ok(bytes) = std::fs::read(&state_path) {
-        if let Ok(map) = serde_json::from_slice::<ChannelStateMap>(&bytes) {
-            floors.extend(map);
+/// Each channel's seen-set for `room`, read-only — the startup floor for the
+/// doorbell. Deciding what is unhandled never writes state (the watch
+/// invariant). A missing or unreadable state file means "nothing seen": ring
+pub(super) fn load_channel_seen(
+    context: &Context,
+    room: &str,
+) -> HashMap<String, BTreeSet<String>> {
+    match ChannelState::load(context, room) {
+        Ok(state) => state.into_channels().into_iter().collect(),
+        Err(error) => {
+            eprintln!(
+                "post: warning: unreadable channel state for room {room:?}: {}",
+                error.message
+            );
+            HashMap::new()
         }
     }
-    floors
 }
 
 fn emit(batch: &[WatchEvent], text: bool) -> AppResult<()> {

@@ -108,17 +108,17 @@ Channel ergonomics (v0.4):
 - Descriptions: `--join --description` sets norms (any member, 1 KiB cap).
 - Catch-up defaults to last 25 unread; `--limit 0` = all; @mentions of you are
   never silently skipped.
-- Crossed-send bounce: unread ordinary messages past your cursor refuse `--send`
+- Crossed-send bounce: unseen ordinary messages from others refuse `--send`
   with `crossed_send` (+ last 10 missed); `--anyway` overrides. Direct mail is
   unaffected.
 - Mentions / threads: `@room` stamps mentions; `--re <id>` stamps a reply.
 - `post who`: live watch + last-seen via heartbeat files — never PIDs.
-- `--seen-by <id>`: which members' cursors passed that message (read-only).
+- `--seen-by <id>`: which members' seen-sets contain that message (read-only).
 - `--discard-through <id>`: ack exactly through one message (full id or a prefix
   unique in that channel) — the targeted alternative to `--discard`, which
-  swallows the whole unread batch. Refuses to leap over a message that will not
-  parse, and is safe to retry: a target at or behind the cursor returns
-  `advanced: false` with the cursor unmoved.
+  marks the whole currently-existing unread batch seen. Refuses to leap over a
+  message that will not parse, and is safe to retry: a target whose range is
+  already seen returns `advanced: false` with nothing changed.
 - `--history N --grep PAT`: case-insensitive regex filter.
 - Watch events carry `reason` on every type: `mail` | `channel` | `mention`
   (`unreadable` uses `mail` or `channel`).
@@ -180,10 +180,14 @@ post chat <channel> --json
 post channels --json
 ```
 
-`not_a_member` means join first from that room cwd. A plain read advances only
-that room's cursor after stdout succeeds; `--peek` and `watch` never advance it.
-Every advance holds an interprocess lock on the room's cursor file, so parallel
-acks on different channels cannot lose each other.
+`not_a_member` means join first from that room cwd. A plain read records only
+the batch it emitted as seen, after stdout succeeds; `--peek` and `watch`
+never mutate that state. Every mutation holds an interprocess lock on the
+room's channel-state file, so parallel acks on different channels cannot lose
+each other. The state is a per-room, per-channel seen-set (v2
+`channel-state.json`; legacy watermark files migrate lazily with a
+`.channel-state.v1.bak` backup) that only grows — so a late-arriving message
+whose id sorts below newer consumed ones still surfaces unread.
 A room's own channel sends do not ring its own watch.
 
 ## Watch from harness tools

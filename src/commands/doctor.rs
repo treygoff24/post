@@ -1,6 +1,5 @@
-use crate::channel::{
-    channel_state_path, parse_channel_message, ChannelPaths, ChannelStateMap, CHANNELS_DIR,
-};
+use crate::channel::{channel_state_path, parse_channel_message, ChannelPaths, CHANNELS_DIR};
+use crate::channel_state;
 use crate::cli::DoctorArgs;
 use crate::command_result::CommandResult;
 use crate::commands::schema::doctor_exit_codes;
@@ -342,8 +341,10 @@ fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
             }
         }
     }
-    // Reader cursors live in each room's own tree; a corrupt one can only
-    // hurt that room, but a bad JSON blob silently breaks its reads, so flag it.
+    // Reader state lives in each room's own tree; a corrupt one can only
+    // hurt that room, but a bad JSON blob silently breaks its reads, so flag
+    // it. Both shapes are valid: the legacy v1 {channel: last-read-id} map
+    // and the v2 {"version": 2, "channels": {ch: {seen: [...]}}} document.
     for name in rooms.keys() {
         let Ok(state_path) = channel_state_path(context, name) else {
             continue;
@@ -351,15 +352,15 @@ fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
         if !state_path.is_file() {
             continue;
         }
-        let parsed = fs::read(&state_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<ChannelStateMap>(&bytes).ok());
-        if parsed.is_none() {
+        let valid = fs::read(&state_path)
+            .map(|bytes| channel_state::stored_shape_is_valid(&bytes))
+            .unwrap_or(false);
+        if !valid {
             checks.push(check(
                 &format!("channel_state.{name}.invalid"),
                 DoctorSeverity::Error,
                 &state_path,
-                "channel-state.json is not a valid {channel: last-read-id} map",
+                "channel-state.json is neither a v1 {channel: last-read-id} map nor a v2 seen-set document",
                 false,
                 "Correct or remove the reader's channel-state.json by hand; the channel history is untouched.",
             ));

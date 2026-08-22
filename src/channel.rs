@@ -32,13 +32,6 @@ pub(crate) const PROFILE_EVENT: &str = "profile";
 
 pub(crate) type MemberMap = BTreeMap<String, String>;
 
-/// Reader-owned cursor map, channel name -> last-read message id. Lives in
-/// the READER's room tree (root/<room>/channel-state.json), never in the
-/// channel dir: the channel tree stays append-only-by-senders, and a lost
-/// or corrupt cursor can only ever hurt its own room.
-#[allow(dead_code)] // consumed by the read/cursor lane's patch (contract 013246 item 4)
-pub(crate) type ChannelStateMap = BTreeMap<String, String>;
-
 #[allow(dead_code)] // consumed by the read/cursor + doctor lanes' patches
 pub(crate) fn channel_state_path(context: &Context, room: &str) -> AppResult<PathBuf> {
     validate_room_name(room).map_err(|reason| {
@@ -440,9 +433,9 @@ pub(crate) fn send(
     Ok(parse_channel_message(&file)?.message)
 }
 
-/// Unread messages from other rooms past the sender's cursor. Empty = clear
-/// to send. Bounded to the last 10 for the bounce payload. Malformed `.msg`
-/// files at/below the cursor are ignored; an unreadable file past the cursor
+/// Unread messages from other rooms the sender has not yet seen. Empty =
+/// clear to send. Bounded to the last 10 for the bounce payload. A malformed
+/// `.msg` the room already consumed is ignored; an unreadable UNSEEN file
 /// refuses the send (`--anyway` remains the escape hatch).
 fn crossed_send_bounce(
     context: &Context,
@@ -462,24 +455,27 @@ fn crossed_send_bounce(
     }
 
     let state = ChannelState::load(context, room)?;
-    let cursor = state.cursor(channel);
     let mut missed = Vec::new();
-    let mut unreadable_past = false;
+    let mut unreadable_unseen = false;
     for path in message_files(&paths.messages)? {
-        let past = message_stem_past_cursor(&path, cursor);
+        // The filename stem is the id (parse_channel_message enforces that a
+        // parsed envelope matches it); membership needs no parse.
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if state.has_seen(channel, id) {
+            continue;
+        }
         let parsed = match parse_channel_message(&path) {
             Ok(parsed) => parsed,
             Err(_) => {
-                if past {
-                    unreadable_past = true;
-                }
+                unreadable_unseen = true;
                 continue;
             }
         };
-        let unread = cursor.is_none_or(|last| parsed.message.id.as_str() > last);
         // System events (join/profile) are not conversation the sender needs
         // to revise against; bounce only on ordinary messages from others.
-        if !unread || parsed.message.from == room || parsed.message.event.is_some() {
+        if parsed.message.from == room || parsed.message.event.is_some() {
             continue;
         }
         let message = parsed.message;
@@ -498,21 +494,21 @@ fn crossed_send_bounce(
             body: parsed.body,
         });
     }
-    if missed.is_empty() && !unreadable_past {
+    if missed.is_empty() && !unreadable_unseen {
         return Ok(None);
     }
     let fix = format!(
         "post chat {} --send --anyway --body '<revised text>'",
         crate::mailbox::shell_quote(channel)
     );
-    if unreadable_past && missed.is_empty() {
+    if unreadable_unseen && missed.is_empty() {
         // Renders no messages, so it stays pure transport: the trust anchor
         // is never loaded (Decision 3 matrix).
         return Ok(Some(
             AppError::new(
                 ErrorCode::CrossedSend,
                 format!(
-                    "channel '{channel}' has unreadable unread message(s) past your cursor; send was not delivered"
+                    "channel '{channel}' has unreadable unseen message(s); send was not delivered"
                 ),
                 format!(
                     "Inspect/repair the channel store, catch up with `post chat {}`, then revise; or retry with `--anyway` to deliver regardless: `{fix}`.",
@@ -521,7 +517,7 @@ fn crossed_send_bounce(
             )
             .exact_fix(fix)
             .input(channel)
-            .reason("unreadable message past sender cursor"),
+            .reason("unreadable unseen message"),
         ));
     }
     // A bounce that renders missed conversation is a badge-computing surface
@@ -550,11 +546,11 @@ fn crossed_send_bounce(
         missed = missed.split_off(missed.len() - 10);
     }
     let mut message = format!(
-        "channel '{channel}' has {total} unread message(s) past your cursor; send was not delivered (showing the last {})",
+        "channel '{channel}' has {total} unseen message(s) from others; send was not delivered (showing the last {})",
         missed.len()
     );
-    if unreadable_past {
-        message.push_str("; plus unreadable unread message(s)");
+    if unreadable_unseen {
+        message.push_str("; plus unreadable unseen message(s)");
     }
     Ok(Some(
         AppError::new(
@@ -566,16 +562,9 @@ fn crossed_send_bounce(
         )
         .exact_fix(fix)
         .input(channel)
-        .reason("channel tip advanced past sender cursor")
+        .reason("channel tip contains messages unseen by the sender")
         .missed(missed),
     ))
-}
-
-fn message_stem_past_cursor(path: &Path, after: Option<&str>) -> bool {
-    let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-        return true;
-    };
-    after.is_none_or(|last| id > last)
 }
 
 /// Resolve a full id or unique prefix within this channel's messages/.

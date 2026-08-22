@@ -105,12 +105,13 @@ Subjects are limited to 1 KiB with no override; longer text belongs in the body.
 falls back to the room's read store and the archive, answering with
 `already_read: true` instead of reporting the mail missing. A channel read
 whose stdout is `/dev/null` is refused rather than silently consuming the
-batch — use `--peek` to look without advancing or `--discard` to skip on
-purpose. `--discard-through <msg-id>` is the targeted ack: it advances the
-cursor exactly through one message and no further, which is what a remote
-reader wants after rendering up to a known id. It refuses to leap over a
-message that cannot be parsed, and retrying it is safe — a target at or behind
-the cursor succeeds with `advanced: false` and moves nothing.
+batch — use `--peek` to look without consuming or `--discard` to skip on
+purpose. `--discard-through <msg-id>` is the targeted ack: it marks every
+currently-existing unseen id at or below one message as seen and nothing
+beyond it, which is what a remote reader wants after rendering up to a known
+id. It refuses to leap over a message that cannot be parsed, and retrying it
+is safe — a target whose whole range is already seen succeeds with
+`advanced: false` and changes nothing.
 
 ## Direct mail
 
@@ -215,13 +216,16 @@ post channels --pretty
 ```
 
 Only joined rooms can read or send; otherwise `not_a_member` exits 65 with a
-join-first fix. A plain channel read advances only that room's cursor after a
-successful emit. `--peek` preserves the cursor. Blocked routes cannot share a
-channel.
+join-first fix. A plain channel read records only the batch it emitted as
+seen, only after a successful emit — and because unreadness is decided by
+seen-set membership rather than an ordering watermark, a message that arrives
+late with an id sorting below newer consumed ones (a bridged import) still
+surfaces on the next read. `--peek` and `watch` change nothing. Blocked routes
+cannot share a channel.
 
 Cursorless reads (v0.3): `--history <n>` shows the last n messages and
-`--since <id>` shows everything after an id. Both ignore the cursor entirely
-and never advance it, so they are idempotent and safe to pipe through any
+`--since <id>` shows everything after an id. Both ignore the seen-set entirely
+and never mutate it, so they are idempotent and safe to pipe through any
 filter — the "grep too tight and the message is gone" failure class cannot
 happen through them. Use them for scroll-back, polling UIs, and re-reading.
 `--history N --grep <pattern>` filters that window by case-insensitive Rust
@@ -229,14 +233,14 @@ regex (invalid patterns are structured `invalid_argument` errors).
 
 Bounded catch-up (v0.4): a plain `post chat <chan>` defaults to the newest
 **25** unread when the backlog is larger, reports
-`skipped N older messages (use --limit 0 for all)`, and advances the cursor
-past the whole batch. Explicit `--limit N` still works; `--limit 0` means
-unlimited. Messages that `@mention` the reading room are never silently
+`skipped N older messages (use --limit 0 for all)`, and consumes the whole
+selected batch. Explicit `--limit N` still works; `--limit 0` means unlimited.
+Messages that `@mention` the reading room are never silently
 skipped — if they live in the skipped range they are pulled forward into the
 display.
 
 Crossed-send bounce (v0.4): on channel `--send`, if ordinary (non-join)
-messages from others sit past the sender's read cursor, the send is **not**
+messages from others are unseen by the sender, the send is **not**
 delivered. Exit nonzero with a structured `crossed_send` error that includes
 the missed messages (last 10) so the sender can revise. `--anyway` delivers
 regardless. Humans see incoming while typing; agents get the equivalent at
@@ -248,7 +252,7 @@ Mentions / threads / presence / receipts (v0.4): `@<room>` in a channel body
 `post watch` emit `"reason":"mention"` (with an `@` marker in `--text`).
 `--re <msg-id>` stamps a reply reference (unique prefix ok). `post who`
 reports live watches via heartbeat files (no PIDs). `post chat <chan>
---seen-by <id>` lists members whose cursors have advanced past that message
+--seen-by <id>` lists members whose seen-sets contain that message
 (read-only).
 
 Channel descriptions (v0.4): `post chat <chan> --join --description "..."`

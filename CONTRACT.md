@@ -32,7 +32,7 @@ The public language is model-neutral; the default root remains
    immutable copy to `~/.claude-mail/archive/`. Nothing in the tool deletes
    mail; `read` moves inbox → read/ within the recipient's dir. Channel
    history is append-only under `channels/<name>/messages/`; channel reads only
-   move per-room cursors forward after successful output.
+   grow the acting room's seen-set after successful output.
 5. **Registers stay distinct.** Direct-mail `kind` ∈ {letter, note, signal}.
    Channel messages have no `kind`, so a signal structurally cannot occur in a
    channel; anything gate-grade stays one-to-one room mail.
@@ -108,20 +108,37 @@ The public language is model-neutral; the default root remains
   room in `members.json`; blocked-route checks prevent any two rooms that are
   structurally blocked from sharing the same channel. Sending and reading
   require membership; non-members fail with `not_a_member`.
-- Channel cursors are per room and per channel, separate from message history.
-  A plain channel read advances only the acting room's cursor, only after a
-  successful emit, and only to the last emitted message. `--peek` and `watch`
-  never advance channel cursors. A sender's own message is advanced past only
-  when the sender was already caught up; unread messages from others keep the
-  cursor back so they still surface. One room's cursors for every channel live
-  in a single `<root>/<room>/channel-state.json` map, so every advance —
-  read, `--discard`, `--discard-through`, or a sender's own-message skip —
-  takes an exclusive `flock` on `<root>/<room>/.channel-state.lock` and holds
-  it across reload, monotonic check, and atomic replace. Without that lock two
-  processes acking different channels each write back a snapshot taken before
-  the other's write, and the loser's advance is silently lost. Cursors are
-  monotonic under the lock: an advance to an id at or behind the stored cursor
-  leaves it unchanged and is never an error.
+- Channel consumption state is per room and per channel, separate from message
+  history: a **seen-set** — the exact ids this room has consumed (read,
+  discarded, acked, or sent itself). Unread = file exists ∧ id ∉ seen ∧
+  from ≠ self. A plain channel read marks only the batch it actually emitted,
+  only after a successful emit. `--peek` and `watch` never mutate the state.
+  A sender's own message id is recorded as seen unconditionally (own words are
+  never news; messages from others simply stay unseen, so nothing is
+  swallowed). One room's state for every channel lives in a single
+  `<root>/<room>/channel-state.json` document, so every mutation — read,
+  `--discard`, `--discard-through`, or a sender's own-message mark — takes an
+  exclusive `flock` on `<root>/<room>/.channel-state.lock` and holds it across
+  reload, union, and atomic replace. Without that lock two processes acking
+  different channels each write back a snapshot taken before the other's
+  write, and the loser's marks are silently lost.
+  The state file is versioned. v2 is
+  `{"version": 2, "channels": {"<channel>": {"seen": ["<id>", ...]}}}` (ids
+  sorted, written pretty). Legacy v1 (`{"<channel>": "<last-read-id>"}`
+  watermarks) migrate lazily: reads convert in memory (seen := every id
+  currently in messages/ that is ≤ the watermark), and the first lock-held
+  write converts the file to v2 after backing the v1 bytes up alongside as
+  `.channel-state.v1.bak` for rollback. After a v2 write, v1 is never written
+  again. A room's seen-set ONLY GROWS: ids are never un-seen, and because
+  membership — not ordering — decides unreadness, a message that arrives late
+  with an id sorting below newer consumed ids (a bridged import) still
+  surfaces unread on the next read. Growth is O(channel history), accepted;
+  recorded policy if a channel ever proves it needs one: compact to
+  {watermark + exception list} once the seen prefix is contiguous with the
+  messages directory, under a version bump. Mixed binaries are fenced like
+  every cutover: stores reach v2 only through an enrolled, generation-gated
+  migration, and a pre-seen-set binary cannot parse v2 state — it refuses with
+  `config_invalid` rather than misreading it.
 
 ## Commands
 
@@ -194,15 +211,7 @@ results, stderr = diagnostics/errors.
   (including `to: "*"`), quoting the rule's reason verbatim.
   Validation and replacement are one flock-protected transaction. It never
   creates the workspace, overwrites an existing registration, or modifies
-  `rules.json`. Once replacement commits, a stdout failure does not turn the
-  registration into a retryable failure.
-- `post chat <channel> --join [--description <text>]` — joins a shared channel as the registered room
-  containing cwd; creates the channel on first join; records a join event in
-  append-only history; optional `--description` (cap 1 KiB, any member may
-  update on a later `--join`) sets the channel norms carrier; returns `{ok, channel, room, created, already_member,
-  event_id}` with `--json`. Refuses unregistered cwd identity, invalid channel
-  name, and blocked shared membership. There is deliberately no `--room` or
-  `--from` override.
+  rules.json beyond the one registration it performs.
 - `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> |
   --body-file <path> | stdin)` — sends to a shared channel as the registered room
   containing cwd. `--body`/`--body-file` imply `--send`, so the verb is
@@ -212,30 +221,32 @@ results, stderr = diagnostics/errors.
   Bodies are scanned for `@<room>` word-boundary mentions of registered rooms
   (stamped into the envelope as `mentions`). `--re <id>` stamps a reply to a
   prior message in the same channel (full id or unique prefix). By default, if
-  ordinary unread messages from others sit past the sender's cursor, the send
-  is refused with `crossed_send` (details include up to the last 10 missed
+  ordinary unseen messages from others exist in the channel, the send is
+  refused with `crossed_send` (details include up to the last 10 missed
   messages); `--anyway` delivers regardless. System join/profile events do not
-  trigger the bounce. A plain read whose
-  stdout is the null device is refused before anything is emitted, leaving the
-  cursor untouched; `--discard` is the deliberate way to advance past unread
-  messages without printing them, and reports
-  `{ok, channel, room, discarded, cursor}`.
-  `--discard-through <id>` is the targeted form: it advances this room's cursor
-  exactly through one message and no further, for a reader (such as a phone
-  client) that has rendered up to a known id and wants to ack only that much.
+  trigger the bounce. A plain read whose stdout is the null device is refused
+  before anything is emitted, consuming nothing; `--discard` is the deliberate
+  way to mark every currently-existing unseen message seen without printing
+  them, and reports `{ok, channel, room, discarded, cursor}` (`cursor` is the
+  max seen id — a compatibility summary of the underlying seen-set).
+  `--discard-through <id>` is the targeted form: it marks every
+  currently-existing unseen id at or below one message as seen and nothing
+  beyond it, for a reader (such as a phone client) that has rendered up to a
+  known id and wants to ack only that much.
   `<id>` is a full message id or a prefix unique within that channel, resolved
   against the channel's message filenames — an id from another channel is
   `not_found`, an ambiguous prefix is `ambiguous_id`. It refuses with
-  `config_invalid` when an unreadable message sits between the cursor and the
-  target: a message that cannot be rendered has certainly not been read, and
-  the cursor never leaps over it. It is replay-safe — a target at or behind the
-  current cursor is success with `advanced: false` and an unchanged cursor, not
+  `config_invalid` when an unreadable message sits in the affected range
+  (every currently-existing unseen id at or below the target): a message that
+  cannot be rendered has certainly not been read, and nothing is consumed past
+  it. It is replay-safe — a target whose whole range is already seen is
+  success with `advanced: false` and a byte-identical state file, not
   an error, so a lost response can simply be retried. JSON is
   `{ok, channel, room, target, prior_cursor, cursor, advanced, discarded}`;
   text is a one-line summary. Unlike every body-returning read, this one
-  advances the cursor BEFORE emitting its receipt, because the receipt's whole
-  job is to report the cursor that is now stored; nothing is skipped
-  unreported, since a retry replays as a no-op.
+  mutates BEFORE emitting its receipt, because the receipt's whole job is to
+  report the state that is now stored; nothing is skipped unreported, since a
+  retry replays as a no-op.
   A plain cursor read defaults to the
   newest 25 unread when the backlog is larger (`skipped` reports how many older
   ones were neither shown nor rescued; `@mention`s of the reader in the skipped

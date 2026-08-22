@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Channel consumption state is now a per-room, per-channel **seen-set** (v2
+  `channel-state.json`: `{"version": 2, "channels": {"<ch>": {"seen": [...]}}}`)
+  instead of a per-channel watermark cursor. Unread = file exists ∧ id ∉ seen ∧
+  from ≠ self, so a message that arrives late with an id sorting below newer
+  consumed ids — the bridged-import ordering that hit 2026-08-21, where T2
+  landed after the room had consumed T1 and its own T3 and was then hidden
+  forever by `id > last` selection — surfaces on the next plain read and rings
+  watch. Every consumer moved to membership semantics: reads, watches,
+  crossed-send bounce, `--seen-by`, own-send advancement, `--discard-through`,
+  and `--discard`. A send records the sender's own message id as seen
+  unconditionally; `cursor` fields in JSON output keep their names and report
+  the max seen id as a compatibility summary.
+
+### Migration
+- Legacy watermark files migrate lazily: reads convert in memory (seen :=
+  every existing id ≤ the watermark); the first lock-held write converts to v2
+  under the room's `.channel-state.lock` flock and backs the original bytes up
+  alongside as `.channel-state.v1.bak` (rollback: copy it back over
+  `channel-state.json` with a pre-seen-set binary). After a v2 write, v1 is
+  never written again. Mixed binaries are fenced per the repo's generation
+  cutover pattern: stores reach v2 only through an enrolled cutover, and older
+  binaries refuse v2 state with `config_invalid` rather than misreading it.
+  Growth is O(channel history), accepted; recorded compaction policy: rewrite
+  as {watermark + exception list} once the seen prefix is contiguous with the
+  messages directory, under a version bump.
+
 ## 0.5.0 — 2026-08-13
 
 The identity release: layers 1 (address) and 2 (cards) of the three-layer

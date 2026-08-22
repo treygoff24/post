@@ -2570,6 +2570,17 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
         "beta mail",
         "--json",
     ]));
+    // Pre-watch peek counts: the baseline the watch must leave untouched.
+    // (Alpha's own send is recorded seen at send time under the seen-set
+    // model — own words are never news — so the shared message may already
+    // be absent from ALPHA's peek; what matters is that the WATCH changes
+    // nothing.)
+    let pre_watch: Vec<ChatReadOutput> = [&alpha, &beta]
+        .iter()
+        .map(|room_path| {
+            from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, room_path))
+        })
+        .collect();
 
     let output = sandbox.run(&["watch", "--room", "alpha", "--room", "beta", "--snapshot"]);
     assert_success(&output);
@@ -2596,14 +2607,11 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
         )));
     }
 
-    for room_path in [&alpha, &beta] {
-        let unread: ChatReadOutput =
+    for (room_path, before) in [&alpha, &beta].iter().zip(&pre_watch) {
+        let after: ChatReadOutput =
             from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, room_path));
-        assert!(
-            unread
-                .messages
-                .iter()
-                .any(|message| message.message.id == channel_sent.message.id),
+        assert_eq!(
+            after.count, before.count,
             "watch must not advance either room's channel cursor"
         );
     }
@@ -3601,14 +3609,23 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
 
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(sandbox.mail_root.join("beta").join("channel-state.json"))
-            .expect("read cursor state"),
+            .expect("read channel state"),
     )
-    .expect("cursor state is JSON");
+    .expect("channel state is JSON");
+    assert_eq!(
+        state["version"], 2,
+        "the store must be v2 after a write: {state}"
+    );
     for (channel, target) in ["tax", "build"].iter().zip(&targets) {
-        assert_eq!(
-            state.get(channel).and_then(serde_json::Value::as_str),
-            Some(target.as_str()),
-            "#{channel}'s ack was lost to the other process: {state}"
+        let seen: Vec<&str> = state["channels"][channel]["seen"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing seen array for {channel}: {state}"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(
+            seen.contains(&target.as_str()),
+            "{channel}'s ack was lost to the other process: {state}"
         );
     }
 }
@@ -5742,6 +5759,17 @@ fn chat_peek_json(sandbox: &Sandbox, channel: &str, cwd: &Path) -> serde_json::V
     from_stdout(&sandbox.run_in(&["chat", channel, "--peek", "--json"], None, cwd))
 }
 
+/// Cursorless read: ignores the seen-set entirely, so a SENDER can still
+/// inspect its own message's badge after the send records it as seen.
+fn chat_history_json(sandbox: &Sandbox, channel: &str, cwd: &Path) -> serde_json::Value {
+    from_stdout(&sandbox.run_in(&["chat", channel, "--history", "100", "--json"], None, cwd))
+}
+
+/// Text form of [`chat_history_json`].
+fn chat_history_text(sandbox: &Sandbox, channel: &str, cwd: &Path) -> String {
+    stdout(&sandbox.run_in(&["chat", channel, "--history", "100"], None, cwd))
+}
+
 fn chat_peek_text(sandbox: &Sandbox, channel: &str, cwd: &Path) -> String {
     stdout(&sandbox.run_in(&["chat", channel, "--peek"], None, cwd))
 }
@@ -6275,7 +6303,7 @@ fn a0a_f9_immutable_room_id_renders_under_every_label_and_hostile_labels_rejecte
         None,
         &alpha,
     ));
-    let text = chat_peek_text(&sandbox, "labelled", &mara);
+    let text = chat_history_text(&sandbox, "labelled", &mara);
     assert!(text.contains("Mara (mara)"));
 
     // A scratch config with a genuinely NON-default label (--label Oracle),
@@ -6980,7 +7008,7 @@ fn write_channel_message_with_ref(
 }
 
 fn v2_read_badge(sandbox: &Sandbox, channel: &str, cwd: &Path, id: &str) -> Option<bool> {
-    let read = chat_peek_json(sandbox, channel, cwd);
+    let read = chat_history_json(sandbox, channel, cwd);
     let messages = read["messages"].as_array().expect("messages");
     let message = messages
         .iter()
@@ -7101,7 +7129,7 @@ fn v2_stolen_tag_fails_on_different_body_and_different_channel() {
         Some(false),
         "stolen tag on a different body must fail"
     );
-    let text = chat_peek_text(&sandbox, "chan-a", &mara);
+    let text = chat_history_text(&sandbox, "chan-a", &mara);
     assert!(
         text.contains("SIGNATURE FAILED"),
         "text render must fail loudly: {text}"
@@ -7493,7 +7521,7 @@ fn v2_present_locator_with_missing_sidecar_fails_loudly_and_never_falls_back_to_
         Some(false),
         "a locator with no sidecar must fail loudly, never fall back to v1"
     );
-    let text = chat_peek_text(&sandbox, "nosidecar", &mara);
+    let text = chat_history_text(&sandbox, "nosidecar", &mara);
     assert!(
         text.contains("SIGNATURE FAILED"),
         "text render must fail loudly: {text}"
