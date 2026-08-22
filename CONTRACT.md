@@ -43,8 +43,8 @@ The public language is model-neutral; the default root remains
   first-class root override, r2.1; the value must be absolute, and the
   harness/agent invoking post sets it deliberately, never for tests only).
 - `rooms.json`: `{name: path-with-tilde}`. `rules.json`: `{"blocked":
-  [{"from","to","reason"}]}`. First run creates the original defaults,
-  including the agent-memory ARMED INSTRUMENT rule. New config files use mode
+  [{"from","to","reason"}]}`. First run creates empty defaults
+  (`{"blocked": []}` and `{}`). New config files use mode
   `0600`.
 - Migration fence (enrollment-owned): `POST_ARX_GENERATION` is parsed only for
   writers. A missing declaration is the ordinary legacy writer mode only while
@@ -491,8 +491,10 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   affects routing, blocks, cursors, membership, profiles, or signed-message
   verification. Old mail and old stores keep reading; old binaries ignore the
   new fields.
-- Resolution precedence: explicit `--from`/`--room` > `POST_FROM` pin >
-  cwd-inside-registered-room > cwd basename. The pin is the launch helper's
+- Resolution precedence: explicit `--room` > `POST_FROM` pin >
+  cwd-inside-registered-room > cwd basename. An explicit `--from` must agree
+  with the pin; a disagreeing `--from` is refused (`invalid_argument`) rather
+  than silently overriding the session's declared identity. The pin is the launch helper's
   stable room declaration and **beats cwd by design** — identity is a
   declaration made at launch, not a location. On mail send the pin bypasses
   the registered-room cwd-containment reservation (it exists precisely so

@@ -25,6 +25,7 @@ cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
 install -m 0755 target/release/post ~/.local/bin/post
+export PATH="$HOME/.local/bin:$PATH"              # if ~/.local/bin is not on PATH yet
 post rooms add myroom /path/to/your/project   # register where you live (an existing directory)
 cd /path/to/your/project                      # cwd is your identity from here on
 post send --to myroom --allow-self --body "hello"   # first mail: to yourself (self-send is opt-in)
@@ -167,7 +168,7 @@ wrong tree posts as that tree's room. A launch helper can pin identity for a
 whole session instead:
 
 ```bash
-POST_FROM=codex             # stable room pin; beats cwd, --from still wins
+POST_FROM=codex             # stable room pin; beats cwd; a disagreeing --from is refused
 POST_SENDER_ADDRESS=codex.myrepo.5f3a…   # opaque per-launch instance address
 POST_FRAMING=compact        # framing for body-returning reads; --framing still wins
 ```

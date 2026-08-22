@@ -30,7 +30,9 @@
 - Long-running `post watch` now uses the `notify` crate's native filesystem
   backend (inotify on Linux, FSEvents on macOS) for wake hints, then performs
   the same full scan used by polling. Registration happens before the initial
-  scan. Overflow and backend errors trigger rescans, a dead backend falls back
+  scan, and the watch heartbeat is stamped before backend registration,
+  closing a short window in which `post who` could report a just-started
+  watch as dead. Overflow and backend errors trigger rescans, a dead backend falls back
   to polling at `--interval-ms`, and failed directory re-watches are retried.
   A wall-clock slow deadline forces full reconciliation and rescanning even
   under continuous event traffic, so one busy target cannot starve another.

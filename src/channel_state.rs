@@ -22,10 +22,11 @@
 //!
 //! Mixed binaries: a pre-seen-set binary cannot parse v2 state (its loader
 //! expects the bare v1 map) and fails closed with `config_invalid` rather
-//! than misreading it. Per the repo's migration-fence pattern
-//! (`migration_fence.rs`), a store only reaches v2 through an enrolled,
-//! generation-gated cutover — stale writers refuse at the fence before any
-//! state mutation.
+//! than misreading it. A store with no migration-fence marker (a plain
+//! single-binary upgrade) converts on its first admitted write; a store whose
+//! fence marker exists but is not activated refuses the conversion
+//! (`migration_fence.rs`), so a coordinated mixed-binary cutover cannot brick
+//! its old binaries mid-migration.
 //!
 //! Growth is O(channel history) — the same order as messages/ itself, which
 //! every read already scans. Linear exact-state cost is EXPLICITLY accepted

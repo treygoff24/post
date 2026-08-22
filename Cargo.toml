@@ -8,6 +8,8 @@ repository = "https://github.com/treygoff24/post"
 homepage = "https://github.com/treygoff24/post"
 documentation = "https://github.com/treygoff24/post/blob/main/CONTRACT.md"
 readme = "README.md"
+# Distributed as source (clone + cargo build); the crates.io name is taken.
+publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

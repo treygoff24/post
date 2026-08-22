@@ -225,9 +225,9 @@ with a PTY, then `functions.write_stdin` to poll or send Ctrl-C.)
 Watch event variants:
 
 ```json
-{"event":"mail","room":"<room>","id":"...","from":"...","kind":"note","subject":"...","sent":"..."}
-{"event":"unreadable","room":"<room>","id":"..."}
-{"event":"channel_message","channel":"...","id":"...","from":"...","subject":"...","sent":"..."}
+{"event":"mail","room":"<room>","id":"...","from":"...","kind":"note","subject":"...","sent":"...","reason":"mail"}
+{"event":"unreadable","room":"<room>","id":"...","reason":"mail"|"channel"}
+{"event":"channel_message","channel":"...","id":"...","from":"...","subject":"...","sent":"...","reason":"channel"|"mention"}
 ```
 
 Warnings such as unregistered room, unreadable entries, or corrupt channel state

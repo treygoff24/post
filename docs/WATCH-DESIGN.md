@@ -41,7 +41,7 @@ post watch [--room <name>]... [--once | --snapshot [--limit <N>]] [--interval-ms
 Event shapes:
 
 ```
-{"event":"mail","room":R,"id":I,"from":F,"kind":K,"subject":S,"sent":T}
+{"event":"mail","room":R,"id":I,"from":F,"kind":K,"subject":S,"sent":T,"reason":"mail"}
 {"event":"unreadable","room":R,"id":I,"reason":"mail"|"channel"}
 {"event":"channel_message","channel":C,"id":I,"from":F,"subject":S,"sent":T,"reason":"channel"|"mention"}
 ```

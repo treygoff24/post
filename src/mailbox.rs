@@ -300,7 +300,8 @@ impl Context {
 
     /// Resolve the acting room and record HOW it was resolved. Precedence:
     /// explicit argument (`--room`/`--from`) > POST_FROM environment pin >
-    /// cwd-in-registered-room > cwd basename. The pin beats cwd by design —
+    /// cwd-in-registered-room > cwd basename. A `--from` that disagrees with
+    /// the pin is refused by `send` before resolution reaches here. The pin beats cwd by design —
     /// identity is a declaration made at launch, not a location (spec v2,
     /// three-way signed 2026-08-12); the provenance field carries the
     /// evidence to every reader.
