@@ -135,6 +135,10 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         }
         return Ok(CommandResult::success(String::new()));
     }
+    // Presence first: the watch is live from this moment, and backend
+    // registration (FSEvents especially) can take hundreds of ms — `post who`
+    // must not report a dead watch during that window.
+    touch_heartbeats(context, &targets, interval_ms)?;
     // Register every watch BEFORE the first scan (r2): nothing created in
     // the gap can be missed, because the first pass inside the loop is an
     // unconditional scan. Any registration failure falls back to polling
@@ -168,6 +172,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
 /// registration), then the loop blocks on a wake source. Events are WAKE
 /// HINTS for the existing full scan, never truth (r2): no per-event
 /// incremental state exists anywhere.
+#[allow(clippy::too_many_arguments)] // watch loop wiring; a param struct would add nothing
 fn run_watch_loop(
     context: &Context,
     targets: &mut [WatchTarget],
@@ -176,7 +181,7 @@ fn run_watch_loop(
     once: bool,
     text: bool,
     wake: &mut Box<dyn WakeSource>,
-    mut event_mode: bool,
+    event_mode: bool,
 ) -> AppResult<CommandResult> {
     touch_heartbeats(context, targets, interval_ms)?;
     let mut batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
