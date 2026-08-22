@@ -27,17 +27,43 @@ pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResul
                 suggested_fix: error.suggested_fix,
             }];
             let output = report(context, checks, fixed);
-            let mut result = CommandResult::json(&output, pretty)?;
-            result.exit_code = 3;
-            return Ok(result);
+            return finish(output, args.brief, pretty, 3);
         }
     }
     let checks = detect(context);
     let output = report(context, checks, fixed);
     let exit_code = if output.count == 0 { 0 } else { 1 };
-    let mut result = CommandResult::json(&output, pretty)?;
+    finish(output, args.brief, pretty, exit_code)
+}
+
+/// Emit the doctor result: the full JSON report by default, or a single
+/// summary line under --brief. Exit codes are identical either way.
+fn finish(
+    output: DoctorOutput,
+    brief: bool,
+    pretty: bool,
+    exit_code: i32,
+) -> AppResult<CommandResult> {
+    let mut result = if brief {
+        CommandResult::success(brief_line(&output))
+    } else {
+        CommandResult::json(&output, pretty)?
+    };
     result.exit_code = exit_code;
     Ok(result)
+}
+
+/// The one-line --brief summary. Healthy mailboxes name how many checks ran;
+/// anything else points back at the full report for the detail.
+fn brief_line(output: &DoctorOutput) -> String {
+    if output.count == 0 {
+        format!("post doctor: ok ({} checks)\n", output.checks.len())
+    } else {
+        format!(
+            "post doctor: {} findings (run post doctor for detail)\n",
+            output.count
+        )
+    }
 }
 
 fn report(context: &Context, checks: Vec<DoctorCheck>, fixed: Vec<String>) -> DoctorOutput {

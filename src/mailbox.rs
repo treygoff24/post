@@ -53,6 +53,10 @@ pub(crate) const POST_FROM_ENV: &str = "POST_FROM";
 /// Opaque per-launch instance address exported by the launch helper.
 /// Recorded verbatim on envelopes; post never synthesizes one.
 pub(crate) const POST_SENDER_ADDRESS_ENV: &str = "POST_SENDER_ADDRESS";
+/// Presentation preference for body-returning reads, exported by a session
+/// launcher. Consulted only when `--framing` is absent; an explicit flag
+/// always wins. Set-but-invalid is a loud error (POST_FROM precedent).
+pub(crate) const POST_FRAMING_ENV: &str = "POST_FRAMING";
 /// Bound on a declared sender address. `harness.repo.uuid` is well under
 /// this; the cap keeps a hostile environment from bloating every envelope.
 const SENDER_ADDRESS_MAX_BYTES: usize = 256;
@@ -451,6 +455,33 @@ pub(crate) fn declared_env_pin() -> AppResult<Option<String>> {
         .reason(reason)
     })?;
     Ok(Some(value.to_owned()))
+}
+
+/// Resolve the effective framing mode for a body-returning read. An explicit
+/// `--framing` always wins; absent the flag, `POST_FRAMING` (valid values:
+/// auto|full|compact) is consulted; unset falls back to Auto. Set-but-invalid
+/// warns on stderr and falls back to Auto: framing is presentation only, so a
+/// launcher exporting a broken value must be visible but must never break a
+/// read. (Deliberately weaker than the POST_FROM pin, which guards identity.)
+pub(crate) fn resolve_framing(flag: Option<crate::cli::FramingMode>) -> crate::cli::FramingMode {
+    if let Some(mode) = flag {
+        return mode;
+    }
+    let Some(raw) = std::env::var_os(POST_FRAMING_ENV) else {
+        return crate::cli::FramingMode::Auto;
+    };
+    match raw.to_str() {
+        Some("auto") => crate::cli::FramingMode::Auto,
+        Some("full") => crate::cli::FramingMode::Full,
+        Some("compact") => crate::cli::FramingMode::Compact,
+        other => {
+            eprintln!(
+                "post: warning: {POST_FRAMING_ENV} value {} is invalid (expected auto|full|compact); using auto",
+                other.map_or_else(|| "<non-UTF-8>".to_owned(), |v| format!("'{v}'")),
+            );
+            crate::cli::FramingMode::Auto
+        }
+    }
 }
 
 /// The POST_SENDER_ADDRESS declaration, validated but otherwise opaque.

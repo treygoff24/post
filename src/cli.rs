@@ -250,8 +250,10 @@ pub(crate) struct ChatArgs {
     /// wall), full (every invocation), or compact (one-line reminder).
     /// Rejected on send/join/discard/discard-through/seen-by, which return no
     /// bodies and must not look like they honored it.
-    #[arg(long, value_enum, default_value_t = FramingMode::Auto, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file"])]
-    pub framing: FramingMode,
+    /// Banner form when absent: POST_FRAMING env (auto|full|compact), else
+    /// auto. An explicit value always wins over the environment.
+    #[arg(long, value_enum, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file"])]
+    pub framing: Option<FramingMode>,
 }
 
 #[derive(Debug, Args)]
@@ -427,12 +429,11 @@ pub(crate) struct ReadArgs {
     /// Read without moving the message to read/.
     #[arg(long)]
     pub peek: bool,
-
-    /// Banner form: auto (default), full, or a one-line compact reminder.
-    #[arg(long, value_enum, default_value_t = FramingMode::Auto)]
-    pub framing: FramingMode,
+    /// Banner form when absent: POST_FRAMING env (auto|full|compact), else
+    /// auto. An explicit value always wins over the environment.
+    #[arg(long, value_enum)]
+    pub framing: Option<FramingMode>,
 }
-
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
     /// Mailbox room; repeat to merge rooms, or omit for cwd resolution.
@@ -468,4 +469,8 @@ pub(crate) struct DoctorArgs {
     /// Create missing directories and default config files only.
     #[arg(long)]
     pub fix: bool,
+
+    /// Print one summary line instead of the full JSON report.
+    #[arg(long)]
+    pub brief: bool,
 }

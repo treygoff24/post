@@ -77,7 +77,7 @@ post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
 post owner [init | show]
 post schema
-post doctor [--fix]
+post doctor [--fix] [--brief]
 ```
 
 Global flags: `--json` switches `send`, `read`, and `chat` from text to JSON;
@@ -158,6 +158,7 @@ whole session instead:
 ```bash
 POST_FROM=codex             # stable room pin; beats cwd, --from still wins
 POST_SENDER_ADDRESS=codex.myrepo.5f3a…   # opaque per-launch instance address
+POST_FRAMING=compact        # framing for body-returning reads; --framing still wins
 ```
 
 Every envelope records `sender_provenance` (`declared-env` | `declared-flag` |
@@ -274,7 +275,13 @@ post never infers that a reader remembers the full framing — the caller
 claims familiarity explicitly, each invocation — and neither `full` nor
 `compact` ever consults or stamps the banner-day state, so a compact reader
 cannot burn the day's full banner for a fresh session. There is no `none`
-mode. The flag is rejected on send/join/discard/discard-through/seen-by. JSON keeps `source`
+mode.
+When the flag is absent, `POST_FRAMING`
+(valid values: `auto|full|compact`) supplies it — a session launcher can pin
+its readers to compact framing without changing every invocation; an explicit
+`--framing` always wins over the environment, and a set-but-invalid
+`POST_FRAMING` is a loud error, never a silent fallback (same precedent as
+`POST_FROM`). The flag is rejected on send/join/discard/discard-through/seen-by. JSON keeps `source`
 and `authority: false` unchanged in every mode.
 
 Signed-sender badges: the signed owner is declared with

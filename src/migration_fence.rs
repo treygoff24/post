@@ -449,7 +449,7 @@ pub(crate) fn activate(context: &Context, generation: u64) -> AppResult<()> {
 pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
     use crate::cli::{Command, DoctorArgs};
     match command {
-        Command::Doctor(DoctorArgs { fix: true })
+        Command::Doctor(DoctorArgs { fix: true, .. })
         | Command::Send(_)
         | Command::Rooms(crate::cli::RoomsArgs {
             command: Some(crate::cli::RoomsCommand::Add(_)),

@@ -109,6 +109,7 @@ fn read(
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    let framing = crate::mailbox::resolve_framing(args.framing);
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
     // --history/--since are cursorless reads: they ignore the unread cursor
@@ -201,7 +202,7 @@ fn read(
         output::json(
             &output::ChatReadOutput {
                 ok: true,
-                framing: match args.framing {
+                framing: match framing {
                     crate::cli::FramingMode::Auto | crate::cli::FramingMode::Full => {
                         output::ChannelFraming::default()
                     }
@@ -235,7 +236,7 @@ fn read(
             &room,
             &batch,
             &reply_index,
-            args.framing,
+            framing,
             owner.as_ref(),
         );
         if skipped > 0 {

@@ -12,6 +12,7 @@ pub(super) fn run(
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    let framing = crate::mailbox::resolve_framing(args.framing);
     let explicit_room = args.room.is_some();
     let (room, inbox, read) = context.resolved_mailbox_dirs(args.room)?;
     if !explicit_room {
@@ -33,11 +34,11 @@ pub(super) fn run(
             &args.id,
             json_output,
             pretty,
-            args.framing,
+            framing,
         );
     };
     let mail = parse_mail(path)?;
-    let rendered = render(&mail, false, json_output, pretty, args.framing)?;
+    let rendered = render(&mail, false, json_output, pretty, framing)?;
     if args.peek {
         return Ok(CommandResult::success(rendered));
     }
