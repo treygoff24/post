@@ -28,14 +28,24 @@
 //! state mutation.
 //!
 //! Growth is O(channel history) — the same order as messages/ itself, which
-//! every read already scans. Accepted (ponytail): no compaction until a
-//! channel proves it needs one. If one ever does, the recorded policy is to
-//! compact to {watermark + exception list} once the seen prefix is
-//! contiguous with the messages directory, under a version bump.
+//! every read already scans. Linear exact-state cost is EXPLICITLY accepted
+//! (Sol review 2026-08-22, finding 12): a {watermark + exceptions}
+//! compaction is UNSAFE under this feature's own late-arrival model — an id
+//! backfilled below the watermark after compaction would be silently seen —
+//! so compaction requires a durable local arrival-sequence fence first, a
+//! bigger feature than any state file this crate has yet met in practice.
+//! Writes past SEEN_SET_WARN ids warn on stderr so a channel that outgrows
+//! the accepted cost is visible long before it hurts; scale benchmarks
+//! (10k/100k histories) are a release-blocking bead in .beads/.
 
 use crate::channel::{channel_state_path, CHANNELS_DIR};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{atomic_replace, Context};
+
+/// Seen-set size at which state writes start warning (linear-cost policy —
+/// see the module docs); well below any measured pain point, well above any
+/// channel this tool has met in practice.
+pub(crate) const SEEN_SET_WARN: usize = 50_000;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -217,6 +227,14 @@ where
             .insert(id.clone());
     }
     let bytes = serialize_v2(&state)?;
+    if let Some(seen) = state.channels.get(channel) {
+        if seen.len() >= SEEN_SET_WARN {
+            eprintln!(
+                "post: warning: channel '{channel}' seen-set holds {} ids; reads/acks scale linearly with history (accepted policy — see channel_state.rs docs)",
+                seen.len()
+            );
+        }
+    }
     atomic_replace(&path, &bytes)
         .map_err(|error| AppError::io("atomically update channel state", &path, error))?;
     let cursor = state

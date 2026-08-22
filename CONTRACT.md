@@ -134,10 +134,12 @@ The public language is model-neutral; the default root remains
   again. A room's seen-set ONLY GROWS: ids are never un-seen, and because
   membership — not ordering — decides unreadness, a message that arrives late
   with an id sorting below newer consumed ids (a bridged import) still
-  surfaces unread on the next read. Growth is O(channel history), accepted;
-  recorded policy if a channel ever proves it needs one: compact to
-  {watermark + exception list} once the seen prefix is contiguous with the
-  messages directory, under a version bump. Mixed binaries are fenced like
+  surfaces unread on the next read. Growth is O(channel history) — linear
+  exact-state cost, explicitly accepted: a watermark-plus-exceptions
+  compaction is unsafe under the late-arrival model (a backfilled id below
+  the watermark would be silently seen) and is deferred until a durable
+  arrival-sequence fence exists. State writes warn once a channel's seen-set
+  passes 50k ids. Mixed binaries are fenced like
   every cutover: stores reach v2 only through an enrolled, generation-gated
   migration, and a pre-seen-set binary cannot parse v2 state — it refuses with
   `config_invalid` rather than misreading it.
