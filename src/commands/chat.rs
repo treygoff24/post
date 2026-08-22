@@ -149,20 +149,11 @@ fn read(
             .map(|(message, _)| message.id.clone())
             .collect()
     };
-    let unread_total = batch.len();
     // --discard must count (and mark seen) the full unread batch. Catch-up
     // trimming is a display concern; applying it first undercounted receipts
     // when unread > 25 while still consuming everything.
     if args.discard {
-        return discard(
-            context,
-            &args.name,
-            &room,
-            unread_total,
-            batch_ids.last().cloned(),
-            json_output,
-            pretty,
-        );
+        return discard(context, &args.name, &room, batch_ids, json_output, pretty);
     }
     // Default bounded catch-up: plain cursor reads show the newest 25 unread
     // when the backlog is larger. --limit 0 means unlimited; explicit --limit N
@@ -412,17 +403,19 @@ fn short_id(id: &str) -> &str {
 /// Skip the unread batch without printing bodies: the honest spelling of what
 /// `> /dev/null` used to do by accident. Same emit-then-consume ordering as a
 /// real read, so a failed receipt leaves the seen-set untouched. The receipt
-/// counts the batch selected at read time; the mutation marks every
-/// currently-existing unseen id seen (the deliberate clear-my-backlog op).
+/// counts the batch selected at read time, and the mutation records EXACTLY
+/// those ids: a message that arrives between the render and the post-stdout
+/// callback stays unseen and surfaces on the next read.
 fn discard(
     context: &Context,
     channel_name: &str,
     room: &str,
-    count: usize,
-    last_id: Option<String>,
+    batch_ids: Vec<String>,
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    let count = batch_ids.len();
+    let last_id = batch_ids.last().cloned();
     let rendered = if json_output {
         output::json(
             &output::ChatDiscardOutput {
@@ -450,7 +443,7 @@ fn discard(
     let room = room.to_owned();
     let channel_name = channel_name.to_owned();
     Ok(CommandResult::after_stdout(rendered, move || {
-        ChannelState::mark_all_seen(&context, &room, &channel_name).map(|_| ())
+        ChannelState::mark_seen(&context, &room, &channel_name, batch_ids).map(|_| ())
     }))
 }
 
@@ -1881,6 +1874,40 @@ mod tests {
         let batch = read_batch(&context, "alpha", "tax").expect("read");
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].0.id, ID2);
+        trash_test_root(&root);
+    }
+    #[test]
+    fn discard_consumes_exactly_the_rendered_batch_even_if_mail_arrives_before_the_callback() {
+        let (root, context) = chat_context("discard-race");
+        let dir = seed_channel(&root, &["alpha"]);
+        seed_message(&dir, ID1, "beta", "rendered");
+        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch_ids: Vec<String> = batch
+            .iter()
+            .map(|(message, _)| message.id.clone())
+            .collect();
+        assert_eq!(batch_ids.len(), 1);
+
+        // The receipt is rendered but the post-stdout callback has NOT run.
+        let result = discard(&context, "tax", "alpha", batch_ids, false, false)
+            .expect("discard builds the receipt");
+        // A new message arrives in the window between render and callback —
+        // exactly the gap a mark_all_seen rescan used to swallow silently.
+        seed_message(&dir, ID2, "beta", "arrives mid-flight");
+
+        let callback = result
+            .after_stdout
+            .expect("discard returns a post-stdout callback");
+        callback().expect("callback records the rendered batch");
+        let state = ChannelState::load(&context, "alpha").expect("reload state");
+        assert!(state.has_seen("tax", ID1), "the rendered batch is consumed");
+        assert!(
+            !state.has_seen("tax", ID2),
+            "the mid-flight arrival must stay unseen"
+        );
+        let next = read_batch(&context, "alpha", "tax").expect("next read");
+        assert_eq!(next.len(), 1, "the mid-flight arrival surfaces next read");
+        assert_eq!(next[0].0.id, ID2);
         trash_test_root(&root);
     }
 }
