@@ -203,7 +203,26 @@ where
             marked: 0,
         });
     };
-    backup_v1_if_legacy(context, room, &path)?;
+    // A v1→v2 REPLACEMENT on disk bricks a pre-seen-set binary (it cannot
+    // parse v2), so it is legal only once the migration fence reports an
+    // activated cutover. In-memory migrated reads stay allowed unfenced.
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(AppError::io("read channel state", &path, error)),
+    };
+    let legacy_v1 = raw
+        .as_deref()
+        .is_some_and(|raw| matches!(parse_stored(raw), Ok(Stored::V1(_))));
+    if legacy_v1 {
+        crate::migration_fence::require_activated_for_state_migration(context)?;
+        let backup = path.with_file_name(V1_BACKUP_FILE);
+        atomic_replace(
+            &backup,
+            raw.as_deref().expect("legacy_v1 implies the file was read"),
+        )
+        .map_err(|error| AppError::io("back up legacy channel state", &backup, error))?;
+    }
     for id in &additions {
         state
             .channels
@@ -417,25 +436,6 @@ fn migrate_v1_in_memory(context: &Context, cursors: &BTreeMap<String, String>) -
     ChannelState { channels }
 }
 
-/// Before the first v2 write over a legacy file, preserve the v1 bytes for
-/// rollback. Called under the room's cursor lock, after the reload, so the
-/// classification cannot race a concurrent writer.
-fn backup_v1_if_legacy(context: &Context, room: &str, path: &std::path::Path) -> AppResult<()> {
-    let raw = match std::fs::read(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(AppError::io("read channel state", path, error)),
-    };
-    if matches!(parse_stored(&raw), Ok(Stored::V1(_))) {
-        let backup = channel_state_path(context, room)?
-            .with_file_name(V1_BACKUP_FILE)
-            .to_path_buf();
-        atomic_replace(&backup, &raw)
-            .map_err(|error| AppError::io("back up legacy channel state", &backup, error))?;
-    }
-    Ok(())
-}
-
 fn corrupt_state_error(path: &std::path::Path, reason: &str) -> AppError {
     AppError::new(
         ErrorCode::ConfigInvalid,
@@ -529,6 +529,17 @@ mod tests {
 
     fn read_state_bytes(root: &std::path::Path, room: &str) -> Vec<u8> {
         std::fs::read(root.join(room).join("channel-state.json")).expect("read state file")
+    }
+
+    /// Enroll and activate the migration fence on this test root: the cutover
+    /// is complete, so v1→v2 disk replacements are admitted.
+    fn enroll_activated_fence(root: &std::path::Path) {
+        let context = Context {
+            root: root.to_owned(),
+            home: root.to_owned(),
+        };
+        crate::migration_fence::fence(&context, 1).expect("fence store");
+        crate::migration_fence::activate(&context, 1).expect("activate store");
     }
 
     #[test]
@@ -650,6 +661,9 @@ mod tests {
         seed_message(&root, "tax", ID3, "beta");
         let v1 = r#"{"tax": "20260722-013000-000002-bbb222"}"#;
         write_v1_state(&root, "alpha", v1);
+        // Conversion replaces the file on disk, which requires the activated
+        // migration cutover (finding 4).
+        enroll_activated_fence(&root);
 
         // A late-arriving OLDER id would be absent from the baseline...
         ChannelState::mark_seen(&context, "alpha", "tax", [ID3.to_owned()])
@@ -858,6 +872,77 @@ mod tests {
         );
         let error = ChannelState::load(&context, "alpha").expect_err("missing seen key");
         assert_eq!(error.code.as_str(), "config_invalid");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn unfenced_v1_conversion_is_refused_and_the_v1_file_stays_intact() {
+        let (root, context) = state_context("v1unfenced");
+        seed_message(&root, "tax", ID1, "beta");
+        seed_message(&root, "tax", ID2, "beta");
+        let v1 = r#"{"tax": "20260722-013000-000002-bbb222"}"#;
+        write_v1_state(&root, "alpha", v1);
+
+        let error = ChannelState::mark_seen(&context, "alpha", "tax", [ID3.to_owned()])
+            .expect_err("unfenced conversion must refuse");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(
+            error.message.contains("cutover"),
+            "refusal must name the cutover requirement: {}",
+            error.message
+        );
+        // The v1 bytes are untouched and no backup was taken.
+        assert_eq!(read_state_bytes(&root, "alpha"), v1.as_bytes());
+        assert!(
+            !root.join("alpha").join(V1_BACKUP_FILE).exists(),
+            "no backup may appear behind a refusal"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn enrolled_store_converts_v1_to_v2_with_backup() {
+        let (root, context) = state_context("v1enrolled");
+        seed_message(&root, "tax", ID1, "beta");
+        let v1 = r#"{"tax": "20260722-013000-000001-aaa111"}"#;
+        write_v1_state(&root, "alpha", v1);
+        enroll_activated_fence(&root);
+
+        ChannelState::mark_seen(&context, "alpha", "tax", [ID2.to_owned()])
+            .expect("activated cutover admits the conversion");
+        let converted: serde_json::Value =
+            serde_json::from_slice(&read_state_bytes(&root, "alpha")).expect("v2 JSON");
+        assert_eq!(converted["version"], 2);
+        let backup = std::fs::read_to_string(root.join("alpha").join(V1_BACKUP_FILE))
+            .expect("v1 backup exists");
+        assert_eq!(backup, v1, "backup holds the original v1 bytes");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn restored_backup_on_an_unfenced_store_stays_v1() {
+        let (root, context) = state_context("v1restore");
+        seed_message(&root, "tax", ID1, "beta");
+        let v1 = r#"{"tax": "20260722-013000-000001-aaa111"}"#;
+        write_v1_state(&root, "alpha", v1);
+        enroll_activated_fence(&root);
+        ChannelState::mark_seen(&context, "alpha", "tax", [ID2.to_owned()])
+            .expect("convert while enrolled");
+
+        // Rollback: restore the v1 bytes and unenroll the cutover.
+        let backup = std::fs::read(root.join("alpha").join(V1_BACKUP_FILE)).expect("backup");
+        std::fs::write(root.join("alpha").join("channel-state.json"), backup).expect("restore");
+        std::fs::remove_file(root.join(crate::migration_fence::STATE_FILE))
+            .expect("unenroll store");
+
+        let error = ChannelState::mark_seen(&context, "alpha", "tax", [ID2.to_owned()])
+            .expect_err("restored v1 on an unfenced store must stay v1");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert_eq!(
+            read_state_bytes(&root, "alpha"),
+            v1.as_bytes(),
+            "the restored v1 file is untouched"
+        );
         trash_test_root(&root);
     }
 }

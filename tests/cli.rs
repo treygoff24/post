@@ -3449,7 +3449,7 @@ fn discard_through_text_mode_summarizes_in_one_line() {
     let text = stdout(&output);
     assert_eq!(text.lines().count(), 1, "text mode is one line: {text}");
     assert!(
-        text.contains("cursor advanced through") && text.contains(&ids[2]),
+        text.contains("marked 5 additional message(s) seen") && text.contains(&ids[2]),
         "text receipt must name the new cursor: {text}"
     );
     let replay = sandbox.run_in(&["chat", "tax", "--discard-through", &ids[2]], None, &beta);

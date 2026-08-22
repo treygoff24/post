@@ -306,6 +306,23 @@ pub(crate) fn read_only_must_not_mutate(context: &Context) -> bool {
     )
 }
 
+/// Channel-state v1→v2 conversion REPLACES the legacy file on disk, and a
+/// pre-seen-set binary cannot parse the v2 document: converting without a
+/// completed cutover bricks old binaries mid-migration. The replacement is
+/// therefore legal only once the store's fence reports the cutover
+/// activated. Generation matching itself is enforced at command admission;
+/// this is the store-level capability signal for nested writers.
+/// In-memory migrated reads stay allowed either way.
+pub(crate) fn require_activated_for_state_migration(context: &Context) -> AppResult<()> {
+    if matches!(read_state(context), Ok(Some(FenceState::Active { .. }))) {
+        return Ok(());
+    }
+    Err(refuse(
+        context,
+        "converting the legacy channel-state to the seen-set format requires an activated migration cutover",
+    ))
+}
+
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {
     let path = state_path(context);
     AppError::new(
