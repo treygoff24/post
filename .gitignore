@@ -11,3 +11,6 @@ STATE.md
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Local agent-harness config (machine-specific hooks)
+.claude/

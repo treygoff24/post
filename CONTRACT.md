@@ -72,7 +72,7 @@ The public language is model-neutral; the default root remains
   are reserved room names; the actual `.post-arx.json` temporary name is
   `..post-arx.json.<pid>.<nonce>.tmp`, and no lock temporary namespace is
   produced or reserved.
-- Under an enrolled/fenced store, Read-only forms stay available and never write: `read --peek`, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `watch --snapshot`, and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads (`read`, a plain `chat`), long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Admitted read-only forms create
+- Under an enrolled/fenced store, read-only forms stay available and never write: `read --peek`, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `watch --snapshot`, `schema`, `doctor` (without `--fix`), `profile` (show), `owner` (show), and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads (`read`, a plain `chat`), long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Admitted read-only forms create
   no root/room directory, banner-day, heartbeat, or cursor writes. A long
   non-snapshot watch re-admits before every heartbeat and exits nonzero if the
   fence or generation changes. Snapshot remains read-only only under the

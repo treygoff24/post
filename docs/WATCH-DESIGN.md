@@ -88,8 +88,9 @@ a delivery. It only selects targets for the existing full scan.
   mail via exclusive hard-link after a synced temp write (CONTRACT.md,
   on-disk format). A directory listing therefore never sees a partial
   file — the link either exists with full content or doesn't. No
-  rename-vs-create event-type hazard exists because we never consume FS
-  events at all.
+  rename-vs-create event-type hazard exists because filesystem events are
+  consumed only as wake hints, never as delivery truth — every delivery
+  decision comes from a directory scan.
 - **Startup emits existing unread.** The "mail arrived just before the
   watcher started" hole is closed structurally: watch's first batch IS the
   current unread set. Semantics: watch = "stream of unread mail, starting
