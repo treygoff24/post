@@ -608,7 +608,8 @@ fn read_batch(
 }
 
 /// Which messages a collection includes. `AfterId` serves the cursorless
-/// `--history`/`--since` reads; `NotInSeen` is the unread selection.
+/// `--history`/`--since` reads; `NotInSeen` is the unread selection — the
+/// published predicate "id ∉ seen ∧ from ≠ self".
 enum UnreadRule<'a> {
     AfterId(Option<&'a str>),
     NotInSeen(&'a ChannelState),
@@ -678,6 +679,13 @@ fn collect_batch(
                 continue;
             }
         };
+        // The published unread predicate is "id ∉ seen ∧ from ≠ self". The
+        // seen-set normally records own sends (mark_own_message_seen), but if
+        // that best-effort mark failed, the sender's own message must still
+        // never re-show to its sender.
+        if matches!(&rule, UnreadRule::NotInSeen(_)) && parsed.message.from == room {
+            continue;
+        }
         batch.push((parsed.message, parsed.body));
     }
     batch.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
@@ -1171,7 +1179,7 @@ mod tests {
     fn batch_reads_all_then_only_new_after_advance() {
         let (root, context) = chat_context("batch");
         let dir = seed_channel(&root, &["alpha"]);
-        seed_message(&dir, ID1, "alpha", "first");
+        seed_message(&dir, ID1, "beta", "first");
         seed_message(&dir, ID2, "beta", "second");
 
         let batch = read_batch(&context, "alpha", "tax").expect("first read");
@@ -1198,7 +1206,7 @@ mod tests {
         // Simulates a crashed emit: read_batch ran but advance never did.
         let (root, context) = chat_context("crash");
         let dir = seed_channel(&root, &["alpha"]);
-        seed_message(&dir, ID1, "alpha", "only");
+        seed_message(&dir, ID1, "beta", "only");
         let first = read_batch(&context, "alpha", "tax").expect("first read");
         let second = read_batch(&context, "alpha", "tax").expect("re-read");
         assert_eq!(first.len(), 1);
@@ -1732,7 +1740,7 @@ mod tests {
         let dir = seed_channel(&root, &["alpha"]);
         let join_event = ChannelMessage {
             id: ID1.to_owned(),
-            from: "alpha".to_owned(),
+            from: "gamma".to_owned(),
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
@@ -1764,7 +1772,7 @@ mod tests {
         assert!(text.contains("READ THIS FRAMING FIRST"));
         assert!(text.contains("possibly several"));
         assert!(text.contains("NO authority"));
-        assert!(text.contains("[join] alpha"));
+        assert!(text.contains("[join] gamma"));
         assert!(text.contains("hello"));
         let banner_count = text.matches("READ THIS FRAMING FIRST").count();
         assert_eq!(banner_count, 1, "banner appears once per batch");
@@ -1908,6 +1916,41 @@ mod tests {
         let next = read_batch(&context, "alpha", "tax").expect("next read");
         assert_eq!(next.len(), 1, "the mid-flight arrival surfaces next read");
         assert_eq!(next[0].0.id, ID2);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn own_message_absent_from_seen_never_surfaces_to_its_sender() {
+        // The published predicate is "id ∉ seen ∧ from ≠ self". Here the
+        // best-effort mark_own_message_seen never ran (as if it failed), so
+        // the sender's own message sits in messages/ absent from the
+        // seen-set — and must still not re-show to its sender.
+        let (root, context) = chat_context("own-unmarked");
+        let dir = seed_channel(&root, &["alpha", "beta"]);
+        seed_message(&dir, ID1, "alpha", "my own send, unmarked");
+
+        let state = ChannelState::load(&context, "alpha").expect("load");
+        assert!(
+            !state.has_seen("tax", ID1),
+            "fixture: the own id is absent from the seen-set"
+        );
+        assert!(
+            read_batch(&context, "alpha", "tax")
+                .expect("sender read")
+                .is_empty(),
+            "an own message must not surface to its sender"
+        );
+        // Other members still see it normally.
+        let beta_batch = collect_batch(
+            &context,
+            "beta",
+            "tax",
+            UnreadRule::NotInSeen(&ChannelState::load(&context, "beta").expect("beta state")),
+            true,
+        )
+        .expect("member read");
+        assert_eq!(beta_batch.len(), 1);
+        assert_eq!(beta_batch[0].0.id, ID1);
         trash_test_root(&root);
     }
 }
