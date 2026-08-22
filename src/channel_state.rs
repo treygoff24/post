@@ -156,20 +156,6 @@ impl ChannelState {
             unseen_candidates(context, channel, seen, Some(target))
         })
     }
-
-    /// Mark every currently-existing unseen id as seen — the deliberate
-    /// `--discard` clear-my-backlog op.
-    pub(crate) fn mark_all_seen(
-        context: &Context,
-        room: &str,
-        channel: &str,
-    ) -> AppResult<CursorAdvance> {
-        seal(context, room, channel, |state| {
-            let empty = BTreeSet::new();
-            let seen = state.channels.get(channel).unwrap_or(&empty);
-            unseen_candidates(context, channel, seen, None)
-        })
-    }
 }
 
 /// Reload, compute additions, back up any v1 bytes, union, and atomically
@@ -782,22 +768,6 @@ mod tests {
     }
 
     #[test]
-    fn mark_all_seen_consumes_every_currently_existing_unseen_id() {
-        let (root, context) = state_context("allseen");
-        seed_message(&root, "tax", ID1, "beta");
-        seed_message(&root, "tax", ID2, "beta");
-        let outcome = ChannelState::mark_all_seen(&context, "alpha", "tax").expect("discard");
-        assert!(outcome.advanced);
-        assert_eq!(outcome.marked, 2);
-        assert_eq!(outcome.cursor, ID2);
-        // An empty backlog replays as success without an advance.
-        let empty = ChannelState::mark_all_seen(&context, "alpha", "tax").expect("empty");
-        assert!(!empty.advanced);
-        assert_eq!(empty.cursor, ID2);
-        trash_test_root(&root);
-    }
-
-    #[test]
     fn cursor_lock_is_private_and_excludes_a_second_writer() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::os::unix::io::AsRawFd;
@@ -1017,7 +987,7 @@ mod tests {
             "alpha",
             r#"{"version": "20260722-013000-000001-aaa111"}"#,
         );
-        let state =
+        let _state =
             ChannelState::load(&context, "alpha").expect("v1 map with a 'version' channel loads");
         // The migrated in-memory baseline is empty (no messages/ yet), so
         // prove the DISK bytes classified as legacy v1: an unfenced write

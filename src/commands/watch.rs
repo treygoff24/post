@@ -172,7 +172,6 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         once,
         text,
         &mut wake,
-        event_mode,
         slow_period,
     )
 }
@@ -190,7 +189,6 @@ fn run_watch_loop(
     once: bool,
     text: bool,
     wake: &mut Box<dyn WakeSource>,
-    event_mode: bool,
     slow_period: Duration,
 ) -> AppResult<CommandResult> {
     touch_heartbeats(context, targets, interval_ms)?;
@@ -915,7 +913,6 @@ body
             true,
             false,
             &mut wake,
-            true,
             Duration::from_secs(3600),
         )
         .expect("loop emits and exits");
@@ -996,7 +993,6 @@ body
             true,
             false,
             &mut wake,
-            true,
             Duration::from_secs(0),
         )
         .expect("deadline pass emits the starved room's mail");
