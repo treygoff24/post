@@ -237,10 +237,12 @@ import) still surfaces on the next read. A room's own messages are excluded
 even if their best-effort seen-state update is absent. `--peek` and `watch`
 change nothing. Blocked routes cannot share a channel.
 
-Legacy watermark state converts in memory on reads. The first write during an
-activated migration cutover saves the original bytes as
-`.channel-state.v1.bak` and writes v2; pre-seen-set binaries then refuse the v2
-file rather than guessing. Seen-sets grow with channel history and warn on a
+Legacy watermark state converts in memory on reads. On a store with no
+migration fence marker — a plain upgrade — the first write saves the original
+bytes as `.channel-state.v1.bak` and writes v2; while a fence marker exists
+but its cutover is not activated, the conversion is refused so a coordinated
+mixed-binary migration cannot brick its old binaries. Pre-seen-set binaries
+refuse the v2 file rather than guessing. Seen-sets grow with channel history and warn on a
 write at 50,000 ids. Compacting them into a watermark is not safe until Post
 has a durable arrival-sequence fence, because a later backfill below that
 watermark would be hidden.

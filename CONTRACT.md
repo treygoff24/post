@@ -141,9 +141,11 @@ The public language is model-neutral; the default root remains
   compaction is unsafe under the late-arrival model (a backfilled id below
   the watermark would be silently seen) and is deferred until a durable
   arrival-sequence fence exists. State writes warn when a channel's seen-set
-  reaches 50,000 ids. Mixed binaries are fenced like
-  every cutover: stores reach v2 only through an enrolled, generation-gated
-  migration, and a pre-seen-set binary cannot parse v2 state — it refuses with
+  reaches 50,000 ids. A store with no migration fence marker (a plain
+  single-binary upgrade) converts on its first write, backing up the v1 bytes;
+  while a fence marker exists but its cutover is not activated, conversion is
+  refused so a coordinated mixed-binary migration cannot brick its old
+  binaries. A pre-seen-set binary cannot parse v2 state — it refuses with
   `config_invalid` rather than misreading it.
 
 ## Commands
