@@ -156,6 +156,14 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             (Box::new(PollWake) as Box<dyn WakeSource>, false)
         }
     };
+    // Scaled x10 off the poll interval, floored at 30 s — quiet enough to
+    // stay out of the way, tight enough that a stale watch goes at most one
+    // window without news. The poll fallback's period is one tick.
+    let slow_period = if event_mode {
+        Duration::from_millis((interval_ms * 10).max(30_000))
+    } else {
+        Duration::from_millis(interval_ms)
+    };
     run_watch_loop(
         context,
         &mut targets,
@@ -165,6 +173,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         text,
         &mut wake,
         event_mode,
+        slow_period,
     )
 }
 
@@ -182,6 +191,7 @@ fn run_watch_loop(
     text: bool,
     wake: &mut Box<dyn WakeSource>,
     event_mode: bool,
+    slow_period: Duration,
 ) -> AppResult<CommandResult> {
     touch_heartbeats(context, targets, interval_ms)?;
     let mut batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
@@ -193,14 +203,13 @@ fn run_watch_loop(
     }
     // The slow periodic pass keeps running even in event mode (r2): presence
     // and the migration-fence check need periodic passes, and re-registration
-    // needs them to catch new or replaced channel dirs. Scaled x10 off the
-    // poll interval, floored at 30 s — quiet enough to stay out of the way,
-    // tight enough that a stale watch goes at most one window without news.
-    // The POLL fallback has no slow pass: it scans every tick, behavior
-    // identical to the pre-event loop.
-    let slow_ticks = ((interval_ms * 10).max(30_000) / interval_ms.max(1)).max(1) as u32;
-    let mut slow_every = if event_mode { slow_ticks } else { 1 };
-    let mut ticks_since_slow = 0u32;
+    // needs them to catch new or replaced channel dirs. It fires on a
+    // WALL-CLOCK deadline checked after every wake — tick counting only
+    // advanced on TimedOut, so one target raining continuous events starved
+    // reconciliation and full scans for every other target indefinitely.
+    // The POLL fallback has no distinct slow pass: its period is one tick,
+    // so every tick is a full scan, behavior identical to the pre-event loop.
+    let mut slow_deadline = Instant::now() + slow_period;
     // Heartbeat cadence stays at --interval-ms even when wakes arrive faster
     // or slower than ticks (`post who` presence depends on it).
     let mut last_beat = Instant::now();
@@ -209,33 +218,19 @@ fn run_watch_loop(
             None => {
                 // Backend died mid-run: degrade to polling rather than to
                 // silence, with one warning like the startup fallback. The
-                // poll fallback scans every tick, like today.
+                // dead backend delivers nothing more, so the next tick is
+                // due a full scan immediately.
                 eprintln!(
                     "post: warning: filesystem event backend failed; falling back to polling every {interval_ms} ms"
                 );
                 *wake = Box::new(PollWake);
-                slow_every = 1;
+                slow_deadline = Instant::now();
                 Vec::new()
             }
             Some(Wake::TimedOut) => {
                 touch_heartbeats(context, targets, interval_ms)?;
                 last_beat = Instant::now();
-                ticks_since_slow += 1;
-                if ticks_since_slow >= slow_every {
-                    ticks_since_slow = 0;
-                    // Re-derive the watched-dir set (new channel dirs, dirs
-                    // replaced by rm+mkdir) and hand deltas to the backend
-                    // before the unconditional rescan (r2).
-                    refresh_target_dirs(context, targets);
-                    let desired: BTreeSet<PathBuf> = targets
-                        .iter()
-                        .flat_map(|target| target.dirs.iter().cloned())
-                        .collect();
-                    wake.reconcile(&desired);
-                    scan_targets(context, targets, emitted_channel_ids, |_| true)
-                } else {
-                    Vec::new()
-                }
+                Vec::new()
             }
             Some(Wake::Events(dirs)) => {
                 if last_beat.elapsed() >= Duration::from_millis(interval_ms) {
@@ -249,6 +244,20 @@ fn run_watch_loop(
                 })
             }
         };
+        // Slow pass: due whenever the wall clock says so, after EVERY wake.
+        if Instant::now() >= slow_deadline {
+            slow_deadline = Instant::now() + slow_period;
+            // Re-derive the watched-dir set (new channel dirs, dirs replaced
+            // by rm+mkdir) and hand deltas to the backend before the
+            // unconditional rescan (r2).
+            refresh_target_dirs(context, targets);
+            let desired: BTreeSet<PathBuf> = targets
+                .iter()
+                .flat_map(|target| target.dirs.iter().cloned())
+                .collect();
+            wake.reconcile(&desired);
+            batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
+        }
         if !batch.is_empty() {
             emit(&batch, text)?;
             if once {
@@ -391,6 +400,13 @@ impl NotifyWake {
         if matches!(event.kind, notify::EventKind::Access(_)) {
             return;
         }
+        // Overflow: notify reports a dropped-events condition as a SUCCESSFUL
+        // event flagged need_rescan, often with no paths — anything may have
+        // happened anywhere, so every watched dir gets a full scan (Sol 8).
+        if event.need_rescan() {
+            dirs.extend(self.watched.iter().cloned());
+            return;
+        }
         for path in &event.paths {
             for dir in &self.watched {
                 if path.starts_with(dir) {
@@ -469,6 +485,13 @@ impl WakeSource for NotifyWake {
                             dir.display().to_string(),
                             error.to_string()
                         );
+                        // Do NOT record the new identity: leaving it stale
+                        // makes the next slow pass see "changed" again and
+                        // retry — recording it would end retries forever
+                        // with a dead watch (Sol 8).
+                        self.identities.remove(dir);
+                        self.watched.remove(dir.as_path());
+                        continue;
                     }
                     self.identities.insert(dir.clone(), id);
                 }
@@ -810,10 +833,14 @@ mod tests {
     struct StubWake {
         on_first_wait: Option<Box<dyn FnOnce()>>,
         scheduled: std::collections::VecDeque<Wake>,
+        /// Number of wait() calls, shared so the test can assert how many
+        /// wakes the loop needed.
+        waits: std::rc::Rc<std::cell::Cell<u32>>,
     }
 
     impl WakeSource for StubWake {
         fn wait(&mut self, _timeout: Duration) -> Option<Wake> {
+            self.waits.set(self.waits.get() + 1);
             if let Some(action) = self.on_first_wait.take() {
                 action();
             }
@@ -862,6 +889,7 @@ body
         }];
         let wake_dirs = targets[0].dirs.clone();
         let deliver_inbox = inbox.clone();
+        let waits = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let stub = StubWake {
             on_first_wait: Some(Box::new(move || {
                 fs::write(
@@ -873,6 +901,7 @@ body
             scheduled: [Wake::Events(wake_dirs.into_iter().collect())]
                 .into_iter()
                 .collect(),
+            waits: waits.clone(),
         };
         let mut wake: Box<dyn WakeSource> = Box::new(stub);
         let mut emitted_channel_ids = HashSet::new();
@@ -887,11 +916,94 @@ body
             false,
             &mut wake,
             true,
+            Duration::from_secs(3600),
         )
         .expect("loop emits and exits");
         assert!(
             room_dir.join("watch.heartbeat").exists(),
             "event mode must still touch presence heartbeats"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn continuous_events_for_one_room_cannot_starve_anothers_slow_scan() {
+        // Sol 7 regression: tick-counting only advanced on TimedOut, so a
+        // stream of events for room A starved the slow pass and room B's
+        // deliveries went silent. The wall-clock deadline must fire after
+        // ANY wake once due, full-scanning every target.
+        let root = test_root("watch-starvation");
+        let mut dirs_by_room = Vec::new();
+        let mut rooms_json = serde_json::Map::new();
+        for room in ["alpha", "beta2"] {
+            let room_dir = root.join(room);
+            let inbox = room_dir.join("inbox");
+            fs::create_dir_all(&inbox).expect("create inbox");
+            rooms_json.insert(
+                room.to_owned(),
+                serde_json::Value::String(room_dir.display().to_string()),
+            );
+            dirs_by_room.push((room.to_owned(), inbox));
+        }
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_string(&serde_json::Value::Object(rooms_json)).expect("rooms"),
+        )
+        .expect("write rooms.json");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut targets: Vec<WatchTarget> = dirs_by_room
+            .iter()
+            .map(|(room, inbox)| WatchTarget {
+                channel_seen: HashMap::new(),
+                room: room.clone(),
+                inbox: inbox.clone(),
+                dirs: target_dirs(&context, room, inbox),
+                seen: HashSet::new(),
+                scan_failing: false,
+            })
+            .collect();
+        // A's dirs rain events; B's message lands during the first wait and
+        // NO wake ever names B's dirs.
+        let alpha_dirs: BTreeSet<PathBuf> = targets[0].dirs.clone();
+        let beta_inbox = dirs_by_room[1].1.clone();
+        let waits = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let stub = StubWake {
+            on_first_wait: Some(Box::new(move || {
+                fs::write(
+                    beta_inbox.join("20260822-000000-000002-def456.mail"),
+                    mail_bytes("20260822-000000-000002-def456", "alpha", "beta2"),
+                )
+                .expect("deliver to the starved room");
+            })),
+            scheduled: std::iter::repeat_with(|| Wake::Events(alpha_dirs.clone()))
+                .take(50)
+                .collect(),
+            waits: waits.clone(),
+        };
+        let mut wake: Box<dyn WakeSource> = Box::new(stub);
+        let mut emitted_channel_ids = HashSet::new();
+        // slow_period zero: the deadline is due on the very first wake, so a
+        // correct loop emits B's mail immediately despite A-only events;
+        // the starved loop would drain all 50 A-wakes without emitting.
+        run_watch_loop(
+            &context,
+            &mut targets,
+            &mut emitted_channel_ids,
+            1000,
+            true,
+            false,
+            &mut wake,
+            true,
+            Duration::from_secs(0),
+        )
+        .expect("deadline pass emits the starved room's mail");
+        assert!(
+            waits.get() <= 2,
+            "the slow deadline must fire on the first due wake, not after draining events (waits={})",
+            waits.get()
         );
         trash_test_root(&root);
     }
