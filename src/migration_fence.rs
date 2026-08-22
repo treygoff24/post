@@ -314,13 +314,21 @@ pub(crate) fn read_only_must_not_mutate(context: &Context) -> bool {
 /// this is the store-level capability signal for nested writers.
 /// In-memory migrated reads stay allowed either way.
 pub(crate) fn require_activated_for_state_migration(context: &Context) -> AppResult<()> {
-    if matches!(read_state(context), Ok(Some(FenceState::Active { .. }))) {
-        return Ok(());
+    match read_state(context) {
+        // No fence marker: a plain single-binary upgrade. There is no mixed
+        // deployment to protect, the conversion is documented, and 0.6.0
+        // ships no cutover CLI — refusing here would permanently lock every
+        // upgrader out of channel writes. The v1 backup covers rollback.
+        Ok(None) => Ok(()),
+        // A coordinated cutover is underway (or done): conversion is legal
+        // only once the fence reports the cutover activated, so a mixed
+        // deployment can never brick its old binaries mid-migration.
+        Ok(Some(FenceState::Active { .. })) => Ok(()),
+        _ => Err(refuse(
+            context,
+            "a migration fence exists but is not activated: converting the legacy channel-state to the seen-set format requires the activated cutover",
+        )),
     }
-    Err(refuse(
-        context,
-        "converting the legacy channel-state to the seen-set format requires an activated migration cutover",
-    ))
 }
 
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {

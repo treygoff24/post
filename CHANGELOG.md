@@ -44,9 +44,13 @@
 ### Migration
 - Legacy watermark state migrates lazily. Reads derive an in-memory baseline
   from every existing message id at or below the watermark without rewriting
-  the file. The first admitted, lock-held write converts it to v2 under the
-  room's `.channel-state.lock` and saves the original bytes as
-  `.channel-state.v1.bak`. Rollback requires restoring that backup over
+  the file. On a store with no migration fence marker — a plain single-binary
+  upgrade, which is every 0.5.0 machine — the first admitted, lock-held write
+  converts it to v2 under the room's `.channel-state.lock` and saves the
+  original bytes as `.channel-state.v1.bak`. While a fence marker exists but
+  its cutover is not activated (a coordinated mixed-binary migration in
+  progress), that conversion is refused so old binaries cannot be bricked
+  mid-cutover. Rollback requires restoring the backup over
   `channel-state.json` and running a pre-seen-set binary; v1 is never written
   again after conversion.
 - A new single-store migration fence covers every mailbox mutation, including

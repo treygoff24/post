@@ -891,22 +891,47 @@ mod tests {
     }
 
     #[test]
-    fn unfenced_v1_conversion_is_refused_and_the_v1_file_stays_intact() {
+    fn no_marker_store_converts_v1_with_backup_plain_upgrade_path() {
+        // A store with NO fence marker is a plain single-binary upgrade
+        // (every public 0.5.0 -> 0.6.0 user): conversion must proceed with a
+        // backup — refusing would permanently lock channel writes on a
+        // release that ships no cutover CLI.
         let (root, context) = state_context("v1unfenced");
         seed_message(&root, "tax", ID1, "beta");
         seed_message(&root, "tax", ID2, "beta");
         let v1 = r#"{"tax": "20260722-013000-000002-bbb222"}"#;
         write_v1_state(&root, "alpha", v1);
 
+        ChannelState::mark_seen(&context, "alpha", "tax", [ID3.to_owned()])
+            .expect("a fence-less store admits the plain-upgrade conversion");
+        let converted: serde_json::Value =
+            serde_json::from_slice(&read_state_bytes(&root, "alpha")).expect("v2 JSON");
+        assert_eq!(converted["version"], 2);
+        let backup = std::fs::read_to_string(root.join("alpha").join(V1_BACKUP_FILE))
+            .expect("v1 backup exists");
+        assert_eq!(backup, v1, "backup holds the original v1 bytes");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn fenced_but_not_activated_store_refuses_v1_conversion() {
+        // A fence marker EXISTS but the cutover has not activated: this is
+        // the mixed-deployment window the gate protects — conversion refused,
+        // v1 bytes untouched, no backup.
+        let (root, context) = state_context("v1fencedidle");
+        seed_message(&root, "tax", ID1, "beta");
+        let v1 = r#"{"tax": "20260722-013000-000002-bbb222"}"#;
+        write_v1_state(&root, "alpha", v1);
+        crate::migration_fence::fence(&context, 1).expect("fence store (not activated)");
+
         let error = ChannelState::mark_seen(&context, "alpha", "tax", [ID3.to_owned()])
-            .expect_err("unfenced conversion must refuse");
+            .expect_err("fenced-but-idle conversion must refuse");
         assert_eq!(error.code.as_str(), "config_invalid");
         assert!(
             error.message.contains("cutover"),
             "refusal must name the cutover requirement: {}",
             error.message
         );
-        // The v1 bytes are untouched and no backup was taken.
         assert_eq!(read_state_bytes(&root, "alpha"), v1.as_bytes());
         assert!(
             !root.join("alpha").join(V1_BACKUP_FILE).exists(),
@@ -935,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_backup_on_an_unfenced_store_stays_v1() {
+    fn restored_backup_behind_an_idle_fence_stays_v1() {
         let (root, context) = state_context("v1restore");
         seed_message(&root, "tax", ID1, "beta");
         let v1 = r#"{"tax": "20260722-013000-000001-aaa111"}"#;
@@ -944,14 +969,18 @@ mod tests {
         ChannelState::mark_seen(&context, "alpha", "tax", [ID2.to_owned()])
             .expect("convert while enrolled");
 
-        // Rollback: restore the v1 bytes and unenroll the cutover.
+        // Rollback: restore the v1 bytes and wind the fence back to fenced
+        // (enrolled, cutover NOT active). The restored v1 must stay v1 —
+        // this is the mixed-deployment window where reconversion would brick
+        // the old binaries the rollback exists to serve.
         let backup = std::fs::read(root.join("alpha").join(V1_BACKUP_FILE)).expect("backup");
         std::fs::write(root.join("alpha").join("channel-state.json"), backup).expect("restore");
         std::fs::remove_file(root.join(crate::migration_fence::STATE_FILE))
-            .expect("unenroll store");
+            .expect("drop activated marker");
+        crate::migration_fence::fence(&context, 2).expect("re-fence, cutover not active");
 
         let error = ChannelState::mark_seen(&context, "alpha", "tax", [ID2.to_owned()])
-            .expect_err("restored v1 on an unfenced store must stay v1");
+            .expect_err("restored v1 behind an idle fence must stay v1");
         assert_eq!(error.code.as_str(), "config_invalid");
         assert_eq!(
             read_state_bytes(&root, "alpha"),
@@ -1007,14 +1036,15 @@ mod tests {
         );
         let _state =
             ChannelState::load(&context, "alpha").expect("v1 map with a 'version' channel loads");
-        // The migrated in-memory baseline is empty (no messages/ yet), so
-        // prove the DISK bytes classified as legacy v1: an unfenced write
-        // refuses the v1→v2 replacement — a misparse as versioned v2 would
-        // have been a loud config error or a plain v2 write instead.
-        let error = ChannelState::mark_seen(&context, "alpha", "version", [ID1.to_owned()])
-            .expect_err("unfenced conversion must refuse");
-        assert_eq!(error.code.as_str(), "config_invalid");
-        assert!(error.message.contains("cutover"), "{}", error.message);
+        // Prove the DISK bytes classified as legacy v1: on this fence-less
+        // store the write CONVERTS (plain-upgrade path) and the backup holds
+        // the original map — a misparse as versioned v2 would have been a
+        // loud config error instead, and no backup would exist.
+        ChannelState::mark_seen(&context, "alpha", "version", [ID1.to_owned()])
+            .expect("fence-less store converts the v1 'version' map");
+        let backup = std::fs::read_to_string(root.join("alpha").join(V1_BACKUP_FILE))
+            .expect("v1 backup proves the legacy classification");
+        assert!(backup.contains("20260722-013000-000001-aaa111"));
         trash_test_root(&root);
     }
 }
