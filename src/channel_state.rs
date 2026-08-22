@@ -82,7 +82,7 @@ impl ChannelState {
     pub(crate) fn load(context: &Context, room: &str) -> AppResult<Self> {
         match load_stored(context, room)? {
             Stored::Missing => Ok(Self::default()),
-            Stored::V1(cursors) => Ok(migrate_v1_in_memory(context, &cursors)),
+            Stored::V1(cursors) => migrate_v1_in_memory(context, &cursors),
             Stored::V2(channels) => Ok(Self { channels }),
         }
     }
@@ -413,7 +413,15 @@ pub(crate) fn stored_shape_is_valid(bytes: &[u8]) -> bool {
 /// currently in messages/ that is ≤ the watermark. A later-arriving OLDER id
 /// is then absent from the set ⇒ unread, which is precisely the late-arrival
 /// property the watermark model lacked.
-fn migrate_v1_in_memory(context: &Context, cursors: &BTreeMap<String, String>) -> ChannelState {
+///
+/// A MISSING channel messages directory is the only accepted-empty case (the
+/// room simply has no history there yet). Any other enumeration error
+/// propagates: an unreadable messages/ must never silently become "nothing
+/// was ever read", and no v2 state may be derived from that lie.
+fn migrate_v1_in_memory(
+    context: &Context,
+    cursors: &BTreeMap<String, String>,
+) -> AppResult<ChannelState> {
     let mut channels = BTreeMap::new();
     for (channel, cursor) in cursors {
         let mut seen = BTreeSet::new();
@@ -422,18 +430,27 @@ fn migrate_v1_in_memory(context: &Context, cursors: &BTreeMap<String, String>) -
             .join(CHANNELS_DIR)
             .join(channel)
             .join("messages");
-        if let Ok(files) = crate::channel::message_files(&directory) {
-            for path in files {
-                if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
-                    if id <= cursor.as_str() {
-                        seen.insert(id.to_owned());
-                    }
+        match std::fs::read_dir(&directory) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::io(
+                    "list channel messages directory",
+                    &directory,
+                    error,
+                ))
+            }
+        }
+        for path in crate::channel::message_files(&directory)? {
+            if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
+                if id <= cursor.as_str() {
+                    seen.insert(id.to_owned());
                 }
             }
         }
         channels.insert(channel.clone(), seen);
     }
-    ChannelState { channels }
+    Ok(ChannelState { channels })
 }
 
 fn corrupt_state_error(path: &std::path::Path, reason: &str) -> AppError {
@@ -942,6 +959,39 @@ mod tests {
             read_state_bytes(&root, "alpha"),
             v1.as_bytes(),
             "the restored v1 file is untouched"
+        );
+        trash_test_root(&root);
+    }
+    #[test]
+    fn unreadable_messages_dir_fails_migration_instead_of_an_empty_baseline() {
+        // An enumeration error must propagate, never collapse into "nothing
+        // was ever read" — and no v2 may be derived from that lie. Root
+        // ignores file modes, so the fixture is unbuildable there.
+        if unsafe { libc::geteuid() } == 0 {
+            println!("skipped: root ignores file modes");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let (root, context) = state_context("v1unreadable");
+        seed_message(&root, "tax", ID1, "beta");
+        let v1 = r#"{"tax": "20260722-013000-000001-aaa111"}"#;
+        write_v1_state(&root, "alpha", v1);
+        let dir = root.join(CHANNELS_DIR).join("tax").join("messages");
+        let mut perms = std::fs::metadata(&dir)
+            .expect("stat messages dir")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&dir, perms.clone()).expect("chmod 000");
+
+        let error = ChannelState::load(&context, "alpha")
+            .expect_err("unreadable messages dir must fail the migrating load");
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dir, perms).expect("restore mode");
+        assert_eq!(error.code.as_str(), "io_error");
+        assert_eq!(
+            read_state_bytes(&root, "alpha"),
+            v1.as_bytes(),
+            "no v2 is written behind a failed migration"
         );
         trash_test_root(&root);
     }
