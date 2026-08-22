@@ -180,9 +180,10 @@ post chat <channel> --json
 post channels --json
 ```
 
-`not_a_member` means join first from that room cwd. A plain read records only
-the batch it emitted as seen, after stdout succeeds; `--peek` and `watch`
-never mutate that state. Every mutation holds an interprocess lock on the
+`not_a_member` means join first from that room cwd. A plain read records its
+whole unread selection as seen — the newest 25 it shows plus the older ones
+it reports as skipped (`--limit 0` shows all) — after stdout succeeds;
+`--peek` and `watch` never mutate that state. Every mutation holds an interprocess lock on the
 room's channel-state file, so parallel acks on different channels cannot lose
 each other. The state is a per-room, per-channel seen-set (v2
 `channel-state.json`; legacy watermark files migrate lazily with a

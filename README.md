@@ -217,8 +217,9 @@ post channels --pretty
 ```
 
 Only joined rooms can read or send; otherwise `not_a_member` exits 65 with a
-join-first fix. A plain channel read records only the batch it emitted as
-seen, only after a successful emit — and because unreadness is decided by
+join-first fix. A plain channel read records its whole unread selection as
+seen — the newest 25 it shows plus the older ones it reports as skipped
+(`--limit 0` shows all) — only after a successful emit; and because unreadness is decided by
 seen-set membership rather than an ordering watermark, a message that arrives
 late with an id sorting below newer consumed ones (a bridged import) still
 surfaces on the next read. `--peek` and `watch` change nothing. Blocked routes
@@ -279,10 +280,14 @@ mode.
 When the flag is absent, `POST_FRAMING`
 (valid values: `auto|full|compact`) supplies it — a session launcher can pin
 its readers to compact framing without changing every invocation; an explicit
-`--framing` always wins over the environment, and a set-but-invalid
-`POST_FRAMING` is a loud error, never a silent fallback (same precedent as
-`POST_FROM`). The flag is rejected on send/join/discard/discard-through/seen-by. JSON keeps `source`
-and `authority: false` unchanged in every mode.
+`--framing` always wins over the environment, and a set-but-invalid (or
+non-UTF-8) `POST_FRAMING` warns on stderr and falls back to `auto` — framing
+is presentation only, so a launcher exporting a broken value is visible but
+never breaks a read (deliberately weaker than the `POST_FROM` identity pin,
+which stays a loud error). Only body-returning reads consult the variable;
+send/join/discard/discard-through/seen-by never do, and still reject an
+explicit `--framing`. JSON keeps `source` and `authority: false` unchanged
+in every mode.
 
 Signed-sender badges: the signed owner is declared with
 `post owner init --room <name>` — create-only `owner.json` at the mail root

@@ -130,9 +130,9 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --limit <N> [--framing MODE] (last N unread; --limit 0 = all)\n       \
      post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
      post chat <CHANNEL> --since <ID> [--framing MODE] (messages after ID, cursor untouched)\n       \
-     post chat <CHANNEL> --discard                   (advance past unread without printing)\n       \
-     post chat <CHANNEL> --discard-through <MSG_ID>  (advance the cursor exactly through MSG_ID)\n       \
-     post chat <CHANNEL> --seen-by <MSG_ID>          (which members' cursors passed MSG_ID)\n       \
+     post chat <CHANNEL> --discard                   (mark all unread seen without printing)\n       \
+     post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
+     post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
      post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n       \
      post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body <TEXT>\n       \
      post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body-file <PATH>\n       \
@@ -157,7 +157,7 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["peek", "discard", "seen_by"])]
     pub send: bool,
 
-    /// Deliver even when unread messages sit past the sender's cursor.
+    /// Deliver even when unseen messages from other rooms exist in the channel.
     #[arg(long, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
     pub anyway: bool,
 
@@ -230,10 +230,11 @@ pub(crate) struct ChatArgs {
     #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"])]
     pub limit: Option<usize>,
 
-    /// Advance this room's cursor exactly through MSG_ID (full id, or a prefix
-    /// unique within the channel) without printing bodies. Idempotent: a target
-    /// at or behind the current cursor succeeds with `advanced: false`. Refuses
-    /// when an unreadable message sits between the cursor and MSG_ID.
+    /// Mark every currently unseen message at or before MSG_ID (full id, or a
+    /// prefix unique within the channel) as seen without printing bodies.
+    /// Idempotent: a range that is already fully seen succeeds with
+    /// `advanced: false`. Refuses when an unreadable unseen message sits in
+    /// that range.
     #[arg(
         long = "discard-through",
         value_name = "MSG_ID",
@@ -242,7 +243,7 @@ pub(crate) struct ChatArgs {
     )]
     pub discard_through: Option<String>,
 
-    /// List member rooms whose cursors have advanced past this message (read-only).
+    /// List member rooms whose seen-set contains this message (read-only).
     #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
 
@@ -470,7 +471,8 @@ pub(crate) struct DoctorArgs {
     #[arg(long)]
     pub fix: bool,
 
-    /// Print one summary line instead of the full JSON report.
-    #[arg(long)]
+    /// Print one summary line instead of the full JSON report (human-only;
+    /// conflicts with --json).
+    #[arg(long, conflicts_with = "json")]
     pub brief: bool,
 }

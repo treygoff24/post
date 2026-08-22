@@ -55,7 +55,8 @@ pub(crate) const POST_FROM_ENV: &str = "POST_FROM";
 pub(crate) const POST_SENDER_ADDRESS_ENV: &str = "POST_SENDER_ADDRESS";
 /// Presentation preference for body-returning reads, exported by a session
 /// launcher. Consulted only when `--framing` is absent; an explicit flag
-/// always wins. Set-but-invalid is a loud error (POST_FROM precedent).
+/// always wins. Set-but-invalid warns and falls back to auto (see
+/// `resolve_framing`): presentation must never break a read.
 pub(crate) const POST_FRAMING_ENV: &str = "POST_FRAMING";
 /// Bound on a declared sender address. `harness.repo.uuid` is well under
 /// this; the cap keeps a hostile environment from bloating every envelope.

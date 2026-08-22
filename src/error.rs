@@ -76,7 +76,7 @@ pub enum ErrorCode {
     DeliveredOutputFailure,
     DeliveredUnarchived,
     NotAMember,
-    /// Channel tip advanced past the sender's cursor; send was not delivered.
+    /// Unseen messages from other rooms exist in the channel; send was not delivered.
     CrossedSend,
 }
 

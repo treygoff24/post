@@ -111,8 +111,10 @@ The public language is model-neutral; the default root remains
 - Channel consumption state is per room and per channel, separate from message
   history: a **seen-set** — the exact ids this room has consumed (read,
   discarded, acked, or sent itself). Unread = file exists ∧ id ∉ seen ∧
-  from ≠ self. A plain channel read marks only the batch it actually emitted,
-  only after a successful emit. `--peek` and `watch` never mutate the state.
+  from ≠ self. A plain channel read consumes its whole unread selection — the
+  newest N it displays plus the older ones it reports as `skipped` (which are
+  marked seen too, never re-shown) — only after a successful emit; `--limit 0`
+  displays everything. `--peek` and `watch` never mutate the state.
   A sender's own message id is recorded as seen unconditionally (own words are
   never news; messages from others simply stay unseen, so nothing is
   swallowed). One room's state for every channel lives in a single
@@ -247,21 +249,22 @@ results, stderr = diagnostics/errors.
   mutates BEFORE emitting its receipt, because the receipt's whole job is to
   report the state that is now stored; nothing is skipped unreported, since a
   retry replays as a no-op.
-  A plain cursor read defaults to the
+  A plain consuming read defaults to displaying the
   newest 25 unread when the backlog is larger (`skipped` reports how many older
-  ones were neither shown nor rescued; `@mention`s of the reader in the skipped
-  range are pulled forward). Explicit `--limit <n>` still works; `--limit 0`
-  means unlimited. With `--peek` the bound is display-only and never advances.
-  `--seen-by <id>` is a read-only listing of member rooms whose cursors have
-  advanced past that message. Cursor-advancing reads fail closed: an
-  unreadable/unparseable `.msg` file past the reader's cursor makes a plain
-  read return `config_invalid` with the cursor untouched (the cursor advances
-  only to the last emitted message, never past one that could not be emitted).
-  Cursorless `--history`/`--since` reads warn on stderr and skip unreadable
-  messages, since they never move a cursor. Crossed-send applies the same
-  posture: an unreadable unread file past the sender's cursor bounces a
-  normal send (`--anyway` remains the escape hatch); malformed files at or
-  below the cursor are ignored. Requires
+  unread ones were not shown — they are consumed with the batch, never
+  re-shown; `@mention`s of the reader in the skipped range are pulled forward
+  into the display). Explicit `--limit <n>` still works; `--limit 0` means
+  unlimited. With `--peek` the bound is display-only and nothing is consumed.
+  `--seen-by <id>` is a read-only listing of member rooms whose seen-set
+  contains that message (`cursor` fields in JSON output are max-seen-id
+  summaries for compatibility, never the model). Consuming reads fail closed:
+  an unreadable/unparseable unseen `.msg` file makes a plain read return
+  `config_invalid` with the seen-set untouched (a read consumes only messages
+  it emitted, never one it could not). Non-consuming `--history`/`--since`
+  reads warn on stderr and skip unreadable messages. Crossed-send applies the
+  same posture: an unreadable unseen file from another room bounces a normal
+  send (`--anyway` remains the escape hatch); malformed files already in the
+  seen-set are ignored. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
@@ -273,8 +276,8 @@ results, stderr = diagnostics/errors.
   `{ok, framing, channel, room, peek, messages, count}` and preserves parsed
   message bodies unchanged (`re` and `mentions` when present). Text-mode message headers and bodies are sanitized
   at the output boundary so crafted controls cannot rewrite the framing banner.
-  After stdout succeeds, a non-peek read advances only that room's cursor;
-  `--peek` never advances. `--framing` on a channel read selects `auto`
+  After stdout succeeds, a non-peek read records its selection in that
+  room's seen-set; `--peek` records nothing. `--framing` on a channel read selects `auto`
   (default: the legacy once-daily wall), `full` (the complete wall every
   invocation), or `compact` (condensed laws in one line, multiplicity law
   included). Explicit `full` and `compact` never consult or stamp the
@@ -306,12 +309,16 @@ results, stderr = diagnostics/errors.
   doorbell: blocks and streams one event per arriving direct mail or joined
   channel message so any harness monitor becomes a notifier. Room resolution as
   `inbox` (unregistered explicit rooms are accepted with a one-line stderr
-  warning, since a silent watch on a typo'd name never rings). Poll-diff over
-  the inbox directory and joined channel messages (default 1000ms, clamped
-  100–60000): the exclusive-link delivery commit means a listing never sees a
-  partial direct-mail file, and the first batch emits the current unread
-  backlog plus channel messages after the cursor floor, so there is no
-  start-vs-arrival loss window. Emits ENVELOPE METADATA ONLY — never body
+  warning, since a silent watch on a typo'd name never rings). Scans of the
+  inbox directory and joined channel messages are the truth source; a native
+  filesystem watcher (inotify on Linux, FSEvents on macOS) supplies wake hints
+  that trigger a scan early, and a slow periodic pass re-registers replaced
+  directories and rescans regardless of hints; `--interval-ms` (default
+  1000ms, clamped 100–60000) bounds the poll cadence that remains the fallback
+  when no native watcher is available or it fails mid-run. The exclusive-link
+  delivery commit means a listing never sees a partial direct-mail file, and
+  the first batch emits the current unread backlog plus channel messages not
+  in the room's seen-set, so there is no start-vs-arrival loss window. Emits ENVELOPE METADATA ONLY — never body
   content, on any surface; consumption and its framing banner stay exclusively
   with `post read` or `post chat`. Default output NDJSON, one object per line:
   direct mail `{"event":"mail", room, id, from, kind, subject, sent, reason}`;
@@ -341,14 +348,14 @@ results, stderr = diagnostics/errors.
   Caveat: all watch warnings (unregistered room, scan outages, channel-store
   diagnostics) are stderr-only; a consumer that captures just stdout will not
   see them. Never moves, alters, or deletes mail; keeps no state on disk; never
-  advances channel cursors. Known accepted window: direct mail arriving AND
+  mutates channel seen-sets. Known accepted window: direct mail arriving AND
   consumed by a concurrent reader within one interval is never emitted because
   it was never observed unread. Channel messages are append-only; watch holds
-  its startup cursor floor in memory, so a channel read during the same watch
-  does not erase a later notification. `--snapshot` (conflicts with `--once`;
+  its startup seen-set snapshot in memory (read-only), so a channel read
+  during the same watch does not erase a later notification. `--snapshot` (conflicts with `--once`;
   `--interval-ms` has no effect) is the nonblocking poll for bounded lifecycle
   hooks: it performs exactly one scan of unread direct mail plus
-  joined-channel messages past the cursor floor, then exits 0. An empty scan
+  joined-channel messages outside the room's seen-set, then exits 0. An empty scan
   emits nothing; a non-empty scan emits the ordinary NDJSON/text batch. A
   direct-mail scan failure is a nonzero error envelope — never a false empty —
   while per-channel failures keep the watch posture (stderr warning, healthy

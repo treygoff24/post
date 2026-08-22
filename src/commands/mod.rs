@@ -14,6 +14,7 @@ mod who;
 use crate::cli::{Cli, Command};
 use crate::command_result::CommandResult;
 use crate::error::AppResult;
+use crate::error::{AppError, ErrorCode};
 use crate::mailbox::Context;
 use crate::migration_fence;
 
@@ -44,7 +45,19 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     let pretty = cli.pretty;
     let json = cli.json;
     let mut result = match cli.command {
-        Command::Doctor(args) => doctor::run(&context, args, pretty),
+        Command::Doctor(args) => {
+            // clap enforces `conflicts_with = "json"` only when the global flag
+            // follows the subcommand; `post --json doctor --brief` parses. The
+            // contract is human-only, so enforce it here as well.
+            if args.brief && cli.json {
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    "--brief cannot be used with --json: the brief doctor line is human-only",
+                    "Drop --brief for the JSON report, or drop --json for the one-line summary.",
+                ));
+            }
+            doctor::run(&context, args, pretty)
+        }
         Command::Send(args) => send::run(&context, args, json, pretty),
         Command::Chat(args) => chat::run(&context, args, json, pretty),
         Command::Channels(args) => channels::run(&context, args, pretty),

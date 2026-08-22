@@ -8552,3 +8552,51 @@ fn doctor_brief_prints_one_line_for_both_outcomes() {
         "unhealthy --brief must be exactly one findings line: {line:?}"
     );
 }
+
+#[test]
+fn schema_describes_seen_set_semantics_not_watermarks() {
+    let output = post_command().args(["schema"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Membership semantics must be what the machine contract publishes.
+    assert!(
+        text.contains("records its whole selection in the reader's seen-set"),
+        "{text}"
+    );
+    assert!(
+        text.contains("--seen-by lists members whose seen-set contains an id"),
+        "{text}"
+    );
+    assert!(text.contains("never mutates channel seen-sets"), "{text}");
+    assert!(
+        text.contains("falls back to auto (presentation never breaks a read"),
+        "{text}"
+    );
+    // Watermark-era phrasing must be gone.
+    for stale in [
+        "advances the reader's own cursor",
+        "cursors passed an id",
+        "past the sender cursor",
+        "never advances channel cursors",
+        "an invalid value is a loud error",
+    ] {
+        assert!(
+            !text.contains(stale),
+            "stale contract phrase still published: {stale}"
+        );
+    }
+}
+
+#[test]
+fn doctor_brief_is_human_only_and_conflicts_with_json() {
+    let output = post_command()
+        .args(["--json", "doctor", "--brief"])
+        .output()
+        .unwrap();
+    assert_ne!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{text}{err}");
+    assert!(combined.contains("--brief"), "{combined}");
+    assert!(combined.contains("--json"), "{combined}");
+}
