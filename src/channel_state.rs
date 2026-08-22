@@ -438,7 +438,17 @@ fn migrate_v1_in_memory(
             .join(channel)
             .join("messages");
         match std::fs::read_dir(&directory) {
-            Ok(_) => {}
+            Ok(_) => {
+                for path in crate::channel::message_files(&directory)? {
+                    if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
+                        if id <= cursor.as_str() {
+                            seen.insert(id.to_owned());
+                        }
+                    }
+                }
+            }
+            // The one accepted-empty case: the channel simply has no
+            // messages directory yet.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(AppError::io(
@@ -446,13 +456,6 @@ fn migrate_v1_in_memory(
                     &directory,
                     error,
                 ))
-            }
-        }
-        for path in crate::channel::message_files(&directory)? {
-            if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
-                if id <= cursor.as_str() {
-                    seen.insert(id.to_owned());
-                }
             }
         }
         channels.insert(channel.clone(), seen);
@@ -1014,12 +1017,16 @@ mod tests {
             "alpha",
             r#"{"version": "20260722-013000-000001-aaa111"}"#,
         );
-        let state = ChannelState::load(&context, "alpha").expect("v1 map with a 'version' channel");
-        assert_eq!(
-            state.max_seen("version"),
-            Some("20260722-013000-000001-aaa111"),
-            "parsed as a v1 {channel: cursor} map"
-        );
+        let state =
+            ChannelState::load(&context, "alpha").expect("v1 map with a 'version' channel loads");
+        // The migrated in-memory baseline is empty (no messages/ yet), so
+        // prove the DISK bytes classified as legacy v1: an unfenced write
+        // refuses the v1→v2 replacement — a misparse as versioned v2 would
+        // have been a loud config error or a plain v2 write instead.
+        let error = ChannelState::mark_seen(&context, "alpha", "version", [ID1.to_owned()])
+            .expect_err("unfenced conversion must refuse");
+        assert_eq!(error.code.as_str(), "config_invalid");
+        assert!(error.message.contains("cutover"), "{}", error.message);
         trash_test_root(&root);
     }
 }
