@@ -8600,3 +8600,30 @@ fn doctor_brief_is_human_only_and_conflicts_with_json() {
     assert!(combined.contains("--brief"), "{combined}");
     assert!(combined.contains("--json"), "{combined}");
 }
+
+#[test]
+fn global_json_before_any_human_only_flag_is_refused() {
+    // clap misses the conflict when --json precedes the subcommand; the
+    // dispatcher guard must catch every human-only flag, not just doctor.
+    let sandbox = Sandbox::new();
+    register_alpha_beta(&sandbox);
+    for args in [
+        vec!["--json", "channels", "--text"],
+        vec!["--json", "who", "--room", "alpha", "--text"],
+        vec!["--json", "inbox", "--room", "alpha", "--text"],
+        vec!["--json", "watch", "--room", "alpha", "--text", "--snapshot"],
+        vec!["--json", "doctor", "--brief"],
+    ] {
+        let out = sandbox.run(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "human-only flag with leading --json must be a usage error: {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--json"),
+            "refusal must name the conflict: {stderr}"
+        );
+    }
+}

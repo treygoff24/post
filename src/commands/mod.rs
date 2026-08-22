@@ -44,20 +44,26 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     }
     let pretty = cli.pretty;
     let json = cli.json;
+    // clap enforces `conflicts_with = "json"` only when the global flag
+    // FOLLOWS the subcommand; `post --json <cmd> --text` parses fine. Every
+    // human-only flag is therefore re-checked here, ordering-independent.
+    let human_only_flag = match &cli.command {
+        Command::Doctor(args) if args.brief => Some("--brief"),
+        Command::Channels(args) if args.text => Some("--text"),
+        Command::Who(args) if args.text => Some("--text"),
+        Command::Inbox(args) if args.text => Some("--text"),
+        Command::Watch(args) if args.text => Some("--text"),
+        _ => None,
+    };
+    if let (Some(flag), true) = (human_only_flag, cli.json) {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("{flag} cannot be used with --json: it selects the human-only output"),
+            format!("Drop {flag} for the JSON output, or drop --json for the human form."),
+        ));
+    }
     let mut result = match cli.command {
-        Command::Doctor(args) => {
-            // clap enforces `conflicts_with = "json"` only when the global flag
-            // follows the subcommand; `post --json doctor --brief` parses. The
-            // contract is human-only, so enforce it here as well.
-            if args.brief && cli.json {
-                return Err(AppError::new(
-                    ErrorCode::InvalidArgument,
-                    "--brief cannot be used with --json: the brief doctor line is human-only",
-                    "Drop --brief for the JSON report, or drop --json for the one-line summary.",
-                ));
-            }
-            doctor::run(&context, args, pretty)
-        }
+        Command::Doctor(args) => doctor::run(&context, args, pretty),
         Command::Send(args) => send::run(&context, args, json, pretty),
         Command::Chat(args) => chat::run(&context, args, json, pretty),
         Command::Channels(args) => channels::run(&context, args, pretty),
