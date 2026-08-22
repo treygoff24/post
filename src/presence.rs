@@ -391,6 +391,9 @@ mod tests {
         std::fs::create_dir_all(&room).expect("room");
         let victim = root.join("victim.txt");
         std::fs::write(&victim, b"SAFE\n").expect("victim");
+        // Pin the mode: fs::write honours umask (002 on the devbox gives 0664), and the
+        // assertion below checks the victim's mode is untouched, not the host default.
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).expect("chmod");
         let hb = room.join("watch.heartbeat");
         std::fs::hard_link(&victim, &hb).expect("plant hard link");
         assert_eq!(
