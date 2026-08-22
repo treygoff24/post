@@ -455,7 +455,8 @@ pub(crate) struct WatchArgs {
     #[arg(long, value_name = "N", requires = "snapshot")]
     pub limit: Option<usize>,
 
-    /// Poll cadence in milliseconds.
+    /// Wait and heartbeat cadence in milliseconds; also the scan cadence when
+    /// the native event backend is unavailable and watch polls instead.
     #[arg(long, value_name = "MS", default_value_t = 1000,
           value_parser = clap::value_parser!(u64).range(100..=60_000))]
     pub interval_ms: u64,

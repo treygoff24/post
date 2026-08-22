@@ -130,8 +130,11 @@ object per line:
 {"event":"unreadable","room":"myroom","id":"<filename-stem>","reason":"mail"}
 ```
 
-Empty scan → no output. It never moves mail, never mutates channel seen-state, never
-creates directories, and an unregistered cwd scans nothing and exits 0 (safe
+Empty scan → no output. It never moves mail and never mutates channel
+seen-state. On a legacy (unfenced) store a snapshot may still run first-use
+initialization and create a registered room's inbox/read directories; only
+under an enrolled/fenced store is it fully write-free. An unregistered cwd
+scans nothing and exits 0 (safe
 to fire from any hook cwd — post resolves the room from the working
 directory itself; don't pin `--room` in a lifecycle hook). A direct-mail scan
 failure is a nonzero error envelope, never a false empty. A deliberately

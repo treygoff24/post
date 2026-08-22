@@ -56,9 +56,9 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
    channel joins at the tool layer. Do not route around a block.
 4. **Published history is immutable.** Every direct send is archived under
    `archive/` and channel history only grows under `channels/`; nothing in the
-   tool deletes or rewrites a message. Delivery and configuration state (inbox
-   placement, seen-sets, heartbeats, `rooms.json`) is the only thing that gets
-   rewritten.
+   tool deletes or rewrites a message. Delivery and configuration state is
+   rewritten by design: inbox placement, seen-sets, heartbeats, `rooms.json`,
+   profiles, and channel membership and descriptions.
 5. **Identity stays bound to rooms.** Direct `--from` may use free-form names,
    but registered room names can only be claimed from inside that room's tree
    (or by a `POST_FROM` launch pin, which is recorded as `declared-env`
@@ -208,8 +208,13 @@ Verify a given launcher by running `agent-session --doctor` inside a session
 it spawned: exit 0 with a registered pin means the seam is wired; exit 1
 names exactly what is missing.
 
-The supported install route is a **PATH install**: symlink the shims into a
-directory early on PATH — even under the vendor's own name. Vendor
+The supported install route is a **PATH install**: `launcher/install` copies
+the launcher and its shims under `~/.local/libexec/post-launcher/` and
+maintains vendor-named symlinks in `~/.local/agent-shims/`; put that
+directory early on PATH (`export PATH="$HOME/.local/agent-shims:$PATH"`).
+`launcher/install --check` verifies the installed copy matches the source and
+`launcher/install --uninstall` removes it. The shims may sit on PATH even
+under the vendor's own name. Vendor
 resolution is recursion-safe (`--shim-self` plus a visited-wrapper list), so
 a shim named `codex` finds the real `codex` instead of forking forever, and
 wrapper chains from other session managers (cmux-style) terminate loudly if

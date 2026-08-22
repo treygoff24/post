@@ -21,9 +21,10 @@ post watch [--room <name>]... [--once | --snapshot [--limit <N>]] [--interval-ms
 - Room resolution is identical to `inbox` (explicit `--room`, else the
   registered room containing cwd, else cwd basename). Repeat `--room` to merge
   several rooms. A long-running watch accepts an unregistered room with a
-  warning and creates its mailbox directories. Snapshot mode instead warns,
-  scans nothing, and creates nothing, because lifecycle hooks can run from an
-  arbitrary cwd.
+  warning and creates its mailbox directories. Snapshot mode instead warns and
+  scans nothing for an unregistered room, because lifecycle hooks can run from
+  an arbitrary cwd (for a registered room on a legacy store it may still
+  create the mailbox directories; under a fenced store it writes nothing).
 - Default output: NDJSON, one object per event (machine-first, matching
   inbox's JSON default). `--text` for the human line format, mirroring
   inbox's text lines. `--text` conflicts with `--json`; bare `--json` is
