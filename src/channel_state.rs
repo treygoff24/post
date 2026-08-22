@@ -354,6 +354,13 @@ fn parse_stored(raw: &[u8]) -> Result<Stored, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "not a JSON object".to_owned())?;
+    // The unambiguous bare string→string map is tried FIRST: a legacy v1
+    // watermark map may legitimately contain a channel literally named
+    // "version", which the version-key dispatch used to misread as a
+    // versioned document and reject.
+    if let Ok(cursors) = serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
+        return Ok(Stored::V1(cursors));
+    }
     match object.get("version") {
         Some(version) => {
             let version = version
@@ -992,6 +999,26 @@ mod tests {
             read_state_bytes(&root, "alpha"),
             v1.as_bytes(),
             "no v2 is written behind a failed migration"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn v1_channel_literally_named_version_is_not_misparsed_as_versioned() {
+        // A legacy map may hold a channel called "version". Parsing the
+        // unambiguous v1 shape FIRST keeps it a watermark map instead of
+        // rejecting it as a versioned document with a non-integer version.
+        let (root, context) = state_context("v1version");
+        write_v1_state(
+            &root,
+            "alpha",
+            r#"{"version": "20260722-013000-000001-aaa111"}"#,
+        );
+        let state = ChannelState::load(&context, "alpha").expect("v1 map with a 'version' channel");
+        assert_eq!(
+            state.max_seen("version"),
+            Some("20260722-013000-000001-aaa111"),
+            "parsed as a v1 {channel: cursor} map"
         );
         trash_test_root(&root);
     }
