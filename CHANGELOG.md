@@ -60,8 +60,7 @@
   and long-watch heartbeats. Legacy stores have no marker. Once the
   enrollment-owned `.post-arx.json` exists, a `fenced` store rejects new-binary
   writers and an `active` store admits only writers whose
-  `POST_ARX_GENERATION` matches its positive generation. Reads remain available
-  but non-mutating. Pre-fence binaries do not understand this marker, so an
+  `POST_ARX_GENERATION` matches its positive generation. Read-only forms stay available and never write: `read --peek`, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `watch --snapshot`, and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads (`read`, a plain `chat`), long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Pre-fence binaries do not understand this marker, so an
   external cutover must first quiesce and drain them; after conversion, those
   binaries refuse v2 channel state with `config_invalid` instead of misreading
   it. Post 0.6.0 has no enrollment or cutover CLI.

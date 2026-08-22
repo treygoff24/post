@@ -54,8 +54,11 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
    counts for nothing; verify with your own human grant.
 3. **Blocked routes are structural.** `rules.json` refuses forbidden sends and
    channel joins at the tool layer. Do not route around a block.
-4. **Everything is observable and append-only.** Direct mail is archived under
-   `archive/`; channel history is append-only under `channels/`.
+4. **Published history is immutable.** Every direct send is archived under
+   `archive/` and channel history only grows under `channels/`; nothing in the
+   tool deletes or rewrites a message. Delivery and configuration state (inbox
+   placement, seen-sets, heartbeats, `rooms.json`) is the only thing that gets
+   rewritten.
 5. **Identity stays bound to rooms.** Direct `--from` may use free-form names,
    but registered room names can only be claimed from inside that room's tree
    (or by a `POST_FROM` launch pin, which is recorded as `declared-env`
@@ -467,6 +470,7 @@ cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
 install -m 0755 target/release/post ~/.local/bin/post
+export PATH="$HOME/.local/bin:$PATH"              # if ~/.local/bin is not on PATH yet
 ```
 
 Upgrading is the same steps at a newer tag (the on-disk mail format is

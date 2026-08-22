@@ -29,15 +29,14 @@
 //! its old binaries mid-migration.
 //!
 //! Growth is O(channel history) — the same order as messages/ itself, which
-//! every read already scans. Linear exact-state cost is EXPLICITLY accepted
-//! (Sol review 2026-08-22, finding 12): a {watermark + exceptions}
-//! compaction is UNSAFE under this feature's own late-arrival model — an id
+//! every read already scans. Linear exact-state cost is accepted by design:
+//! a {watermark + exceptions} compaction is UNSAFE under this feature's own late-arrival model — an id
 //! backfilled below the watermark after compaction would be silently seen —
 //! so compaction requires a durable local arrival-sequence fence first, a
 //! bigger feature than any state file this crate has yet met in practice.
 //! Writes past SEEN_SET_WARN ids warn on stderr so a channel that outgrows
-//! the accepted cost is visible long before it hurts; scale benchmarks
-//! (10k/100k histories) are a release-blocking bead in .beads/.
+//! the accepted cost is visible long before it hurts; measured costs at
+//! 10k and 100k messages of history are recorded in CHANGELOG.md (0.6.0).
 
 use crate::channel::{channel_state_path, CHANNELS_DIR};
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -201,8 +200,9 @@ where
         });
     };
     // A v1→v2 REPLACEMENT on disk bricks a pre-seen-set binary (it cannot
-    // parse v2), so it is legal only once the migration fence reports an
-    // activated cutover. In-memory migrated reads stay allowed unfenced.
+    // parse v2). With no fence marker the store is a plain upgrade and may
+    // convert; once a marker exists, conversion waits for the activated
+    // cutover. In-memory migrated reads stay allowed either way.
     let raw = match std::fs::read(&path) {
         Ok(raw) => Some(raw),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

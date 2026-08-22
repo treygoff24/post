@@ -28,11 +28,13 @@ The public language is model-neutral; the default root remains
    appears in output with its provenance (no silent ambient inference).
    Channel identity is stricter: `post chat` has no `--from` and no `--room`;
    the acting room is the pinned or cwd-resolved room and must be registered.
-4. **Everything observable, append-only.** Every direct send also writes an
+4. **Published history is immutable.** Every direct send also writes an
    immutable copy to `~/.claude-mail/archive/`. Nothing in the tool deletes
    mail; `read` moves inbox → read/ within the recipient's dir. Channel
-   history is append-only under `channels/<name>/messages/`; channel reads only
-   grow the acting room's seen-set after successful output.
+   history only grows under `channels/<name>/messages/`. Delivery and
+   configuration state is mutable by design: a channel read rewrites the
+   acting room's seen-set after successful output, long watches refresh a
+   heartbeat file, and `rooms add` atomically replaces `rooms.json`.
 5. **Registers stay distinct.** Direct-mail `kind` ∈ {letter, note, signal}.
    Channel messages have no `kind`, so a signal structurally cannot occur in a
    channel; anything gate-grade stays one-to-one room mail.
@@ -70,7 +72,7 @@ The public language is model-neutral; the default root remains
   are reserved room names; the actual `.post-arx.json` temporary name is
   `..post-arx.json.<pid>.<nonce>.tmp`, and no lock temporary namespace is
   produced or reserved.
-- Under an enrolled/fenced store, all reads remain available and non-mutating:
+- Under an enrolled/fenced store, Read-only forms stay available and never write: `read --peek`, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `watch --snapshot`, and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads (`read`, a plain `chat`), long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Admitted read-only forms create
   no root/room directory, banner-day, heartbeat, or cursor writes. A long
   non-snapshot watch re-admits before every heartbeat and exits nonzero if the
   fence or generation changes. Snapshot remains read-only only under the

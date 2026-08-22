@@ -144,7 +144,7 @@ test("copies the adapter privately and writes through hook-config symlinks", () 
 
 test("normalizes and deduplicates only its own hooks", () => {
   const target = freshTarget();
-  const unrelated = { command: "/Users/treygoff/.cursor/hooks/audit.sh sessionStart" };
+  const unrelated = { command: "/Users/example/.cursor/hooks/audit.sh sessionStart" };
   const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
   fs.writeFileSync(
     target,
