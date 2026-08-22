@@ -121,7 +121,7 @@ style; each one closes a hole that was found the hard way.
 ## What the snapshot gives you
 
 `post watch --snapshot` performs exactly one scan of unread direct mail plus
-joined-channel messages past the cursor floor, then exits 0. NDJSON, one
+joined-channel messages outside the room's seen-set, then exits 0. NDJSON, one
 object per line:
 
 ```json
@@ -130,7 +130,7 @@ object per line:
 {"event":"unreadable","room":"myroom","id":"<filename-stem>","reason":"mail"}
 ```
 
-Empty scan → no output. It never moves mail, never advances a cursor, never
+Empty scan → no output. It never moves mail, never mutates channel seen-state, never
 creates directories, and an unregistered cwd scans nothing and exits 0 (safe
 to fire from any hook cwd — post resolves the room from the working
 directory itself; don't pin `--room` in a lifecycle hook). A direct-mail scan
@@ -438,8 +438,8 @@ spec:
 
 If the harness cannot inject lifecycle context or start a turn, keep the
 boundary simple. This loop prints NDJSON for a human or another program and
-re-arms after each non-empty batch; it does not consume mail or advance
-channel cursors, and it does not pretend to wake the agent:
+re-arms after each non-empty batch; it does not consume mail or mutate channel
+seen-state, and it does not pretend to wake the agent:
 
 ```bash
 while :; do

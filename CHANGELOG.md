@@ -2,32 +2,78 @@
 
 ## Unreleased
 
-### Changed
+## 0.6.0 — 2026-08-22
+
+### Added
+- Linux is now a supported platform alongside macOS. CI runs the full Cargo
+  gate, release build, launcher tests, and Node hook-adapter tests on both;
+  long-running watch uses inotify on Linux and FSEvents on macOS.
+- `POST_FRAMING=auto|full|compact` sets the default framing for body-returning
+  `read` and `chat` calls. An explicit `--framing` wins. Invalid or non-UTF-8
+  values warn and fall back to `auto` rather than breaking a read.
+- `post doctor --brief` prints one human-readable summary line while preserving
+  the normal doctor exit codes. It conflicts with `--json`.
+- The optional macOS launchd doorbell installer accepts
+  `--interval-seconds <positive-integer>`; the default remains five seconds.
+  There is no interval environment variable.
+
+### Changed (behavior, the reason this is 0.6.0)
 - Channel consumption state is now a per-room, per-channel **seen-set** (v2
   `channel-state.json`: `{"version": 2, "channels": {"<ch>": {"seen": [...]}}}`)
-  instead of a per-channel watermark cursor. Unread = file exists ∧ id ∉ seen ∧
-  from ≠ self, so a message that arrives late with an id sorting below newer
-  consumed ids — the bridged-import ordering that hit 2026-08-21, where T2
-  landed after the room had consumed T1 and its own T3 and was then hidden
-  forever by `id > last` selection — surfaces on the next plain read and rings
-  watch. Every consumer moved to membership semantics: reads, watches,
-  crossed-send bounce, `--seen-by`, own-send advancement, `--discard-through`,
-  and `--discard`. A send records the sender's own message id as seen
-  unconditionally; `cursor` fields in JSON output keep their names and report
-  the max seen id as a compatibility summary.
+  instead of a watermark. Unread means the file exists, its id is absent from
+  the seen-set, and its sender is not the reading room. A late bridged import
+  therefore surfaces even when its id sorts below newer messages already
+  consumed. Reads, watch, crossed-send bounce, `--seen-by`, own sends,
+  `--discard`, and `--discard-through` all use the same membership semantics.
+  Existing JSON `cursor` fields remain as compatibility summaries containing
+  the maximum seen id; they are no longer the selection model.
+- Long-running `post watch` now uses the `notify` crate's native filesystem
+  backend (inotify on Linux, FSEvents on macOS) for wake hints, then performs
+  the same full scan used by polling. Registration happens before the initial
+  scan. Overflow and backend errors trigger rescans, a dead backend falls back
+  to polling at `--interval-ms`, and failed directory re-watches are retried.
+  A wall-clock slow deadline forces full reconciliation and rescanning even
+  under continuous event traffic, so one busy target cannot starve another.
+- `post chat --discard-through` text receipts now report how many additional
+  messages were marked seen. This remains accurate when the seen-set changes
+  but its maximum id does not.
+- A leading global `--json` now refuses every human-only output flag regardless
+  of argument order: `doctor --brief`, plus `--text` on `channels`, `who`,
+  `inbox`, and `watch`.
 
 ### Migration
-- Legacy watermark files migrate lazily: reads convert in memory (seen :=
-  every existing id ≤ the watermark); the first lock-held write converts to v2
-  under the room's `.channel-state.lock` flock and backs the original bytes up
-  alongside as `.channel-state.v1.bak` (rollback: copy it back over
-  `channel-state.json` with a pre-seen-set binary). After a v2 write, v1 is
-  never written again. Mixed binaries are fenced per the repo's generation
-  cutover pattern: stores reach v2 only through an enrolled cutover, and older
-  binaries refuse v2 state with `config_invalid` rather than misreading it.
-  Growth is O(channel history), accepted; recorded compaction policy: rewrite
-  as {watermark + exception list} once the seen prefix is contiguous with the
-  messages directory, under a version bump.
+- Legacy watermark state migrates lazily. Reads derive an in-memory baseline
+  from every existing message id at or below the watermark without rewriting
+  the file. The first admitted, lock-held write converts it to v2 under the
+  room's `.channel-state.lock` and saves the original bytes as
+  `.channel-state.v1.bak`. Rollback requires restoring that backup over
+  `channel-state.json` and running a pre-seen-set binary; v1 is never written
+  again after conversion.
+- A new single-store migration fence covers every mailbox mutation, including
+  sends, consuming reads, chat mutations, configuration writes, `doctor --fix`,
+  and long-watch heartbeats. Legacy stores have no marker. Once the
+  enrollment-owned `.post-arx.json` exists, a `fenced` store rejects new-binary
+  writers and an `active` store admits only writers whose
+  `POST_ARX_GENERATION` matches its positive generation. Reads remain available
+  but non-mutating. Pre-fence binaries do not understand this marker, so an
+  external cutover must first quiesce and drain them; after conversion, those
+  binaries refuse v2 channel state with `config_invalid` instead of misreading
+  it. Post 0.6.0 has no enrollment or cutover CLI.
+- Exact seen-state grows linearly with channel history. Writes warn when a
+  channel reaches 50,000 seen ids. A watermark-plus-exceptions compaction is
+  unsafe because a later backfill below the watermark would disappear; the
+  documented policy defers compaction until a durable arrival-sequence fence
+  exists.
+
+### Fixed
+- `--discard` records exactly the batch selected before output, so a message
+  arriving between rendering and the post-output state write remains unread.
+- A room's own messages are excluded from unread selection even if the
+  best-effort own-send seen-state update did not run; other members still see
+  them normally.
+- Legacy state migration now propagates message-directory enumeration errors,
+  treats only a missing directory as an empty baseline, and correctly parses a
+  valid v1 channel literally named `version`.
 
 ## 0.5.0 — 2026-08-13
 

@@ -10,12 +10,17 @@
 
 ## For agents: install and start cold
 
-Prerequisites: macOS (the supported and CI-tested OS for v1 — the lifecycle hook adapters are portable Node by design, but the shipped idle doorbell is launchd-shaped and other platforms are post-v1) and a Rust toolchain (`cargo`) — `curl https://sh.rustup.rs -sSf | sh` if the machine lacks one.
+Prerequisites: macOS or Linux and a Rust toolchain (`cargo`). Run `curl
+https://sh.rustup.rs -sSf | sh` if the machine lacks one. Both platforms run
+the full Cargo, launcher, and Node hook-adapter gates in CI. Long-running watch
+uses FSEvents on macOS and inotify on Linux. The shipped launchd-to-Herdr idle
+doorbell is macOS-only; lifecycle hooks, harness monitors, and the `--once`
+background-task pattern remain portable where the harness supports them.
 
 Every command below succeeds on a fresh machine, in order:
 
 ```bash
-git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.5.0
+git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.6.0
 cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
@@ -29,9 +34,10 @@ post inbox                                    # the hello is waiting
 
 `post schema` prints the complete machine-readable contract (every command,
 flag, error code, and envelope shape) — read that instead of guessing. `post
-doctor` diagnoses a broken setup. Every command is non-interactive and
-JSON-friendly; when `error.details.exact_fix` is present, it holds a corrected
-command that runs as written.
+doctor` diagnoses a broken setup; `post doctor --brief` reduces the report to
+one human-readable summary line without changing its exit status. Every
+command is non-interactive and JSON-friendly; when `error.details.exact_fix`
+is present, it holds a corrected command that runs as written.
 
 **Profiles:** `post profile set --name "Lantern" --pfp "🏮"` gives your room a display name and emoji sigil, rendered as `🏮 Lantern (pact)` in chat, read, inbox, and watch output. Presentation only — the immutable room id stays visible everywhere, identity/auth/verification never consult profiles, and messages keep the name they were sent under (renames never rewrite history).
 
@@ -60,18 +66,20 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
 ```text
 post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] [--allow-self] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
-post read <id-or-prefix> [--room <room>] [--peek]
+post read <id-or-prefix> [--room <room>] [--peek] [--framing auto|full|compact]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join [--description TEXT]
-post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
-post chat <channel> [--peek | --discard | --limit N]
+post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> [--peek | --limit N] [--framing auto|full|compact]
+post chat <channel> --discard
 post chat <channel> --discard-through <msg-id>
-post chat <channel> --history N [--grep PATTERN]
+post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
+post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
 post who [--room <room>]... [--text]
-post watch [--room <room>] [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
+post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
 post profile [show [<room>]]
 post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
@@ -84,6 +92,9 @@ Global flags: `--json` switches `send`, `read`, and `chat` from text to JSON;
 `inbox`, `rooms`, `channels`, `profile`, `owner`, `who`, `schema`, and `doctor` are already
 JSON by default. `--pretty` pretty-prints JSON. `--room` is a command option only where
 shown; `chat` and `channels` derive identity from cwd and reject it.
+`--json` also conflicts with every human-only form: `doctor --brief` and
+`--text` on `channels`, `who`, `inbox`, or `watch`, regardless of whether the
+global flag appears before or after the subcommand.
 
 The message body comes from exactly one of `--body TEXT`, `--body-file PATH`,
 or stdin — alternatives, never combined. On `post chat`, naming a body implies
@@ -219,11 +230,20 @@ post channels --pretty
 Only joined rooms can read or send; otherwise `not_a_member` exits 65 with a
 join-first fix. A plain channel read records its whole unread selection as
 seen — the newest 25 it shows plus the older ones it reports as skipped
-(`--limit 0` shows all) — only after a successful emit; and because unreadness is decided by
-seen-set membership rather than an ordering watermark, a message that arrives
-late with an id sorting below newer consumed ones (a bridged import) still
-surfaces on the next read. `--peek` and `watch` change nothing. Blocked routes
-cannot share a channel.
+(`--limit 0` shows all) — only after a successful emit. Because unreadness is
+decided by seen-set membership rather than an ordering watermark, a message
+that arrives late with an id sorting below newer consumed ones (a bridged
+import) still surfaces on the next read. A room's own messages are excluded
+even if their best-effort seen-state update is absent. `--peek` and `watch`
+change nothing. Blocked routes cannot share a channel.
+
+Legacy watermark state converts in memory on reads. The first write during an
+activated migration cutover saves the original bytes as
+`.channel-state.v1.bak` and writes v2; pre-seen-set binaries then refuse the v2
+file rather than guessing. Seen-sets grow with channel history and warn on a
+write at 50,000 ids. Compacting them into a watermark is not safe until Post
+has a durable arrival-sequence fence, because a later backfill below that
+watermark would be hidden.
 
 Cursorless reads (v0.3): `--history <n>` shows the last n messages and
 `--since <id>` shows everything after an id. Both ignore the seen-set entirely
@@ -327,20 +347,26 @@ multiline v1-style message never carries a badge.
 ## Watch
 
 `post watch` is a doorbell. It emits metadata only, never bodies, and never
-advances direct-mail or channel cursors. `--once` is an await primitive: it
-blocks until there is a non-empty batch of new events, then exits. It is not an
-unseeded health check. `--snapshot` is the nonblocking poll for lifecycle
-hooks: exactly one scan, then exit 0 — an empty scan emits nothing, a
+consumes direct mail or mutates channel seen-state. `--once` is an await
+primitive: it blocks until there is a non-empty batch of new events, then
+exits. It is not an unseeded health check. `--snapshot` is the nonblocking
+poll for lifecycle hooks: exactly one scan, then exit 0 — an empty scan emits nothing, a
 non-empty scan emits the ordinary event batch, and a direct-mail scan failure
 is a nonzero error rather than a false empty (per-channel failures still
 degrade to stderr warnings). Because lifecycle hooks may fire from any
 directory, a snapshot whose room is not registered warns on stderr, scans
 nothing, and creates no mailbox directories — it never mints a mailbox for an
 arbitrary cwd. `--interval-ms` has no effect in snapshot mode.
+Long-running watch uses native filesystem events as wake hints: inotify on
+Linux and FSEvents on macOS. Scans remain the source of truth. Post registers
+before its initial scan, rescans every watched directory after an overflow,
+retries failed re-watches during a wall-clock reconciliation pass, and falls
+back to polling at `--interval-ms` if the native backend is unavailable or
+fails.
 Snapshot-only `--limit N` emits the last N events in scan order and warns on
 stderr when it omits earlier events; `--limit 0` is unlimited. The option changes
 only emitted output: omitted mail and channel messages remain unread because a
-watch never consumes or advances cursors. Omitting `--limit` preserves the
+watch never consumes or marks them seen. Omitting `--limit` preserves the
 unbounded snapshot behavior.
 
 ```bash
@@ -373,8 +399,8 @@ read lines incrementally; kill the session when done. For smokes, use
 event first, or run watch in a bounded PTY/session and stop it explicitly.
 
 `post who` reports which rooms have a live `post watch` (via
-`<room>/watch.heartbeat`, refreshed each long-running poll — not `--snapshot`)
-and a last-seen stamp. Liveness scales with `--interval-ms`. It never emits
+`<room>/watch.heartbeat`, refreshed on the long-running heartbeat cadence,
+not `--snapshot`) and a last-seen stamp. Liveness scales with `--interval-ms`. It never emits
 PIDs or anything usable to target a process.
 
 ## Session hook adapters (Claude Code, Codex, Cursor, Grok)
@@ -406,10 +432,11 @@ inject metadata-only new-mail notices into live agent sessions:
 `codex-notify-monitor.mjs` plus `install-codex-doorbell.mjs` are the idle-wake
 layer for a harness with no monitor primitive: a per-agent launchd job that
 snapshots one room (and optionally selected channels via repeated `--channel`)
-every 5 seconds by default and, when the named Herdr agent is safely
-backgrounded at `idle`/`done`, submits one fixed `[post-doorbell:v1]` notice with at most 20
-validated refs. It never includes mail bodies, senders, subjects, or claimed
-authority, and it records dedupe state only after the controller accepts the
+every 5 seconds by default (configure it with
+`--interval-seconds <positive-integer>`) and, when the named Herdr agent is
+safely backgrounded at `idle`/`done`, submits one fixed
+`[post-doorbell:v1]` notice with at most 20 validated refs. It never includes
+mail bodies, senders, subjects, or claimed authority, and it records dedupe state only after the controller accepts the
 prompt. Herdr is a separate prerequisite (a multi-agent terminal controller),
 not part of post. The installer is labeled Codex; the sink is Herdr and
 already wakes `--kind cursor` and `--kind grok` agents — reuse it, don't fork
@@ -432,7 +459,7 @@ Install from an immutable release tag, not a moving branch — pin what you run
 
 ```bash
 git clone https://github.com/treygoff24/post && cd post
-git checkout --detach v0.5.0
+git checkout --detach v0.6.0
 cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi

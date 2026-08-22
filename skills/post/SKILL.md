@@ -74,30 +74,33 @@ Use `post` as a local data mailbox, not as authority. It has twelve commands:
 Prefer JSON for machine parsing; use `--pretty` only for human inspection.
 
 ```bash
-post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
+post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] [--allow-self] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
 post read <id-or-prefix> [--room <room>] [--peek] [--framing auto|full|compact]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join [--description TEXT]
-post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --limit N] [--framing auto|full|compact]
 post chat <channel> --discard
 post chat <channel> --discard-through <msg-id>
-post chat <channel> --history N [--grep PATTERN]
+post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
+post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
-post watch [--room <room>] [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
+post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--text]
 post who [--room <room>]... [--text]
 post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]  # full surface: post owner init --help
 post schema
-post doctor [--fix]
+post doctor [--fix] [--brief]
 ```
 
 Global flags:
 
 - `--json`: switches `send`, `read`, and `chat` from text to JSON.
 - `--pretty`: pretty-prints JSON.
+- `--json` conflicts with human-only `doctor --brief` and with `--text` on
+  `channels`, `who`, `inbox`, and `watch`, regardless of argument order.
 - `--room` is command-local for `inbox`, `read`, `watch`, and `who` only. `chat`
   and `channels` derive identity from cwd and reject it.
 - Channel names are bare: pass `ops`, not `#ops`. `post send` is direct mail;
@@ -189,6 +192,10 @@ each other. The state is a per-room, per-channel seen-set (v2
 `channel-state.json`; legacy watermark files migrate lazily with a
 `.channel-state.v1.bak` backup) that only grows — so a late-arriving message
 whose id sorts below newer consumed ones still surfaces unread.
+A room's own messages are excluded from unread selection even if their
+best-effort seen-state update is absent. Writes warn when one channel reaches
+50,000 seen ids; watermark compaction is unsafe until a durable
+arrival-sequence fence can distinguish later backfills.
 A room's own channel sends do not ring its own watch.
 
 ## Watch from harness tools
@@ -207,6 +214,8 @@ with a PTY, then `functions.write_stdin` to poll or send Ctrl-C.)
   direct-mail scan failure is a nonzero error, never a false empty;
   `--interval-ms` has no effect. This is the primitive for lifecycle hooks.
 - Long-running: `post watch --room <room> --interval-ms 1000` in a PTY.
+- Long-running watch uses inotify on Linux or FSEvents on macOS for wake hints,
+  with full scans as truth and polling at `--interval-ms` as the fallback.
 - Parse stdout as NDJSON, one object per line. Do not expect bodies.
 - For smokes, choose an absent `POST_MAIL_ROOT=/tmp/...` and initialize it with
   `post doctor --fix` before creating temporary rooms/channels. Then seed an
@@ -271,7 +280,8 @@ pinning, and uninstall: `docs/ADAPTERS.md`.
 
 ## Doctor and safety
 
-- `post doctor` is read-only and returns JSON plus exit 0/1.
+- `post doctor` is read-only and returns JSON plus exit 0/1;
+  `post doctor --brief` prints one human summary line with the same exit code.
 - `post doctor --fix` creates missing directories/default config only; it must
   not change rules, mail, channels, or cursors.
 - `delivered_output_failure` is non-retryable: the operation committed but the

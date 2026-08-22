@@ -63,7 +63,9 @@ The public language is model-neutral; the default root remains
   ownership, then copy and activate; a writer's slow stdout and its
   after-stdout cursor or read move remain inside the same lock hold, so slow
   stdout can block the lock; operator quiesce and timeout handling must bound
-  that drain. Neither state nor lock may be deleted. The state, lock, and
+  that drain. Post exposes no enrollment or cutover CLI; external cutover
+  tooling owns these transitions. Neither state nor lock may be deleted. The
+  state, lock, and
   actual state atomic temporary-name namespace
   are reserved room names; the actual `.post-arx.json` temporary name is
   `..post-arx.json.<pid>.<nonce>.tmp`, and no lock temporary namespace is
@@ -138,23 +140,26 @@ The public language is model-neutral; the default root remains
   exact-state cost, explicitly accepted: a watermark-plus-exceptions
   compaction is unsafe under the late-arrival model (a backfilled id below
   the watermark would be silently seen) and is deferred until a durable
-  arrival-sequence fence exists. State writes warn once a channel's seen-set
-  passes 50k ids. Mixed binaries are fenced like
+  arrival-sequence fence exists. State writes warn when a channel's seen-set
+  reaches 50,000 ids. Mixed binaries are fenced like
   every cutover: stores reach v2 only through an enrolled, generation-gated
   migration, and a pre-seen-set binary cannot parse v2 state — it refuses with
   `config_invalid` rather than misreading it.
 
 ## Commands
 
-Global flags: `--json` (machine envelopes; default for inbox/rooms/channels/
-profile/schema/doctor is already JSON — `--json` on send/read/chat switches them from
-text), `--pretty`, `--room <name>` where noted. `--room` is not global; it is a
-command option for inbox/read/watch only. No prompts ever; no color; stdout =
-results, stderr = diagnostics/errors.
+Global flags: `--json` (machine envelopes; inbox/rooms/channels/profile/owner/
+who/schema/doctor are already JSON, while send/read/chat switch from text),
+and `--pretty`. `--room` is not global; it is a command option for
+inbox/read/watch/who only. A leading global `--json` refuses the same
+human-only forms as a trailing one: doctor `--brief`, and `--text` on
+channels/who/inbox/watch. No prompts ever; no color; stdout = results, stderr =
+diagnostics/errors.
 
 - `post send --to <room> [--from <name>] [--kind letter|note|signal (default
-  note)] [--subject <s>] [--oversize] (--body <text> | --body-file <path> |
-  stdin)` — the three body forms are mutually exclusive alternatives; a bare positional FILE
+  note)] [--subject <s>] [--oversize] [--allow-self] (--body <text> |
+  --body-file <path> | stdin)` — the three body forms are mutually exclusive
+  alternatives; a bare positional FILE
   remains accepted as the deprecated spelling of `--body-file`, and a
   body-file path that does not exist is `invalid_argument` (a usage error)
   rather than a retryable `io_error`. Refuses: unknown
@@ -169,7 +174,7 @@ results, stderr = diagnostics/errors.
   before each inbox publication attempt. If inbox commits but archive
   publication fails, `delivered_unarchived` is non-retryable and the message
   must not be resent.
-- `post inbox [--room <name>]` — unread list, oldest first. JSON default:
+- `post inbox [--room <name>] [--text]` — unread list, oldest first. JSON default:
   `{ok, room, unread: [{id, from, kind, subject, sent}], count,
   skipped_unreadable}`. Text with `--text`. Malformed mail is skipped with one
   stderr warning. I/O-unreadable mail is also warned and increments
@@ -216,8 +221,9 @@ results, stderr = diagnostics/errors.
   Validation and replacement are one flock-protected transaction. It never
   creates the workspace, overwrites an existing registration, or modifies
   rules.json beyond the one registration it performs.
-- `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>] [--oversize] (--body <text> |
-  --body-file <path> | stdin)` — sends to a shared channel as the registered room
+- `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>]
+  [--oversize] [--signature-ref <tag>] (--body <text> | --body-file <path> |
+  stdin)` — sends to a shared channel as the registered room
   containing cwd. `--body`/`--body-file` imply `--send`, so the verb is
   optional once a body is named; the deprecated positional FILE still requires
   it. The same 1 KiB subject limit, 32 KiB body guard, and warn-only watch-event
@@ -298,15 +304,16 @@ results, stderr = diagnostics/errors.
   slack, and future stamps are never live. Never reports PIDs or process info.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
-- `post doctor [--fix]` — validates root exists, rooms.json/rules.json parse
+- `post doctor [--fix] [--brief]` — validates root exists, rooms.json/rules.json parse
   and have sane shapes, room paths exist (warn), stray non-.mail files,
   malformed envelopes, and channel state including malformed channel metadata,
   membership, and messages. `--fix` creates missing dirs/defaults only — never
   touches rules content, mail, channel history, membership, or cursors. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
-  manual reconciliation. Doctor exit dictionary: 0 healthy / 1 findings / 3
-  fix-failed.
-- `post watch [--room <name>] [--once | --snapshot [--limit <n>]] [--interval-ms <ms>]
+  manual reconciliation. `--brief` prints exactly one human-readable summary
+  line, conflicts with `--json`, and preserves the doctor exit dictionary:
+  0 healthy / 1 findings / 3 fix-failed.
+- `post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>]
   [--text]` — the
   doorbell: blocks and streams one event per arriving direct mail or joined
   channel message so any harness monitor becomes a notifier. Room resolution as
@@ -315,7 +322,10 @@ results, stderr = diagnostics/errors.
   inbox directory and joined channel messages are the truth source; a native
   filesystem watcher (inotify on Linux, FSEvents on macOS) supplies wake hints
   that trigger a scan early, and a slow periodic pass re-registers replaced
-  directories and rescans regardless of hints; `--interval-ms` (default
+  directories and rescans regardless of hints. Overflow marks every watched
+  directory for a rescan; a failed re-watch remains pending for the next slow
+  pass. That pass uses a wall-clock deadline checked after every wake, so
+  continuous events for one target cannot starve another. `--interval-ms` (default
   1000ms, clamped 100–60000) bounds the poll cadence that remains the fallback
   when no native watcher is available or it fails mid-run. The exclusive-link
   delivery commit means a listing never sees a partial direct-mail file, and
@@ -345,12 +355,14 @@ results, stderr = diagnostics/errors.
   Transient scan failures (mailbox removed or recreated mid-watch, permission
   blips) degrade to an empty scan with one stderr warning per outage and
   polling continues; corrupt or unreadable channel stores warn on stderr and do
-  not suppress healthy joined channels. Only stdout failure exits, because a
-  doorbell that cannot reach its consumer is better off dead than silent.
+  not suppress healthy joined channels. A dead event backend falls back to
+  polling; stdout failure and migration-fence re-admission failure remain
+  fatal, because either means the watch can no longer uphold its contract.
   Caveat: all watch warnings (unregistered room, scan outages, channel-store
   diagnostics) are stderr-only; a consumer that captures just stdout will not
-  see them. Never moves, alters, or deletes mail; keeps no state on disk; never
-  mutates channel seen-sets. Known accepted window: direct mail arriving AND
+  see them. Never moves, alters, or deletes mail; keeps delivery dedupe only in
+  process memory; never mutates channel seen-sets. The heartbeat is presence
+  state, not delivery state. Known accepted window: direct mail arriving AND
   consumed by a concurrent reader within one interval is never emitted because
   it was never observed unread. Channel messages are append-only; watch holds
   its startup seen-set snapshot in memory (read-only), so a channel read
@@ -559,7 +571,8 @@ failure, 75 retryable pre-commit I/O.
 ## Quality gate
 
 `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
-warnings`, `cargo test --all-features`, `cargo build --release`. Tests must
+warnings`, `cargo test --all-targets --all-features`, `cargo build --release`,
+the Node hook and launcher suites, and a release-binary schema smoke. Tests must
 cover: full send/inbox/read roundtrip against a temp `POST_MAIL_ROOT`; the
 armed-route refusal quoting the reason; reserved-name refusal + free-form
 sender + cwd-basename default; banner/framing present in BOTH text and json
