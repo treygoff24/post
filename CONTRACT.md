@@ -346,7 +346,10 @@ diagnostics/errors.
   channel messages
   `{"event":"channel_message", channel, id, from, subject, sent, reason}` where
   `reason` is `channel` or `mention` (the watching room is @mentioned). A room's
-  own channel messages are never news to it and never ring its own watch.
+  own channel messages are never news to it and never ring its own watch. A
+  watcher wearing several identities declares them with `--own <room>`
+  (repeatable); selecting a room with `--room` never implies owning it, so a
+  monitor still receives the rooms it merely watches.
   With `--digest`, each batch instead emits one object per `(room, source)`
   group, ordered by the first underlying event:
   `{"event":"digest", room, source, count, first_id, last_id, from, reason}`.
