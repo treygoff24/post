@@ -412,6 +412,11 @@ fn write_description(paths: &ChannelPaths, description: &str) -> AppResult<()> {
 pub(crate) struct SendOptions<'a> {
     pub subject: &'a str,
     pub body: &'a str,
+    /// How to re-supply this body on a retry (` --body '...'` / ` --body-file
+    /// '...'`), or empty when it arrived on stdin and no command can carry it.
+    /// crossed_send's exact_fix appends it so the refusal hands back the
+    /// caller's own send, not a send with the message missing.
+    pub body_flag: &'a str,
     pub anyway: bool,
     pub re: Option<&'a str>,
     /// Signed-v2 sidecar tag; when present the envelope is stamped with the
@@ -463,7 +468,7 @@ pub(crate) fn send(
     // equivalent at the send point. Check-then-append has a TOCTOU window
     // (another room can land a message between check and exclusive create);
     // that occasional slip is accepted. Corrupting the store is not.
-    let crossed = crossed_send_check(context, &paths, channel, &room)?;
+    let crossed = crossed_send_check(context, &paths, channel, &room, options.body_flag)?;
     let (unseen, targeted) = (crossed.unseen, crossed.targeted);
     if options.anyway {
         log_crossed_event(
@@ -587,6 +592,7 @@ fn crossed_send_check(
     paths: &ChannelPaths,
     channel: &str,
     room: &str,
+    body_flag: &str,
 ) -> AppResult<CrossedReport> {
     use crate::channel_state::ChannelState;
     use crate::error::MissedChannelMessage;
@@ -685,9 +691,15 @@ fn crossed_send_check(
     // bodies -- roughly 15KB of prose, most of it already read -- which cost the
     // reader more context than the operation it refused (pc2_0dfb29556dec7b0c).
     missed.retain(|item| item.targeted);
+    // Runnable as written: --anyway re-reads the body from stdin, so a caller
+    // who was piping a heredoc keeps piping it. The old fix said
+    // `--body '<revised text>'`, which is not a command -- and it steered the
+    // caller onto argv, the one form this binary's own help calls dangerous
+    // because the shell parses it first.
     let fix = format!(
-        "post chat {} --send --anyway --body '<revised text>'",
-        crate::mailbox::shell_quote(channel)
+        "post chat {} --send --anyway{}",
+        crate::mailbox::shell_quote(channel),
+        body_flag
     );
     if unreadable_unseen && missed.is_empty() {
         // Renders no messages, so it stays pure transport: the trust anchor
@@ -756,7 +768,7 @@ fn crossed_send_check(
     Ok(CrossedReport {
         verdict: CrossedVerdict::Refuse(
             AppError::new(ErrorCode::CrossedSend, message, format!(
-                "Read the messages addressed to you, revise, then retry with `--anyway` to deliver regardless: `{fix}`."
+                "Read the messages addressed to you, revise, then resend the same way you sent it -- body on stdin -- adding `--anyway`: `{fix}`."
             ))
             .exact_fix(fix)
             .input(channel)

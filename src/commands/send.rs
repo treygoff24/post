@@ -148,7 +148,16 @@ where
     // routable instances are a recorded non-goal. --allow-self is the
     // deliberate exception for doorbell probes and smoke tests.
     if sender == args.to && !args.allow_self {
-        let fix = format!("{fix_prefix} --allow-self --body '<text>'");
+        // Reproduce the caller's own invocation with the one change that makes
+        // it succeed, INCLUDING the body when the body is knowable from argv or
+        // a file. The old fix said `--body '<text>'`; the test that ran it
+        // asserted success and got it, because a mail whose body is literally
+        // "<text>" does land. Runnable and correct are not the same property.
+        let body_flag = send_body_flag(
+            args.body.as_deref(),
+            args.body_file.as_deref().or(args.file.as_deref()),
+        );
+        let fix = format!("{fix_prefix} --allow-self{body_flag}");
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
             format!("refusing to send mail from '{sender}' to itself"),
@@ -255,10 +264,13 @@ where
             ErrorCode::EmptyBody,
             "message body is empty after trimming whitespace",
             format!(
-                "Retry with `{fix_prefix} --body '<text>'` or pass a non-empty body file/stdin."
+                "Retry with `{fix_prefix}` and a non-empty body on stdin (heredoc or pipe), or pass --body-file."
             ),
         )
-        .exact_fix(format!("{fix_prefix} --body '<text>'"))
+        // Runs as written: the prefix reads the body from stdin. It used to say
+        // `--body '<text>'`, which is not a command and points at argv, the
+        // form the shell parses before post ever sees it.
+        .exact_fix(fix_prefix.clone())
         .input("message body")
         .reason("empty or whitespace-only"));
     }
@@ -509,13 +521,19 @@ fn read_body_unchecked(source: BodySource<'_>) -> AppResult<String> {
         }
     }
     if io::stdin().is_terminal() {
-        let fix = format!("{} --body '<text>'", source.fix_prefix);
+        // No exact_fix here, deliberately. Every candidate needs content only
+        // the caller has, so any command printed would be a template, and this
+        // field promises something that runs as written. Same call as the
+        // POST_FROM branch in acting_room: when no complete command exists,
+        // say so in prose rather than print a fill-in-the-blank.
+        let prefix = &source.fix_prefix;
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
             "message body is missing and stdin is a terminal; post never prompts or waits for interactive input",
-            format!("Run `{fix}`, or pass `--body-file <PATH>`, or pipe the body on stdin."),
+            format!(
+                "Pipe the body on stdin -- `{prefix} <<'EOF' ... EOF` -- or pass --body-file, or --body for a short line."
+            ),
         )
-        .exact_fix(fix)
         .input("stdin")
         .reason("interactive terminal input is not allowed"));
     }
@@ -582,6 +600,25 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
             )),
         ),
     }
+}
+
+/// The body-bearing flag to append to an `exact_fix`, reproducing the channel
+/// the caller actually used. Returns empty when the body arrived on stdin: no
+/// command can carry it, and inventing a `--body '<text>'` placeholder is how
+/// this field starts lying.
+pub(crate) fn send_body_flag(inline: Option<&str>, body_file: Option<&std::path::Path>) -> String {
+    if let Some(text) = inline {
+        return format!(" --body {}", crate::mailbox::shell_quote(text));
+    }
+    if let Some(path) = body_file {
+        if path.as_os_str() != "-" {
+            return format!(
+                " --body-file {}",
+                crate::mailbox::shell_quote(&path.display().to_string())
+            );
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]

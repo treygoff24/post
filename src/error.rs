@@ -178,7 +178,17 @@ impl AppError {
     }
 
     pub fn exact_fix(mut self, value: impl Into<String>) -> Self {
-        self.details.exact_fix = Some(value.into());
+        let value = value.into();
+        // README: exact_fix "holds a command that runs as written". A
+        // placeholder makes that false, and the caller most likely to paste it
+        // unedited is an agent. Enforced here rather than per-test because
+        // runnability was opt-in (`run_fix`) and crossed_send's fix shipped a
+        // `'<revised text>'` placeholder for weeks under a green suite.
+        debug_assert!(
+            !contains_placeholder(&value),
+            "exact_fix must run as written, but contains a placeholder: {value}"
+        );
+        self.details.exact_fix = Some(value);
         self
     }
 
@@ -302,5 +312,44 @@ impl AppError {
         .inbox_path(inbox.display().to_string())
         .archive_path(archive.display().to_string())
         .reason(reason)
+    }
+}
+
+/// A `<...>` placeholder: `<` followed immediately by a non-space, closed by a
+/// later `>` on the same line. Shell redirection (`< FILE`) puts a space after
+/// the `<` and has no `>`, so it is not mistaken for one.
+fn contains_placeholder(value: &str) -> bool {
+    value.lines().any(|line| {
+        let bytes = line.as_bytes();
+        bytes.iter().enumerate().any(|(i, &c)| {
+            c == b'<'
+                && bytes.get(i + 1).is_some_and(|n| !n.is_ascii_whitespace())
+                && line[i + 1..].contains('>')
+        })
+    })
+}
+
+#[cfg(test)]
+mod exact_fix_contract {
+    use super::contains_placeholder;
+
+    #[test]
+    fn placeholders_are_caught_and_shell_redirection_is_not() {
+        // The shapes that actually shipped in this binary.
+        assert!(contains_placeholder(
+            "post chat 'x' --send --anyway --body '<revised text>'"
+        ));
+        assert!(contains_placeholder("post send --to <ROOM> --body <TEXT>"));
+        assert!(contains_placeholder("post chat <CHANNEL>"));
+
+        // Must NOT fire on real commands, or the guard gets disabled by whoever
+        // hits the first false positive. `<` with a space after it is
+        // redirection, and a lone `>` is not a placeholder either.
+        assert!(!contains_placeholder("post chat 'ops' --send --anyway"));
+        assert!(!contains_placeholder("post chat 'ops' --send < body.txt"));
+        assert!(!contains_placeholder("post send --to 'a' --body 'x > y'"));
+        assert!(!contains_placeholder(
+            "post send --to 'a' --body 'a<b and c'"
+        ));
     }
 }

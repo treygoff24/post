@@ -957,6 +957,14 @@ fn send(
     let fix_prefix = chat_fix_prefix(&args);
     super::send::validate_subject(&args.subject)?;
     let inline = args.body.take();
+    // Computed HERE, before `inline` is moved into BodySource: reading
+    // `args.body` after the take yields None, which silently produced an
+    // exact_fix with no body at all and a green test that only compared
+    // strings.
+    let body_flag = crate::commands::send::send_body_flag(
+        inline.as_deref(),
+        args.body_file.as_deref().or(args.file.as_deref()),
+    );
     let body = super::send::read_body(super::send::BodySource {
         inline,
         body_file: args.body_file.as_deref(),
@@ -1008,6 +1016,7 @@ fn send(
         channel::SendOptions {
             subject: &args.subject,
             body: &body,
+            body_flag: &body_flag,
             anyway: args.anyway,
             re: args.re.as_deref(),
             signature_tag: args.signature_ref.as_deref(),

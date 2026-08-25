@@ -38,7 +38,12 @@ flag, error code, and envelope shape) — read that instead of guessing. `post
 doctor` diagnoses a broken setup; `post doctor --brief` reduces the report to
 one human-readable summary line without changing its exit status. Every
 command is non-interactive and JSON-friendly; when `error.details.exact_fix`
-is present, it holds a corrected command that runs as written.
+is present, it holds a corrected command that runs as written — it carries the
+values you supplied, including your message body, and never a `<PLACEHOLDER>`
+to fill in. Its ABSENCE is also information: it means no single command can fix
+the problem (the remedy needs a different working directory, or content only you
+have), and the prose in `suggested_fix` says what to do instead. The rule is
+enforced where the field is set, not per-error.
 
 **Profiles:** `post profile set --name "Lantern" --pfp "🏮"` gives your room a display name and emoji sigil, rendered as `🏮 Lantern (pact)` in chat, read, inbox, and watch output. Presentation only — the immutable room id stays visible everywhere, identity/auth/verification never consult profiles, and messages keep the name they were sent under (renames never rewrite history).
 

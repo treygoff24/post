@@ -27,7 +27,9 @@ where
                     .reason("command-line parse failure");
                 if let Some((fix, guidance)) = parse_failure_fix(&message, &argv) {
                     error.suggested_fix = guidance;
-                    error = error.exact_fix(fix);
+                    if let Some(fix) = fix {
+                        error = error.exact_fix(fix);
+                    }
                 }
                 output::write_error(&error, false);
                 return error.exit_code;
@@ -54,17 +56,21 @@ where
 /// the subcommand that was actually attempted. A flag accepted on one
 /// subcommand and rejected on another otherwise produces a bare "unexpected
 /// argument" that offers no alternative.
-/// Returns the command to run and the prose explaining it. `exact_fix` stays a
-/// bare command so a caller can run or template it directly; the reasoning
-/// goes to `suggested_fix`, which is the field that carries prose.
-fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(String, String)> {
+/// Returns an OPTIONAL command and the prose explaining it. The command is
+/// `Some` only when it runs as written; every correction here that needs a
+/// value only the caller has -- a room, a name, a body -- returns `None` and
+/// says it in prose instead. This function used to hand back templates like
+/// `post send --to <ROOM> --body <TEXT>` as `exact_fix`, and its own comment
+/// licensed that ("run or template it directly") in flat contradiction of the
+/// README, which promises a command that runs as written.
+fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(Option<String>, String)> {
     let subcommand = subcommand_of(argv);
     let subcommand = subcommand.as_deref();
     // Agents keep typing `post send <room> --body …`; the positional is a body
     // FILE, so clap reports a FILE/--body conflict that hides the real mistake.
     if message.contains("'[FILE]' cannot be used with '--body") {
         return Some((
-            "post send --to <ROOM> --from <NAME> --subject <SUBJECT> --body <TEXT>".to_owned(),
+            None,
             "The recipient is named by --to, never by position: the positional argument is a body FILE. Pass the recipient as a flag and the message as --body."
                 .to_owned(),
         ));
@@ -72,21 +78,25 @@ fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(String, String
     if message.contains("unexpected argument '--room'") {
         return Some(match subcommand {
             Some("chat") => (
-                "post chat <CHANNEL>".to_owned(),
+                // No command: the correction is to run it from another
+                // directory. A stripped `post chat tax` would run fine right
+                // here and send under the WRONG identity -- a correction that
+                // silently does something else is worse than none.
+                None,
                 "Channel identity comes from cwd, so chat has no --room: run it from inside the room's registered directory. Run `post rooms` to see the paths."
                     .to_owned(),
             ),
             Some("channels") => (
-                "post channels".to_owned(),
+                Some("post channels".to_owned()),
                 "channels takes no --room; it lists every channel with its members.".to_owned(),
             ),
             Some("send") => (
-                "post send --to <ROOM> --from <NAME> --body <TEXT>".to_owned(),
+                None,
                 "send names the recipient with --to and the sender with --from; it has no --room."
                     .to_owned(),
             ),
             _ => (
-                "post inbox --room <ROOM>".to_owned(),
+                None,
                 "--room is a command option for inbox, read, and watch only.".to_owned(),
             ),
         });
@@ -94,12 +104,12 @@ fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(String, String
     if message.contains("unexpected argument '--from'") {
         return Some(match subcommand {
             Some("chat") => (
-                "post chat <CHANNEL> --send --body <TEXT>".to_owned(),
+                None,
                 "Channel sender identity comes from cwd, so chat has no --from: run it from inside the room's registered directory."
                     .to_owned(),
             ),
             _ => (
-                "post send --to <ROOM> --from <NAME> --body <TEXT>".to_owned(),
+                None,
                 "--from names the sender on send only.".to_owned(),
             ),
         });
@@ -108,7 +118,8 @@ fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(String, String
         || message.contains("unexpected argument '--body'")
     {
         return Some((
-            format!("post {} --help", subcommand.unwrap_or("<command>")),
+            // Runnable only when we know which subcommand was typed.
+            subcommand.map(|name| format!("post {name} --help")),
             "--body and --body-file supply a message body on `send` and `chat --send` only."
                 .to_owned(),
         ));

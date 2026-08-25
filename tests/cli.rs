@@ -3562,12 +3562,23 @@ fn room_flag_on_channel_commands_names_the_cwd_bound_invocation() {
         Some("post channels")
     );
 
+    // `post channels` is offered as exact_fix because it RUNS; prove it rather
+    // than trusting that a plausible string was printed.
+    let ran = sandbox.run_fix("post channels", &alpha);
+    assert_success(&ran);
+
     let on_chat = sandbox.run_in(&["chat", "tax", "--room", "alpha"], None, &alpha);
     assert_eq!(on_chat.status.code(), Some(2));
     let error: ErrorEnvelope = from_stderr(&on_chat);
+    // No exact_fix here, and that is the assertion. The correction is "run it
+    // from the room's directory", which no single command expresses: a bare
+    // `post chat tax` would succeed right where the caller is standing and send
+    // under the cwd's identity instead of the one they asked for. This field
+    // used to carry the template `post chat <CHANNEL>`, which cannot run at all.
     assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post chat <CHANNEL>")
+        error.error.details.exact_fix, None,
+        "a correction that needs a different cwd must not be published as a runnable command: {:?}",
+        error.error.details.exact_fix
     );
     assert!(
         error.error.suggested_fix.contains("cwd"),
@@ -5747,15 +5758,31 @@ fn crossed_send_exact_fix_shell_quotes_channel_metacharacters() {
         assert_eq!(error.error.code, "crossed_send");
         let fix = error.error.details.exact_fix.as_deref().expect("exact_fix");
         let quoted = format!("'{}'", name.replace('\'', r"'\''"));
+        // The fix carries the caller's OWN body. It used to say
+        // `--body '<revised text>'`, so a caller who pasted it sent a message
+        // whose text was the placeholder -- and nothing failed, because a mail
+        // with that body delivers perfectly well.
         assert_eq!(
             fix,
-            format!("post chat {quoted} --send --anyway --body '<revised text>'"),
-            "exact_fix must shell-quote channel name {name:?}"
+            format!("post chat {quoted} --send --anyway --body 'blind reply'"),
+            "exact_fix must shell-quote channel name {name:?} and carry the body"
         );
         // Semicolon injection must not appear as a bare shell command token.
         assert!(
             !fix.contains("post chat ops;echo"),
             "unquoted metacharacters in exact_fix: {fix}"
+        );
+        // Run it. This is the assertion that matters: the refusal's remedy has
+        // to deliver the message the caller was trying to send, through a real
+        // shell, with a channel name full of metacharacters.
+        let applied = sandbox.run_fix(fix, &alpha);
+        assert_success(&applied);
+        let history = sandbox.run_in(&["chat", name, "--history", "5", "--json"], None, &alpha);
+        assert_success(&history);
+        assert!(
+            stdout(&history).contains("blind reply"),
+            "the executed fix must deliver the caller's own body for {name:?}: {}",
+            stdout(&history)
         );
     }
 }
