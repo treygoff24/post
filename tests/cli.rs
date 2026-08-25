@@ -2881,9 +2881,62 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
         })
         .collect();
 
+    // Default: alpha and beta are merely SELECTED, not declared owned, so
+    // alpha's own send still rings. Suppressing on selection alone made a
+    // monitor that watches rooms it does not own silently deaf to them.
     let output = sandbox.run(&["watch", "--room", "alpha", "--room", "beta", "--snapshot"]);
     assert_success(&output);
     let events = watch_events(&output.stdout);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                WatchEvent::ChannelMessage { id, .. } if id == &own_sent.message.id
+            ))
+            .count(),
+        1,
+        "a watched-but-not-owned room's message must still reach the watcher"
+    );
+
+    // Declared owned: the same two rooms are now one session's identities, so
+    // its own send is not news to it.
+    let owned = sandbox.run(&[
+        "watch",
+        "--room",
+        "alpha",
+        "--room",
+        "beta",
+        "--own",
+        "alpha",
+        "--own",
+        "beta",
+        "--snapshot",
+    ]);
+    assert_success(&owned);
+    let owned_events = watch_events(&owned.stdout);
+    assert_eq!(
+        owned_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                WatchEvent::ChannelMessage { id, .. } if id == &own_sent.message.id
+            ))
+            .count(),
+        0,
+        "a declared-own room's message must not ring the session that owns it"
+    );
+    assert_eq!(
+        owned_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                WatchEvent::ChannelMessage { id, .. } if id == &channel_sent.message.id
+            ))
+            .count(),
+        1,
+        "declaring ownership must not silence a third party"
+    );
     assert_eq!(
         events
             .iter()
@@ -2895,17 +2948,7 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
         1,
         "one shared channel message must ring once across watched rooms"
     );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                event,
-                WatchEvent::ChannelMessage { id, .. } if id == &own_sent.message.id
-            ))
-            .count(),
-        0,
-        "a multi-room watch must not ring for a message sent by any room it covers"
-    );
+
     for (room, id) in [
         ("alpha", alpha_mail.envelope.id.as_str()),
         ("beta", beta_mail.envelope.id.as_str()),

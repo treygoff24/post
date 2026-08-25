@@ -457,6 +457,13 @@ pub(crate) struct WatchArgs {
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Vec<String>,
 
+    /// Rooms this watcher IS, whose own channel messages are therefore not news
+    /// to it. Repeat per room. Defaults to empty: watching a room is not the
+    /// same as being it, and an observer that selects rooms it does not own
+    /// must keep receiving their traffic.
+    #[arg(long = "own", value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
+    pub own: Vec<String>,
+
     /// Exit 0 after the first batch that emits at least one event.
     #[arg(long)]
     pub once: bool,

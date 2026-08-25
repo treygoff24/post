@@ -198,7 +198,9 @@ A room's own messages are excluded from unread selection even if their
 best-effort seen-state update is absent. Writes warn when one channel reaches
 50,000 seen ids; watermark compaction is unsafe until a durable
 arrival-sequence fence can distinguish later backfills.
-A room's own channel sends do not ring its own watch.
+A room's own channel sends do not ring its own watch. A session watching
+several of its own rooms declares them with `--own <room>` (repeatable) so none
+of them ring it; `--room` alone never implies ownership.
 
 ## Watch from harness tools
 

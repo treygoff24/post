@@ -424,7 +424,10 @@ capped with `+N more`.
 
 `reason` is `mail` | `channel` | `mention` on every event type (`unreadable`
 uses `mail` or `channel`; mention is unknowable without a body). A room's own
-channel messages do not ring its own watch. Use a long-running PTY session and
+channel messages do not ring its own watch, and a watcher wearing several
+identities declares them with `--own <room>` (repeatable) so none of them ring
+it; `--room` alone selects what to scan and never implies ownership, so a
+monitor keeps receiving the rooms it merely watches. Use a long-running PTY session and
 read lines incrementally; kill the session when done. For smokes, use
 `POST_MAIL_ROOT=/tmp/...` plus temporary registered rooms/channels, seed an
 event first, or run watch in a bounded PTY/session and stop it explicitly.
