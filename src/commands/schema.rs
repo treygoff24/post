@@ -256,7 +256,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Channel history is append-only and is its own immutable archive; nothing in messages/ is ever moved or deleted.",
             "Channel identity is inferred from cwd; membership and per-room channel state require a registered room, and joins are recorded in the channel history itself.",
             "Watch emits channel events as notifications only and never marks channel messages seen; only a read consumes, and only after a successful emit.",
-            "A room's own channel messages are never news to it: they never ring its own watch, and a send records the sender's own message id as seen unconditionally.",
+            "A room's own channel messages are never news to it: they never ring its own watch, and a send records the sender's own message id as seen unconditionally. A multi-room watch is one session, so a message from ANY room that watch covers is suppressed across all of them.",
             "A message body comes from exactly one of --body, --body-file, or stdin; a body-file path that does not exist is a usage error, never a retryable I/O fault.",
             "Shell quoting happens before Post: double quotes can expand dollar-positionals such as $1 in $1.63B, and an apostrophe can terminate single quotes; use --body-file or stdin for shell-sensitive prose.",
             "Subjects over 1 KiB fail before any write with no override; longer text belongs in the body.",

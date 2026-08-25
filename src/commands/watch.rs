@@ -252,6 +252,12 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             scan_failing: false,
         });
     }
+    // Suppression spans the whole watch, not one target. Scanning is per-room,
+    // so a session watching two rooms used to deliver room A's own send to
+    // room B's scan and ring the session that wrote it -- one wake per
+    // outbound message, which teaches the operator to ignore the doorbell.
+    let watched_rooms: BTreeSet<String> = targets.iter().map(|t| t.room.clone()).collect();
+
     // Ring for anything not yet handled. Load each channel's seen-set as a
     // read-only floor — watch NEVER writes one — and emit unseen messages. A
     // doorbell rings until handled: reading marks messages seen, so a handled
@@ -276,6 +282,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             batch.extend(scan_batch(
                 context,
                 &target.room,
+                &watched_rooms,
                 &target.inbox,
                 &target.channel_seen,
                 &mut target.seen,
@@ -326,6 +333,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     run_watch_loop(
         context,
         &mut targets,
+        &watched_rooms,
         &mut emitted_channel_ids,
         interval_ms,
         once,
@@ -344,6 +352,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
 fn run_watch_loop(
     context: &Context,
     targets: &mut [WatchTarget],
+    watched_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<String>,
     interval_ms: u64,
     once: bool,
@@ -353,7 +362,9 @@ fn run_watch_loop(
     slow_period: Duration,
 ) -> AppResult<CommandResult> {
     touch_heartbeats(context, targets, interval_ms)?;
-    let mut batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
+    let mut batch = scan_targets(context, targets, watched_rooms, emitted_channel_ids, |_| {
+        true
+    });
     if !batch.is_empty() {
         emit(&batch, text, digest)?;
         if once {
@@ -398,9 +409,13 @@ fn run_watch_loop(
                 }
                 // Rescan every affected target through the full existing scan
                 // path — never an incremental one (r2).
-                scan_targets(context, targets, emitted_channel_ids, |target| {
-                    target.dirs.iter().any(|dir| dirs.contains(dir))
-                })
+                scan_targets(
+                    context,
+                    targets,
+                    watched_rooms,
+                    emitted_channel_ids,
+                    |target| target.dirs.iter().any(|dir| dirs.contains(dir)),
+                )
             }
         };
         // Slow pass: due whenever the wall clock says so, after EVERY wake.
@@ -415,7 +430,9 @@ fn run_watch_loop(
                 .flat_map(|target| target.dirs.iter().cloned())
                 .collect();
             wake.reconcile(&desired);
-            batch = scan_targets(context, targets, emitted_channel_ids, |_| true);
+            batch = scan_targets(context, targets, watched_rooms, emitted_channel_ids, |_| {
+                true
+            });
         }
         if !batch.is_empty() {
             emit(&batch, text, digest)?;
@@ -440,6 +457,7 @@ fn touch_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64
 fn scan_targets(
     context: &Context,
     targets: &mut [WatchTarget],
+    watched_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<String>,
     selected: impl Fn(&WatchTarget) -> bool,
 ) -> Vec<WatchDelivery> {
@@ -448,6 +466,7 @@ fn scan_targets(
         match scan_batch(
             context,
             &target.room,
+            watched_rooms,
             &target.inbox,
             &target.channel_seen,
             &mut target.seen,
@@ -674,6 +693,7 @@ fn dir_id(path: &Path) -> Option<(u64, u64)> {
 fn scan_batch(
     context: &Context,
     room: &str,
+    watched_rooms: &BTreeSet<String>,
     inbox: &Path,
     channel_seen: &HashMap<String, BTreeSet<String>>,
     seen: &mut HashSet<PathBuf>,
@@ -736,8 +756,10 @@ fn scan_batch(
         }
         match parse_channel_message(&path) {
             // A room's own words are never news: its own sends don't ring
-            // its own doorbell (they still ring every other member's).
-            Ok(parsed) if parsed.message.from == room => {}
+            // its own doorbell (they still ring every other member's). "Own"
+            // means any room THIS watch covers -- one process watching two
+            // rooms is one session, and its own send is not news to it.
+            Ok(parsed) if watched_rooms.contains(&parsed.message.from) => {}
             Ok(parsed) => {
                 emitted_channel_ids.insert(parsed.message.id.clone());
                 batch.push(WatchDelivery::channel(
@@ -1090,6 +1112,83 @@ mod tests {
     }
 
     #[test]
+    fn scan_batch_never_rings_for_any_room_this_watch_covers() {
+        // One process watching alpha and beta is ONE session. Beta's send is
+        // that session's own words, so scanning alpha must not ring for it --
+        // the per-room check used to, costing a wake per outbound message.
+        let root = test_root("watch-ownfilter-multi");
+        let inbox = root.join("alpha").join("inbox");
+        fs::create_dir_all(&inbox).expect("create inbox");
+        let dir = root.join("channels").join("tax");
+        fs::create_dir_all(dir.join("messages")).expect("create channel dirs");
+        fs::write(
+            dir.join("channel.json"),
+            r#"{"name":"tax","created":"2026-07-22 01:00:00 -0500","created_by":"alpha"}"#,
+        )
+        .expect("write channel.json");
+        fs::write(
+            dir.join("members.json"),
+            r#"{"alpha":"2026-07-22 01:00:00 -0500","beta":"2026-07-22 01:00:00 -0500","gamma":"2026-07-22 01:00:00 -0500"}"#,
+        )
+        .expect("write members.json");
+        for (id, from) in [
+            ("20260722-013000-000001-aaa111", "alpha"),
+            ("20260722-013000-000002-bbb222", "beta"),
+            ("20260722-013000-000003-ccc333", "gamma"),
+        ] {
+            let message = ChannelMessage {
+                id: id.to_owned(),
+                from: from.to_owned(),
+                channel: "tax".to_owned(),
+                subject: String::new(),
+                sent: "2026-07-22 01:30:00 -0500".to_owned(),
+                event: None,
+                display_name: None,
+                pfp: None,
+                re: None,
+                mentions: vec![],
+                signature_ref: None,
+                sender_address: None,
+                sender_provenance: None,
+            };
+            let bytes = encode_message(&message, "body").expect("encode");
+            fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
+                .expect("write message");
+        }
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut seen = HashSet::new();
+        let mut emitted_channel_ids = HashSet::new();
+        let batch = scan_batch(
+            &context,
+            "alpha",
+            &BTreeSet::from(["alpha".to_owned(), "beta".to_owned()]),
+            &inbox,
+            &HashMap::new(),
+            &mut seen,
+            &mut emitted_channel_ids,
+        )
+        .expect("scan");
+        let froms: Vec<&str> = batch
+            .iter()
+            .filter_map(|delivery| match &delivery.event {
+                WatchEvent::ChannelMessage { from, .. } => Some(from.as_str()),
+                _ => None,
+            })
+            .collect();
+        // gamma is a real other member and must still ring: this suppresses the
+        // session's own voice, not the channel.
+        assert_eq!(
+            froms,
+            vec!["gamma"],
+            "a multi-room watch must not ring for a room it is itself watching"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
     fn scan_batch_never_rings_for_the_rooms_own_messages() {
         let root = test_root("watch-ownfilter");
         let inbox = root.join("alpha").join("inbox");
@@ -1138,6 +1237,7 @@ mod tests {
         let batch = scan_batch(
             &context,
             "alpha",
+            &BTreeSet::from(["alpha".to_owned()]),
             &inbox,
             &HashMap::new(),
             &mut seen,
@@ -1239,9 +1339,11 @@ body
         let mut emitted_channel_ids = HashSet::new();
         // once=true: run_watch_loop returns Ok ONLY after emitting a non-empty
         // batch — so Ok proves the event wake produced an emit.
+        let watched_rooms: BTreeSet<String> = targets.iter().map(|t| t.room.clone()).collect();
         run_watch_loop(
             &context,
             &mut targets,
+            &watched_rooms,
             &mut emitted_channel_ids,
             1000,
             true,
@@ -1320,9 +1422,11 @@ body
         // slow_period zero: the deadline is due on the very first wake, so a
         // correct loop emits B's mail immediately despite A-only events;
         // the starved loop would drain all 50 A-wakes without emitting.
+        let watched_rooms: BTreeSet<String> = targets.iter().map(|t| t.room.clone()).collect();
         run_watch_loop(
             &context,
             &mut targets,
+            &watched_rooms,
             &mut emitted_channel_ids,
             1000,
             true,

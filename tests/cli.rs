@@ -2809,8 +2809,17 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
 fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
+    // A third member sends the shared message. The original fixture sent it
+    // from alpha, which conflated two different properties: dedup across the
+    // watched rooms, and whether a watch rings for its own voice. Alpha is a
+    // room THIS watch covers, so its send is not news to it -- the dedup
+    // property needs an outside sender to be tested at all.
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&gamma).expect("create gamma room path");
+    register_room(&sandbox, "gamma", &gamma);
     join_channel(&sandbox, "tax", &alpha);
     join_channel(&sandbox, "tax", &beta);
+    join_channel(&sandbox, "tax", &gamma);
 
     let channel_sent: ChatSendOutput = from_stdout(&sandbox.run_in(
         &[
@@ -2820,6 +2829,21 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
             "--anyway",
             "--body",
             "one shared ring",
+            "--json",
+        ],
+        None,
+        &gamma,
+    ));
+    // Alpha's own send, in the same channel, in the same watch. It must not
+    // ring: one process watching alpha and beta is one session.
+    let own_sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "my own voice",
             "--json",
         ],
         None,
@@ -2870,6 +2894,17 @@ fn watch_merges_rooms_and_dedupes_shared_channel_messages_without_consuming() {
             .count(),
         1,
         "one shared channel message must ring once across watched rooms"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                WatchEvent::ChannelMessage { id, .. } if id == &own_sent.message.id
+            ))
+            .count(),
+        0,
+        "a multi-room watch must not ring for a message sent by any room it covers"
     );
     for (room, id) in [
         ("alpha", alpha_mail.envelope.id.as_str()),
