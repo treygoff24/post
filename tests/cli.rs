@@ -9096,3 +9096,39 @@ fn body_file_dash_reads_stdin_and_a_real_path_still_wins() {
     assert!(body.contains("from the file"));
     assert!(!body.contains("this stdin must be ignored"));
 }
+
+/// `post chat --help` and the `chat` usage in `post schema` are two renderings
+/// of one contract, and nothing pinned them together — so reordering help to
+/// lead with sending left the schema, which SKILL.md calls the authority when
+/// help is ambiguous, still reads-first. Pin the property both must hold.
+#[test]
+fn help_and_schema_agree_that_chat_leads_with_sending() {
+    let sandbox = Sandbox::new();
+
+    let help = String::from_utf8_lossy(&sandbox.run(&["chat", "--help"]).stdout).into_owned();
+    let first_help_form = help
+        .lines()
+        .skip_while(|line| !line.starts_with("Usage:"))
+        .find(|line| line.contains("post chat"))
+        .expect("chat --help must show a usage form");
+    assert!(
+        first_help_form.contains("--send"),
+        "help must lead with a send form, got: {first_help_form}"
+    );
+
+    let schema: serde_json::Value = from_stdout(&sandbox.run(&["schema"]));
+    let usage = schema["commands"]
+        .as_array()
+        .expect("commands array")
+        .iter()
+        .find(|entry| entry["name"] == "chat")
+        .expect("chat command in schema")["usage"]
+        .as_str()
+        .expect("usage string")
+        .to_owned();
+    let first_schema_form = usage.split(" | ").next().expect("at least one form");
+    assert!(
+        first_schema_form.contains("--send"),
+        "schema usage must lead with a send form, got: {first_schema_form}"
+    );
+}

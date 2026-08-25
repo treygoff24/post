@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changed
+- Errors now name the directory identity was resolved from. A channel operation
+  from an unregistered cwd reports the full path rather than only its basename,
+  lists the registered rooms (bounded inline, complete in `details.matches`),
+  and carries a runnable `exact_fix`.
+- `post send --to <channel>` reports that the recipient is a channel and hands
+  back the `post chat <channel> --send` form, carrying `--subject`, `--oversize`
+  and the body source across and naming `--kind`, which channels have no
+  equivalent for. A leading `#` is accepted and stripped.
+- `post chat --help` and the `chat` usage string in `post schema` now lead with
+  the `--send` forms instead of burying them below the read forms.
+- A sender can read back its own archived mail; the archive filter admits both
+  parties rather than only the recipient. A miss now distinguishes an id that is
+  absent from one that is archived between two other rooms, instead of reporting
+  "not in the archive" for both.
+- The send receipt names the command that reads the message back.
+- `--body-file -` reads stdin, matching `--body -`.
+
 ### Added
 - `post watch --digest` emits one JSON or text line per room/source group in
   each batch, with counts, id bounds, a capped arrival-ordered sender list, and
