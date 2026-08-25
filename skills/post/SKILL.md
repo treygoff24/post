@@ -298,3 +298,11 @@ pinning, and uninstall: `docs/ADAPTERS.md`.
 - `delivered_output_failure` is non-retryable: the operation committed but the
   receipt failed. Inspect state instead of resending blindly.
 - Use `POST_MAIL_ROOT=/tmp/...` for smokes that must not touch live mail.
+- **Smokes assert on `--json` or the cursor file, never on human-formatted
+  output.** The text rendering is presentation: the trust-boundary banner,
+  the compact/full framing, and the unread counter all change with
+  `POST_FRAMING`, the room profile, and what has arrived since. A smoke that
+  diffs two `post chat <channel> --peek` runs byte-for-byte is testing the
+  framing, not the behaviour it means to pin, and it goes red on a cosmetic
+  change while staying green on a real cursor bug. Compare `--json` payloads
+  (or the cursor file directly) and let the framing vary.
