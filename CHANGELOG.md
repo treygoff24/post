@@ -28,7 +28,9 @@
   and the body source across and naming `--kind`, which channels have no
   equivalent for. A leading `#` is accepted and stripped.
 - `post chat --help` and the `chat` usage string in `post schema` now lead with
-  the `--send` forms instead of burying them below the read forms.
+  the `--send` forms instead of burying them below the read forms. Within those,
+  stdin and `--body-file` come first and `--body` last, with a note that a body
+  on argv is parsed by the shell before post ever sees it.
 - A sender can read back its own archived mail; the archive filter admits both
   parties rather than only the recipient. A miss now distinguishes an id that is
   absent from one that is archived between two other rooms, instead of reporting

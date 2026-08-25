@@ -129,9 +129,19 @@ pub(crate) struct SendArgs {
     // lines and the --send forms the last three, which reads as a read-only
     // command to anyone scanning the top of --help -- and three papercuts say
     // exactly that, one of them after three tries to find the syntax.
-    override_usage = "post chat <CHANNEL> --send --body <TEXT>              (send to the channel)\n       \
-     post chat <CHANNEL> --send --body-file <PATH>        (send a longer or prose body)\n       \
-     post chat <CHANNEL> --send < BODY_FILE               (send a body on stdin)\n       \
+    //
+    // Within the send forms, stdin leads and argv comes last. post cannot see
+    // the shell and must not try to detect substituted prose, so the only
+    // defence is making the safe path the obvious one: an agent that copies the
+    // first form it reads copies a heredoc. The reverse ordering -- which this
+    // usage block briefly had -- put the argv form first and would have taught
+    // exactly the habit that spliced command output into #build.
+    override_usage = "post chat <CHANNEL> --send < BODY_FILE               (send prose: heredoc or pipe, SAFEST)\n       \
+     post chat <CHANNEL> --send --body-file <PATH>        (send prose from a file)\n       \
+     post chat <CHANNEL> --send --body-file -             (send prose on stdin)\n       \
+     post chat <CHANNEL> --send --body <TEXT>             (send a short line; argv only)\n       \
+       ...prose belongs on stdin or in a file. A body on argv is parsed by your shell first:\n       \
+       ...backticks and $(...) inside double quotes execute and splice their output into the message.\n       \
        ...add [--anyway] to send past unread messages, [--re ID] to reply, [--oversize] to exceed the size cap\n       \
      post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default last 25 unread)\n       \
      post chat <CHANNEL> --peek [--framing MODE]     (read without advancing)\n       \
