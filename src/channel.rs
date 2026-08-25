@@ -13,7 +13,7 @@
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{
     ascii_escape_json, atomic_replace, exclusive_atomic_write, local_timestamp_micros, new_mail_id,
-    validate_room_name, Context,
+    shell_quote, validate_room_name, Context,
 };
 use crate::model::{ChannelMessage, ParsedChannelMessage, RoomMap, SenderProvenance};
 use serde::{Deserialize, Serialize};
@@ -173,24 +173,43 @@ pub(crate) fn acting_room(
     // directory that was." Name the full path, list the rooms that do exist, and
     // hand back a command that works.
     let names: Vec<String> = rooms.keys().cloned().collect();
-    let (evidence, fix) = if provenance == SenderProvenance::DeclaredEnv {
+    // `suggested_fix` is prose for a human; `exact_fix` is a command that runs as
+    // written (README § Commands), and the suite pins that as law -- see
+    // crossed_send_exact_fix_shell_quotes_channel_metacharacters, whose comment
+    // says an unquoted name there is a command injection. So every interpolated
+    // path and name goes through shell_quote, and `exact_fix` is omitted entirely
+    // on the branch where no single complete command exists rather than filled
+    // with a template nobody can run.
+    let (evidence, prose, exact) = if provenance == SenderProvenance::DeclaredEnv {
         (
             format!("the POST_FROM pin names '{room}'"),
-            format!("Register it with `post rooms add {room} <path>`, or unset POST_FROM to fall back to cwd."),
+            format!(
+                "Register it with `post rooms add {} <path>`, or unset POST_FROM to fall back to cwd.",
+                shell_quote(&room)
+            ),
+            // The pin names a room but not a path, so no runnable command exists.
+            None,
         )
     } else {
         let cwd = std::env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unreadable>".to_owned());
+        let register = format!(
+            "post rooms add {} {}",
+            shell_quote(&room),
+            shell_quote(&cwd)
+        );
+        let prose = match names.first().and_then(|first| rooms.get(first)) {
+            Some(path) => format!(
+                "cd into a registered room and retry, for example `cd {}`; or register this directory as a room with `{register}`.",
+                shell_quote(path)
+            ),
+            None => format!("No rooms are registered. Register this directory with `{register}`."),
+        };
         (
             format!("cwd {cwd} resolves to '{room}'"),
-            match names.first() {
-                Some(first) => format!(
-                    "cd into a registered room and retry, for example `cd {} && post chat <CHANNEL> ...`; or register this one with `post rooms add <name> {cwd}`.",
-                    rooms.get(first).map(String::as_str).unwrap_or(first)
-                ),
-                None => format!("No rooms are registered. Register one with `post rooms add <name> {cwd}`."),
-            },
+            prose,
+            Some(register),
         )
     };
     // The inline list is bounded because an error that costs more context than the
@@ -210,17 +229,20 @@ pub(crate) fn acting_room(
     } else {
         format!("registered rooms: {listed}")
     };
-    Err(AppError::new(
+    let mut error = AppError::new(
         ErrorCode::UnknownRoom,
         format!(
             "channel operations require a registered room; {evidence}, which is not in rooms.json ({registered})"
         ),
-        fix.clone(),
+        prose,
     )
     .input(room)
     .reason("acting room is not registered")
-    .exact_fix(fix)
-    .matches(names))
+    .matches(names);
+    if let Some(command) = exact {
+        error = error.exact_fix(command);
+    }
+    Err(error)
 }
 
 pub(crate) struct JoinOutcome {

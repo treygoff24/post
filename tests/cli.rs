@@ -1552,7 +1552,100 @@ fn unregistered_cwd_names_the_directory_and_lists_the_rooms_that_exist() {
         "message must list the rooms that do exist, got: {}",
         error.error.message
     );
-    assert!(error.error.details.exact_fix.is_some());
+    // `is_some()` was the original assertion here and it survives any non-empty
+    // string, including the multi-sentence prose this field used to carry. The
+    // contract is that the command runs as written, so run it.
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .clone()
+        .expect("cwd identity failure must carry a runnable exact_fix");
+    let applied = sandbox.run_fix(&fix, &sandbox.path);
+    assert!(
+        applied.status.success(),
+        "exact_fix must run as written; `{fix}` exited {:?}: {}",
+        applied.status.code(),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    // Having run it, the situation it described is resolved.
+    let after = sandbox.run(&["chat", "some-channel", "--peek"]);
+    assert_ne!(
+        after.status.code(),
+        Some(65),
+        "after running the fix the cwd must resolve to a registered room"
+    );
+}
+
+/// A cwd carrying shell metacharacters is a command injection into `exact_fix`
+/// unless every interpolation is quoted — the rule this repo already pins for
+/// channel names in crossed_send_exact_fix_shell_quotes_channel_metacharacters.
+#[test]
+fn unregistered_cwd_exact_fix_shell_quotes_the_directory() {
+    for dirname in ["has space", "has;touch INJECTED", "has'quote"] {
+        let sandbox = Sandbox::new();
+        let hostile = sandbox.path.join(dirname);
+        fs::create_dir_all(&hostile).expect("create hostile cwd");
+
+        let output = sandbox.run_in(&["chat", "some-channel", "--peek"], None, &hostile);
+        let error: ErrorEnvelope = from_stderr(&output);
+        let fix = error
+            .error
+            .details
+            .exact_fix
+            .clone()
+            .expect("hostile cwd must still carry an exact_fix");
+
+        let applied = sandbox.run_fix(&fix, &hostile);
+        assert!(
+            applied.status.success(),
+            "exact_fix must survive a cwd named {dirname:?}; `{fix}` failed: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        // Asserting on stdout would be a false positive: the room name itself
+        // carries the payload text, so it appears in any listing the fix prints.
+        // A filesystem side effect only exists if the shell actually ran it.
+        assert!(
+            !hostile.join("INJECTED").exists(),
+            "exact_fix executed an injected command for cwd {dirname:?}: `{fix}`"
+        );
+    }
+}
+
+/// The inline room list is bounded so an error cannot cost more context than the
+/// operation it refused; the fixture has three rooms, so the bound needs its own.
+#[test]
+fn many_rooms_are_summarized_inline_but_complete_in_matches() {
+    let sandbox = Sandbox::new_unseeded();
+    fs::create_dir_all(&sandbox.mail_root).expect("create mail root");
+    let names: Vec<String> = (0..12).map(|i| format!("room{i:02}")).collect();
+    let entries: Vec<String> = names
+        .iter()
+        .map(|name| format!("  \"{name}\": \"~/{name}\""))
+        .collect();
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        format!("{{\n{}\n}}\n", entries.join(",\n")),
+    )
+    .expect("seed many rooms");
+
+    let output = sandbox.run(&["chat", "some-channel", "--peek"]);
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(
+        error.error.message.contains("+4 more"),
+        "12 rooms with a bound of 8 must summarize, got: {}",
+        error.error.message
+    );
+    assert!(
+        !error.error.message.contains("room11"),
+        "the inline list must stop at the bound, got: {}",
+        error.error.message
+    );
+    assert_eq!(
+        error.error.details.matches.unwrap_or_default().len(),
+        12,
+        "matches carries the complete set for machine consumers"
+    );
 }
 
 /// Rooms and channels are disjoint namespaces; a channel name reaching `--to`
@@ -1598,8 +1691,59 @@ fn send_to_a_channel_names_the_channel_verb_and_the_fix_runs() {
             .expect("channel recipient must carry an exact_fix");
         assert!(fix.contains("post chat"), "fix was: {fix}");
         // The '#' is a rendering convention, never part of the channel's name.
-        assert!(!fix.contains("'#tax'"), "fix must strip the # sigil: {fix}");
+        // Asserting the absence of "'#tax'" was decoration: an unquoted `#tax`
+        // also passes it, and in a POSIX shell `#` opens a comment, so that
+        // "fix" would degrade to a bare `post chat`. Pin the quoted form.
+        assert!(
+            fix.contains("'tax'"),
+            "fix must name the shell-quoted channel: {fix}"
+        );
+        assert!(!fix.contains('#'), "fix must strip the # sigil: {fix}");
+
+        // The test says the fix runs. Run it.
+        let applied = sandbox.run_fix(&fix, &alpha);
+        assert!(
+            applied.status.success(),
+            "exact_fix must run as written for {recipient}; `{fix}` failed: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        let landed = sandbox.run_in(&["chat", "tax", "--history", "5"], None, &alpha);
+        assert!(
+            String::from_utf8_lossy(&landed.stdout).contains("x"),
+            "the body the caller supplied must survive into the fix and land in the channel"
+        );
     }
+
+    // Flags the caller supplied must survive into the fix; a flag that cannot
+    // survive must be named rather than silently dropped.
+    let output = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "tax",
+            "--from",
+            "claude-space",
+            "--kind",
+            "signal",
+            "--subject",
+            "Report",
+            "--body",
+            "x",
+        ],
+        None,
+        &alpha,
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    let fix = error.error.details.exact_fix.clone().expect("exact_fix");
+    assert!(
+        fix.contains("--subject 'Report'"),
+        "--subject maps onto channels and must survive: {fix}"
+    );
+    assert!(
+        error.error.suggested_fix.contains("--kind signal"),
+        "a flag with no channel equivalent must be named, not dropped: {}",
+        error.error.suggested_fix
+    );
 
     // A genuine typo must still take the did-you-mean path, not the channel one.
     let output = sandbox.run_in(
