@@ -315,18 +315,52 @@ impl AppError {
     }
 }
 
-/// A `<...>` placeholder: `<` followed immediately by a non-space, closed by a
-/// later `>` on the same line. Shell redirection (`< FILE`) puts a space after
-/// the `<` and has no `>`, so it is not mistaken for one.
+/// A `<...>` placeholder: a shell word whose ENTIRE content is one bracket
+/// pair, quoted or not -- `<ROOM>`, `--body '<revised text>'`.
+///
+/// The whole-word rule is what makes this safe to enforce. exact_fix now
+/// reproduces the caller's real message body, so brackets appear in legitimate
+/// commands all the time: prose mentioning a `<tag>`, pasted XML, a redirect.
+/// Those are brackets INSIDE an argument; a placeholder IS the argument. A
+/// guard that fired on `--body 'see the <tag> here'` would be switched off by
+/// the first person it lied to, and then it protects nothing.
 fn contains_placeholder(value: &str) -> bool {
-    value.lines().any(|line| {
-        let bytes = line.as_bytes();
-        bytes.iter().enumerate().any(|(i, &c)| {
-            c == b'<'
-                && bytes.get(i + 1).is_some_and(|n| !n.is_ascii_whitespace())
-                && line[i + 1..].contains('>')
-        })
+    shell_words(value).iter().any(|word| {
+        let bare: String = word.chars().filter(|&c| c != '\'').collect();
+        let Some(inner) = bare.strip_prefix('<').and_then(|r| r.strip_suffix('>')) else {
+            return false;
+        };
+        // `<note>hi</note>` is a body, not a placeholder: a placeholder holds
+        // one unbroken run of text between exactly one pair of brackets.
+        !inner.contains('<') && !inner.contains('>')
     })
+}
+
+/// Split on whitespace, keeping single-quoted runs together so
+/// `--body '<revised text>'` stays one word. Not a full shell parser: it only
+/// needs to agree with `shell_quote`, which is what builds every fix.
+fn shell_words(value: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in value.chars() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 #[cfg(test)]
@@ -350,6 +384,21 @@ mod exact_fix_contract {
         assert!(!contains_placeholder("post send --to 'a' --body 'x > y'"));
         assert!(!contains_placeholder(
             "post send --to 'a' --body 'a<b and c'"
+        ));
+
+        // Reported by Fable at the 078f6bd gate. exact_fix now reproduces the
+        // caller's real body, so legitimate angle brackets reach this check.
+        // Brackets inside an argument are data; only a whole argument that is
+        // nothing but a bracket pair is a placeholder.
+        assert!(!contains_placeholder(
+            "post send --to 'a' --allow-self --body 'see the <tag> here'"
+        ));
+        assert!(!contains_placeholder(
+            "post chat 'ops' --send --anyway --body '<note>hi</note>'"
+        ));
+        // A template outside the quotes is still caught, body or no body.
+        assert!(contains_placeholder(
+            "post send --to <ROOM> --body 'a real body'"
         ));
     }
 }

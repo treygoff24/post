@@ -5727,6 +5727,44 @@ fn description_over_1kib_is_refused() {
 }
 
 #[test]
+fn exact_fix_carries_a_body_full_of_angle_brackets_without_tripping_the_guard() {
+    // The exact_fix funnel rejects `<PLACEHOLDER>` arguments, and exact_fix now
+    // reproduces the caller's real body -- so a body that legitimately contains
+    // angle brackets runs straight into the guard. In a debug build a false
+    // positive is a PANIC (exit 101), not a bad message: the refusal a caller
+    // asked for would come back as a crash. Caught at review by Fable before it
+    // could happen to anyone.
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let body = "see the <tag> here and this <note>xml</note> too";
+
+    let refused = sandbox.run_in(&["send", "--to", "alpha", "--body", body], None, &alpha);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a bracketed body must produce the ordinary refusal, not a guard panic: {}",
+        stderr(&refused)
+    );
+    let error: ErrorEnvelope = from_stderr(&refused);
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .as_deref()
+        .expect("self-send refusal must still supply exact_fix");
+    assert!(
+        fix.contains("<tag>") && fix.contains("<note>xml</note>"),
+        "the body must survive into the fix verbatim: {fix}"
+    );
+
+    // And it still runs, brackets and all, through a real shell.
+    assert_success(&sandbox.run_fix(fix, &alpha));
+    let after = sandbox.run_in(&["inbox"], None, &alpha);
+    let listed: InboxOutput = from_stdout(&after);
+    assert_eq!(listed.count, 1, "the executed fix must deliver the message");
+}
+
+#[test]
 fn crossed_send_exact_fix_shell_quotes_channel_metacharacters() {
     // Channel names may carry spaces/metacharacters; exact_fix runs verbatim
     // through a shell, so an unquoted name is a command injection.
