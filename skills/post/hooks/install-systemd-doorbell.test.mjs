@@ -252,7 +252,9 @@ test("each preflight refusal writes nothing", () => {
     { control: { ...OK, herdrGetStdout: "garbage" }, match: /herdr agent get.*malformed output/ },
     {
       control: { ...OK, herdrGetStdout: JSON.stringify({ result: { agent: { agent_status: "idle" } } }) },
-      match: /lane-bot.*must be a named herdr agent/,
+      // Pins the remedy, not just the diagnosis: a refusal that names no fix is
+      // the wall this message was rewritten to stop being.
+      match: /lane-bot.*must be a named herdr agent\. Name the pane first: herdr agent rename <pane-id> lane-bot\./,
     },
     {
       control: { ...OK, herdrGetStdout: JSON.stringify({ result: { agent: { name: "someone-else" } } }) },

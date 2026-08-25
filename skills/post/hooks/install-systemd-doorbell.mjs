@@ -351,6 +351,29 @@ function preflight(postBin, herdrBin, room, agent, channels) {
     }
   }
 
+  // Listing what IS named matters as much as naming the fix: on a host where
+  // nothing is named at all, saying so beats printing an empty list.
+  const namedAgentsSuffix = () => {
+    const listed = spawnSync(herdrBin, ["agent", "list"], {
+      encoding: "utf8",
+      timeout: 4000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (listed.error || listed.status !== 0) return "";
+    let names;
+    try {
+      names = JSON.parse(String(listed.stdout ?? ""))
+        ?.result?.agents?.map((a) => a?.name)
+        .filter((n) => typeof n === "string" && n);
+    } catch {
+      return "";
+    }
+    if (!Array.isArray(names)) return "";
+    return names.length
+      ? `Named agents right now: ${names.join(", ")}.`
+      : "No herdr agent on this host is named right now.";
+  };
+
   const info = spawnSync(herdrBin, ["agent", "get", agent], {
     encoding: "utf8",
     timeout: 4000,
@@ -370,9 +393,14 @@ function preflight(postBin, herdrBin, room, agent, channels) {
     fail(`preflight failed: \`herdr agent get ${agent}\` printed malformed output; fix the herdr install, then re-run`);
   }
   if (parsed?.result?.agent?.name === undefined) {
+    // Matches the daemon's own refusal wording (post-doorbell b3b65b0): name the
+    // remedy, not just the diagnosis. `herdr agent list` omits the name key
+    // entirely for panes never named, which is the common case, not the edge —
+    // so a bare "no such agent" reads as a broken installer and is not one.
     fail(
       `preflight failed: \`herdr agent get ${agent}\` returned no name; ` +
-        `agent '${agent}' must be a named herdr agent`
+        `agent '${agent}' must be a named herdr agent. Name the pane first: ` +
+        `herdr agent rename <pane-id> ${agent}. ${namedAgentsSuffix()}`
     );
   }
   if (parsed.result.agent.name !== agent) {
