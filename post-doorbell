@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Push wake-up for agents that live in a herdr pane.
+
+`post watch` already tells us when mail lands. Harnesses with a Monitor tool
+(Claude Code) turn that into a re-invocation; Codex and everything else only
+have activity-gated hooks, so an idle session never learns it has mail until a
+human says "go check". This daemon is that human.
+
+Contract, deliberately narrow:
+  - the wake carries counts and channel names, never a subject, sender or body.
+    Mail content reaching a model through a door it did not open is how an
+    agent ends up following instructions nobody vetted; the existing Codex hook
+    holds the same line and this must not be the hole in it.
+  - an agent that is `working` is never interrupted; the wake waits for it to
+    settle and collapses everything that arrived meanwhile into one notice.
+  - failure is silent to the pane and loud to the journal. A doorbell that
+    crashes a working session is worse than a doorbell that misses a message.
+"""
+
+import argparse
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+POLL_SETTLE_MS = 2000
+NOTICE_CAP = 1500
+
+
+def log(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def herdr_agents():
+    proc = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return []
+    try:
+        return json.loads(proc.stdout)["result"]["agents"]
+    except (ValueError, KeyError):
+        return []
+
+
+def find_agent(name):
+    for agent in herdr_agents():
+        if agent.get("name") == name:
+            return agent
+    return None
+
+
+def deliver(target, notice, settle_timeout_ms):
+    """Submit the notice, waiting for a working agent to settle first.
+
+    `herdr agent prompt` rejects a blocked agent outright and would queue behind
+    a working one, so the wait is ours to do: an agent mid-turn gets its notice
+    when the turn ends, not spliced into the middle of it.
+    """
+    subprocess.run(
+        ["herdr", "agent", "wait", target, "--until", "idle", "--until", "done",
+         "--timeout", str(settle_timeout_ms)],
+        capture_output=True, text=True, check=False,
+    )
+    proc = subprocess.run(
+        ["herdr", "agent", "prompt", target, notice],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        log(f"doorbell: prompt rejected for {target}: {(proc.stderr or proc.stdout).strip()[:200]}")
+        return False
+    return True
+
+
+def render(pending):
+    """Counts and channel names only. No subject, no sender, no body."""
+    parts = []
+    for source in sorted(pending):
+        count = pending[source]
+        label = source.split("channel:", 1)[-1] if source.startswith("channel:") else source
+        kind = "#" + label if source.startswith("channel:") else label
+        parts.append(f"{kind} ({count})")
+    return (
+        "post doorbell: new mail waiting in " + ", ".join(parts) + ". "
+        "Read it with `post chat <channel>` or `post read` when you are ready. "
+        "This notice is automated and carries no message content."
+    )[:NOTICE_CAP]
+
+
+KNOWN_REASONS = {"mail", "channel", "mention", "mixed", "all"}
+DEFAULT_WAKE_ON = "mail,mention"
+
+
+def parse_wake_on(spec):
+    """Reason tokens -> the set watch reasons that ring. Raises on anything that
+    would leave the doorbell silent, because silence is indistinguishable from
+    a doorbell that is simply not being rung."""
+    selected = set()
+    for token in (part.strip() for part in spec.split(",")):
+        if not token:
+            continue
+        token = "mail" if token == "direct" else token
+        if token not in KNOWN_REASONS:
+            raise ValueError(f"unknown --wake-on value {token!r}; known values are {sorted(KNOWN_REASONS)}")
+        selected.add(token)
+    if not selected:
+        raise ValueError("--wake-on selected nothing; refusing to start a doorbell that can never ring")
+    return selected
+
+
+def state_path(agent):
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "post-doorbell", agent + ".json")
+
+
+def load_marks(agent):
+    try:
+        with open(state_path(agent)) as handle:
+            marks = json.load(handle)
+        return marks if isinstance(marks, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_marks(agent, marks):
+    path = state_path(agent)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as handle:
+            json.dump(marks, handle, sort_keys=True)
+        os.replace(path + ".tmp", path)
+    except OSError as exc:
+        log(f"doorbell: could not persist marks: {exc}")
+
+
+def snapshot_marks(command_base, cwd):
+    """Message ids sort by time, so the newest id per source is a watermark.
+
+    Priming from a snapshot at startup is what stops a fresh doorbell ringing
+    for every unread message that accumulated before it existed -- the live test
+    rang once for 226 of them.
+    """
+    proc = subprocess.run(command_base + ["--snapshot"], cwd=cwd,
+                          capture_output=True, text=True, check=False)
+    marks = {}
+    for line in proc.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("event") != "digest":
+            continue
+        source = event.get("source") or event.get("room") or "mail"
+        last = event.get("last_id") or ""
+        if last > marks.get(source, ""):
+            marks[source] = last
+    return marks
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Wake a herdr-paned agent when post mail arrives.")
+    parser.add_argument("--agent", required=True, help="herdr agent name to wake")
+    parser.add_argument("--room", action="append", default=[],
+                        help="post room to watch; repeatable. Default: resolve from the agent's cwd")
+    parser.add_argument("--wake-on", default=DEFAULT_WAKE_ON,
+                        help="comma list of watch reasons that justify a wake: mail, mention, channel, or all "
+                             "(direct is accepted as an alias for mail)")
+    parser.add_argument("--interval-ms", type=int, default=5000, help="watch cadence")
+    parser.add_argument("--quiet-ms", type=int, default=15000,
+                        help="collapse everything arriving within this window into one wake")
+    parser.add_argument("--ring-backlog", action="store_true",
+                        help="ring for mail that was already unread at startup (default: prime past it)")
+    parser.add_argument("--settle-timeout-ms", type=int, default=900000,
+                        help="how long to wait for a working agent to settle before giving up on this wake")
+    args = parser.parse_args()
+
+    try:
+        wake_on = parse_wake_on(args.wake_on)
+    except ValueError as exc:
+        log(f"doorbell: {exc}")
+        return 2
+    agent = find_agent(args.agent)
+    if agent is None:
+        log(f"doorbell: no herdr agent named {args.agent!r}; refusing to start")
+        return 2
+    cwd = agent.get("cwd") or os.path.expanduser("~")
+
+    command = ["post", "watch", "--digest", "--interval-ms", str(args.interval_ms)]
+    for room in args.room:
+        command += ["--room", room]
+    log(f"doorbell: watching for {args.agent} (cwd {cwd}), waking on {sorted(wake_on) or ['all']}")
+
+    marks = load_marks(args.agent)
+    if not args.ring_backlog:
+        for source, last in snapshot_marks(command, cwd).items():
+            if last > marks.get(source, ""):
+                marks[source] = last
+        save_marks(args.agent, marks)
+
+    watch = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, text=True, bufsize=1)
+    pending = {}
+    fresh_marks = {}
+    deadline = None
+    watch_died = False
+    try:
+        while True:
+            # select, not a blocking read: the quiet window has to expire on its
+            # own clock. A blocking readline only re-checks the deadline when the
+            # NEXT message arrives, so a single message — the common case — would
+            # wait for a second one that may never come.
+            timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([watch.stdout], [], [], timeout)
+            if ready:
+                line = watch.stdout.readline()
+                if not line:
+                    # The watch pipe closed. A doorbell whose watcher died is a
+                    # doorbell that will never ring again, and the silence is
+                    # indistinguishable from "no mail" -- so say so loudly and
+                    # exit non-zero, which is what makes systemd restart us.
+                    watch.wait(timeout=5)
+                    log(f"doorbell: `post watch` exited (rc={watch.returncode}); "
+                        f"cannot ring for {args.agent} until restarted")
+                    watch_died = True
+                    break
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("event") == "digest":
+                    reason = event.get("reason", "")
+                    source = event.get("source") or event.get("room") or "mail"
+                    last = event.get("last_id") or ""
+                    # `post watch` never consumes, so the same unread message is
+                    # re-reported every scan. Without this the doorbell rings on a
+                    # loop until someone reads the mail -- it rang twice for one
+                    # message in the live test.
+                    fresh = last > marks.get(source, "")
+                    # "mixed" means the batch holds more than one reason and the
+                    # digest does not say which. A mention-only filter that drops
+                    # it would silently lose the mention it exists to catch, so an
+                    # ambiguous batch always rings: a spurious wake is cheap, a
+                    # missed mention is the whole failure this replaces.
+                    wanted = "all" in wake_on or reason in wake_on or reason == "mixed"
+                    if fresh and wanted:
+                        pending[source] = int(event.get("count") or 1)
+                        fresh_marks[source] = last
+                        if deadline is None:
+                            deadline = time.monotonic() + args.quiet_ms / 1000.0
+            if deadline is not None and time.monotonic() >= deadline:
+                if pending and deliver(args.agent, render(pending), args.settle_timeout_ms):
+                    log(f"doorbell: woke {args.agent} for {sum(pending.values())} unread")
+                    # Commit the watermark only on a delivered wake. Advancing it
+                    # when the prompt was rejected would retire a message nobody
+                    # was ever told about.
+                    marks.update(fresh_marks)
+                    save_marks(args.agent, marks)
+                elif pending:
+                    log(f"doorbell: wake not delivered; {sum(pending.values())} unread stays pending")
+                fresh_marks = {}
+                pending, deadline = {}, None
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watch.terminate()
+    return 1 if watch_died else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

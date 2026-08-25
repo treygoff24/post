@@ -1,0 +1,23 @@
+[Unit]
+Description=post doorbell for %i — wakes an idle agent when mail arrives
+Documentation=file:/tmp/doorbell/post-doorbell
+# No start-rate limit. Systemd's default gives up after 5 restarts in 10s and
+# leaves the unit dead — which for a doorbell means it stops ringing and nothing
+# says so, the exact failure this daemon exists to prevent. Ten-second backoff
+# makes a permanently broken `post` cheap to keep retrying, and the journal
+# carries one "post watch exited (rc=N)" line per attempt.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/post-doorbell --agent %i
+Restart=always
+RestartSec=10s
+# No ProtectHome/ProtectSystem: `post watch` writes a per-room watch.heartbeat
+# under ~/.claude-mail (measured, 2026-08-25), and other agents read those
+# heartbeats for liveness. A read-only home would break the watch quietly, which
+# is the one failure mode this unit must never have.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
