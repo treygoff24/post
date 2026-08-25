@@ -9186,6 +9186,47 @@ fn the_send_receipt_names_a_readback_command_that_runs() {
         String::from_utf8_lossy(&applied.stderr)
     );
     assert!(String::from_utf8_lossy(&applied.stdout).contains("hi"));
+
+    // A copy-pasteable command has to be correct from somewhere other than
+    // where it was produced. Identity comes from cwd, so a receipt that omits
+    // --room is only accidentally right; with --from <alias> it is always wrong.
+    let sent = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "beta",
+            "--from",
+            "someAlias",
+            "--body",
+            "aliased",
+        ],
+        None,
+        &alpha,
+    );
+    let text = String::from_utf8_lossy(&sent.stdout).into_owned();
+    let line = text
+        .lines()
+        .find(|line| line.contains("read it back with"))
+        .expect("receipt must name a readback command");
+    let command = line
+        .split_once('`')
+        .and_then(|(_, rest)| rest.rsplit_once('`'))
+        .map(|(cmd, _)| cmd.to_owned())
+        .expect("readback command must be backticked");
+    assert!(
+        command.contains("--room"),
+        "the readback command must name the room it reads as: {command}"
+    );
+    // Run it from a room that is party to neither side of that message.
+    let elsewhere = sandbox.home.join("pact");
+    fs::create_dir_all(&elsewhere).expect("create third room path");
+    let applied = sandbox.run_fix(&command, &elsewhere);
+    assert!(
+        applied.status.success(),
+        "the readback command must work away from the sending cwd; `{command}` failed: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(String::from_utf8_lossy(&applied.stdout).contains("aliased"));
 }
 
 /// `--body -` was already the stdin sentinel; `--body-file -` was not, so it
@@ -9265,5 +9306,36 @@ fn help_and_schema_agree_that_chat_leads_with_sending() {
     assert!(
         first_schema_form.contains("--send"),
         "schema usage must lead with a send form, got: {first_schema_form}"
+    );
+}
+
+/// A file that cannot be parsed is not evidence about who it was addressed to.
+/// The first version of the honest-miss branch used `is_ok_and`, which discarded
+/// the parse error and reported a corrupt archive entry as another room's mail —
+/// a fresh unverified claim inside the change that removed one.
+#[test]
+fn a_corrupt_archive_entry_is_reported_as_corrupt_not_as_someone_elses() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let archive = sandbox.mail_root.join("archive");
+    fs::create_dir_all(&archive).expect("create archive");
+    let id = "20260101-000000-deadbe";
+    fs::write(archive.join(format!("{id}.mail")), "this is not mail\n").expect("write corrupt");
+
+    let output = sandbox.run_in(&["read", id], None, &alpha);
+    assert!(!output.status.success());
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_ne!(
+        error.error.code, "not_found",
+        "a corrupt archive entry must not be reported as a miss: {}",
+        error.error.message
+    );
+    assert!(
+        !error
+            .error
+            .message
+            .contains("addressed between two other rooms"),
+        "an unparseable file says nothing about its recipients: {}",
+        error.error.message
     );
 }

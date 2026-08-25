@@ -102,15 +102,23 @@ fn already_read(
         // `post send` reported archived=true about a file sitting right there.
         // The sender authored the body, so showing it back leaks nothing.
         let candidates = prefix_matches(&context.root.join("archive"), id)?;
-        let party: Vec<_> = candidates
-            .iter()
-            .filter(|path| {
-                parse_mail(path)
-                    .is_ok_and(|mail| mail.envelope.to == room || mail.envelope.from == room)
-            })
-            .cloned()
-            .collect();
-        archived_elsewhere = party.is_empty() && !candidates.is_empty();
+        let mut party = Vec::new();
+        let mut other_party = false;
+        for path in &candidates {
+            // Parse once, and let the failure be a failure. `is_ok_and` here
+            // discarded the parse error, so a corrupt archive entry fell through
+            // to the "addressed between two other rooms" branch -- a fresh
+            // unverified claim introduced by the commit whose entire point was
+            // removing one. A file we cannot read is not evidence about who it
+            // was addressed to.
+            let mail = parse_mail(path)?;
+            if mail.envelope.to == room || mail.envelope.from == room {
+                party.push(path.clone());
+            } else {
+                other_party = true;
+            }
+        }
+        archived_elsewhere = party.is_empty() && other_party;
         found = party;
     }
     if found.len() > 1 {

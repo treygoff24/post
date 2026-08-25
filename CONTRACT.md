@@ -173,8 +173,9 @@ diagnostics/errors.
   warns on stderr but does not block legitimate forensic traffic. `--body`
   exists so agents don't need heredocs (the first real mail shipped the literal
   word "placeholder" via a botched heredoc — design against that). Success
-  (text): `post: sent <kind> <id> <from> -> <to>`. Success (json): full envelope
-  + `archived: true`. Rules are reloaded after payload construction immediately
+  (text): `post: sent <kind> <id> <from> -> <to>` followed by a readback line
+  naming an executable `post read <id> --room <from>`. Success (json): full
+  envelope + `archived: true`. Rules are reloaded after payload construction immediately
   before each inbox publication attempt. If inbox commits but archive
   publication fails, `delivered_unarchived` is non-retryable and the message
   must not be resent.
@@ -199,7 +200,8 @@ diagnostics/errors.
   `framing.source`/`framing.authority` are unchanged in every mode.
   Ambiguous prefix: error listing
   the matches. A prefix matching nothing unread falls back to the room's read/
-  store and then to archive copies addressed to that room; such a message is
+  store and then to archive copies this room is a party to -- addressed to it
+  or sent by it; such a message is
   served with `already_read: true` and consumes nothing (the field is omitted
   entirely on a fresh read, so existing consumers are unaffected). Only when
   no store holds the prefix is it not found, with `exact_fix: post inbox

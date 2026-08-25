@@ -346,13 +346,21 @@ where
         // useless: an agent that read it and ran `post read <id>` got told the
         // message was "not in the archive". Name the command that works, from
         // the room that just sent it.
+        // --room is not decoration. The archive admits the two parties to a
+        // message, and identity is resolved from cwd, so a receipt that omits it
+        // is only correct when the sender happens to equal the room the reader
+        // is standing in. With `--from <alias>` it never does, and the P2 panel's
+        // attacker lane found the receipt handing back a command that fails.
+        // Naming the room makes it correct from anywhere, which is what a
+        // copy-pasteable command has to be.
         format!(
-            "post: sent {} {} {} -> {}\npost: read it back with `post read {}`\n",
+            "post: sent {} {} {} -> {}\npost: read it back with `post read {} --room {}`\n",
             envelope.kind,
             envelope.id,
             envelope.from,
             envelope.to,
-            crate::mailbox::shell_quote(&envelope.id)
+            crate::mailbox::shell_quote(&envelope.id),
+            crate::mailbox::shell_quote(&envelope.from)
         )
     };
     Ok(CommandResult::committed(rendered))
