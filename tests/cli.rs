@@ -172,12 +172,23 @@ impl Sandbox {
             });
         let mut child = command.spawn().expect("spawn post binary");
         if let Some(input) = input {
-            child
+            // A BrokenPipe here is the child exiting without reading stdin, which
+            // is correct behaviour for several of these cases -- when a real
+            // --body-file path wins, the binary never reads the '-' stream at all.
+            // Panicking on it made the outcome depend on whether the parent
+            // finished writing before the child finished exiting, so the suite
+            // failed under load and passed in isolation. Any other error is still
+            // a real failure.
+            match child
                 .stdin
                 .as_mut()
                 .expect("piped stdin should exist")
                 .write_all(input.as_bytes())
-                .expect("write command stdin");
+            {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("write command stdin: {e:?}"),
+            }
         }
         child.wait_with_output().expect("wait for post binary")
     }
