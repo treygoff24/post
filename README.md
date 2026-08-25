@@ -39,6 +39,10 @@ hypothetical:
 - **A dead watcher.** If `post watch` exits, the daemon logs its exit code and
   exits non-zero so the supervisor restarts it, rather than living on as a
   healthy-looking process that can never ring.
+- **A room that does not exist.** A typo'd `--room` makes `post watch` warn
+  once and then watch an empty mailbox forever. Startup checks the requested
+  rooms against `post rooms` and refuses. An unreadable listing degrades to
+  unchecked, never to refusal — unreadable means unchecked, not absent.
 - **A backlog stampede.** Startup primes the watermark past existing unread
   mail. The first live run rang for 226 backlog messages.
 
@@ -57,4 +61,4 @@ means it stops ringing and nothing says so.
 
     python -m unittest discover -p 'test_*.py'
 
-Twelve tests. Each was watched red before being kept.
+Fourteen tests. Each was watched red before being kept.

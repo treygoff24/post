@@ -108,6 +108,46 @@ def parse_wake_on(spec):
     return selected
 
 
+def registered_rooms(cwd):
+    """Room names `post` knows about, or None when the listing cannot be read."""
+    proc = subprocess.run(["post", "rooms"], cwd=cwd, capture_output=True,
+                          text=True, check=False)
+    if proc.returncode != 0:
+        return None
+    try:
+        listing = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if not listing.get("ok"):
+        return None
+    return {room.get("name") for room in listing.get("rooms") or []}
+
+
+def check_rooms(rooms, cwd):
+    """Refuse a room `post` does not know.
+
+    `post watch --room typo` warns once on stderr and then watches an empty
+    mailbox forever, exit code and all. Inside a daemon that warning goes to the
+    journal and the doorbell simply never rings -- healthy-looking and deaf,
+    which is the failure this whole program exists to delete. So it is a startup
+    error, not a warning. A rooms listing we cannot read is NOT treated as
+    proof of absence: unreadable means unchecked, and we say so and continue.
+    """
+    if not rooms:
+        return
+    known = registered_rooms(cwd)
+    if known is None:
+        log("doorbell: could not read `post rooms`; starting without room validation")
+        return
+    unknown = sorted(set(rooms) - known)
+    if unknown:
+        raise ValueError(
+            f"unregistered room(s) {unknown}: `post watch` would watch an empty "
+            f"mailbox forever and this doorbell would never ring. Known rooms: "
+            f"{sorted(known)}"
+        )
+
+
 def state_path(agent):
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return os.path.join(base, "post-doorbell", agent + ".json")
@@ -184,6 +224,12 @@ def main():
         log(f"doorbell: no herdr agent named {args.agent!r}; refusing to start")
         return 2
     cwd = agent.get("cwd") or os.path.expanduser("~")
+
+    try:
+        check_rooms(args.room, cwd)
+    except ValueError as exc:
+        log(f"doorbell: {exc}")
+        return 2
 
     command = ["post", "watch", "--digest", "--interval-ms", str(args.interval_ms)]
     for room in args.room:
