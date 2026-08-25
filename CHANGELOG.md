@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+- `post read <id>` recognizes a channel message id — the kind the doorbell hands
+  out — and names the channel holding it plus a `post chat <channel> --history
+  <n>` that renders that message. It previously reported "not unread, not
+  already read, not in the archive" and suggested `post inbox`, which cannot
+  show channel messages either.
+- A parallel-test race in the migration-fence lock hook that made the suite go
+  red at random under load.
+
 ### Changed
 - `crossed_send` now refuses only when an unseen message is addressed to the
   sending room: an `@mention` of it, a reply to something it wrote, or any

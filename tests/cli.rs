@@ -9339,3 +9339,81 @@ fn a_corrupt_archive_entry_is_reported_as_corrupt_not_as_someone_elses() {
         error.error.message
     );
 }
+
+/// The doorbell hands out channel message ids, and `post read` answered one with
+/// "not unread, not already read, not in the archive" plus a fix pointing at
+/// `post inbox` — two statements that are both true and both useless, since a
+/// channel message will never be in any of those places.
+#[test]
+fn read_recognizes_a_channel_message_id_and_names_a_command_that_shows_it() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "hall", &alpha);
+    join_channel(&sandbox, "hall", &beta);
+
+    let mut ids = Vec::new();
+    for body in ["first", "second", "third"] {
+        let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+            &[
+                "chat", "hall", "--send", "--anyway", "--body", body, "--json",
+            ],
+            None,
+            &beta,
+        ));
+        ids.push(sent.message.id);
+    }
+
+    // Ask about the OLDEST of the three, so a naive "--history 1" would miss it.
+    let target = ids.first().expect("three ids").clone();
+    let output = sandbox.run_in(&["read", &target], None, &alpha);
+    assert_eq!(output.status.code(), Some(66));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(
+        error
+            .error
+            .message
+            .contains("is a message in channel 'hall'"),
+        "the error must name the store the id lives in, got: {}",
+        error.error.message
+    );
+    assert!(
+        !error.error.message.contains("not in the archive"),
+        "the old useless answer must be gone: {}",
+        error.error.message
+    );
+    assert!(
+        !error.error.suggested_fix.contains("post inbox"),
+        "the fix must not point at a command that cannot show channel messages: {}",
+        error.error.suggested_fix
+    );
+
+    // The command has to actually show the message that was asked about.
+    // `--since <id>` would render everything AFTER it — every message except
+    // the one in question — so the depth matters, not just the channel name.
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .clone()
+        .expect("channel id must carry an exact_fix");
+    let applied = sandbox.run_fix(&fix, &alpha);
+    assert!(
+        applied.status.success(),
+        "exact_fix must run as written; `{fix}` failed: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let shown = String::from_utf8_lossy(&applied.stdout);
+    assert!(
+        shown.contains("first"),
+        "the fix must show the message that was asked about, not the ones after it; `{fix}` printed: {shown}"
+    );
+
+    // A genuinely unknown id keeps the ordinary miss.
+    let absent = sandbox.run_in(&["read", "20200101-000000-000000-abcdef"], None, &alpha);
+    let error: ErrorEnvelope = from_stderr(&absent);
+    assert!(
+        error.error.message.contains("not in the archive"),
+        "an id in no store at all must still say so, got: {}",
+        error.error.message
+    );
+}

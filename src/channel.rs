@@ -1211,6 +1211,60 @@ pub(crate) fn is_canonical_channel_message_id(id: &str) -> bool {
         && id[23..].iter().all(u8::is_ascii_hexdigit)
 }
 
+/// Find a channel message by full id or unique-enough prefix, across channels.
+///
+/// `post read` answers a miss by saying the id is "not unread, not already read,
+/// not in the archive" and pointing at `post inbox` — two statements that are
+/// both true and both useless when the id came from the doorbell, which hands
+/// out channel message ids. Channel messages are not mail and never will be in
+/// any of those three places, so the miss path has to look where they actually
+/// live before claiming the id does not exist.
+///
+/// A miss is already an error path, so a stat per channel is affordable; the
+/// scan stops at the first channel holding a match.
+pub(crate) fn find_channel_message(
+    context: &Context,
+    prefix: &str,
+) -> Option<(String, String, usize)> {
+    let root = context.root.join(CHANNELS_DIR);
+    let mut names: Vec<String> = fs::read_dir(&root)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    for channel in names {
+        let messages = root.join(&channel).join("messages");
+        let Ok(entries) = fs::read_dir(&messages) else {
+            continue;
+        };
+        let mut ids: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("msg") {
+                    return None;
+                }
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+            .collect();
+        // Ids sort chronologically, which is what makes the depth below correct.
+        ids.sort();
+        if let Some(position) = ids.iter().position(|id| id.starts_with(prefix)) {
+            // `--history N` renders the last N messages, so the depth that
+            // includes the target is its distance from the end, inclusive.
+            // `--since <id>` would NOT do -- it renders messages AFTER the id and
+            // so would show everything except the one that was asked about.
+            let depth = ids.len() - position;
+            return Some((channel, ids[position].clone(), depth));
+        }
+    }
+    None
+}
+
 pub(crate) fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
     let mut files = Vec::new();
     let entries = fs::read_dir(directory)

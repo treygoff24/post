@@ -206,19 +206,29 @@ fn lock(context: &Context, create: bool) -> AppResult<File> {
     if !trusted_lock_metadata(&before) {
         return Err(invalid_state(&path, "lock must be a solitary regular file"));
     }
+    // The hook is invoked through the guard rather than taken out and put back.
+    //
+    // Taking it left a window in which the global held None, and cargo runs this
+    // binary's tests in parallel threads: any other test reaching this line
+    // during that window took the installed hook, found the path did not match,
+    // and restored it -- while the thread the hook was installed FOR sailed past
+    // seeing None and never signalled its rendezvous. The waiting test then
+    // blocked until its timeout and the suite went red at random, roughly once
+    // per loaded full-suite run, passing every time it was re-run in isolation.
+    //
+    // Holding the guard across the call serializes concurrent lock() callers
+    // behind a blocking hook, which is correct for a test hook and cannot lose
+    // the signal. It cannot deadlock: the thread that releases the hook is the
+    // test's main thread, which never touches this mutex.
     #[cfg(test)]
-    let hook = LOCK_OPEN_HOOK
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("lock-open hook mutex")
-        .take();
-    #[cfg(test)]
-    if let Some(hook) = hook {
-        hook(&path);
-        *LOCK_OPEN_HOOK
+    {
+        let guard = LOCK_OPEN_HOOK
             .get_or_init(|| Mutex::new(None))
             .lock()
-            .expect("lock-open hook mutex") = Some(hook);
+            .expect("lock-open hook mutex");
+        if let Some(hook) = guard.as_ref() {
+            hook(&path);
+        }
     }
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
         return Err(AppError::io(
@@ -665,9 +675,21 @@ mod tests {
 
             let child_context = context.clone();
             let child = thread::spawn(move || lock(&child_context, false));
+            // This bound is a DEADLOCK GUARD, not a timing assertion. The test
+            // asserts that a split lock admission fails; how fast the child
+            // thread reaches the open hook is scheduling, not behaviour. Two
+            // seconds encoded a timing claim the test never intended, and lost
+            // it on a loaded box -- one red run during a full suite that
+            // overlapped four concurrent review lanes, while passing 5/5 in
+            // isolation on the same tree. An intermittently red gate teaches
+            // everyone to re-run until green, which is worse than no gate.
+            //
+            // Sixty seconds is unreachable by scheduling delay and still bounds
+            // a genuine hang. The sibling rendezvous in mailbox.rs already
+            // treats its timeout this way, message and all.
             opened_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("child opened old lock inode");
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("child thread HUNG before opening the old lock inode, or died");
             if replace {
                 fs::write(root.join("replacement"), b"").expect("replacement");
                 fs::rename(root.join("replacement"), &lock_path).expect("replace lock path");

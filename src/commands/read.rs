@@ -125,6 +125,29 @@ fn already_read(
         return Err(ambiguous(&found, id, room, "already-read"));
     }
     let Some(path) = found.first() else {
+        // Before claiming the id does not exist, look where the doorbell's ids
+        // actually live. A channel message is not mail and will never be unread,
+        // read, or archived, so the old answer was true, useless, and paired
+        // with a fix (`post inbox`) that cannot show channel messages either --
+        // two wrong answers in one error.
+        if let Some((channel, full_id, depth)) = crate::channel::find_channel_message(context, id) {
+            let quoted = crate::mailbox::shell_quote(&channel);
+            // --history <depth> is the only form that renders the message the
+            // caller named. --since <id> renders everything AFTER it, which is
+            // every message except the one they asked about.
+            let fix = format!("post chat {quoted} --history {depth}");
+            return Err(AppError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "'{full_id}' is a message in channel '{channel}', not mail; `post read` serves direct mail only"
+                ),
+                format!("Channels are a different store, and reading one never consumes it. Run `{fix}`."),
+            )
+            .exact_fix(fix)
+            .input(id)
+            .reason("id names a channel message, not mail")
+            .room(room));
+        }
         let fix = format!("post inbox --room {}", crate::mailbox::shell_quote(room));
         // Saying "not in the archive" when a matching file is in the archive is
         // a claim the code never checked, and it sent an agent hunting for lost
