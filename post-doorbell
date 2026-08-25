@@ -123,6 +123,19 @@ def registered_rooms(cwd):
     return {room.get("name") for room in listing.get("rooms") or []}
 
 
+def supports_own(cwd):
+    """Whether the `post` on PATH knows `watch --own`.
+
+    The flag exists so a session wearing several identities is not rung by its
+    own voice. An older `post` rejects it outright, and a doorbell that dies on
+    an unknown flag is worse than one that is occasionally noisy -- so this is
+    detected, never assumed.
+    """
+    proc = subprocess.run(["post", "watch", "--help"], cwd=cwd,
+                          capture_output=True, text=True, check=False)
+    return "--own" in proc.stdout
+
+
 def check_rooms(rooms, cwd):
     """Refuse a room `post` does not know.
 
@@ -234,6 +247,16 @@ def main():
     command = ["post", "watch", "--digest", "--interval-ms", str(args.interval_ms)]
     for room in args.room:
         command += ["--room", room]
+    # A doorbell exists to wake ONE agent about ITS mail, so the rooms it was
+    # given are that agent's own identities and its own sends are not news to
+    # it. Declaring them is only possible on a `post` that has the flag.
+    if args.room:
+        if supports_own(cwd):
+            for room in args.room:
+                command += ["--own", room]
+        else:
+            log("doorbell: this `post` has no `watch --own`; the agent's own "
+                "sends across its rooms will ring it")
     log(f"doorbell: watching for {args.agent} (cwd {cwd}), waking on {sorted(wake_on) or ['all']}")
 
     marks = load_marks(args.agent)

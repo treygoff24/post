@@ -43,6 +43,12 @@ hypothetical:
   once and then watch an empty mailbox forever. Startup checks the requested
   rooms against `post rooms` and refuses. An unreadable listing degrades to
   unchecked, never to refusal — unreadable means unchecked, not absent.
+- **Its own voice.** A doorbell wakes one agent about that agent's mail, so
+  the rooms it is given are that agent's own identities and their sends are not
+  news to it. It declares them with `post watch --own`, and detects whether the
+  installed `post` has that flag rather than assuming it — an older `post`
+  rejects an unknown flag outright, and a doorbell that dies on a flag is worse
+  than one that is occasionally noisy. When the flag is absent it says so.
 - **A backlog stampede.** Startup primes the watermark past existing unread
   mail. The first live run rang for 226 backlog messages.
 
@@ -61,4 +67,4 @@ means it stops ringing and nothing says so.
 
     python -m unittest discover -p 'test_*.py'
 
-Fourteen tests. Each was watched red before being kept.
+Sixteen tests. Each was watched red before being kept.
