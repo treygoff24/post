@@ -125,7 +125,15 @@ pub(crate) struct SendArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default last 25 unread)\n       \
+    // To send, lead with sending. The read forms used to occupy the first nine
+    // lines and the --send forms the last three, which reads as a read-only
+    // command to anyone scanning the top of --help -- and three papercuts say
+    // exactly that, one of them after three tries to find the syntax.
+    override_usage = "post chat <CHANNEL> --send --body <TEXT>              (send to the channel)\n       \
+     post chat <CHANNEL> --send --body-file <PATH>        (send a longer or prose body)\n       \
+     post chat <CHANNEL> --send < BODY_FILE               (send a body on stdin)\n       \
+       ...add [--anyway] to send past unread messages, [--re ID] to reply, [--oversize] to exceed the size cap\n       \
+     post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default last 25 unread)\n       \
      post chat <CHANNEL> --peek [--framing MODE]     (read without advancing)\n       \
      post chat <CHANNEL> --limit <N> [--framing MODE] (last N unread; --limit 0 = all)\n       \
      post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
@@ -133,11 +141,9 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --discard                   (mark all unread seen without printing)\n       \
      post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
-     post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n       \
-     post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body <TEXT>\n       \
-     post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] --body-file <PATH>\n       \
-     post chat <CHANNEL> --send [--anyway] [--re ID] [--oversize] < BODY_FILE\n\n\
-     These forms are alternatives; pass exactly one. --body/--body-file imply --send."
+     post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n\n\
+     These forms are alternatives; pass exactly one. --body/--body-file imply --send.\n\
+     Direct mail to a single room is a different verb: `post send --to <ROOM>`."
 )]
 pub(crate) struct ChatArgs {
     /// Channel name.

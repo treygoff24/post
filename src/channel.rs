@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const CHANNELS_DIR: &str = "channels";
 const CHANNELS_LOCK_FILE: &str = ".channels.lock";
+/// How many room names an error spells out inline before switching to a count.
+const ROOM_LIST_PREVIEW: usize = 8;
 pub(crate) const JOIN_EVENT: &str = "join";
 /// Profile-change announcement ("=== pact is now Lantern 🏮 (pact) ===").
 pub(crate) const PROFILE_EVENT: &str = "profile";
@@ -163,26 +165,62 @@ pub(crate) fn acting_room(
     if rooms.contains_key(&room) {
         return Ok((room, provenance));
     }
+    // Identity here is a location, so the error has to name the location. It used
+    // to report only the inferred basename ("cwd resolves to 'nested'"), which is
+    // the one fact the caller already knew and never the one they needed: five
+    // separate papercuts across three agents and three weeks are all "I composed a
+    // correct message from the wrong directory and post would not tell me which
+    // directory that was." Name the full path, list the rooms that do exist, and
+    // hand back a command that works.
+    let names: Vec<String> = rooms.keys().cloned().collect();
     let (evidence, fix) = if provenance == SenderProvenance::DeclaredEnv {
         (
-            "the POST_FROM pin names",
-            "Register the pinned room with `post rooms add <name> <path>`, or fix the pin.",
+            format!("the POST_FROM pin names '{room}'"),
+            format!("Register it with `post rooms add {room} <path>`, or unset POST_FROM to fall back to cwd."),
         )
     } else {
+        let cwd = std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "<unreadable>".to_owned());
         (
-            "cwd resolves to",
-            "Run from inside a registered room tree, or register one with `post rooms add <name> <path>`.",
+            format!("cwd {cwd} resolves to '{room}'"),
+            match names.first() {
+                Some(first) => format!(
+                    "cd into a registered room and retry, for example `cd {} && post chat <CHANNEL> ...`; or register this one with `post rooms add <name> {cwd}`.",
+                    rooms.get(first).map(String::as_str).unwrap_or(first)
+                ),
+                None => format!("No rooms are registered. Register one with `post rooms add <name> {cwd}`."),
+            },
         )
+    };
+    // The inline list is bounded because an error that costs more context than the
+    // operation it refused is its own papercut; the full set stays in `matches`
+    // for machine consumers.
+    let listed = if names.len() > ROOM_LIST_PREVIEW {
+        format!(
+            "{}, +{} more",
+            names[..ROOM_LIST_PREVIEW].join(", "),
+            names.len() - ROOM_LIST_PREVIEW
+        )
+    } else {
+        names.join(", ")
+    };
+    let registered = if names.is_empty() {
+        "no rooms are registered".to_owned()
+    } else {
+        format!("registered rooms: {listed}")
     };
     Err(AppError::new(
         ErrorCode::UnknownRoom,
         format!(
-            "channel operations require a registered room; {evidence} '{room}', which is not in rooms.json"
+            "channel operations require a registered room; {evidence}, which is not in rooms.json ({registered})"
         ),
-        fix,
+        fix.clone(),
     )
     .input(room)
-    .reason("acting room is not registered"))
+    .reason("acting room is not registered")
+    .exact_fix(fix)
+    .matches(names))
 }
 
 pub(crate) struct JoinOutcome {

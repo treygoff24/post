@@ -1516,6 +1516,134 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
     assert!(error.error.suggested_fix.contains("`post rooms`"));
 }
 
+/// Identity is a directory, so the error has to name the directory. Naming only
+/// the inferred basename told the caller the one thing they already knew.
+#[test]
+fn unregistered_cwd_names_the_directory_and_lists_the_rooms_that_exist() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["chat", "some-channel", "--peek"]);
+    assert_eq!(output.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "unknown_room");
+
+    let cwd = sandbox
+        .path
+        .canonicalize()
+        .expect("canonicalize sandbox cwd");
+    let cwd = cwd.display().to_string();
+    assert!(
+        error.error.message.contains(&cwd),
+        "message must name the cwd it resolved from, got: {}",
+        error.error.message
+    );
+
+    // Every registered room, structurally for machines and inline for humans.
+    let matches = error.error.details.matches.clone().unwrap_or_default();
+    assert_eq!(
+        matches,
+        vec![
+            "agent-memory".to_owned(),
+            "claude-space".to_owned(),
+            "pact".to_owned()
+        ]
+    );
+    assert!(
+        error.error.message.contains("claude-space"),
+        "message must list the rooms that do exist, got: {}",
+        error.error.message
+    );
+    assert!(error.error.details.exact_fix.is_some());
+}
+
+/// Rooms and channels are disjoint namespaces; a channel name reaching `--to`
+/// used to produce a flat "room is unknown" that never mentioned the other verb.
+#[test]
+fn send_to_a_channel_names_the_channel_verb_and_the_fix_runs() {
+    let sandbox = Sandbox::new();
+    let alpha = sandbox.home.join("claude-space");
+    fs::create_dir_all(&alpha).expect("create room dir");
+    from_stdout::<serde_json::Value>(&sandbox.run_in(
+        &["chat", "tax", "--join", "--json"],
+        None,
+        &alpha,
+    ));
+
+    for recipient in ["tax", "#tax"] {
+        let output = sandbox.run_in(
+            &[
+                "send",
+                "--to",
+                recipient,
+                "--from",
+                "claude-space",
+                "--body",
+                "x",
+            ],
+            None,
+            &alpha,
+        );
+        assert_eq!(output.status.code(), Some(65), "recipient {recipient}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "unknown_room");
+        assert!(
+            error.error.message.contains("is a channel, not a room"),
+            "recipient {recipient} got: {}",
+            error.error.message
+        );
+        let fix = error
+            .error
+            .details
+            .exact_fix
+            .clone()
+            .expect("channel recipient must carry an exact_fix");
+        assert!(fix.contains("post chat"), "fix was: {fix}");
+        // The '#' is a rendering convention, never part of the channel's name.
+        assert!(!fix.contains("'#tax'"), "fix must strip the # sigil: {fix}");
+    }
+
+    // A genuine typo must still take the did-you-mean path, not the channel one.
+    let output = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "claude-spac",
+            "--from",
+            "claude-space",
+            "--body",
+            "x",
+        ],
+        None,
+        &alpha,
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.did_you_mean.as_deref(),
+        Some("claude-space")
+    );
+}
+
+/// Three papercuts say `post chat --help` reads as a read-only command because
+/// its first nine usage lines were reads. Sending must be visible at the top.
+#[test]
+fn chat_help_leads_with_a_send_form() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["chat", "--help"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    let usage: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.starts_with("Usage:"))
+        .take(4)
+        .collect();
+    assert!(
+        usage.iter().any(|line| line.contains("--send")),
+        "a --send form must appear in the first lines of usage, got: {usage:?}"
+    );
+    assert!(
+        text.contains("post send --to"),
+        "chat --help must cross-reference the direct-mail verb"
+    );
+}
+
 #[test]
 fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     let sandbox = Sandbox::new_unseeded();

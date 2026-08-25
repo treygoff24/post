@@ -1,9 +1,10 @@
+use crate::channel::ChannelPaths;
 use crate::cli::SendArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{
     closest_room, declared_env_pin, declared_sender_address, encode_mail, exclusive_atomic_write,
-    local_timestamp, new_mail_id, validate_envelope, Context,
+    local_timestamp, new_mail_id, shell_quote, validate_envelope, Context,
 };
 use crate::model::{Envelope, RoomMap, SenderProvenance};
 use crate::output::{self, SendOutput};
@@ -161,6 +162,33 @@ where
     }
 
     if !rooms.contains_key(&args.to) {
+        // Rooms and channels are disjoint namespaces, so a channel name reaching
+        // --to used to produce a flat "room is unknown" that never mentioned the
+        // destination exists under a different verb. Three papercuts are that
+        // sentence. Check the channel registry before claiming ignorance; a
+        // leading '#' is accepted here because agents type the rendered form.
+        let channel_candidate = args.to.strip_prefix('#').unwrap_or(&args.to);
+        let is_channel = ChannelPaths::new(context, channel_candidate)
+            .map(|paths| paths.exists())
+            .unwrap_or(false);
+        if is_channel {
+            let fix = format!(
+                "post chat {} --send --body '<text>'",
+                shell_quote(channel_candidate)
+            );
+            return Err(AppError::new(
+                ErrorCode::UnknownRoom,
+                format!(
+                    "'{}' is a channel, not a room; `post send --to` delivers direct mail to rooms only",
+                    args.to
+                ),
+                format!("Channels take a different verb. Run `{fix}`."),
+            )
+            .exact_fix(fix)
+            .input(args.to.clone())
+            .reason("recipient names a channel, not a room"));
+        }
+
         let suggestion = closest_room(&args.to, &rooms);
         let mut error = AppError::new(
             ErrorCode::UnknownRoom,
@@ -171,10 +199,11 @@ where
                 ),
                 None => format!("recipient room '{}' is unknown", args.to),
             },
-            "Run `post rooms`, then retry with `post send --to <registered-room> ...`.",
+            "Run `post rooms` to list rooms or `post channels` to list channels, then retry with `post send --to <registered-room>` or `post chat <CHANNEL> --send`.",
         )
         .input(args.to.clone())
-        .reason("recipient is absent from rooms.json");
+        .reason("recipient is absent from rooms.json")
+        .matches(rooms.keys().cloned().collect());
         if let Some(room) = suggestion {
             error = error.did_you_mean(room);
         }
