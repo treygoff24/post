@@ -113,7 +113,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "who",
             "post who [--room <name>]... [--text]",
             "JSON; text with --text",
-            "read-only presence: for each registered room, whether a watch heartbeat is live and the last-seen stamp; never reports PIDs or process info",
+            "read-only presence: for each registered room, whether a watch heartbeat is live and the last-seen stamp; never reports PIDs or process info. A live heartbeat means SOME local process is watching that room, not that the room's own agent is alive: any caller may watch any room, so this answers 'is anyone watching' and cannot answer 'is that agent up'",
         ),
     ];
     let output_shapes = OutputShapes {
