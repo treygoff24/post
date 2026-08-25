@@ -463,9 +463,49 @@ pub(crate) fn send(
     // equivalent at the send point. Check-then-append has a TOCTOU window
     // (another room can land a message between check and exclusive create);
     // that occasional slip is accepted. Corrupting the store is not.
-    if !options.anyway {
-        if let Some(error) = crossed_send_bounce(context, &paths, channel, &room)? {
-            return Err(error);
+    let crossed = crossed_send_check(context, &paths, channel, &room)?;
+    let (unseen, targeted) = (crossed.unseen, crossed.targeted);
+    if options.anyway {
+        log_crossed_event(
+            context,
+            channel,
+            &room,
+            unseen,
+            targeted,
+            CrossedOutcome::Anyway,
+        );
+    } else {
+        match crossed.verdict {
+            CrossedVerdict::Refuse(error) => {
+                log_crossed_event(
+                    context,
+                    channel,
+                    &room,
+                    unseen,
+                    targeted,
+                    CrossedOutcome::Refused,
+                );
+                return Err(error);
+            }
+            CrossedVerdict::Warn => {
+                // Deliver, but say what was crossed. Refusing here was the old
+                // behaviour and it refused on any unseen message from anyone,
+                // so a room that had just joined a busy channel was maximally
+                // crossed by construction with nothing addressed to it.
+                eprintln!(
+                    "post: warning -- {unseen} unseen message(s) from others in #{channel}, none addressed to {room}; delivering anyway. Catch up with `post chat {}`.",
+                    crate::mailbox::shell_quote(channel)
+                );
+                log_crossed_event(
+                    context,
+                    channel,
+                    &room,
+                    unseen,
+                    targeted,
+                    CrossedOutcome::Warned,
+                );
+            }
+            CrossedVerdict::Clear => {}
         }
     }
 
@@ -493,16 +533,61 @@ pub(crate) fn send(
     Ok(parse_channel_message(&file)?.message)
 }
 
-/// Unread messages from other rooms the sender has not yet seen. Empty =
-/// clear to send. Bounded to the last 10 for the bounce payload. A malformed
-/// `.msg` the room already consumed is ignored; an unreadable UNSEEN file
-/// refuses the send (`--anyway` remains the escape hatch).
-fn crossed_send_bounce(
+/// What the unseen tip means for this send.
+pub(crate) enum CrossedVerdict {
+    /// Something unseen is addressed to this room: refuse.
+    Refuse(AppError),
+    /// Unseen messages exist but none concern this room: deliver, and say so.
+    Warn,
+    /// Nothing unseen from others.
+    Clear,
+}
+
+pub(crate) struct CrossedReport {
+    pub verdict: CrossedVerdict,
+    pub unseen: usize,
+    pub targeted: usize,
+}
+
+pub(crate) enum CrossedOutcome {
+    Refused,
+    Warned,
+    Anyway,
+}
+
+impl CrossedOutcome {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::Warned => "warned",
+            Self::Anyway => "anyway",
+        }
+    }
+}
+
+/// Decide whether the unseen channel tip should stop this send.
+///
+/// It used to stop every send with any unseen message from anyone, which fired
+/// hardest in the situation where it protected least: a room that has just
+/// joined a busy channel is maximally crossed by construction, and none of those
+/// hundreds of messages are addressed to it. Agents learned to type `--anyway`
+/// reflexively, so the guard was measuring its own bypass rate and nothing else.
+///
+/// The line is now the one this store already draws everywhere else: a message
+/// that @mentions you, or replies to something you wrote, is conversation you
+/// must not miss (`post chat` already refuses to silently drop mentions of the
+/// reader from a skipped range). Everything else is conversation you may skim,
+/// so it warns and delivers.
+///
+/// A malformed `.msg` the room already consumed is ignored; an unreadable UNSEEN
+/// file refuses, because a message that cannot be parsed cannot be shown not to
+/// concern you. `--anyway` remains the escape hatch for all of it.
+fn crossed_send_check(
     context: &Context,
     paths: &ChannelPaths,
     channel: &str,
     room: &str,
-) -> AppResult<Option<AppError>> {
+) -> AppResult<CrossedReport> {
     use crate::channel_state::ChannelState;
     use crate::error::MissedChannelMessage;
 
@@ -512,9 +597,13 @@ fn crossed_send_bounce(
         bounce: MissedChannelMessage,
         message: crate::model::ChannelMessage,
         body: String,
+        targeted: bool,
     }
 
     let state = ChannelState::load(context, room)?;
+    // Resolved once, before the scan: needed to decide targeting, and the same
+    // value the badge pass below uses.
+    let owner_room = crate::mailbox::resolve_owner(context)?.map(|owner| owner.room);
     let mut missed = Vec::new();
     let mut unreadable_unseen = false;
     for path in message_files(&paths.messages)? {
@@ -539,7 +628,26 @@ fn crossed_send_bounce(
             continue;
         }
         let message = parsed.message;
+        // Addressed to this room: an @mention of it, or a reply to something it
+        // wrote. `re` carries a message id, so the author of the parent has to
+        // be looked up; only messages that actually carry one pay for that.
+        // Addressed to this room: an @mention of it, a reply to something it
+        // wrote, or a message from the owner room.
+        //
+        // The owner clause is not deference, it is a consequence: a signed owner
+        // message binds its whole body, so adding "@you" to one invalidates the
+        // signature. Without this clause an owner's signed word could never be
+        // targeted, could therefore never appear in a refusal preview, and the
+        // signed_verified badge on that path would become unreachable code. The
+        // owner's messages to a channel are not skimmable conversation.
+        let targeted = message.mentions.iter().any(|name| name == room)
+            || owner_room.as_deref() == Some(message.from.as_str())
+            || message
+                .re
+                .as_deref()
+                .is_some_and(|parent| message_author_is(paths, parent, room));
         missed.push(MissedItem {
+            targeted,
             bounce: MissedChannelMessage {
                 id: message.id.clone(),
                 from: message.from.clone(),
@@ -554,9 +662,29 @@ fn crossed_send_bounce(
             body: parsed.body,
         });
     }
+    let unseen = missed.len();
+    let targeted_count = missed.iter().filter(|item| item.targeted).count();
     if missed.is_empty() && !unreadable_unseen {
-        return Ok(None);
+        return Ok(CrossedReport {
+            verdict: CrossedVerdict::Clear,
+            unseen: 0,
+            targeted: 0,
+        });
     }
+    // Nothing here concerns this room, so delivering is the right default and
+    // the caller says what was crossed rather than refusing over it.
+    if targeted_count == 0 && !unreadable_unseen {
+        return Ok(CrossedReport {
+            verdict: CrossedVerdict::Warn,
+            unseen,
+            targeted: 0,
+        });
+    }
+    // From here the send is refused, so only the messages that caused the
+    // refusal belong in the preview. The old bounce embedded the last ten full
+    // bodies -- roughly 15KB of prose, most of it already read -- which cost the
+    // reader more context than the operation it refused (pc2_0dfb29556dec7b0c).
+    missed.retain(|item| item.targeted);
     let fix = format!(
         "post chat {} --send --anyway --body '<revised text>'",
         crate::mailbox::shell_quote(channel)
@@ -564,7 +692,10 @@ fn crossed_send_bounce(
     if unreadable_unseen && missed.is_empty() {
         // Renders no messages, so it stays pure transport: the trust anchor
         // is never loaded (Decision 3 matrix).
-        return Ok(Some(
+        return Ok(CrossedReport {
+            unseen,
+            targeted: targeted_count,
+            verdict: CrossedVerdict::Refuse(
             AppError::new(
                 ErrorCode::CrossedSend,
                 format!(
@@ -578,7 +709,8 @@ fn crossed_send_bounce(
             .exact_fix(fix)
             .input(channel)
             .reason("unreadable unseen message"),
-        ));
+            ),
+        });
     }
     // A bounce that renders missed conversation is a badge-computing surface
     // (A0a Decision 3): resolve the owner ONCE — a broken owner.json fails
@@ -599,32 +731,131 @@ fn crossed_send_bounce(
             }
         }
     }
-    let mut missed: Vec<MissedChannelMessage> =
-        missed.into_iter().map(|item| item.bounce).collect();
+    let mut missed: Vec<MissedChannelMessage> = missed
+        .into_iter()
+        .map(|mut item| {
+            // First line only. The whole body was never what the reader needed
+            // to decide whether to revise, and the ids are right there.
+            item.bounce.body = first_line(&item.bounce.body);
+            item.bounce
+        })
+        .collect();
     let total = missed.len();
-    if missed.len() > 10 {
-        missed = missed.split_off(missed.len() - 10);
+    if missed.len() > PREVIEW_CAP {
+        missed = missed.split_off(missed.len() - PREVIEW_CAP);
     }
     let mut message = format!(
-        "channel '{channel}' has {total} unseen message(s) from others; send was not delivered (showing the last {})",
+        "channel '{channel}' has {total} unseen message(s) addressed to '{room}' out of {unseen} unseen; send was not delivered (showing the last {}, first line only)",
         missed.len()
     );
     if unreadable_unseen {
-        message.push_str("; plus unreadable unseen message(s)");
+        message.push_str(
+            "; plus unreadable unseen message(s), which cannot be shown not to concern you",
+        );
     }
-    Ok(Some(
-        AppError::new(
-            ErrorCode::CrossedSend,
-            message,
-            format!(
-                "Read the missed messages, revise, then retry with `--anyway` to deliver regardless: `{fix}`."
-            ),
-        )
-        .exact_fix(fix)
-        .input(channel)
-        .reason("channel tip contains messages unseen by the sender")
-        .missed(missed),
-    ))
+    Ok(CrossedReport {
+        verdict: CrossedVerdict::Refuse(
+            AppError::new(ErrorCode::CrossedSend, message, format!(
+                "Read the messages addressed to you, revise, then retry with `--anyway` to deliver regardless: `{fix}`."
+            ))
+            .exact_fix(fix)
+            .input(channel)
+            .reason("unseen messages are addressed to this room")
+            .missed(missed),
+        ),
+        unseen,
+        targeted: targeted_count,
+    })
+}
+
+/// The crossed-send audit log: one JSON line per send that met an unseen tip.
+///
+/// This exists because the guard kept no record of itself. Asked for one real
+/// interleaving the old refusal had prevented, nobody could produce one -- not
+/// because none existed, but because a refusal is an error and errors are not
+/// written anywhere. Weeks of running and zero evidence in either direction,
+/// which meant the guard could only ever be tuned by argument. `anyway_after_ms`
+/// is the field that settles it: the gap between a refusal and the `--anyway`
+/// that followed measures whether anyone read what they were shown.
+///
+/// Best-effort by construction. Telemetry must never be able to fail a send.
+fn log_crossed_event(
+    context: &Context,
+    channel: &str,
+    room: &str,
+    unseen: usize,
+    targeted: usize,
+    outcome: CrossedOutcome,
+) {
+    let path = context.root.join("crossed-send.jsonl");
+    let Some(now_ms) = epoch_millis() else { return };
+    let anyway_after_ms = match outcome {
+        CrossedOutcome::Anyway => last_refusal_ms(&path, channel, room).map(|then| now_ms - then),
+        _ => None,
+    };
+    let mut line = format!(
+        "{{\"epoch_ms\":{now_ms},\"room\":\"{}\",\"channel\":\"{}\",\"unseen\":{unseen},\"targeted\":{targeted},\"outcome\":\"{}\"",
+        ascii_escape_json(room),
+        ascii_escape_json(channel),
+        outcome.as_str()
+    );
+    if let Some(gap) = anyway_after_ms {
+        line.push_str(&format!(",\"anyway_after_ms\":{gap}"));
+    }
+    line.push_str("}\n");
+    // Telemetry must never be able to fail a send, so every error here is
+    // deliberately dropped: a lost audit line costs a data point, a failed send
+    // costs the message.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+}
+
+fn epoch_millis() -> Option<u128> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_millis())
+}
+
+/// Epoch millis of this room's most recent refusal on this channel.
+fn last_refusal_ms(path: &Path, channel: &str, room: &str) -> Option<u128> {
+    let text = fs::read_to_string(path).ok()?;
+    text.lines()
+        .rev()
+        .filter(|line| line.contains(&format!("\"room\":\"{room}\"")))
+        .filter(|line| line.contains(&format!("\"channel\":\"{channel}\"")))
+        .find(|line| line.contains("\"outcome\":\"refused\""))
+        .and_then(|line| {
+            let rest = line.split("\"epoch_ms\":").nth(1)?;
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+}
+
+/// How many targeted messages a refusal previews before summarizing.
+const PREVIEW_CAP: usize = 5;
+
+fn first_line(body: &str) -> String {
+    const LINE_CAP: usize = 200;
+    let line = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let mut out: String = line.chars().take(LINE_CAP).collect();
+    if line.chars().count() > LINE_CAP {
+        out.push('\u{2026}');
+    }
+    out
+}
+
+/// Was `id` written by `room`? Used only to decide whether a reply is aimed here.
+fn message_author_is(paths: &ChannelPaths, id: &str, room: &str) -> bool {
+    let path = paths.messages.join(format!("{id}.msg"));
+    parse_channel_message(&path).is_ok_and(|parsed| parsed.message.from == room)
 }
 
 /// Resolve a full id or unique prefix within this channel's messages/.

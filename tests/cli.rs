@@ -5277,60 +5277,174 @@ fn default_catch_up_skips_older_unless_limit_zero() {
     assert_eq!(all.skipped, 0);
 }
 
+/// Like `assert_success` but tolerant of stderr: a send that crosses an
+/// untargeted tip now warns there by design, and setup sends in channel tests
+/// routinely do.
+fn assert_delivered(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "status={:?}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
-fn crossed_send_bounces_with_missed_messages_unless_anyway() {
+fn crossed_send_refuses_only_what_is_addressed_to_you() {
+    // The rule this test pins changed deliberately. It used to refuse any send
+    // while ANY unseen message from anyone existed, which fired hardest where it
+    // protected least: a room that has just joined a busy channel is maximally
+    // crossed by construction and none of that backlog concerns it. The guard
+    // was measuring its own bypass rate.
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "cross", &alpha);
     join_channel(&sandbox, "cross", &beta);
-    // Catch alpha up past joins, then beta posts something alpha has not read.
-    assert_success(&sandbox.run_in(&["chat", "cross", "--discard", "--json"], None, &alpha));
-    let missed: ChatSendOutput = from_stdout(&sandbox.run_in(
+    assert_delivered(&sandbox.run_in(&["chat", "cross", "--discard", "--json"], None, &alpha));
+
+    // Unseen, but about nothing to do with alpha: deliver, and say so.
+    assert_delivered(&sandbox.run_in(
         &[
             "chat",
             "cross",
             "--send",
             "--body",
-            "stop and revise",
+            "just chatter",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    let delivered = sandbox.run_in(
+        &["chat", "cross", "--send", "--body", "unrelated", "--json"],
+        None,
+        &alpha,
+    );
+    assert!(
+        delivered.status.success(),
+        "an untargeted backlog must not refuse the send: {}",
+        String::from_utf8_lossy(&delivered.stderr)
+    );
+    let warning = String::from_utf8_lossy(&delivered.stderr);
+    assert!(
+        warning.contains("1 unseen") && warning.contains("none addressed to alpha"),
+        "delivery must still report what was crossed, got: {warning}"
+    );
+
+    // Addressed to alpha: refuse.
+    assert_delivered(&sandbox.run_in(&["chat", "cross", "--discard", "--json"], None, &alpha));
+    assert_delivered(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "@alpha stop and revise",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert_delivered(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "more chatter",
             "--json",
         ],
         None,
         &beta,
     ));
     let bounced = sandbox.run_in(
-        &[
-            "chat",
-            "cross",
-            "--send",
-            "--body",
-            "I did not see that",
-            "--json",
-        ],
+        &["chat", "cross", "--send", "--body", "blind reply", "--json"],
         None,
         &alpha,
     );
     assert_eq!(bounced.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&bounced);
     assert_eq!(error.error.code, "crossed_send");
-    let missed_list = error.error.details.missed.as_ref().expect("missed payload");
-    assert_eq!(missed_list.len(), 1);
-    assert_eq!(missed_list[0].id, missed.message.id);
-    assert_eq!(missed_list[0].body, "stop and revise");
-    // --anyway delivers regardless.
-    let forced: ChatSendOutput = from_stdout(&sandbox.run_in(
+    let missed = error.error.details.missed.clone().unwrap_or_default();
+    // Only what caused the refusal is previewed. The old bounce returned the
+    // last ten full bodies regardless of relevance (pc2_0dfb29556dec7b0c).
+    assert_eq!(missed.len(), 1, "preview must carry only targeted messages");
+    assert!(missed[0].body.contains("stop and revise"));
+    assert!(
+        error.error.message.contains("out of 2 unseen"),
+        "the message must still report the full unseen count, got: {}",
+        error.error.message
+    );
+
+    // The escape hatch is unchanged.
+    let anyway = sandbox.run_in(
         &[
             "chat",
             "cross",
             "--send",
             "--anyway",
             "--body",
-            "sending anyway",
+            "blind reply",
             "--json",
         ],
         None,
         &alpha,
+    );
+    assert_delivered(&anyway);
+}
+
+#[test]
+fn every_crossed_send_decision_is_recorded() {
+    // The whole design argument about this guard happened because it kept no
+    // evidence about itself: a refusal is an error, and errors are written
+    // nowhere, so nobody could say whether it had ever prevented anything.
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "audit", &alpha);
+    join_channel(&sandbox, "audit", &beta);
+    assert_success(&sandbox.run_in(&["chat", "audit", "--discard", "--json"], None, &alpha));
+
+    assert_success(&sandbox.run_in(
+        &["chat", "audit", "--send", "--body", "@alpha look", "--json"],
+        None,
+        &beta,
     ));
-    assert!(forced.ok);
+    let refused = sandbox.run_in(
+        &["chat", "audit", "--send", "--body", "x", "--json"],
+        None,
+        &alpha,
+    );
+    assert_eq!(refused.status.code(), Some(65));
+    assert_success(&sandbox.run_in(
+        &[
+            "chat", "audit", "--send", "--anyway", "--body", "x", "--json",
+        ],
+        None,
+        &alpha,
+    ));
+
+    let log = std::fs::read_to_string(sandbox.mail_root.join("crossed-send.jsonl"))
+        .expect("every decision must be recorded");
+    let events: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|event: &serde_json::Value| event["channel"] == "audit" && event["room"] == "alpha")
+        .collect();
+    let refusal = events
+        .iter()
+        .find(|event| event["outcome"] == "refused")
+        .expect("the refusal must be recorded");
+    assert_eq!(refusal["targeted"], 1);
+    assert_eq!(refusal["unseen"], 1);
+    let override_event = events
+        .iter()
+        .find(|event| event["outcome"] == "anyway")
+        .expect("the override must be recorded");
+    // The field that settles whether anyone read what they were shown.
+    assert!(
+        override_event["anyway_after_ms"].is_number(),
+        "an --anyway following a refusal must record the gap: {override_event}"
+    );
 }
 
 #[test]
@@ -5612,7 +5726,14 @@ fn crossed_send_exact_fix_shell_quotes_channel_metacharacters() {
         join_channel(&sandbox, name, &beta);
         assert_success(&sandbox.run_in(&["chat", name, "--discard", "--json"], None, &alpha));
         assert_success(&sandbox.run_in(
-            &["chat", name, "--send", "--body", "missed you", "--json"],
+            &[
+                "chat",
+                name,
+                "--send",
+                "--body",
+                "@alpha missed you",
+                "--json",
+            ],
             None,
             &beta,
         ));
@@ -6779,7 +6900,14 @@ fn a0a_f11_command_matrix_rows_and_crossed_send_draft_preserved() {
     join_channel(&sandbox, "mat", &beta);
     assert_success(&sandbox.run_in(&["chat", "mat", "--discard", "--json"], None, &alpha));
     assert_success(&sandbox.run_in(
-        &["chat", "mat", "--send", "--body", "beta unread", "--json"],
+        &[
+            "chat",
+            "mat",
+            "--send",
+            "--body",
+            "@alpha beta unread",
+            "--json",
+        ],
         None,
         &beta,
     ));
@@ -7006,7 +7134,14 @@ fn a0a_r2_crossed_preview_signed_verified_field_contract() {
     join_channel(&sandbox, "cross", &mara);
     // Phase 1: an ordinary unsigned owner message.
     let plain: ChatSendOutput = from_stdout(&sandbox.run_in(
-        &["chat", "cross", "--send", "--body", "plain hello", "--json"],
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            "@alpha plain hello",
+            "--json",
+        ],
         None,
         &mara,
     ));
@@ -8547,7 +8682,7 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
             "xbounce",
             "--send",
             "--body",
-            "landed first",
+            "@claude-space landed first",
             "--json",
         ],
         None,

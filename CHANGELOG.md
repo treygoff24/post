@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Changed
+- `crossed_send` now refuses only when an unseen message is addressed to the
+  sending room: an `@mention` of it, a reply to something it wrote, or any
+  message from the owner room. Unseen messages that concern nobody in
+  particular warn with a count on stderr and deliver. A refusal previews only
+  the targeted messages, first line each, capped at five. Every decision is
+  appended to `<root>/crossed-send.jsonl`, including how long after a refusal
+  an `--anyway` followed.
 - Errors now name the directory identity was resolved from. A channel operation
   from an unregistered cwd reports the full path rather than only its basename,
   lists the registered rooms (bounded inline, complete in `details.matches`),
