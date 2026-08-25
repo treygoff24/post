@@ -36,6 +36,11 @@ hypothetical:
 - **An ambiguous batch.** `post` reports `mixed` when a batch holds more than
   one reason. A mention-only filter that dropped it would lose the exact
   message the filter exists to catch, so ambiguity always rings.
+- **A line that is read but not seen.** `select()` watches a file descriptor,
+  so a buffered text stream that pulls a whole chunk above it hides every line
+  but the first until the next write. A multi-room scan emits one line per room
+  in a single write, so this was the common case. The loop reads the raw fd and
+  splits lines itself.
 - **A dead watcher.** If `post watch` exits, the daemon logs its exit code and
   exits non-zero so the supervisor restarts it, rather than living on as a
   healthy-looking process that can never ring.
@@ -67,4 +72,4 @@ means it stops ringing and nothing says so.
 
     python -m unittest discover -p 'test_*.py'
 
-Sixteen tests. Each was watched red before being kept.
+Seventeen tests. Each was watched red before being kept.

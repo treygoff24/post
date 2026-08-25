@@ -1,6 +1,6 @@
 [Unit]
 Description=post doorbell for %i — wakes an idle agent when mail arrives
-Documentation=file:/tmp/doorbell/post-doorbell
+Documentation=file:%h/Code/post-doorbell/README.md
 # No start-rate limit. Systemd's default gives up after 5 restarts in 10s and
 # leaves the unit dead — which for a doorbell means it stops ringing and nothing
 # says so, the exact failure this daemon exists to prevent. Ten-second backoff

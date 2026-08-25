@@ -195,6 +195,12 @@ def snapshot_marks(command_base, cwd):
     """
     proc = subprocess.run(command_base + ["--snapshot"], cwd=cwd,
                           capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        # Priming failed, so every unread message is about to look new. The
+        # failure direction is right -- noisy, never deaf -- but an unexplained
+        # 226-ring morning is not diagnosable unless we say why here.
+        log(f"doorbell: priming snapshot failed (rc={proc.returncode}); "
+            f"the existing backlog will ring once")
     marks = {}
     for line in proc.stdout.splitlines():
         try:
@@ -250,6 +256,9 @@ def main():
     # A doorbell exists to wake ONE agent about ITS mail, so the rooms it was
     # given are that agent's own identities and its own sends are not news to
     # it. Declaring them is only possible on a `post` that has the flag.
+    if not args.room:
+        log("doorbell: no --room given; watching the room `post` resolves from "
+            f"{cwd} , with no room validation and no own-send suppression")
     if args.room:
         if supports_own(cwd):
             for room in args.room:
@@ -266,7 +275,14 @@ def main():
                 marks[source] = last
         save_marks(args.agent, marks)
 
-    watch = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, text=True, bufsize=1)
+    # Binary pipe, read with os.read: a buffered text stream would pull a
+    # whole chunk into Python's own buffer, and select() -- which watches the
+    # FILE DESCRIPTOR -- cannot see what is already buffered above it. A
+    # multi-room scan writes one line per room in a single write, so lines
+    # 2..n would sit invisible until the next write woke select again.
+    # Verified: two lines in one write, select then times out holding line 2.
+    watch = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE)
+    buffered = b""
     pending = {}
     fresh_marks = {}
     deadline = None
@@ -279,9 +295,10 @@ def main():
             # wait for a second one that may never come.
             timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
             ready, _, _ = select.select([watch.stdout], [], [], timeout)
+            lines = []
             if ready:
-                line = watch.stdout.readline()
-                if not line:
+                chunk = os.read(watch.stdout.fileno(), 65536)
+                if not chunk:
                     # The watch pipe closed. A doorbell whose watcher died is a
                     # doorbell that will never ring again, and the silence is
                     # indistinguishable from "no mail" -- so say so loudly and
@@ -291,8 +308,15 @@ def main():
                         f"cannot ring for {args.agent} until restarted")
                     watch_died = True
                     break
+                buffered += chunk
+                # Keep the trailing partial line: a write can split mid-line.
+                *complete, buffered = buffered.split(b"\n")
+                lines = complete
+            for raw in lines:
+                if not raw.strip():
+                    continue
                 try:
-                    event = json.loads(line)
+                    event = json.loads(raw.decode("utf-8", "replace"))
                 except ValueError:
                     continue
                 if event.get("event") == "digest":
