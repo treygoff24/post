@@ -68,6 +68,16 @@ Nothing is installed. The template unit expects the script at
 gives up after five restarts and leaves the unit dead, which for a doorbell
 means it stops ringing and nothing says so.
 
+`<agent-name>` must be a **named** herdr agent. `herdr agent list` omits the
+`name` key entirely for panes that were never named, and `find_agent` matches on
+it, so an unnamed pane refuses to start. At first install on this cell, three of
+four live agents carried no name at all, so this is the common case rather than
+the edge one. The refusal names the fix and lists the agents that do have names:
+
+    herdr agent rename <pane-id> <agent-name>
+
+`herdr agent list` shows the pane ids.
+
 ## Tests
 
     python -m unittest discover -p 'test_*.py'

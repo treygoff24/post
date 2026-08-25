@@ -240,7 +240,19 @@ def main():
         return 2
     agent = find_agent(args.agent)
     if agent is None:
-        log(f"doorbell: no herdr agent named {args.agent!r}; refusing to start")
+        # Most panes on a cell are never named, and `herdr agent list` omits the
+        # name key entirely for those -- so this refusal is the common first
+        # experience, not an edge case. A bare "not found" reads as a broken
+        # daemon; say what actually fixes it and what names exist to choose from.
+        known = sorted(
+            a["name"] for a in herdr_agents() if a.get("name")
+        )
+        have = ", ".join(known) if known else "none -- no pane on this host is named"
+        log(
+            f"doorbell: no herdr agent named {args.agent!r}; refusing to start. "
+            f"Name the pane first: herdr agent rename <pane-id> {args.agent}. "
+            f"Named agents right now: {have}."
+        )
         return 2
     cwd = agent.get("cwd") or os.path.expanduser("~")
 
