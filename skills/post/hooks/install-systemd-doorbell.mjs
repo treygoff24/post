@@ -433,6 +433,15 @@ function timerContent({ agent, intervalSeconds }) {
     `Description=Post Codex doorbell timer for Herdr agent ${unitQuote(agent)}`,
     "",
     "[Timer]",
+    // Both keys are required, and the failure without OnActiveSec is silent.
+    // OnUnitActiveSec measures from the service's last activation, so a oneshot
+    // that has never run has no reference point: the timer enables, reports
+    // active, shows an empty NEXT, and never fires. Measured on the cell —
+    // OnUnitActiveSec=5s alone logged zero triggers in 20s. OnActiveSec gives
+    // the first trigger, relative to the timer starting; OnUnitActiveSec paces
+    // every one after it. A doorbell that installs clean and never rings is the
+    // exact failure this whole daemon exists to prevent.
+    `OnActiveSec=${intervalSeconds}s`,
     `OnUnitActiveSec=${intervalSeconds}s`,
     `Unit=post-codex-doorbell@${agent}.service`,
     "",

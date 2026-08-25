@@ -314,6 +314,12 @@ test("successful install writes executable monitor and 0644 service and timer", 
   const serviceText = fs.readFileSync(service, "utf8");
   const timerText = fs.readFileSync(timer, "utf8");
   assert.match(serviceText, /^Type=oneshot$/m);
+  // A timer with only OnUnitActiveSec never fires for a oneshot that has never
+  // run: it enables, reports active, and silently never triggers (measured on
+  // the cell — zero fires in 20s at a 5s interval). OnActiveSec is what gives
+  // the first trigger. Losing it is a doorbell that installs clean and is deaf.
+  assert.match(timerText, /^OnActiveSec=\d+s$/m);
+  assert.match(timerText, /^OnUnitActiveSec=\d+s$/m);
   assert.match(serviceText, new RegExp(`^ExecStart=${escapeRegExp(process.execPath)} `, "m"));
   assert.match(serviceText, new RegExp(`^Environment=HOME=${escapeRegExp(home)}$`, "m"));
   assert.match(serviceText, new RegExp(`^Environment=POST_CODEX_NOTIFY_POST_BIN=${escapeRegExp(POST)}$`, "m"));
