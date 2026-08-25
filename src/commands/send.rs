@@ -342,9 +342,17 @@ where
             pretty,
         )?
     } else {
+        // `archived: true` was the whole receipt, and it is true, and it was
+        // useless: an agent that read it and ran `post read <id>` got told the
+        // message was "not in the archive". Name the command that works, from
+        // the room that just sent it.
         format!(
-            "post: sent {} {} {} -> {}\n",
-            envelope.kind, envelope.id, envelope.from, envelope.to
+            "post: sent {} {} {} -> {}\npost: read it back with `post read {}`\n",
+            envelope.kind,
+            envelope.id,
+            envelope.from,
+            envelope.to,
+            crate::mailbox::shell_quote(&envelope.id)
         )
     };
     Ok(CommandResult::committed(rendered))
@@ -483,7 +491,14 @@ fn read_body_unchecked(source: BodySource<'_>) -> AppResult<String> {
         }
     }
     if let Some(path) = source.body_file.or(source.file) {
-        return read_body_file(path, &source.fix_prefix);
+        // `-` means stdin here for the same reason it does for `--body`: it is
+        // the Unix convention, every other CLI honours it, and post did not --
+        // it opened a literal file named "-", failed NotFound, and suggested
+        // `--body '-'`, which happens to work only by accident. `/dev/stdin`
+        // falls through to the ordinary file read below and works on Unix.
+        if path.as_os_str() != "-" {
+            return read_body_file(path, &source.fix_prefix);
+        }
     }
     if io::stdin().is_terminal() {
         let fix = format!("{} --body '<text>'", source.fix_prefix);

@@ -8963,3 +8963,136 @@ fn global_json_before_any_human_only_flag_is_refused() {
         );
     }
 }
+
+/// `post send` reported archived=true and `post read <id>` from the sending
+/// room answered "not in the archive" about a file sitting in the archive. The
+/// filter admitted only `to == room`, so a sender could never read back what it
+/// had just written, and the error asserted a state the code never checked.
+#[test]
+fn a_sender_can_read_back_its_own_archived_mail_and_a_stranger_still_cannot() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&gamma).expect("create gamma room path");
+    register_room(&sandbox, "gamma", &gamma);
+
+    let sent = sandbox.run_in(
+        &["send", "--to", "beta", "--body", "readback me", "--json"],
+        None,
+        &alpha,
+    );
+    let out: serde_json::Value = from_stdout(&sent);
+    assert_eq!(out["archived"], serde_json::Value::Bool(true));
+    let id = out["envelope"]["id"].as_str().expect("id").to_owned();
+
+    // The claim the receipt makes must be one the sender can act on.
+    let readback = sandbox.run_in(&["read", &id], None, &alpha);
+    assert!(
+        readback.status.success(),
+        "sender must read back its own archived mail; got {:?}: {}",
+        readback.status.code(),
+        String::from_utf8_lossy(&readback.stderr)
+    );
+    assert!(String::from_utf8_lossy(&readback.stdout).contains("readback me"));
+
+    // The recipient is unaffected.
+    assert!(sandbox.run_in(&["read", &id], None, &beta).status.success());
+
+    // A third room is still refused — and told the truth about why, rather than
+    // "not in the archive" about a file that is in the archive.
+    let refused = sandbox.run_in(&["read", &id], None, &gamma);
+    assert_eq!(refused.status.code(), Some(66));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "not_found");
+    assert!(
+        error
+            .error
+            .message
+            .contains("addressed between two other rooms"),
+        "a third party must be told why, got: {}",
+        error.error.message
+    );
+    assert!(
+        !error.error.message.contains("not in the archive"),
+        "the error must not deny an archive entry it can see: {}",
+        error.error.message
+    );
+
+    // A genuinely absent id keeps the original wording.
+    let absent = sandbox.run_in(&["read", "20200101-000000-abcdef"], None, &alpha);
+    let error: ErrorEnvelope = from_stderr(&absent);
+    assert!(
+        error.error.message.contains("not in the archive"),
+        "an id that really is absent must still say so, got: {}",
+        error.error.message
+    );
+}
+
+/// The send receipt named a state ("archived") and no way to act on it.
+#[test]
+fn the_send_receipt_names_a_readback_command_that_runs() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let sent = sandbox.run_in(&["send", "--to", "beta", "--body", "hi"], None, &alpha);
+    let text = String::from_utf8_lossy(&sent.stdout).into_owned();
+    let line = text
+        .lines()
+        .find(|line| line.contains("read it back with"))
+        .expect("receipt must name a readback command");
+    let command = line
+        .split_once('`')
+        .and_then(|(_, rest)| rest.rsplit_once('`'))
+        .map(|(cmd, _)| cmd.to_owned())
+        .expect("readback command must be backticked");
+    let applied = sandbox.run_fix(&command, &alpha);
+    assert!(
+        applied.status.success(),
+        "the receipt's readback command must run as written; `{command}` failed: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(String::from_utf8_lossy(&applied.stdout).contains("hi"));
+}
+
+/// `--body -` was already the stdin sentinel; `--body-file -` was not, so it
+/// opened a literal file named "-" against every CLI convention.
+#[test]
+fn body_file_dash_reads_stdin_and_a_real_path_still_wins() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+
+    let sent = sandbox.run_in(
+        &["send", "--to", "beta", "--body-file", "-", "--json"],
+        Some("piped through dash\n"),
+        &alpha,
+    );
+    let out: serde_json::Value = from_stdout(&sent);
+    let id = out["envelope"]["id"].as_str().expect("id").to_owned();
+    let readback = sandbox.run_in(&["read", &id], None, &alpha);
+    assert!(
+        String::from_utf8_lossy(&readback.stdout).contains("piped through dash"),
+        "the piped body must be what was sent"
+    );
+
+    // A file literally named "-" is not what anyone means, but a real path must
+    // still take the file branch rather than silently draining stdin.
+    let real = alpha.join("body.txt");
+    fs::write(&real, "from the file\n").expect("write body file");
+    let sent = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "beta",
+            "--body-file",
+            real.to_str().expect("utf8 path"),
+            "--json",
+        ],
+        Some("this stdin must be ignored\n"),
+        &alpha,
+    );
+    let out: serde_json::Value = from_stdout(&sent);
+    let id = out["envelope"]["id"].as_str().expect("id").to_owned();
+    let readback = sandbox.run_in(&["read", &id], None, &alpha);
+    let body = String::from_utf8_lossy(&readback.stdout);
+    assert!(body.contains("from the file"));
+    assert!(!body.contains("this stdin must be ignored"));
+}

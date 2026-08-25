@@ -93,29 +93,53 @@ fn already_read(
     framing: FramingMode,
 ) -> AppResult<CommandResult> {
     let mut found = prefix_matches(read, id)?;
+    let mut archived_elsewhere = false;
     if found.is_empty() {
-        // The archive is global, so only mail addressed to this room may
-        // surface here; another room's mail stays invisible.
-        found = prefix_matches(&context.root.join("archive"), id)?
-            .into_iter()
-            .filter(|path| parse_mail(path).is_ok_and(|mail| mail.envelope.to == room))
+        // The archive is global, so only mail this room is a party to may
+        // surface here; a third room's mail stays invisible. Both parties
+        // count: the filter used to admit only `to == room`, which meant a
+        // sender could never read back the message it had just written, while
+        // `post send` reported archived=true about a file sitting right there.
+        // The sender authored the body, so showing it back leaks nothing.
+        let candidates = prefix_matches(&context.root.join("archive"), id)?;
+        let party: Vec<_> = candidates
+            .iter()
+            .filter(|path| {
+                parse_mail(path)
+                    .is_ok_and(|mail| mail.envelope.to == room || mail.envelope.from == room)
+            })
+            .cloned()
             .collect();
+        archived_elsewhere = party.is_empty() && !candidates.is_empty();
+        found = party;
     }
     if found.len() > 1 {
         return Err(ambiguous(&found, id, room, "already-read"));
     }
     let Some(path) = found.first() else {
         let fix = format!("post inbox --room {}", crate::mailbox::shell_quote(room));
+        // Saying "not in the archive" when a matching file is in the archive is
+        // a claim the code never checked, and it sent an agent hunting for lost
+        // mail that was never lost. Report what was actually observed.
+        let (tail, reason) = if archived_elsewhere {
+            (
+                "it is in the archive but addressed between two other rooms, so this room may not read it",
+                "archived id belongs to neither party in this room",
+            )
+        } else {
+            (
+                "not unread, not already read, not in the archive",
+                "no unread, read, or archived id has this prefix",
+            )
+        };
         return Err(AppError::new(
             ErrorCode::NotFound,
-            format!(
-                "no mail id starts with '{id}' in room '{room}': not unread, not already read, not in the archive"
-            ),
+            format!("no mail id starts with '{id}' in room '{room}': {tail}"),
             format!("Run `{fix}` and retry with one listed id."),
         )
         .exact_fix(fix)
         .input(id)
-        .reason("no unread, read, or archived id has this prefix")
+        .reason(reason)
         .room(room));
     };
     let mail = parse_mail(path)?;
