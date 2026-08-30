@@ -14,3 +14,4 @@ STATE.md
 
 # Local agent-harness config (machine-specific hooks)
 .claude/
+.beads/.auto-import-issues.jsonl
