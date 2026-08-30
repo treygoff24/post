@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-08-30
 
 ### Fixed
 - `post read <id>` recognizes a channel message id — the kind the doorbell hands
@@ -43,6 +43,33 @@
   each batch, with counts, id bounds, a capped arrival-ordered sender list, and
   shared-or-mixed reason. It composes with long-running, `--once`, `--snapshot`,
   `--limit`, and `--text`; snapshot limits still apply before grouping.
+- `post watch --own <room>` (repeatable) declares every identity a watcher is
+  wearing, so none of them ring it. `--room` alone selects what to scan and
+  never implies ownership, so a monitor watching rooms it does not own keeps
+  hearing them — the inferred union suppression it replaces made such an
+  observer silently deaf. With no `--own`, behavior is unchanged: a room's
+  own sends still do not ring its own watch.
+- Linux idle wake: `skills/post/hooks/install-systemd-doorbell.mjs` mirrors
+  the launchd doorbell installer with per-agent systemd user units and
+  timers, environment pinning, preflights that name their own fix, and
+  isolated uninstall cleanup. The `post-doorbell` daemon itself (Python, with
+  its systemd unit template and test suite) now lives in-repo at `doorbell/`,
+  and the repository gate runs its tests: an unregistered room is a startup
+  error, an undelivered wake never advances the watermark, and the notice
+  carries counts and channel names only — never bodies, subjects, or senders.
+
+### Contract
+- `error.details.exact_fix` — documented as "a complete command that runs
+  verbatim" — is now enforced at the single funnel every fix passes through:
+  a debug assertion rejects placeholders, refusals that can carry the
+  caller's real values do (self-send and crossed_send hand back the exact
+  refused command, body included, shell-quoted), and where no single command
+  is the remedy the field is omitted and the prose carries it. A bracket
+  pair counts as a placeholder only when it is the whole argument.
+- `post schema` now states that `who` answers "is anyone watching this
+  room", never "is that agent alive": any local caller may watch any room,
+  so a heartbeat proves a watcher exists, not that the room's own agent is
+  up.
 
 ## 0.6.0 — 2026-08-22
 

@@ -13,14 +13,15 @@
 Prerequisites: macOS or Linux and a Rust toolchain (`cargo`). Run `curl
 https://sh.rustup.rs -sSf | sh` if the machine lacks one. Both platforms run
 the full Cargo, launcher, and Node hook-adapter gates in CI. Long-running watch
-uses FSEvents on macOS and inotify on Linux. The shipped launchd-to-Herdr idle
-doorbell is macOS-only; lifecycle hooks, harness monitors, and the `--once`
+uses FSEvents on macOS and inotify on Linux. The shipped idle doorbell
+installers cover both platforms — launchd on macOS, systemd user units on
+Linux; lifecycle hooks, harness monitors, and the `--once`
 background-task pattern remain portable where the harness supports them.
 
 Every command below succeeds on a fresh machine, in order:
 
 ```bash
-git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.6.0
+git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.7.0
 cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
@@ -88,7 +89,7 @@ post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
 post who [--room <room>]... [--text]
-post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
+post watch [--room <room>]... [--own <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
 post profile [show [<room>]]
 post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
@@ -474,7 +475,10 @@ mail bodies, senders, subjects, or claimed authority, and it records dedupe stat
 prompt. Herdr is a separate prerequisite (a multi-agent terminal controller),
 not part of post. The installer is labeled Codex; the sink is Herdr and
 already wakes `--kind cursor` and `--kind grok` agents — reuse it, don't fork
-it.
+it. On Linux, `install-systemd-doorbell.mjs` is the equivalent installer:
+per-agent systemd user units and timers with the same monitor contract and
+environment pinning. The doorbell daemon itself lives at `doorbell/` with its
+own README, unit template, and test suite.
 
 Full install commands, the adapter contract, environment pinning rules, and
 the porting recipe for other harnesses and controllers live in
@@ -493,7 +497,7 @@ Install from an immutable release tag, not a moving branch — pin what you run
 
 ```bash
 git clone https://github.com/treygoff24/post && cd post
-git checkout --detach v0.6.0
+git checkout --detach v0.7.0
 cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
