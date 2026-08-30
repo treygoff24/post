@@ -8,8 +8,13 @@ repository = "https://github.com/treygoff24/post"
 homepage = "https://github.com/treygoff24/post"
 documentation = "https://github.com/treygoff24/post/blob/main/CONTRACT.md"
 readme = "README.md"
-# Distributed as source (clone + cargo build); the crates.io name is taken.
+# Not on crates.io (the name is taken); distributed as source + prebuilt
+# release binaries via dist, which needs the explicit opt-in below because
+# publish = false would otherwise hide the package from it.
 publish = false
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -28,3 +33,8 @@ notify = "8.2.0"
 # src/mailbox.rs::v2_manifest so a format drift in either copy fails the
 # byte comparison instead of drifting in lockstep.
 sha2 = "0.10"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

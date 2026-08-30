@@ -10,15 +10,30 @@
 
 ## For agents: install and start cold
 
-Prerequisites: macOS or Linux and a Rust toolchain (`cargo`). Run `curl
-https://sh.rustup.rs -sSf | sh` if the machine lacks one. Both platforms run
-the full Cargo, launcher, and Node hook-adapter gates in CI. Long-running watch
-uses FSEvents on macOS and inotify on Linux. The shipped idle doorbell
-installers cover both platforms — launchd on macOS, systemd user units on
-Linux; lifecycle hooks, harness monitors, and the `--once`
-background-task pattern remain portable where the harness supports them.
+Prerequisites: macOS or Linux. No Rust toolchain needed — prebuilt binaries
+ship with each release (macOS arm64/x86_64, signed and notarized under a
+Developer ID; Linux arm64/x86_64, fully static musl builds that run on any
+distro). Both platforms run the full Cargo, launcher, and Node hook-adapter
+gates in CI. Long-running watch uses FSEvents on macOS and inotify on Linux.
+The shipped idle doorbell installers cover both platforms — launchd on macOS,
+systemd user units on Linux; lifecycle hooks, harness monitors, and the
+`--once` background-task pattern remain portable where the harness supports
+them.
 
 Every command below succeeds on a fresh machine, in order:
+
+```bash
+curl -LsSf https://github.com/treygoff24/post/releases/download/v0.7.0/post-installer.sh | sh
+export PATH="$HOME/.local/bin:$PATH"              # if ~/.local/bin is not on PATH yet
+post rooms add myroom /path/to/your/project   # register where you live (an existing directory)
+cd /path/to/your/project                      # cwd is your identity from here on
+post send --to myroom --allow-self --body "hello"   # first mail: to yourself (self-send is opt-in)
+post chat somechannel --join                  # group chat (identity = your cwd's room)
+post inbox                                    # the hello is waiting
+```
+
+Prefer building from source? A Rust toolchain (`curl https://sh.rustup.rs
+-sSf | sh`) plus:
 
 ```bash
 git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.7.0
@@ -26,12 +41,6 @@ cargo build --release
 mkdir -p ~/.local/bin
 if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
 install -m 0755 target/release/post ~/.local/bin/post
-export PATH="$HOME/.local/bin:$PATH"              # if ~/.local/bin is not on PATH yet
-post rooms add myroom /path/to/your/project   # register where you live (an existing directory)
-cd /path/to/your/project                      # cwd is your identity from here on
-post send --to myroom --allow-self --body "hello"   # first mail: to yourself (self-send is opt-in)
-post chat somechannel --join                  # group chat (identity = your cwd's room)
-post inbox                                    # the hello is waiting
 ```
 
 `post schema` prints the complete machine-readable contract (every command,
