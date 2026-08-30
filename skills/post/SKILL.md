@@ -88,7 +88,7 @@ post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
 post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
-post watch [--room <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
+post watch [--room <room>]... [--own <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
 post who [--room <room>]... [--text]
 post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]  # full surface: post owner init --help
 post schema
