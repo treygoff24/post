@@ -1,92 +1,89 @@
-# HANDOFF — resume Plan B on the devbox
+# HANDOFF — Plan B workflow mid-run, babysit watch active
 
-Written 2026-08-31 on the Mac at the end of the v0.8.0 ship session. Transient:
-the session that consumes this deletes it. Work graph truth is beads; this file
-is the narrative bridge across machines.
+Written 2026-08-31 ~19:50Z at a 5hr-limit account rotation. Transient: the
+session that consumes this deletes it (or rewrites it at its own closeout).
+Work graph truth is beads (`post-esa` epic); narrative is this file + bead
+`post-rsq` comments + the babysit log at `~/tmp/plan-b-babysit-log.md`.
 
 ## Where things stand
 
-**v0.8.0 is fully shipped.** GitHub release live and verified
-(https://github.com/treygoff24/post/releases/tag/v0.8.0), Mac `~/.local/bin/post`
-and devbox host `/usr/local/bin/post` both upgraded (sha256-verified; devbox keeps
-`post-0.7.0.bak`), announcements posted in `#machineroom-devbox`. Follow-up
-canonicalization pass (2026-08-31, Trey ruling): trey/matt/jc cell
-`/usr/local/bin/post` all at 0.8.0, root-owned, exactly one `.bak` each, the
-0.5/0.6/pre-* rollback graveyard purged at root level everywhere; in-cell smoke
-green. Cell binaries update from the Mac via host incus at each release — the
-arrangement is codified in docs/RELEASING.md. Pending on the trey-cell resident
-(atlasos, green-lit in `#machineroom-devbox`): delete their shadowing
-`~/.local/bin/post` + rollback siblings and re-arm their watch, so PATH falls
-through to the canonical copy. What shipped:
+**Plan B (stateful read layer) is EXECUTING** as delegate workflow
+`wf_9484b4e85ae6`, launched from the integration worktree
+`.worktrees/plan-plan-b-stateful-read-layer` (branch
+`plan/plan-b-stateful-read-layer`). 9 tasks, 6 waves. Progress at handoff:
 
-- `watch --from now` — opt-in backlog suppression (one discarded pre-loop scan;
-  fail-open). The default backlog replay is a deliberate recovery invariant
-  (`src/commands/watch.rs:266-273`) — never flip it.
-- Actionable ring lines: digest lines carry `[first..last]` ids and a ready-made
-  `--since 'fencepost'` (last id char replaced with `!` so exclusive `--since`
-  includes first_id). CONTRACT.md documents both.
-- Doctor: empty store is healthy (Info `config.rooms_empty`, not Error) — fixed
-  papercut pc2_97e06ad35353d2e3.
-- Hook-notice disclaimer trim: the no-authority norm is stated once canonically
-  (post SKILL.md, README Laws, global CLAUDE.md); the per-notice repetition is
-  gone from all Mac hook adapters (8 installed copies deployed).
-  `skills/post/hooks/identity-card.mjs` FRAME deliberately untouched. The devbox
-  has **no post hook adapters**, so nothing to deploy there.
-- `scripts/smoke-installed.sh` — live smoke for any installed binary against a
-  throwaway root (promoted from the release verification; RELEASING.md points
-  at it).
+- **B1 (cursor_state module) DONE and merged green** — commit `0acef93` (merge
+  of `809fb9a`), 4/4 verify rows (cargo test cursor_state, full suite, clippy
+  -D warnings, fmt). Panel: opus + sol + omp-retry. Adjudication: decision
+  `fix` — one ADOPTED blocker **B1-R1** (mode-000 messages dir discards the
+  parsed v1 baseline → permanent cursor loss; lane also deleted the base test
+  guarding it). **fix:B1 had not yet appeared in the journal at handoff** —
+  first thing to verify on resume.
+- **B2 + B3 executing** (wave-2 pipelining off B1's merge; codex/luna lanes).
+- **close:1 gate** rejected once for unacknowledged coordinator work, then
+  **CO-B1-1 and CO-B1-2 were acknowledged** (plan-unpark, at 0acef93) —
+  close-retry:1 was in flight at handoff.
 
-## The task: Plan B — stateful read layer (bead `post-rsq`)
+## Resume ritual (next session)
 
-Per-agent channel cursors, `post catchup`, real unread counts, search. Kills the
-"610 unread ???" problem. **Level 2 reviewed plan** per writing-plans: Phase 0
-goal lock → one architect pass + adversarial fresh-context plan-reviewer →
-plan-lint → compile to beads (+ workflow if lanes warrant).
+1. `cd /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer`
+   (workflow commands ONLY work from this cwd).
+2. `delegate workflow status wf_9484b4e85ae6` + tail
+   `.delegate/workflows/wf_9484b4e85ae6/journal.jsonl`.
+3. **If failed again with `SupervisorWatchdogExit`**: read
+   `~/tmp/wf-status-samples.log` (1Hz status sampler, pid 3041795, self-stops
+   ~20:35Z) around the death timestamp — a `failed`/`killed`/READFAIL sample
+   identifies the true watchdog trigger (C3 below). Then resume:
+   `DELEGATE_WORKFLOW_WATCHDOG_TIMEOUT_SECONDS=3600 delegate workflow run --resume wf_9484b4e85ae6`
+   (journal replay caches all finished agents).
+4. Re-arm the watch: background `delegate workflow wait wf_9484b4e85ae6`,
+   /babysit loop ~20 min (Trey delegated the interval), log at
+   `~/tmp/plan-b-babysit-log.md` (header has territory/read-only rules and the
+   review-time checklist).
+5. At workflow terminal success: final review per babysit skill step 6 — run
+   `tests/acceptance.sh` yourself on final HEAD, walk the checklist, verdict +
+   rulings list to Trey. Merged spine lands on the plan branch; close
+   fast-forwards main; then commit/push Forgejo.
 
-### Phase 0 rulings — already decided (recorded on post-rsq)
+## Open items (from babysit log — read it for full detail)
 
-Trey delegated these to the agent ("you decide: which will be best for agents
-like you using the tool"):
+- **C3 (open):** runs 1+2 were killed by the supervisor watchdog for an
+  unknown trigger. Established: NOT heartbeat staleness (env var 600s was live
+  in run 2, death 28s after last event). Suspects: `terminal` or
+  `state_missing` status.json reads. Runtime never logs the true reason
+  (papercut pc2_a75176e09d6dd6fc). Run 3 carries 3600s timeout, verified in
+  /proc.
+- **N1:** reviewer route `cursor` uses invalid model `grok-4.6-xhigh-fast`
+  (needs `cursor-` prefix); every review round burns 2 failed attempts then
+  self-heals via omp retry. Deliberate: leave alone (script edit breaks replay
+  hash). Fix the routing table for FUTURE compiles:
+  `docs/plans/plan-b-stateful-read-layer.md` line ~177.
+- **CO-B1-1 (acknowledged, work owed):** delete dead
+  `require_activated_for_state_migration` (migration_fence.rs) + the `const _`
+  binding in channel_state.rs:16-17 — route into B5's lane or do at
+  coordinator level before close. Ruling: delete, not gate.
+- **CO-B1-2 (acknowledged, work owed):** B6 scope addition — rewrite
+  POST_ARX_GENERATION schema entry (schema.rs:279) to the real cursor
+  contract, drop `.channel-state.v1.bak` claim. Verify cmds in
+  `.delegate/plan-state.json` under coordinator.
+- **W (new, unjudged):** claude-2 stale delegate run = abandoned first
+  adjudicate attempt, harmless zombie; `delegate cancel claude-2` if it
+  lingers.
+- Loose end from last handoff, still pending: atlasos (trey-cell) owes
+  deletion of their shadowing `~/.local/bin/post`.
 
-1. **Cursor granularity: per-room-per-channel**, plus one per-room mail cursor.
-   Agents catch up channel-by-channel; a room-level cursor would mark every
-   channel read after one catchup; per-message read-marks are write
-   amplification with no catchup value.
-2. **No rollout compat window.** Cursors are new orthogonal state; default watch
-   stays cursor-free, armed doorbells unaffected. Hard invariant: advancing a
-   cursor via `catchup` must NOT suppress watch rings — cursors drive
-   catchup/unread counts, never the doorbell.
-3. **Retention/expiry: out of scope** for Plan B.
-4. **Body previews in watch lines: yes** (Trey ruled directly) — capped ~80
-   chars, sanitized, untrusted-framed.
-5. **CLI read-time framing** (the binary's "banner diet" layer — third layer of
-   the disclaimer question) is an open item for Plan B's contract pass, not
-   pre-decided.
+## Infra changes made this session (survive rotation)
 
-So the goal lock is mostly pre-resolved: confirm scope with Trey in two
-sentences, then go to architecture. Planned recon: run the
-`agent-ergonomics-and-intuitiveness-maximization-for-cli-tools` skill in
-audit-only mode as Phase 1 evidence.
+- `~/.delegate/config.work.json`: earlier `stallMinutes: 20` got reverted by
+  provisioning — durable tuning belongs in `config.work.local.json` (not yet
+  done; watchdog is handled via env var on resume instead).
+- Papercuts filed: pc2_8046adb9f3417794 (stall watchdog vs Sol), 
+  pc2_a75176e09d6dd6fc (5s workflow watchdog default + unlogged trigger).
 
-## After Plan B
+## Rulings this session (also on bead post-rsq)
 
-Plan C (mentions, notify levels, pins, ack) authors only once B's contract
-freezes. Note `chat --re ID` reply threading already exists — don't redesign it.
-
-## Loose ends carried over
-
-- Mac doctor warning `profiles.claude-space.inert` — pre-existing, flagged to
-  Trey, not ours to fix (Free Claude's room).
-- Stale delegate run `omp-12` (group `perfwave`, ~10d old) on the Mac — predates
-  this session, left alone.
-- fc/sol cells are canonical too (Trey extended the ruling): root-owned 0.8.0
-  at `/usr/local/bin/post`, their 0.6.0 self-builds kept as the single `.bak`,
-  `~/.local/bin/post` now a symlink to canonical (their systemd units hardcode
-  it). Doctor healthy as both residents; fc bridge sweeper green; both mailed.
-  Long-running watches everywhere keep the old inode until restarted.
-- `~/.claude-shared/rules/post-mail-doorbell.md` (Mac) now documents the backlog
-  replay + `--from now` opt-out; propagates to the devbox cell via nightly
-  estate-sync — verify it landed if a devbox session needs it sooner.
-- bd papercut pc2_7fd388d3b60c3939: read-only `bd show` re-exports
-  `.beads/issues.jsonl` and dirties the tree — avoid bd calls between release
-  preflight and upload.
+1. Watchdog timeout raised via env var + attempted config (workflow died
+   healthy twice; resume is lossless via journal replay).
+2. Cursor reviewer route left broken mid-run (self-heals; replay-hash risk).
+3. CO-B1-1: delete the fence function outright. CO-B1-2: accept into B6 scope.
+4. Coordinator acks issued at 0acef93 so wave-1 close could proceed.
