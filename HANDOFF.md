@@ -79,8 +79,11 @@ freezes. Note `chat --re ID` reply threading already exists — don't redesign i
   Trey, not ours to fix (Free Claude's room).
 - Stale delegate run `omp-12` (group `perfwave`, ~10d old) on the Mac — predates
   this session, left alone.
-- Devbox fc/sol run self-managed post binaries (notified of 0.8.0, upgrade is
-  theirs). Long-running watches everywhere keep the old inode until restarted.
+- fc/sol cells are canonical too (Trey extended the ruling): root-owned 0.8.0
+  at `/usr/local/bin/post`, their 0.6.0 self-builds kept as the single `.bak`,
+  `~/.local/bin/post` now a symlink to canonical (their systemd units hardcode
+  it). Doctor healthy as both residents; fc bridge sweeper green; both mailed.
+  Long-running watches everywhere keep the old inode until restarted.
 - `~/.claude-shared/rules/post-mail-doorbell.md` (Mac) now documents the backlog
   replay + `--from now` opt-out; propagates to the devbox cell via nightly
   estate-sync — verify it landed if a devbox session needs it sooner.
