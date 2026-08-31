@@ -192,6 +192,41 @@ pub struct ChatReadOutput {
     pub skipped: usize,
 }
 
+/// A direct-mail item in a `post catchup` target. The envelope and body stay
+/// separate so callers can deserialize the same shape as a normal mail read.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CatchupMailItem {
+    pub envelope: Envelope,
+    pub body: String,
+}
+
+/// One inspected source in a catchup response. Internal tagging keeps the
+/// stable `source` discriminator first while allowing mail and channel targets
+/// to retain their existing framing and message shapes.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CatchupTarget {
+    Mail {
+        framing: Framing,
+        messages: Vec<CatchupMailItem>,
+        count: usize,
+    },
+    Channel {
+        channel: String,
+        framing: ChannelFraming,
+        messages: Vec<ChatMessageItem>,
+        count: usize,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CatchupOutput {
+    pub ok: bool,
+    pub room: String,
+    pub targets: Vec<CatchupTarget>,
+    pub count: usize,
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }

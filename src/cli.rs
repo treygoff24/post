@@ -53,6 +53,8 @@ pub(crate) enum Command {
     Inbox(InboxArgs),
     /// Read one unread message by full id or unique prefix.
     Read(ReadArgs),
+    /// Consume and print the complete unread slice for mail, a channel, or all targets.
+    Catchup(CatchupArgs),
     /// List or register rooms.
     Rooms(RoomsArgs),
     /// Show or change this room's display name and emoji pfp (presentation only; identity stays the room id).
@@ -67,6 +69,29 @@ pub(crate) enum Command {
     Watch(WatchArgs),
     /// Report which rooms have a live watch and when they were last seen (no PIDs).
     Who(WhoArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    override_usage = "post catchup [<CHANNEL> | --mail | --all] [--framing auto|full|compact]"
+)]
+pub(crate) struct CatchupArgs {
+    /// Channel name; catches up exactly this joined channel.
+    #[arg(value_name = "CHANNEL", value_parser = nonempty_without_controls, conflicts_with_all = ["mail", "all"])]
+    pub channel: Option<String>,
+
+    /// Catch up direct mail only.
+    #[arg(long, conflicts_with_all = ["channel", "all"])]
+    pub mail: bool,
+
+    /// Catch up direct mail and every joined channel (the default).
+    #[arg(long, conflicts_with_all = ["channel", "mail"])]
+    pub all: bool,
+
+    /// Banner form for body-bearing catchup output. Auto emits one compact
+    /// banner per non-empty invocation; JSON carries the structured framing.
+    #[arg(long, value_enum)]
+    pub framing: Option<FramingMode>,
 }
 
 #[derive(Debug, Args)]

@@ -494,7 +494,8 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         })
         | Command::Profile(crate::cli::ProfileArgs {
             command: Some(crate::cli::ProfileCommand::Set(_) | crate::cli::ProfileCommand::Clear),
-        }) => true,
+        })
+        | Command::Catchup(_) => true,
         Command::Read(args) => !args.peek,
         Command::Chat(args) => {
             args.join
@@ -548,6 +549,8 @@ mod tests {
             &["post", "chat", "tax", "--send", "--body", "x"],
             &["post", "chat", "tax", "--discard"],
             &["post", "chat", "tax", "--discard-through", "id"],
+            &["post", "catchup"],
+            &["post", "catchup", "--mail"],
             &["post", "rooms", "add", "alpha", "/tmp"],
             &["post", "profile", "set", "--name", "x"],
             &["post", "profile", "clear"],
