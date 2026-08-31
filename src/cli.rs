@@ -451,6 +451,15 @@ pub(crate) struct ReadArgs {
     #[arg(long, value_enum)]
     pub framing: Option<FramingMode>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum WatchFrom {
+    /// Suppress everything pending when the watch starts; only later arrivals ring.
+    /// This enum is intentionally single-valued for now so future starts such
+    /// as `--from <id>` can grow without changing the flag shape.
+    Now,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
     /// Mailbox room; repeat to merge rooms, or omit for cwd resolution.
@@ -472,6 +481,15 @@ pub(crate) struct WatchArgs {
     /// empty scan emits nothing; --interval-ms has no effect.
     #[arg(long, conflicts_with = "once")]
     pub snapshot: bool,
+
+    /// Start after the current backlog instead of ringing it; currently only `now`.
+    #[arg(
+        long = "from",
+        value_name = "WHEN",
+        value_enum,
+        conflicts_with = "snapshot"
+    )]
+    pub from: Option<WatchFrom>,
 
     /// In snapshot mode, emit only the last N events in scan order; 0 means
     /// unlimited. Omitted events remain unread because watch never consumes.

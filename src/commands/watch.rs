@@ -1,6 +1,6 @@
 use crate::channel::{message_files, parse_channel_message, ChannelPaths, CHANNELS_DIR};
 use crate::channel_state::ChannelState;
-use crate::cli::WatchArgs;
+use crate::cli::{WatchArgs, WatchFrom};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
@@ -98,8 +98,19 @@ impl WatchDigest {
             .source
             .strip_prefix("channel:")
             .map_or_else(|| self.source.clone(), |channel| format!("#{channel}"));
+        let first_id = crate::output::sanitize_text_header(&self.first_id);
+        let last_id = crate::output::sanitize_text_header(&self.last_id);
+        let bounds = format!(" [{first_id}..{last_id}]");
+        let action = self
+            .source
+            .strip_prefix("channel:")
+            .map(|_| {
+                let since = digest_since_fencepost(&first_id);
+                format!(" [--since {}]", crate::mailbox::shell_quote(&since))
+            })
+            .unwrap_or_default();
         if self.sender_counts.is_empty() {
-            return format!("{label}: {} new\n", self.count);
+            return format!("{label}: {} new{bounds}{action}\n", self.count);
         }
         let show_counts = self.sender_counts.iter().any(|(_, count)| *count > 1);
         let mut senders = self
@@ -119,8 +130,25 @@ impl WatchDigest {
         if omitted > 0 {
             senders.push(format!("+{omitted} more"));
         }
-        format!("{label}: {} new ({})\n", self.count, senders.join(", "))
+        format!(
+            "{label}: {} new ({}){bounds}{action}\n",
+            self.count,
+            senders.join(", ")
+        )
     }
+}
+
+/// `chat --since` is exclusive (`id > bound`). A valid message id contains
+/// only `-`, digits, and hex letters, all of which sort after `!`; replacing
+/// the final id character with `!` therefore creates a process-local lower
+/// fencepost that includes `first_id` itself in the follow-up read.
+fn digest_since_fencepost(first_id: &str) -> String {
+    let Some((last, _)) = first_id.char_indices().next_back() else {
+        return "!".to_owned();
+    };
+    let mut fencepost = first_id[..last].to_owned();
+    fencepost.push('!');
+    fencepost
 }
 
 fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
@@ -197,6 +225,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         own: owned_rooms,
         once,
         snapshot,
+        from,
         limit,
         interval_ms,
         text,
@@ -274,6 +303,21 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // Grows for the life of the watch (like each target's seen set): bounded
     // by total channel messages, a few bytes each — deliberate, not a leak.
     let mut emitted_channel_ids = HashSet::new();
+    if matches!(from, Some(WatchFrom::Now)) {
+        // `--from now` is deliberately process-local: one discarded scan
+        // seeds the same suppression sets the normal scan uses, without
+        // touching channel state, heartbeats, or stdout. Messages arriving
+        // after this pass remain eligible for the normal loop below.
+        // Reuse the existing wrapper so transient scan failures keep the
+        // normal warn-and-poll posture rather than making this opt-in fatal.
+        let _ = scan_targets(
+            context,
+            &mut targets,
+            &owned_rooms,
+            &mut emitted_channel_ids,
+            |_| true,
+        );
+    }
     // Snapshot is a one-shot poll for lifecycle hooks — it must not mint or
     // refresh a presence heartbeat, or `post who` would report a live watch
     // for five seconds after a hook that already exited.
@@ -1087,9 +1131,12 @@ mod tests {
 
         assert_eq!(
             repeated[0].text_line(),
-            "#ops: 3 new (sol ×2, atlasos ×1)\n"
+            "#ops: 3 new (sol ×2, atlasos ×1) [c1..c3] [--since 'c!']\n"
         );
-        assert_eq!(singletons[0].text_line(), "mail: 2 new (alpha, beta)\n");
+        assert_eq!(
+            singletons[0].text_line(),
+            "mail: 2 new (alpha, beta) [m1..m2]\n"
+        );
     }
 
     #[test]

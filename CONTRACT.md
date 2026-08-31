@@ -316,11 +316,15 @@ diagnostics/errors.
   membership, and messages. `--fix` creates missing dirs/defaults only — never
   touches rules content, mail, channel history, membership, or cursors. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
-  manual reconciliation. `--brief` prints exactly one human-readable summary
-  line, conflicts with `--json`, and preserves the doctor exit dictionary:
-  0 healthy / 1 findings / 3 fix-failed.
-- `post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>]
-  [--digest] [--text]` — the
+  manual reconciliation. `rooms.json` may be an empty JSON object on a fresh
+  mailbox: doctor reports it as an info-only `config.rooms_empty` check with a
+  `post rooms add` suggestion and exits 0, so `doctor --fix && doctor` succeeds
+  under `set -e` before the first room is registered. Malformed, non-object, or
+  non-string registries remain `config.rooms_invalid` errors. `--brief` prints
+  exactly one human-readable summary line, conflicts with `--json`, and
+  preserves the doctor exit dictionary: 0 healthy / 1 findings / 3 fix-failed.
+- `post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--from now]
+  [--interval-ms <ms>] [--digest] [--text]` — the
   doorbell: blocks and streams one event per arriving direct mail or joined
   channel message so any harness monitor becomes a notifier. Room resolution as
   `inbox` (unregistered explicit rooms are accepted with a one-line stderr
@@ -336,7 +340,11 @@ diagnostics/errors.
   when no native watcher is available or it fails mid-run. The exclusive-link
   delivery commit means a listing never sees a partial direct-mail file, and
   the first batch emits the current unread backlog plus channel messages not
-  in the room's seen-set, so there is no start-vs-arrival loss window. Emits ENVELOPE METADATA ONLY — never body
+  in the room's seen-set, so there is no start-vs-arrival loss window. `--from now`
+  (which conflicts with `--snapshot`) instead performs one discarded startup
+  scan per target to seed only process-local suppression state; it emits nothing
+  from that backlog, and only messages arriving after that scan ring. Omitting
+  `--from` preserves the backlog-replay behavior above. Emits ENVELOPE METADATA ONLY — never body
   content, on any surface; consumption and its framing banner stay exclusively
   with `post read` or `post chat`. Default output NDJSON, one object per line:
   direct mail `{"event":"mail", room, id, from, kind, subject, sent, reason}`;
@@ -356,15 +364,20 @@ diagnostics/errors.
   `source` is `mail` or `channel:<name>`; `from` de-duplicates senders in
   arrival order and caps them at five followed by `"+N more"`; `reason` is the
   shared per-event reason or `mixed`. Digest text is `#<channel>: N new
-  (<sender> ×<count>, ...)` or `mail: N new (...)`, omitting sender counts
-  when all are one and omitting the parenthesized list when no sender parsed.
+  (<sender> ×<count>, ...) [<first_id>..<last_id>] [--since <fencepost>]` for
+  channels, or `mail: N new (...) [<first_id>..<last_id>]` for direct mail. The
+  channel fencepost is strictly below `first_id` because `post chat --since <id>`
+  returns ids strictly greater than its bound; thus the copyable suffix includes
+  the whole digest at emission time. Sender counts are omitted when all are one
+  and the parenthesized list is omitted when no sender parsed.
   Each long-running poll touches `<room>/watch.heartbeat` (`<unix-secs>
   <interval-ms>`) when the room directory already exists, so `post who` can
   report live watches without PIDs. Snapshot mode never writes heartbeats.
   A watch is live when the stamp is not in the future and age is at most
   `interval*2 + slack` (legacy single-number stamps assume a 1000ms interval).
-  `--text` mirrors inbox/channel line formats with the subject, sender,
-  channel, and unreadable id all debug-escaped — the attacker-reachable fields
+  `--text` mirrors inbox/channel line formats with the full message id, subject,
+  sender, channel, and unreadable id all debug-escaped or sanitized as applicable
+  — the attacker-reachable fields
   (crafted subjects and `from` in hand-written mail/messages; filenames, which
   no envelope validation ever touches) cannot forge an event line, and stderr
   warnings debug-quote both path and message for the same reason. `--once`

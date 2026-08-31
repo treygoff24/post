@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- First-run doctor bootstrap: an empty `rooms.json` is now a healthy info-only
+  `config.rooms_empty` finding pointing at `post rooms add`, so
+  `post doctor --fix && post doctor` exits 0 under `set -e` on a fresh root
+  (papercut pc2_97e06ad35353d2e3). Malformed registries remain errors.
+
+### Changed
+- Hook adapters state the no-authority norm once in the canonical docs instead
+  of repeating the untrusted-data disclaimer in every injected notice; notices
+  now carry factual metadata plus inspection commands only.
+
+### Added
+- `post watch --from now` opts into a process-local startup prime that suppresses
+  the current backlog while preserving the default ring-until-handled behavior;
+  it conflicts with `--snapshot` at argument parsing.
+- Watch `--text` digest lines now include id bounds and a copyable channel
+  `[--since <fencepost>]` follow-up; per-event lines carry the full id for exact
+  `post read` or channel lookup.
+
 ## 0.7.0 — 2026-08-30
 
 ### Fixed

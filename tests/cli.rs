@@ -1,7 +1,7 @@
 use post::output::{
     ChannelsOutput, ChatDiscardOutput, ChatDiscardThroughOutput, ChatJoinOutput, ChatReadOutput,
-    ChatSendOutput, DoctorOutput, ErrorEnvelope, InboxOutput, ReadOutput, RoomsOutput,
-    SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
+    ChatSendOutput, DoctorOutput, DoctorSeverity, ErrorEnvelope, InboxOutput, ReadOutput,
+    RoomsOutput, SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -1810,8 +1810,9 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     assert!(!sandbox.mail_root.exists());
 
     let fixed = sandbox.run(&["doctor", "--fix"]);
-    assert_eq!(fixed.status.code(), Some(1));
+    assert_eq!(fixed.status.code(), Some(0));
     let report: DoctorOutput = from_stdout(&fixed);
+    assert!(report.ok);
     assert!(report.fixed.iter().any(|path| path.ends_with("rooms.json")));
     assert!(sandbox.mail_root.join("rooms.json").is_file());
     assert!(sandbox.mail_root.join("rules.json").is_file());
@@ -1846,6 +1847,84 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
         .checks
         .iter()
         .any(|check| check.id == "state.malformed_mail"));
+}
+
+#[test]
+fn doctor_fix_then_doctor_is_healthy_on_a_fresh_root() {
+    let sandbox = Sandbox::new_unseeded();
+
+    // These are the two commands a set -e bootstrap runs; both must succeed
+    // before an operator can register the first room.
+    let fixed = sandbox.run(&["doctor", "--fix"]);
+    assert_success(&fixed);
+    let fixed_report: DoctorOutput = from_stdout(&fixed);
+    assert!(fixed_report.ok);
+    assert!(fixed_report
+        .checks
+        .iter()
+        .all(|check| check.severity != DoctorSeverity::Error));
+
+    let diagnosed = sandbox.run(&["doctor"]);
+    assert_success(&diagnosed);
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    assert!(report.ok);
+    assert_eq!(report.status, "healthy");
+    assert!(report
+        .checks
+        .iter()
+        .all(|check| check.severity != DoctorSeverity::Error));
+}
+
+#[test]
+fn doctor_reports_empty_rooms_as_info_not_invalid() {
+    let sandbox = Sandbox::new_unseeded();
+    fs::create_dir_all(&sandbox.mail_root).expect("create mailbox root");
+    fs::write(sandbox.mail_root.join("rooms.json"), "{}\n").expect("write empty rooms");
+    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked": []}"#).expect("write rules");
+    fs::create_dir_all(sandbox.mail_root.join("archive")).expect("create archive");
+
+    let output = sandbox.run(&["doctor"]);
+    assert_success(&output);
+    let report: DoctorOutput = from_stdout(&output);
+    let empty = report
+        .checks
+        .iter()
+        .find(|check| check.id == "config.rooms_empty")
+        .expect("empty rooms finding");
+    assert_eq!(empty.severity, DoctorSeverity::Info);
+    assert!(empty.message.contains("no rooms registered"));
+    assert!(empty.suggested_fix.contains("post rooms add"));
+    assert!(!report
+        .checks
+        .iter()
+        .any(|check| check.id == "config.rooms_invalid"));
+    assert_eq!(report.count, 0);
+}
+
+#[test]
+fn doctor_keeps_malformed_rooms_as_invalid_errors() {
+    let sandbox = Sandbox::new_unseeded();
+    fs::create_dir_all(&sandbox.mail_root).expect("create mailbox root");
+    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked": []}"#).expect("write rules");
+    fs::create_dir_all(sandbox.mail_root.join("archive")).expect("create archive");
+
+    let malformed_rooms: &[&[u8]] = &[b"[]", br#"{"a": 1}"#, b"\xff\xfe"];
+    for rooms in malformed_rooms {
+        fs::write(sandbox.mail_root.join("rooms.json"), rooms).expect("write malformed rooms");
+        let output = sandbox.run(&["doctor"]);
+        assert_eq!(output.status.code(), Some(1), "rooms fixture: {rooms:?}");
+        let report: DoctorOutput = from_stdout(&output);
+        let invalid = report
+            .checks
+            .iter()
+            .find(|check| check.id == "config.rooms_invalid")
+            .expect("invalid rooms finding");
+        assert_eq!(invalid.severity, DoctorSeverity::Error);
+        assert_eq!(
+            invalid.message,
+            "rooms.json is not a non-empty JSON object of string paths"
+        );
+    }
 }
 
 #[test]
@@ -4106,6 +4185,184 @@ fn watch_once_exits_zero_after_emitting_the_backlog() {
         WatchEvent::Unreadable { id, .. } => panic!("unexpected unreadable event for {id}"),
         WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),
     }
+}
+
+#[test]
+fn watch_from_now_suppresses_backlog_and_emits_post_start_mail() {
+    let sandbox = Sandbox::new();
+    let backlog = sandbox.send_json("watcher-test", "backlog body");
+    let child = post_command()
+        .args([
+            "watch",
+            "--room",
+            "claude-space",
+            "--from",
+            "now",
+            "--once",
+            "--interval-ms",
+            "100",
+        ])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn from-now watch child");
+    let heartbeat = sandbox
+        .mail_root
+        .join("claude-space")
+        .join("watch.heartbeat");
+    for _ in 0..100 {
+        if heartbeat.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        heartbeat.exists(),
+        "watch did not reach startup before the send"
+    );
+    let after_start = sandbox.send_json("watcher-test", "arrived after startup");
+    let output = child
+        .wait_with_output()
+        .expect("collect from-now watch output");
+    assert_success(&output);
+    let raw = stdout(&output);
+    assert!(
+        !raw.contains(&backlog.envelope.id),
+        "--from now must suppress the pre-existing backlog: {raw}"
+    );
+    assert!(
+        raw.contains(&after_start.envelope.id),
+        "--from now must emit a message delivered after startup: {raw}"
+    );
+}
+
+#[test]
+fn watch_without_from_still_emits_the_startup_backlog() {
+    let sandbox = Sandbox::new();
+    let backlog = sandbox.send_json("watcher-test", "backlog body");
+    let output = sandbox.run(&[
+        "watch",
+        "--room",
+        "claude-space",
+        "--once",
+        "--interval-ms",
+        "100",
+    ]);
+    assert_success(&output);
+    let events = watch_events(&output.stdout);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            WatchEvent::Mail { item, .. } if item.id == backlog.envelope.id
+        )),
+        "default watch must retain startup backlog replay"
+    );
+}
+
+#[test]
+fn watch_from_now_conflicts_with_snapshot_at_parse() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["watch", "--from", "now", "--snapshot"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(
+        (error.error.message.contains("conflicts with")
+            || error.error.message.contains("cannot be used with"))
+            && error.error.message.contains("--snapshot")
+            && error.error.message.contains("--from"),
+        "parse error must name the conflicting --snapshot flag: {}",
+        error.error.message
+    );
+}
+
+#[test]
+fn watch_text_event_line_contains_full_message_id() {
+    let sandbox = Sandbox::new();
+    let sent = sandbox.send_json("watcher-test", "text body");
+    let output = sandbox.run(&["watch", "--room", "claude-space", "--snapshot", "--text"]);
+    assert_success(&output);
+    let raw = stdout(&output);
+    assert!(
+        raw.lines().any(|line| line.contains(&sent.envelope.id)),
+        "text ring line must carry the full id for post read: {raw}"
+    );
+}
+
+#[test]
+fn watch_text_digest_suffix_runs_since_follow_up_for_exact_messages() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "workbench", &alpha);
+    join_channel(&sandbox, "workbench", &beta);
+    assert_success(&sandbox.run_in(&["chat", "workbench", "--discard", "--json"], None, &beta));
+
+    let mut sent_ids = Vec::new();
+    for body in ["first digest", "second digest", "third digest"] {
+        let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+            &[
+                "chat",
+                "workbench",
+                "--send",
+                "--anyway",
+                "--body",
+                body,
+                "--json",
+            ],
+            None,
+            &alpha,
+        ));
+        sent_ids.push(sent.message.id);
+    }
+
+    let watched = sandbox.run_in(
+        &[
+            "watch",
+            "--room",
+            "beta",
+            "--snapshot",
+            "--digest",
+            "--text",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&watched);
+    let watched_stdout = stdout(&watched);
+    let line = watched_stdout
+        .lines()
+        .find(|line| line.starts_with("#workbench:"))
+        .expect("channel digest text line");
+    let marker = "--since '";
+    let since = line
+        .strip_prefix("#workbench:")
+        .and_then(|_| line.split_once(marker))
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(id, _)| id.to_owned())
+        .expect("digest must include a copyable --since command");
+    assert!(
+        line.contains(&sent_ids[0]) && line.contains(&sent_ids[2]),
+        "digest line must surface both id bounds: {line}"
+    );
+
+    let follow_up = sandbox.run_in(
+        &["chat", "workbench", "--since", &since, "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&follow_up);
+    let follow_up: ChatReadOutput = from_stdout(&follow_up);
+    let ids: Vec<String> = follow_up
+        .messages
+        .into_iter()
+        .map(|message| message.message.id)
+        .collect();
+    assert_eq!(ids, sent_ids);
 }
 
 #[test]

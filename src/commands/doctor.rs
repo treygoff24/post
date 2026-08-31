@@ -410,27 +410,38 @@ fn detect_rooms(context: &Context, path: &Path, checks: &mut Vec<DoctorCheck>) -
         .ok()
         .and_then(|bytes| serde_json::from_slice::<RoomMap>(&bytes).ok())
     {
-        Some(rooms) if !rooms.is_empty() => {
-            for (name, value) in &rooms {
-                if let Err(reason) = validate_room_name(name) {
-                    checks.push(check(
-                        &format!("config.room_name.{name}"),
-                        DoctorSeverity::Error,
-                        path,
-                        &reason,
-                        false,
-                        "Replace the invalid key in rooms.json with one path-safe component.",
-                    ));
-                }
-                if let Err(reason) = context.expand_room_path(value) {
-                    checks.push(check(
-                        &format!("config.room_path.{name}"),
-                        DoctorSeverity::Error,
-                        path,
-                        &reason,
-                        false,
-                        "Replace the invalid room path with an absolute or '~/...' path.",
-                    ));
+        Some(rooms) => {
+            if rooms.is_empty() {
+                checks.push(check(
+                    "config.rooms_empty",
+                    DoctorSeverity::Info,
+                    path,
+                    "no rooms registered",
+                    false,
+                    "Register the first room with `post rooms add <name> <path>`.",
+                ));
+            } else {
+                for (name, value) in &rooms {
+                    if let Err(reason) = validate_room_name(name) {
+                        checks.push(check(
+                            &format!("config.room_name.{name}"),
+                            DoctorSeverity::Error,
+                            path,
+                            &reason,
+                            false,
+                            "Replace the invalid key in rooms.json with one path-safe component.",
+                        ));
+                    }
+                    if let Err(reason) = context.expand_room_path(value) {
+                        checks.push(check(
+                            &format!("config.room_path.{name}"),
+                            DoctorSeverity::Error,
+                            path,
+                            &reason,
+                            false,
+                            "Replace the invalid room path with an absolute or '~/...' path.",
+                        ));
+                    }
                 }
             }
             Some(rooms)
