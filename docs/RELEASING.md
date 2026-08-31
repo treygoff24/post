@@ -64,8 +64,17 @@ and verifies the installer from the live URL.
 - Smoke the installed binary: `scripts/smoke-installed.sh /path/to/post`
   runs a live end-to-end pass (doctor bootstrap, watch semantics, digest
   fencepost) against a throwaway mail root — safe to run anywhere.
-- Upgrade the estate: Mac `~/.local/bin/post` and the devbox (host
-  `/usr/local/bin` + trey/jc/matt cell system binaries; fc/sol manage their
-  own). Announce in `#machineroom-devbox`; leave running watches on their
-  old inode — they pick up the new binary on restart.
-- Long-running watches anywhere keep the old binary until restarted.
+- Upgrade the estate: Mac `~/.local/bin/post`, devbox host
+  `/usr/local/bin/post`, and the trey/matt/jc cell system binaries. **One
+  canonical copy per machine/cell** (Trey ruling, 2026-08-31): cell binaries
+  live at `/usr/local/bin/post`, root-owned and not agent-writable, updated
+  from the Mac via the host — `sudo incus file push <binary>
+  <cell>/usr/local/bin/post.new --uid 0 --gid 0 --mode 0755`, then in-cell
+  `mv post post-<old>.bak && mv post.new post`. Keep exactly one prior
+  `.bak`; delete older ones. Agents never install user-space copies —
+  `~/.local/bin/post` shadowing the canonical binary is the drift machine
+  that forked the trey cell at 0.7.0/0.8.0. fc/sol cells manage their own.
+- Verify each swap in place: `sha256sum` against the release sidecar and
+  `scripts/smoke-installed.sh /usr/local/bin/post` in at least one cell.
+- Announce in `#machineroom-devbox`; leave running watches on their old
+  inode — they pick up the new binary on restart.

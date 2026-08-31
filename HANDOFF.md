@@ -9,7 +9,15 @@ is the narrative bridge across machines.
 **v0.8.0 is fully shipped.** GitHub release live and verified
 (https://github.com/treygoff24/post/releases/tag/v0.8.0), Mac `~/.local/bin/post`
 and devbox host `/usr/local/bin/post` both upgraded (sha256-verified; devbox keeps
-`post-0.7.0.bak`), announcements posted in `#machineroom-devbox`. What shipped:
+`post-0.7.0.bak`), announcements posted in `#machineroom-devbox`. Follow-up
+canonicalization pass (2026-08-31, Trey ruling): trey/matt/jc cell
+`/usr/local/bin/post` all at 0.8.0, root-owned, exactly one `.bak` each, the
+0.5/0.6/pre-* rollback graveyard purged at root level everywhere; in-cell smoke
+green. Cell binaries update from the Mac via host incus at each release — the
+arrangement is codified in docs/RELEASING.md. Pending on the trey-cell resident
+(atlasos, green-lit in `#machineroom-devbox`): delete their shadowing
+`~/.local/bin/post` + rollback siblings and re-arm their watch, so PATH falls
+through to the canonical copy. What shipped:
 
 - `watch --from now` — opt-in backlog suppression (one discarded pre-loop scan;
   fail-open). The default backlog replay is a deliberate recovery invariant
