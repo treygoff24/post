@@ -1,0 +1,198 @@
+mod common;
+
+use common::{
+    assert_migration_refused, assert_success, from_stdout, register_alpha_beta, seed_fence_store,
+    write_bad_channel, write_channel_message, write_custom_mail, Sandbox,
+};
+use post::output::{CatchupOutput, CatchupTarget};
+use serde_json::json;
+use std::fs;
+
+fn channel_fixture(sandbox: &Sandbox, members: &str) {
+    write_bad_channel(
+        sandbox,
+        "tax",
+        Some(members),
+        true,
+        r#"{"name":"tax","created":"2026-08-20 12:00:00 -0500","created_by":"beta"}"#,
+    );
+}
+
+#[test]
+fn channel_catchup_returns_full_slice_then_fresh_invocation_is_empty() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
+    for (index, body) in ["one", "two", "three"].iter().enumerate() {
+        let id = format!("20260820-120000-00000{}-aaaaa{}", index + 1, index + 1);
+        write_channel_message(&sandbox, "tax", &id, "alpha", "", body);
+    }
+
+    let first = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    assert_success(&first);
+    let first: CatchupOutput = from_stdout(&first);
+    assert_eq!(first.count, 3);
+    match &first.targets[..] {
+        [CatchupTarget::Channel {
+            messages, count, ..
+        }] => {
+            assert_eq!(*count, 3);
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[0].message.id, "20260820-120000-000001-aaaaa1");
+            assert_eq!(messages[2].message.id, "20260820-120000-000003-aaaaa3");
+        }
+        targets => panic!("unexpected targets: {targets:?}"),
+    }
+
+    let second = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    assert_success(&second);
+    let second: CatchupOutput = from_stdout(&second);
+    assert_eq!(second.count, 0);
+    assert!(matches!(
+        &second.targets[..],
+        [CatchupTarget::Channel { messages, count: 0, .. }] if messages.is_empty()
+    ));
+    assert!(fs::read_to_string(sandbox.mail_root.join("beta/cursors.json")).is_ok());
+}
+
+#[test]
+fn all_reports_inspected_empty_targets() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
+
+    let output = sandbox.run_in(&["catchup", "--all", "--json"], None, &beta);
+    assert_success(&output);
+    let output: CatchupOutput = from_stdout(&output);
+    assert_eq!(output.count, 0);
+    assert_eq!(output.targets.len(), 2);
+    assert!(matches!(
+        output.targets[0],
+        CatchupTarget::Mail { count: 0, .. }
+    ));
+    assert!(matches!(
+        output.targets[1],
+        CatchupTarget::Channel { count: 0, .. }
+    ));
+}
+
+#[test]
+fn malformed_channel_entry_fails_before_stdout_or_cursor() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
+    let id = "20260820-120000-000001-aaaaaa";
+    fs::write(
+        sandbox
+            .mail_root
+            .join(format!("channels/tax/messages/{id}.msg")),
+        "not a channel message",
+    )
+    .expect("malformed channel message");
+
+    let output = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    assert_eq!(output.status.code(), Some(78));
+    assert!(output.stdout.is_empty());
+    assert!(!sandbox.mail_root.join("beta/cursors.json").exists());
+    assert!(sandbox
+        .mail_root
+        .join(format!("channels/tax/messages/{id}.msg"))
+        .exists());
+}
+
+#[test]
+fn nonempty_catchup_to_dev_null_refuses_without_cursor() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
+    write_channel_message(
+        &sandbox,
+        "tax",
+        "20260820-120000-000001-aaaaaa",
+        "alpha",
+        "",
+        "visible body",
+    );
+
+    let output = sandbox.run_in_discarding_stdout(&["catchup", "tax"], &beta);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(common::stderr(&output).contains("/dev/null"));
+    assert!(!sandbox.mail_root.join("beta/cursors.json").exists());
+}
+
+#[test]
+fn malformed_mail_warns_and_valid_mail_moves() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let inbox = sandbox.mail_root.join("beta/inbox");
+    fs::create_dir_all(&inbox).expect("inbox");
+    let valid_id = "20260820-120000-aaaaaa";
+    let malformed_id = "20260820-120001-bbbbbb";
+    write_custom_mail(
+        &inbox,
+        valid_id,
+        &json!({
+            "id": valid_id,
+            "from": "alpha",
+            "to": "beta",
+            "kind": "note",
+            "subject": "",
+            "sent": "2026-08-20 12:00:00 -0500"
+        }),
+        "valid body",
+    );
+    fs::write(inbox.join(format!("{malformed_id}.mail")), "malformed").expect("bad mail");
+
+    let output = sandbox.run_in(&["catchup", "--mail", "--json"], None, &beta);
+    assert_eq!(output.status.code(), Some(0), "stderr: {:?}", output.stderr);
+    let parsed: CatchupOutput = from_stdout(&output);
+    assert_eq!(parsed.count, 1);
+    assert!(common::stderr(&output).contains("skipped malformed mail"));
+    assert!(!inbox.join(format!("{valid_id}.mail")).exists());
+    assert!(sandbox
+        .mail_root
+        .join(format!("beta/read/{valid_id}.mail"))
+        .exists());
+    assert!(inbox.join(format!("{malformed_id}.mail")).exists());
+}
+
+#[test]
+fn fenced_catchup_refuses_before_cursor_or_room_mutation() {
+    let sandbox = Sandbox::new();
+    seed_fence_store(&sandbox, r#"{"state":"fenced","generation":7}"#);
+    let before = fs::read_dir(&sandbox.mail_root)
+        .expect("mail root")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    let output = sandbox.run_in(
+        &["catchup", "--mail", "--json"],
+        None,
+        &sandbox.home.join("dest"),
+    );
+    assert_migration_refused(&output);
+    assert!(output.stdout.is_empty());
+    assert!(!sandbox.mail_root.join("dest").exists());
+    assert!(!sandbox.mail_root.join("dest/cursors.json").exists());
+    let after = fs::read_dir(&sandbox.mail_root)
+        .expect("mail root")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn matching_generation_allows_empty_catchup() {
+    let sandbox = Sandbox::new();
+    seed_fence_store(&sandbox, r#"{"state":"active","generation":7}"#);
+    let output = sandbox.run_in_env(
+        &["catchup", "--mail", "--json"],
+        None,
+        &sandbox.home.join("dest"),
+        &[("POST_ARX_GENERATION", "7")],
+    );
+    assert_success(&output);
+    let output: CatchupOutput = from_stdout(&output);
+    assert_eq!(output.room, "dest");
+    assert_eq!(output.count, 0);
+}

@@ -1,3 +1,4 @@
+mod catchup;
 mod channels;
 mod chat;
 mod doctor;
@@ -69,6 +70,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Channels(args) => channels::run(&context, args, pretty),
         Command::Inbox(args) => inbox::run(&context, args, pretty),
         Command::Read(args) => read::run(&context, args, json, pretty),
+        Command::Catchup(args) => catchup::run(&context, args, json, pretty),
         Command::Rooms(args) => rooms::run(&context, args, pretty),
         Command::Profile(args) => profile::run(&context, args, pretty),
         Command::Owner(args) => owner::run(&context, args, pretty),
