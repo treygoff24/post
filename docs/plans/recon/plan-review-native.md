@@ -438,3 +438,216 @@ and assert it is skipped rather than admitted. Or extract the party filter in B3
   directory lock rather than corrupting each other, so this is a wall-clock
   question and not a correctness one. Worth checking before assuming wave 2 is
   three times faster than sequential.
+
+---
+
+# Re-review at ddc63f9
+
+Scoped to the deltas in "plan-b: adjudicate both adversarial reviews into the
+plan". Fresh anchors only where the patch introduced something new.
+
+## Verdict: REMAINING FINDINGS
+
+One blocker, four majors, two minors. The two structural blockers from the first
+pass (the watch floor and the tests/cli.rs relay) are genuinely closed, and the
+delegating-read-seam approach is a better fix than the one I proposed. What
+remains is one ownership entry that did not get written down, one enumeration
+that stopped two functions short, and B9, which arrived with three problems the
+first pass could not have found because the task did not exist.
+
+## Blocker
+
+### R1. B6 must edit `src/output.rs` and does not own it
+
+The Interfaces section assigns it explicitly: "B6 the OutputShapes entries
+(wave 5)" (plan line 61). B6's `delivers` repeats it: "schema.rs entries and
+**OutputShapes** for catchup and search plus the three new listing fields".
+`OutputShapes` is `src/output.rs:561-577`, the same file the patch just
+wave-serialized.
+
+B6's `owned_files` (plan line 307) has eight entries and `src/output.rs` is not
+among them. B5 releases the file at the end of wave 4 and nothing picks it up.
+B6 is the last code task before the close, so this stalls the run at wave 5 with
+`post schema` still advertising nothing about catchup or search, which is the
+exact drift B6's own `schema_surface` test exists to catch.
+
+Wave 5 is B6 alone, so this collides with nothing.
+
+**Fix:** append `"src/output.rs"` to B6's `owned_files`.
+
+## Majors
+
+### R2. The surviving read seam is four functions; the plan names two
+
+The Interfaces bullet (plan line 48) and B3's `delivers` both enumerate exactly
+`ChannelState::load` and `stored_shape_is_valid` as permanent, with everything
+else transitional. Two more are load-bearing for callers B3 does not own:
+
+- `src/commands/watch.rs:965` is `Ok(state) => state.into_channels().into_iter().collect()`.
+  The startup floor is built from `into_channels`, not from `load` alone.
+- `src/channel.rs:621` is `if state.has_seen(channel, id)`, inside
+  `crossed_send_check` (fn at `src/channel.rs:590`, the `load` call the plan
+  cites at 609).
+
+A lane executing B3's sentence literally deletes both and breaks `watch.rs` and
+`channel.rs`, neither of which it owns. `max_seen` is used only at
+`src/commands/chat.rs:1266` and `:1393`, both inside B3's file, so it can go.
+
+This is loud rather than silent, since it is a compile error inside B3's
+`cargo test` row, but it stalls a lane in an unwatched run on a file the lane
+cannot touch.
+
+**Fix:** change both enumerations to `ChannelState::load`, `into_channels`,
+`has_seen`, and `stored_shape_is_valid`, and name the two call sites above.
+
+### R3. The scope fence still forbids what B9 does
+
+Plan lines 77-79, unchanged by the patch: non-goals include "any change to
+default `watch` behavior, backlog replay, or **ring semantics**
+(`src/commands/watch.rs:782-815` stays byte-identical in behavior)."
+
+B9 changes the text of every default watch ring line. The parenthetical is fine,
+because 782-815 is the ring detection branch and B9 does not touch it, but the
+clause in front of it is broader than the parenthetical and now contradicts a
+task in the same document. A lane or reviewer reading the fence has grounds to
+refuse B9, and B7's acceptance already had to carve out an exception in prose
+("except B9's ring-text preview emission") that the fence does not know about.
+
+**Fix:** one clause in the scope fence: ring *semantics* (detection, floor,
+admission, dedup, replay) are frozen; ring *line text* changes once, in B9,
+under goal-lock ruling 4.
+
+### R4. B9 owns every test that could catch a boundary violation
+
+B9's contract is entirely a boundary claim: "ring detection, backlog floor,
+heartbeat, and admission logic in src/commands/watch.rs are untouched, this task
+edits emission formatting only" (plan line 343). Its invariant says the same.
+Its verify rows are `cargo test --test watch_preview`, `cargo test`, clippy, and
+fmt.
+
+Every instrument that would fail on a violation is inside B9's `owned_files`.
+The watch unit tests live in `src/commands/watch.rs` itself
+(`src/commands/watch.rs:1062-1159` digest grouping and snapshot limits,
+`1164-1556` ownership suppression, event wakes, starvation, directory
+re-registration). The watch integration tests live in `tests/cli.rs`
+(`4126-4162` backlog then live arrivals, `4243-4264` the default backlog replay
+pin, `4405-4468` snapshot). B9 owns both files, and its acceptance explicitly
+licenses rewriting the relevant pins: "The existing tests/cli.rs pins that ring
+lines carry no bodies are updated by this task to pin the new preview contract
+instead."
+
+Green then proves that B9 agrees with B9. There is no mutation-check clause of
+the kind B7 carries.
+
+Worth noting alongside: B9 declares `effects = ["code"]` and no tier, so it
+derives **standard** (two lanes, `severity_floor = "major"`), for the emission
+path of the doorbell every agent on both machines depends on.
+
+**Fix:** move the boundary proof to B7. B7 is wave 4, one wave after B9, owns
+`tests/cli.rs`, and does not own `src/commands/watch.rs`, which makes it an
+independent examiner. Add to B7's invariants: "B9's preview emission did not
+change ring detection, floor, or admission", with B7's existing mutation-check
+sentence applied to it. Escalating B9 to `tier = "critical"` is cheap and I
+would take it.
+
+### R5. The ring-line preview can forge the copyable `--since` fencepost
+
+`WatchDigest::text_line` (`src/commands/watch.rs:96-137`) ends the line with the
+copyable action suffix: `format!(" [--since {}]", crate::mailbox::shell_quote(&since))`,
+appended after `[first_id..last_id]`. That suffix is a documented, advertised
+affordance: agents are taught to copy it.
+
+Sanitization does not defend it. `sanitize_text_header`
+(`src/output.rs:749-756`) filters only `refused_profile_char`, so `'`, `-`,
+`[`, and `]` all survive. B9's spec is "control chars stripped, newlines
+flattened, truncation marked", which strips none of those either.
+
+The repo's own parser takes the last match. `scripts/smoke-installed.sh:52` is
+`sed -n "s/.*--since '\([^']*\)'.*/\1/p" | head -1`, and the leading `.*` is
+greedy, so it extracts the **rightmost** `--since '...'` on the line. A channel
+message whose body contains `[--since 'x']`, previewed after the real fencepost,
+wins that match. Anyone who can send to a channel can hand every watcher of that
+channel a read bound of their choosing. `seams.md` danger item 9 is about
+exactly this fencepost.
+
+**Fix:** two parts, both in B9's acceptance. Pin the preview's position relative
+to the fencepost, and pin it in the direction that survives both parser styles:
+strip `'` from previews outright, since a preview has no legitimate need for
+one. Then add a planted-body test: a message whose body is `[--since 'forged']`
+must leave `digest_since_fencepost` extraction returning the real id under both
+a greedy-last and a first-match parse.
+
+## Minors
+
+### R6. B8's invariant is still proven by running the thing it guards
+
+The wording is now correct: "it mints its own throwaway root via mktemp and
+exports POST_MAIL_ROOT itself (scripts/smoke-installed.sh:7-10), exactly as
+today" matches `scripts/smoke-installed.sh:7-10` exactly. The invariant "the
+smoke runs only against its throwaway root" still has `bash
+scripts/smoke-installed.sh target/release/post` as its only verify row, which is
+the run itself.
+
+**Fix:** one assertion in the extended script that `POST_MAIL_ROOT` is under
+`$BASE` before the new observations start.
+
+### R7. B9 declares `tests/cli.rs` as both owned and consumed
+
+`owned_files` includes it and `consumes = ["tests/cli.rs"]`. Lint accepted it,
+and the intent (the B3 handoff) is clear, but `consumes` is for artifacts a task
+reads and does not own. Drop the `consumes` entry or point it at B3.
+
+## Closed, verified
+
+- **The frozen watch floor is genuinely fixed, and better than my proposal.**
+  `ChannelState::load` delegating to the unified snapshot means
+  `src/commands/watch.rs:277` and `:960-966` read post-migration state with zero
+  edits to `watch.rs`. B1's acceptance now carries the explicit delegation test
+  ("a store with a materialized cursors.json makes ChannelState::load return the
+  unified seen view, not the legacy file's"), which is the assertion that binds
+  it at the unit level. Subject to R2.
+- **B7's third doorbell direction binds the failure case.** It is in `delivers`,
+  in `invariants` ("a watch started after catchup does not replay caught-up
+  backlog"), and in the invariant-to-verify table against
+  `cargo test --test doorbell`. B7 owns neither `watch.rs` nor
+  `channel_state.rs`, so it is an independent examiner for this one.
+- **The `tests/cli.rs` relay holds: one owner per wave.** B1 (w1), B3 (w2),
+  B9 (w3), B7 (w4), B6 (w5). B4 shares wave 3 with B9 and does not claim it;
+  B5 shares wave 4 with B7 and does not claim it.
+- **`src/output.rs` serialization holds for B2, B4, and B5.** B2 (w2), B4 (w3),
+  B5 (w4), each alone in its wave for that file. Only the wave-5 handoff is
+  missing (R1).
+- **B3's rewrite of the vacuous assertions is now explicit and complete.** Its
+  acceptance names all six sites I found: `tests/cli.rs:4064-4067`, `5049-5053`,
+  `4002-4009`, `4935`, `5383`, `6437-6444`, with "none passes vacuously" as the
+  standard.
+- **The wave map is arithmetically correct.** B1; B2/B3; B4/B9; B5/B7; B6; B8,
+  which is what `blocked_by` derives. Within-wave `owned_files` are disjoint in
+  all four multi-task waves.
+- **B4 hosts the barrier test and owns the file it needs.** `src/cursor_state.rs`
+  is in B4's `owned_files` and the architecture §7.1 test is in its acceptance
+  with a real assertion shape (paused listing holds the shared lock, writer
+  provably blocks, next count exact). The deferral-to-nobody is gone.
+- **B6's escalation is correctly staffed.** `tier = "critical"` needs three
+  lanes across three families; three personas round-robin onto the reviewer pool
+  head at claude/opus, codex/sol, and cursor/grok, which is three distinct
+  families.
+- **Fourteen is the right number.** Twelve at `tests/cli.rs:352-360` plus
+  catchup and search.
+- **The agent-facing docs are owned.** `README.md`, `CHANGELOG.md`, and
+  `skills/post/SKILL.md` are all in B6's list, and its acceptance names what
+  each must say.
+- **B9's handoff from B3 works.** B3 rewrites the `tests/cli.rs` state
+  assertions in wave 2; B9 rewrites the ring-line pins in wave 3; B9's
+  acceptance states the ordering ("they were updated for cursors.json by B3
+  first"). The relay is sound even though the examiner problem in R4 is not.
+- **B8's smoke wording now matches the script.** Verified against
+  `scripts/smoke-installed.sh:7-10`.
+
+## Still open from the first pass, outside the delta questions
+
+Finding 13 (schema entries land two waves after the commands, against
+`CONTRIBUTING.md:20`'s "in the same change") and finding 17 (no rollback story
+for a v2-to-cursors.json downgrade, and `doctor.rs:386-392` keeps its Error-level
+legacy check forever) were not addressed in the patch. Both were minor and both
+remain minor; noting them only so silence is not read as resolution.

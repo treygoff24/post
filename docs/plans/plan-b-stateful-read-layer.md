@@ -46,9 +46,12 @@ the full semantics.
   `room` and `unread: number|null`; `inbox` gains `unread_count`. All
   additive; existing fields keep their meaning.
 - **Read seam (permanent)**: `channel_state.rs` survives Plan B as the
-  legacy-shape module and delegating read seam: `ChannelState::load` returns
-  the unified snapshot's channel view (cursors.json when present, else the
-  legacy baseline), and `stored_shape_is_valid` stays for legacy validation.
+  legacy-shape module and delegating read seam: the surviving seam is exactly four
+  functions: `ChannelState::load` (returns the unified snapshot's channel
+  view — cursors.json when present, else the legacy baseline),
+  `into_channels` (`src/commands/watch.rs:965`), `has_seen`
+  (`src/channel.rs:621`), and `stored_shape_is_valid`; `max_seen` dies with
+  B3 (its only callers, `chat.rs:1266` and `:1393`, are B3's files).
   Its direct callers — `src/commands/watch.rs:964` (startup floor),
   `src/channel.rs:609` (crossed-send guard), `src/commands/doctor.rs:382` —
   compile unchanged and read correct post-migration state with zero edits.
@@ -234,7 +237,7 @@ personas = ["refuter", "spec-fidelity"]
 ```toml task
 id = "B3"
 title = "Rewire consuming reads onto cursor_state with mail-move ordering"
-delivers = "Plain read and plain chat (plus --discard-through and --seen-by) consume through cursor_state::consume; B1's consumption-write wrappers (mark_seen, mark_seen_through) deleted, while the delegating read seam (ChannelState::load, stored_shape_is_valid) remains per Interfaces for watch.rs, channel.rs, and doctor.rs, none of which this task touches; direct-mail ordering per architecture §2.3: stdout, then read-link commit, then mail.seen mark, then atomic cursor replace, with every partial failure conservative (unmarked on link failure, marked on unlink-after-link failure, physical inbox authoritative when the cursor write fails)"
+delivers = "Plain read and plain chat (plus --discard-through and --seen-by) consume through cursor_state::consume; B1's consumption-write wrappers (mark_seen, mark_seen_through) deleted, while the four-function delegating read seam (ChannelState::load, into_channels, has_seen, stored_shape_is_valid) remains per Interfaces and max_seen is deleted with its two chat.rs callers for watch.rs, channel.rs, and doctor.rs, none of which this task touches; direct-mail ordering per architecture §2.3: stdout, then read-link commit, then mail.seen mark, then atomic cursor replace, with every partial failure conservative (unmarked on link failure, marked on unlink-after-link failure, physical inbox authoritative when the cursor write fails)"
 kind = "build"
 blocked_by = ["B1"]
 acceptance = "cargo test --test consuming covers: emit-then-consume preserved for chat (fixed batch marks only pre-render IDs, late arrival stays unread, extending src/commands/chat.rs:1305-1354); read moves mail then marks mail.seen; simulated link failure leaves the ID unmarked and mail in inbox; simulated cursor-write failure after a successful move leaves physical state authoritative and the next read not duplicated; --discard-through and --seen-by behave identically to 0.8.0 through the new module; the existing tests/cli.rs assertions that read channel-state.json directly (tests/cli.rs:4064-4067, 5049-5053, and the now-vacuous ones at 4002-4009, 4935, 5383, 6437-6444) are rewritten against cursors.json so none passes vacuously. Green does not prove concurrent cross-process behavior (B7). No-Claim: green does not prove unchanged behavior for chat --limit skip-consumption, which is deliberately out of scope."
@@ -297,14 +300,14 @@ personas = ["attacker", "spec-fidelity"]
 ```toml task
 id = "B6"
 title = "Contract, schema, and doctor amendments for the read layer"
-delivers = "CONTRACT.md amended per architecture §6.1 (cursor state in mutable-delivery-state law, cursors.json v1 + lock in on-disk format replacing the contradicted channel-state section, fence matrix rows for catchup/search, catchup/search command grammar and output shapes, channels/inbox field additions, one-banner framing rule for the two new surfaces, performance/security notes); schema.rs entries and OutputShapes for catchup and search plus the three new listing fields; doctor read-only checks cursor_state.<room>.invalid, cursor_lock.<room>.invalid, cursor_state.<room>.legacy with doctor --fix never touching cursor state"
+delivers = "CONTRACT.md amended per architecture §6.1 (cursor state in mutable-delivery-state law, cursors.json v1 + lock in on-disk format replacing the contradicted channel-state section, fence matrix rows for catchup/search, catchup/search command grammar and output shapes, channels/inbox field additions, one-banner framing rule for the two new surfaces, performance/security notes); schema.rs entries and OutputShapes for catchup and search plus the three new listing fields; doctor read-only checks cursor_state.<room>.invalid, cursor_lock.<room>.invalid, cursor_state.<room>.legacy with doctor --fix never touching cursor state; the existing Error-severity channel_state.<room>.invalid check (src/commands/doctor.rs:386-392) is downgraded to a warning once cursors.json exists, because the legacy file is inert rollback evidence from then on"
 kind = "build"
 blocked_by = ["B2", "B3", "B4", "B5", "B9"]
 acceptance = "cargo test --test schema_surface proves schema-vs-reality: every advertised catchup/search arg and output field exists in real CLI output and vice versa (a clap-only addition fails); doctor on a store with a planted malformed cursors.json warns cursor_state.<room>.invalid and --fix leaves it untouched; doctor on a legacy channel-state.json store emits the info check; the exact command-list assert at tests/cli.rs:352-360 is updated to the fourteen commands; README.md, CHANGELOG.md (Unreleased), and skills/post/SKILL.md document catchup, search, unread fields, and the watch preview lines so the new surface is visible to agents. CONTRACT.md changes land as their own commit, never folded into feature commits (goal-lock §6). Green does not prove the prose is complete — the B6 review reads CONTRACT.md against the architecture doc section by section."
 role = "executor"
 persona = "minimalist-implementer"
 skills = ["rust-engineer", "writing-for-agents"]
-owned_files = ["CONTRACT.md", "src/commands/schema.rs", "src/commands/doctor.rs", "tests/schema_surface.rs", "tests/cli.rs", "README.md", "CHANGELOG.md", "skills/post/SKILL.md"]
+owned_files = ["CONTRACT.md", "src/commands/schema.rs", "src/commands/doctor.rs", "src/output.rs", "tests/schema_surface.rs", "tests/cli.rs", "README.md", "CHANGELOG.md", "skills/post/SKILL.md"]
 invariants = ["schema advertises exactly the real CLI surface", "doctor --fix never creates, repairs, or deletes cursor state"]
 verify = [{run = "cargo test --test schema_surface", expect = "exit 0"}, {run = "cargo test", expect = "exit 0"}, {run = "cargo clippy --all-targets --all-features -- -D warnings", expect = "exit 0"}, {run = "cargo fmt --check", expect = "exit 0"}]
 reversibility = "reversible"
@@ -322,7 +325,7 @@ title = "Cross-cutting proofs: doorbell, fence matrix, concurrency, old stores"
 delivers = "tests/doorbell.rs with the live-watch invariant in both directions (armed watch rings m2 after catchup consumed m1; a ring without any consuming read leaves cursors.json byte-identical or absent and a later catchup still returns the message); the fence matrix at tests/cli.rs:4884-5053 extended for catchup refusal and search/listing read-only admission; a third doorbell direction — a watch STARTED AFTER a catchup loads its startup floor from the unified state and does not replay the caught-up backlog (this binds the delegating read seam; it is the case both existing directions miss because they arm the watch first); a two-process CLI concurrency test (two consuming processes, different channels, one room, both seen-sets survive and the next listing shows exactly the one new message); 0.8-store fixtures (no state files, and valid channel-state.json baseline) proving acceptance row 7 end to end"
 kind = "build"
 blocked_by = ["B2", "B3", "B4", "B9"]
-acceptance = "cargo test --test doorbell and the extended tests/cli.rs matrix pass, with each new assertion mutation-checked once: break the guarded behavior (e.g. make watch write the cursor, or drop the union) in a scratch copy and confirm the suite goes red before trusting green. The existing watch snapshot test tests/cli.rs:4405-4468 is retained unchanged. src/commands/watch.rs is not modified by this task or any Plan B task except B9's ring-text preview emission. Green does not prove multi-machine or long-uptime watch behavior."
+acceptance = "cargo test --test doorbell and the extended tests/cli.rs matrix pass, with each new assertion mutation-checked once: break the guarded behavior (e.g. make watch write the cursor, drop the union, or have the preview swallow the fencepost) in a scratch copy and confirm the suite goes red before trusting green. This task also carries B9's boundary proof, since every instrument B9 could game lives in B9's own owned_files: an adversarial fencepost pin in tests/cli.rs (hostile [--since 'x'] body against a live watch), and a behavioral check that ring detection, floor, and heartbeat are unchanged relative to the pre-B9 pins. The existing watch snapshot test tests/cli.rs:4405-4468 is retained unchanged. src/commands/watch.rs is not modified by this task or any Plan B task except B9's ring-text preview emission. Green does not prove multi-machine or long-uptime watch behavior."
 role = "executor"
 persona = "test-first-writer"
 skills = ["rust-engineer"]
@@ -340,15 +343,15 @@ personas = ["test-skeptic", "refuter"]
 ```toml task
 id = "B9"
 title = "Watch ring-line body previews (goal-lock ruling 4)"
-delivers = "Watch text ring lines and digest lines carry a sanitized single-line body preview capped at 80 Unicode scalar values (control chars stripped, newlines flattened, truncation marked), rendered as untrusted data within the existing line shape so the [first..last] fencepost ids and --since suffix survive unchanged; NDJSON watch events gain an additive preview field; ring detection, backlog floor, heartbeat, and admission logic in src/commands/watch.rs are untouched — this task edits emission formatting only"
+delivers = "Watch text ring lines and digest lines carry a sanitized single-line body preview capped at 80 Unicode scalar values (control chars stripped, newlines flattened, truncation marked, and square brackets neutralized — replaced or escaped — so no preview can ever contain a parseable [--since '...'] group and forge the line's copyable fencepost, which greedy extractors take rightmost), rendered as untrusted data within the existing line shape so the [first..last] fencepost ids and --since suffix survive unchanged; NDJSON watch events gain an additive preview field; ring detection, backlog floor, heartbeat, and admission logic in src/commands/watch.rs are untouched — this task edits emission formatting only"
 kind = "build"
 blocked_by = ["B1", "B3"]
-acceptance = "cargo test --test watch_preview covers: preview present and capped on ring and digest lines; a body with ANSI escapes, newlines, and a 500-char run renders as one sanitized line; the fencepost --since suffix round-trips unchanged; NDJSON events carry the additive preview field and existing fields are byte-stable. The existing tests/cli.rs pins that ring lines carry no bodies are updated by this task to pin the new preview contract instead (they were updated for cursors.json by B3 first). Green does not prove the preview renders safely in every terminal — sanitization is the boundary, not terminal behavior."
+acceptance = "cargo test --test watch_preview covers: preview present and capped on ring and digest lines; a body with ANSI escapes, newlines, and a 500-char run renders as one sanitized line; a hostile body containing [--since 'attacker-id'] yields a line whose rightmost --since '...' group is still the true fencepost; the fencepost suffix round-trips unchanged; NDJSON events carry the additive preview field and existing fields are byte-stable. The existing tests/cli.rs pins that ring lines carry no bodies are updated by this task to pin the new preview contract instead (they were updated for cursors.json by B3 first). Green does not prove the preview renders safely in every terminal — sanitization is the boundary, not terminal behavior."
 role = "executor"
 persona = "minimalist-implementer"
 skills = ["rust-engineer", "rust-agent-cli"]
 owned_files = ["src/commands/watch.rs", "tests/watch_preview.rs", "tests/cli.rs"]
-invariants = ["preview emission never changes ring detection, floor, or admission behavior", "previews are sanitized and capped"]
+invariants = ["preview emission never changes ring detection, floor, or admission behavior", "previews are sanitized, capped, and cannot forge the fencepost suffix"]
 verify = [{run = "cargo test --test watch_preview", expect = "exit 0"}, {run = "cargo test", expect = "exit 0"}, {run = "cargo clippy --all-targets --all-features -- -D warnings", expect = "exit 0"}, {run = "cargo fmt --check", expect = "exit 0"}]
 reversibility = "reversible"
 effects = ["code"]
