@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Exec shim: the writing-plans audit tool lives outside this repo; the final
+# close verify row resolves bin/delegate-audit against the target repo.
+exec /home/trey-agent/.local/bin/delegate-audit "$@"

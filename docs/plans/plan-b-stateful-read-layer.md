@@ -188,6 +188,10 @@ routes = [{engine="claude", model="opus", effort="high", mode="work"},
 routes = [{engine="codex", model="luna", effort="max", mode="work"},
           {engine="omp", model="glm", effort="high", mode="work"}]
 
+[fixer]
+routes = [{engine="codex", model="luna", effort="max", mode="work"},
+          {engine="omp", model="glm", effort="high", mode="work"}]
+
 [attacker]
 routes = [{engine="grok", model="grok-4.6", effort="high", mode="work"},
           {engine="codex", model="sol", effort="xhigh", mode="work"}]

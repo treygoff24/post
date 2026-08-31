@@ -1,0 +1,3126 @@
+# compiled by planc at /home/trey-agent/Code/writing-plans @ ca02c6e-dirty (main)
+import os
+meta = {'name': 'plan-plan-b-stateful-read-layer', 'description': 'compiled plan workflow'}
+"""Transport schemas and semantic cross-field validators for workflow results.
+
+The dictionaries in this module are deliberately JSON-schema-shaped rather than
+full JSON Schema objects. They are embedded into standalone workflow scripts,
+so validation stays dependency-free and the semantic rules live next to the
+transport boundary instead of being reimplemented by each engine stage.
+"""
+from collections import namedtuple
+import re
+SEVERITY = ('blocker', 'major', 'minor')
+ORDER = SEVERITY
+_SEVERITY_RANK = {name: index for index, name in enumerate(ORDER)}
+_DISPOSITION_VERDICTS = ('ADOPT', 'REJECT', 'COVERED', 'COORDINATOR', 'DEFERRED')
+_ADJUDICATION_DECISIONS = ('close', 'fix', 'coordinate')
+_FIX_STATES = ('fixed', 'not_fixed', 'regressed')
+
+class ContractError(ValueError):
+
+    def __init__(self, code: str, message: str, path: str | None=None):
+        self.code = code
+        self.rule = code
+        self.name = code
+        self.path = path
+        detail = f'{code}: {message}'
+        if path:
+            detail += f' ({path})'
+        super().__init__(detail)
+DECLARED_ROW_ID = namedtuple('DECLARED_ROW_ID', ['task_id', 'index', 'normalized_run', 'expect'])
+
+def _string():
+    return {'type': 'string'}
+
+def _severity():
+    return {'type': 'string', 'enum': list(SEVERITY)}
+_VERIFY_RESULT = {'type': 'object', 'required': ['run', 'exit', 'note'], 'properties': {'run': _string(), 'exit': {'type': 'integer'}, 'expect': _string(), 'passed': {'type': 'boolean'}, 'note': _string()}, 'additionalProperties': False}
+EXECUTE_RESULT = {'type': 'object', 'required': ['summary', 'changed_files', 'branch', 'head', 'verify_results'], 'properties': {'summary': _string(), 'changed_files': {'type': 'array', 'items': _string()}, 'branch': _string(), 'head': _string(), 'verify_results': {'type': 'array', 'items': _VERIFY_RESULT}, 'discovered': {'type': 'array', 'items': _string()}}, 'additionalProperties': False}
+INTEGRATE_RESULT = {'type': 'object', 'required': ['merged', 'refused', 'conflicts', 'verify_results', 'head'], 'properties': {'merged': {'type': 'array', 'items': {'type': 'object', 'required': ['task', 'branch', 'merge_commit'], 'properties': {'task': _string(), 'branch': _string(), 'merge_commit': _string(), 'base': _string()}, 'additionalProperties': False}}, 'refused': {'type': 'array', 'items': {'type': 'object', 'required': ['task', 'branch', 'reason'], 'properties': {'task': _string(), 'branch': _string(), 'reason': _string()}, 'additionalProperties': False}}, 'conflicts': {'type': 'array', 'items': {'type': 'object', 'required': ['task', 'path', 'ours', 'theirs'], 'properties': {'task': _string(), 'path': _string(), 'ours': _string(), 'theirs': _string()}, 'additionalProperties': False}}, 'verify_results': {'type': 'array', 'items': _VERIFY_RESULT}, 'head': _string()}, 'additionalProperties': False}
+FINDING = {'type': 'object', 'required': ['id', 'severity', 'file', 'line', 'claim', 'counterexample', 'fix'], 'properties': {'id': _string(), 'severity': _severity(), 'file': _string(), 'line': {'type': 'integer'}, 'claim': _string(), 'counterexample': _string(), 'fix': _string()}, 'additionalProperties': False}
+FINDINGS = {'type': 'array', 'items': FINDING}
+DISPOSITION = {'type': 'object', 'required': ['id', 'verdict', 'severity', 'lane', 'persona', 'file', 'line', 'because'], 'properties': {'id': _string(), 'verdict': {'type': 'string', 'enum': list(_DISPOSITION_VERDICTS)}, 'severity': _severity(), 'lane': _string(), 'persona': _string(), 'file': _string(), 'line': {'type': 'integer'}, 'because': _string()}, 'additionalProperties': False}
+_VERIFY_SPEC = {'type': 'object', 'required': ['run', 'expect'], 'properties': {'run': _string(), 'expect': _string()}, 'additionalProperties': False}
+FIX_TASK = {'type': 'object', 'required': ['id', 'delivers', 'owned_files', 'change', 'verify', 'fixes'], 'properties': {'id': _string(), 'delivers': _string(), 'owned_files': {'type': 'array', 'items': _string()}, 'change': _string(), 'verify': {'type': 'array', 'minItems': 1, 'items': _VERIFY_SPEC}, 'fixes': {'type': 'array', 'items': _string()}}, 'additionalProperties': False}
+COORDINATOR_TASK = {'type': 'object', 'required': ['id', 'finding_ids', 'why', 'paths', 'change', 'verify', 'blocking'], 'properties': {'id': _string(), 'finding_ids': {'type': 'array', 'items': _string()}, 'why': _string(), 'paths': {'type': 'array', 'items': _string()}, 'change': _string(), 'verify': {'type': 'array', 'items': _VERIFY_SPEC}, 'blocking': {'type': 'boolean'}}, 'additionalProperties': False}
+ADJUDICATION = {'type': 'object', 'required': ['decision', 'dispositions', 'fix_tasks', 'accepted_residue', 'coordinator_tasks'], 'properties': {'decision': {'type': 'string', 'enum': list(_ADJUDICATION_DECISIONS)}, 'dispositions': {'type': 'array', 'items': DISPOSITION}, 'fix_tasks': {'type': 'array', 'items': FIX_TASK}, 'accepted_residue': {'type': 'array', 'items': _string()}, 'coordinator_tasks': {'type': 'array', 'items': COORDINATOR_TASK}}, 'additionalProperties': False}
+FIX_VERDICT = {'type': 'object', 'required': ['verdicts', 'regressions', 'unrun'], 'properties': {'verdicts': {'type': 'array', 'items': {'type': 'object', 'required': ['finding_id', 'state', 'evidence'], 'properties': {'finding_id': _string(), 'state': {'type': 'string', 'enum': list(_FIX_STATES)}, 'evidence': _string()}, 'additionalProperties': False}}, 'regressions': {'type': 'array', 'items': FINDING}, 'unrun': {'type': 'array', 'items': {'type': 'object', 'required': ['finding_id', 'reason'], 'properties': {'finding_id': _string(), 'reason': _string()}, 'additionalProperties': False}}}, 'additionalProperties': False}
+_ROW_ID_SCHEMA = {'type': 'array', 'minItems': 4, 'items': {}}
+_CLOSE_VERIFY_RESULT = {'type': 'object', 'required': ['declared_row_id', 'run', 'expect', 'exit', 'passed', 'note'], 'properties': {'declared_row_id': _ROW_ID_SCHEMA, 'run': _string(), 'expect': _string(), 'exit': {'type': 'integer'}, 'passed': {'type': 'boolean'}, 'note': _string()}, 'additionalProperties': False}
+_ROW_COVERAGE = {'type': 'object', 'required': ['matched', 'missing', 'failing', 'extra'], 'properties': {'matched': {'type': 'array', 'items': _ROW_ID_SCHEMA}, 'missing': {'type': 'array', 'items': _ROW_ID_SCHEMA}, 'failing': {'type': 'array', 'items': _ROW_ID_SCHEMA}, 'extra': {'type': 'array', 'items': _ROW_ID_SCHEMA}}, 'additionalProperties': False}
+CLOSE_RESULT = {'type': 'object', 'required': ['status', 'verify_results', 'refused_rows', 'row_coverage', 'diff_nonempty', 'bead_closed', 'main_head', 'main_branch', 'spine_head'], 'properties': {'status': {'type': 'string', 'enum': ['complete', 'refused']}, 'verify_results': {'type': 'array', 'items': _CLOSE_VERIFY_RESULT}, 'refused_rows': {'type': 'array', 'items': {'type': 'object', 'required': ['declared_row_id', 'run', 'reason'], 'properties': {'declared_row_id': _ROW_ID_SCHEMA, 'run': _string(), 'reason': _string()}, 'additionalProperties': False}}, 'row_coverage': _ROW_COVERAGE, 'diff_nonempty': {'type': 'object', 'additionalProperties': {'type': 'boolean'}}, 'bead_closed': {'type': 'object', 'additionalProperties': {'type': 'boolean'}}, 'main_head': _string(), 'main_branch': _string(), 'spine_head': _string(), 'acceptance_commit': _string()}, 'additionalProperties': False}
+_SCHEMAS = {'EXECUTE_RESULT': EXECUTE_RESULT, 'INTEGRATE_RESULT': INTEGRATE_RESULT, 'FINDINGS': FINDINGS, 'ADJUDICATION': ADJUDICATION, 'FIX_VERDICT': FIX_VERDICT, 'CLOSE_RESULT': CLOSE_RESULT}
+
+def _schema_errors(value, schema, path='value'):
+    kind = schema.get('type')
+    if kind == 'object':
+        if not isinstance(value, dict):
+            yield ('wrong-type', 'expected an object', path)
+            return
+        properties = schema.get('properties', {})
+        for key in schema.get('required', []):
+            if key not in value:
+                yield ('missing-field', f'missing required field `{key}`', f'{path}.{key}')
+        additional = schema.get('additionalProperties', True)
+        if additional is False:
+            for key in value:
+                if key not in properties:
+                    code = 'legacy-dry-key' if key == 'dry' and path == 'value' else 'unknown-field'
+                    yield (code, f'unknown field `{key}`', f'{path}.{key}')
+        for key, child in value.items():
+            child_schema = properties.get(key)
+            if child_schema is None:
+                if isinstance(additional, dict):
+                    child_schema = additional
+                else:
+                    continue
+            yield from _schema_errors(child, child_schema, f'{path}.{key}')
+        return
+    if kind == 'array':
+        if not isinstance(value, (list, tuple)):
+            yield ('wrong-type', 'expected an array', path)
+            return
+        if schema is _ROW_ID_SCHEMA and len(value) != 4:
+            yield ('bad-declared-row-id', 'declared row id must have exactly four fields', path)
+            return
+        minimum = schema.get('minItems')
+        if minimum is not None and len(value) < minimum:
+            yield ('too-few-items', f'expected at least {minimum} item(s)', path)
+        item_schema = schema.get('items')
+        if item_schema:
+            for index, child in enumerate(value):
+                yield from _schema_errors(child, item_schema, f'{path}[{index}]')
+        return
+    if kind == 'string':
+        if not isinstance(value, str):
+            yield ('wrong-type', 'expected a string', path)
+        elif not value.strip():
+            if path.endswith('.note'):
+                return
+            if path.endswith('.evidence'):
+                code = 'empty-evidence'
+            elif path.endswith('.reason'):
+                code = 'empty-reason'
+            elif path.endswith('.because'):
+                code = 'empty-because'
+            else:
+                code = 'empty-value'
+            yield (code, 'must not be empty', path)
+        elif schema.get('enum') is not None and value not in schema['enum']:
+            code = 'unknown-severity' if path.endswith('.severity') else 'invalid-value'
+            yield (code, f"must be one of {schema['enum']!r}", path)
+        return
+    if kind == 'integer':
+        if not isinstance(value, int) or isinstance(value, bool):
+            yield ('wrong-type', 'expected an integer', path)
+        return
+    if kind == 'boolean':
+        if not isinstance(value, bool):
+            yield ('wrong-type', 'expected a boolean', path)
+        return
+    allowed = schema.get('enum')
+    if allowed is not None and value not in allowed:
+        code = 'unknown-severity' if path.endswith('.severity') else 'invalid-value'
+        yield (code, f'must be one of {allowed!r}', path)
+
+def _validate_transport(value, schema):
+    errors = _schema_errors(value, schema)
+    try:
+        code, message, path = next(errors)
+    except StopIteration:
+        return value
+    raise ContractError(code, message, path)
+
+def failed(value, schema):
+    if value is None or value == {} or value == '':
+        return True
+    try:
+        _validate_transport(value, schema)
+        if schema is FINDINGS:
+            validate_findings(value)
+        elif schema is ADJUDICATION:
+            validate_adjudication(value)
+        elif schema is CLOSE_RESULT:
+            validate_close_result(value)
+    except ContractError:
+        return True
+    return False
+
+def _finding_ids(findings):
+    if findings is None:
+        return (None, {})
+    _validate_transport(findings, FINDINGS)
+    by_id = {}
+    for finding in findings:
+        finding_id = finding['id']
+        if finding_id in by_id:
+            raise ContractError('duplicate-finding-id', f'finding id `{finding_id}` appears more than once')
+        by_id[finding_id] = finding
+    return (set(by_id), by_id)
+
+def _require_reference(reference, known_ids, context):
+    if known_ids is not None and reference not in known_ids:
+        raise ContractError('dangling-finding-id', f'{context} references unknown finding id `{reference}`')
+
+def validate_finding(value):
+    return _validate_transport(value, FINDING)
+
+def validate_findings(value):
+    _finding_ids(value)
+    return value
+
+def validate_adjudication(value, findings=None, severity_floor='minor'):
+    if isinstance(value, dict) and 'dry' in value:
+        raise ContractError('legacy-dry-key', 'ADJUDICATION no longer accepts the legacy `dry` key')
+    _validate_transport(value, ADJUDICATION)
+    known_ids, finding_by_id = _finding_ids(findings)
+    if known_ids is None:
+        known_ids = {row['id'] for row in value['dispositions']}
+    decision = value['decision']
+    if decision == 'fix' and (not value['fix_tasks']):
+        raise ContractError('decision-fix-without-tasks', 'decision `fix` requires non-empty fix_tasks')
+    if decision != 'fix' and value['fix_tasks']:
+        raise ContractError('decision-fix-tasks-mismatch', 'fix_tasks is allowed exactly when decision is `fix`')
+    if decision == 'coordinate' and (not value['coordinator_tasks']):
+        raise ContractError('decision-coordinate-without-tasks', 'decision `coordinate` requires coordinator_tasks')
+    if decision == 'close' and value['coordinator_tasks']:
+        raise ContractError('decision-coordinate-tasks-mismatch', 'coordinator_tasks requires decision `coordinate` or `fix`')
+    disposition_ids = []
+    disposition_by_id = {}
+    for disposition in value['dispositions']:
+        finding_id = disposition['id']
+        _require_reference(finding_id, known_ids, 'disposition')
+        if finding_id in disposition_by_id:
+            raise ContractError('duplicate-disposition', f'finding id `{finding_id}` has more than one disposition')
+        disposition_ids.append(finding_id)
+        disposition_by_id[finding_id] = disposition
+        finding = finding_by_id.get(finding_id) if finding_by_id is not None else None
+        if finding is not None and disposition['severity'] != finding['severity']:
+            raise ContractError('severity-mismatch', f'disposition severity disagrees with finding `{finding_id}`')
+    if known_ids is not None:
+        missing = known_ids - set(disposition_ids)
+        if missing:
+            raise ContractError('missing-disposition', f'finding(s) lack exactly one disposition: {sorted(missing)}')
+    for task in value['fix_tasks']:
+        for finding_id in task['fixes']:
+            _require_reference(finding_id, known_ids, f"fix task `{task['id']}`")
+    seen_residue = set()
+    if severity_floor not in _SEVERITY_RANK:
+        raise ContractError('unknown-severity', f'unknown severity floor `{severity_floor}`')
+    for finding_id in value['accepted_residue']:
+        _require_reference(finding_id, known_ids, 'accepted_residue')
+        if finding_id in seen_residue:
+            raise ContractError('duplicate-accepted-residue', f'finding `{finding_id}` appears twice in accepted_residue')
+        seen_residue.add(finding_id)
+        disposition = disposition_by_id.get(finding_id)
+        if disposition is not None and disposition['verdict'] != 'ADOPT':
+            raise ContractError('residue-not-adopted', f'accepted residue `{finding_id}` is not an ADOPT disposition')
+        severity = (finding_by_id.get(finding_id) or disposition or {}).get('severity')
+        if severity is not None and _SEVERITY_RANK[severity] < _SEVERITY_RANK[severity_floor]:
+            raise ContractError('residue-above-floor', f'accepted residue `{finding_id}` is above severity floor')
+    for task in value['coordinator_tasks']:
+        for finding_id in task['finding_ids']:
+            _require_reference(finding_id, known_ids, f"coordinator task `{task['id']}`")
+    return value
+
+def validate_fix_verdict(value, findings=None, adopted=None, fix_finding_ids=None, *, adopted_findings=None, diff_finding_ids=None):
+    _validate_transport(value, FIX_VERDICT)
+    if adopted is None:
+        adopted = adopted_findings
+    known_ids, _finding_by_id = _finding_ids(findings)
+    if adopted is None:
+        if known_ids is None:
+            adopted_ids = {*[row['finding_id'] for row in value['verdicts']], *[row['finding_id'] for row in value['unrun']]}
+        else:
+            adopted_ids = set(known_ids)
+    else:
+        if isinstance(adopted, dict):
+            adopted = [adopted]
+        if all((isinstance(item, dict) for item in adopted)):
+            adopted_ids = {item['id'] for item in adopted}
+            for item in adopted:
+                validate_finding(item)
+        else:
+            adopted_ids = set(adopted)
+    if known_ids is not None:
+        for finding_id in adopted_ids:
+            _require_reference(finding_id, known_ids, 'adopted finding')
+    seen = set()
+    for verdict in value['verdicts']:
+        finding_id = verdict['finding_id']
+        _require_reference(finding_id, known_ids, 'verdict')
+        if finding_id not in adopted_ids:
+            raise ContractError('unexpected-finding-id', f'verdict names non-adopted finding `{finding_id}`')
+        if finding_id in seen:
+            raise ContractError('duplicate-fix-verdict', f'finding `{finding_id}` has more than one verdict')
+        seen.add(finding_id)
+    for entry in value['unrun']:
+        finding_id = entry['finding_id']
+        _require_reference(finding_id, known_ids, 'unrun')
+        if finding_id not in adopted_ids:
+            raise ContractError('unexpected-finding-id', f'unrun names non-adopted finding `{finding_id}`')
+        if finding_id in seen:
+            raise ContractError('duplicate-fix-verdict', f'finding `{finding_id}` has both a verdict and unrun entry')
+        seen.add(finding_id)
+    if seen != adopted_ids:
+        missing = sorted(adopted_ids - seen)
+        raise ContractError('missing-fix-verdict', f'adopted finding(s) have no verdict or unrun entry: {missing}')
+    allowed_regressions = fix_finding_ids if fix_finding_ids is not None else diff_finding_ids
+    if allowed_regressions is not None:
+        allowed_regressions = set(allowed_regressions)
+    regression_ids = set()
+    for finding in value['regressions']:
+        validate_finding(finding)
+        finding_id = finding['id']
+        if finding_id in regression_ids:
+            raise ContractError('duplicate-regression', f'regression `{finding_id}` appears twice')
+        regression_ids.add(finding_id)
+        if allowed_regressions is not None and finding_id not in allowed_regressions:
+            raise ContractError('regression-outside-fix-diff', f'regression `{finding_id}` is outside the fix diff')
+    return value
+
+def normalize_run(run):
+    if not isinstance(run, str):
+        raise ContractError('bad-run', 'verify run must be a string')
+    normalized = re.sub('\\s+', ' ', run.strip())
+    if normalized.endswith(';'):
+        normalized = normalized[:-1].rstrip()
+    return normalized
+
+def canonical_test_path(path):
+    if not isinstance(path, str):
+        raise ContractError('bad-path', 'path must be a string')
+    parts = path.split('/')
+    if len(parts) >= 2 and parts[-2] == '__tests__' and parts[-1].endswith('.test.ts'):
+        return '/'.join([*parts[:-2], parts[-1]])
+    return path
+
+def _as_row_id(value, *, default_task='', default_index=0, default_run='', default_expect=''):
+    if isinstance(value, dict):
+        nested = value.get('declared_row_id', value.get('row_id'))
+        if nested is not None:
+            return _as_row_id(nested)
+        value = (value.get('task_id', default_task), value.get('index', default_index), value.get('normalized_run', value.get('run', default_run)), value.get('expect', default_expect))
+    try:
+        if isinstance(value, DECLARED_ROW_ID):
+            parts = (value.task_id, value.index, value.normalized_run, value.expect)
+        elif isinstance(value, (list, tuple)) and len(value) == 4:
+            parts = value
+        elif isinstance(value, (list, tuple)) and len(value) == 2:
+            parts = (default_task, default_index, value[0], value[1])
+        elif value is None:
+            parts = (default_task, default_index, default_run, default_expect)
+        else:
+            raise ContractError('bad-declared-row-id', 'declared row id must contain task, index, run, and expect')
+        return DECLARED_ROW_ID(str(parts[0]), int(parts[1]), normalize_run(parts[2]), str(parts[3]))
+    except ContractError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ContractError('bad-declared-row-id', 'declared row id has invalid field types') from exc
+
+def _iter_declared_rows(declared):
+    if declared is None:
+        return []
+    rows = []
+    for position, entry in enumerate(declared):
+        if isinstance(entry, dict) and 'verify' in entry:
+            task_id = entry.get('task_id', entry.get('id', ''))
+            for index, row in enumerate(entry['verify']):
+                rows.append(_as_row_id(row, default_task=task_id, default_index=index))
+            continue
+        if isinstance(entry, tuple) and len(entry) == 3 and isinstance(entry[2], (list, tuple)):
+            task_id, _owned, verify = entry
+            for index, row in enumerate(verify):
+                rows.append(_as_row_id(row, default_task=task_id, default_index=index))
+            continue
+        if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], (list, tuple)):
+            task_id, verify = entry
+            for index, row in enumerate(verify):
+                rows.append(_as_row_id(row, default_task=task_id, default_index=index))
+            continue
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            rows.append(_as_row_id(entry, default_task='', default_index=position))
+            continue
+        rows.append(_as_row_id(entry, default_index=position))
+    return rows
+
+def _reported_row_id(row, position):
+    nested = row.get('declared_row_id', row.get('row_id'))
+    if nested is not None:
+        return _as_row_id(nested)
+    run = row.get('normalized_run', row.get('run', ''))
+    expect = str(row.get('expect', ''))
+    normalized = normalize_run(run)
+    if 'task_id' in row or 'index' in row:
+        return DECLARED_ROW_ID(str(row.get('task_id', '')), int(row.get('index', position)), normalized, expect)
+    return None
+
+def _row_passed(row):
+    if 'passed' in row:
+        return row['passed'] is True
+    return isinstance(row.get('exit'), int) and (not isinstance(row.get('exit'), bool)) and (row['exit'] == 0)
+
+def row_coverage(reported, declared):
+    if isinstance(reported, dict):
+        reported = reported.get('verify_results', [])
+    if not isinstance(reported, (list, tuple)):
+        reported = []
+    declared_rows = _iter_declared_rows(declared)
+    consumed = set()
+    matched = []
+    missing = []
+    failing = []
+    extra = []
+    by_exact = {row: index for index, row in enumerate(declared_rows)}
+    for position, row in enumerate(reported):
+        if not isinstance(row, dict):
+            extra.append(_as_row_id(None, default_index=position))
+            continue
+        explicit = _reported_row_id(row, position)
+        normalized = normalize_run(row.get('normalized_run', row.get('run', '')))
+        task_id = str(row.get('task_id', ''))
+        candidates = []
+        if explicit is not None and explicit in by_exact and (by_exact[explicit] not in consumed):
+            candidates = [by_exact[explicit]]
+        else:
+            for index, declared_row in enumerate(declared_rows):
+                if index in consumed or declared_row.normalized_run != normalized:
+                    continue
+                if task_id and declared_row.task_id != task_id:
+                    continue
+                candidates.append(index)
+        if not candidates:
+            extra.append(explicit or DECLARED_ROW_ID(task_id, int(row.get('index', position)), normalized, str(row.get('expect', ''))))
+            continue
+        target = failing if not _row_passed(row) else matched
+        for index in candidates:
+            consumed.add(index)
+            target.append(declared_rows[index])
+    for index, declared_row in enumerate(declared_rows):
+        if index not in consumed:
+            missing.append(declared_row)
+    return {'matched': matched, 'missing': missing, 'failing': failing, 'extra': extra}
+
+def validate_close_result(value, declared=None, task_ids=None, build_ids=None, final=False, main_branch=None):
+    _validate_transport(value, CLOSE_RESULT)
+    for index, result in enumerate(value['verify_results']):
+        if not result['note'].strip():
+            raise ContractError('empty-note', 'close verify result notes must not be empty', f'value.verify_results[{index}].note')
+    declared_rows = _iter_declared_rows(declared)
+    computed = row_coverage(value['verify_results'], declared_rows) if declared is not None else None
+    supplied = value['row_coverage']
+    coverage_ids = {}
+    for key, rows in supplied.items():
+        ids = [_as_row_id(row) for row in rows]
+        if len(ids) != len(set(ids)):
+            raise ContractError('duplicate-row-id', f'row_coverage.{key} contains a duplicate identity')
+        coverage_ids[key] = set(ids)
+    supplied_sets = coverage_ids
+    if computed is not None:
+        computed_sets = {key: set(computed[key]) for key in computed}
+        if supplied_sets != computed_sets:
+            raise ContractError('row-coverage-mismatch', 'row_coverage does not describe verify_results')
+    expected_tasks = set(value['bead_closed']) if task_ids is None else set(task_ids)
+    expected_builds = set(value['diff_nonempty']) if build_ids is None else set(build_ids)
+    for name, expected, actual in (('bead_closed', expected_tasks, value['bead_closed']), ('diff_nonempty', expected_builds, value['diff_nonempty'])):
+        if set(actual) != expected:
+            raise ContractError('task-key-coverage', f'{name} must have exactly the declared task keys')
+    if main_branch is not None and value['main_branch'] != main_branch:
+        raise ContractError('wrong-main-branch', f"close result names `{value['main_branch']}`, expected `{main_branch}`")
+    if final and (not value.get('acceptance_commit')):
+        raise ContractError('missing-acceptance-commit', 'final close requires acceptance_commit')
+    if value['status'] == 'complete':
+        if value['refused_rows']:
+            raise ContractError('complete-with-refusal', 'complete close cannot include refused rows')
+        if not supplied['matched']:
+            raise ContractError('vacuous-complete-close', 'complete close requires matched declared rows')
+        if declared is not None and (not declared_rows):
+            raise ContractError('vacuous-complete-close', 'complete close requires declared rows')
+        if supplied['missing'] or supplied['failing']:
+            raise ContractError('incomplete-close', 'complete close requires every declared row to pass')
+        if declared is not None and len(supplied['matched']) != len(declared_rows):
+            raise ContractError('incomplete-close', 'complete close is missing declared row coverage')
+        if not expected_tasks and (not expected_builds):
+            raise ContractError('vacuous-complete-close', 'complete close must account for task keys')
+        if not all(value['bead_closed'].values()) or not all(value['diff_nonempty'].values()):
+            raise ContractError('incomplete-close', 'complete close requires successful task receipts')
+    else:
+        refused_ids = {_as_row_id(row['declared_row_id']) for row in value['refused_rows']}
+        if not refused_ids:
+            raise ContractError('refused-without-rows', 'refused close must name unrun work')
+        if refused_ids & supplied_sets['matched']:
+            raise ContractError('refused-row-overlap', 'refused rows cannot overlap matched declared rows')
+        if computed is not None:
+            missing_ids = set(computed['missing'])
+            if not missing_ids.issubset(refused_ids):
+                raise ContractError('unrun-row-unaccounted', 'every missing declared row must be named in refused_rows')
+    return value
+check_adjudication = validate_adjudication
+check_fix_verdict = validate_fix_verdict
+check_close_result = validate_close_result
+"""Workflow state, git helpers, stage entries, and scheduler."""
+import json
+import os
+import pprint
+import subprocess
+import threading
+import tomllib
+from pathlib import Path
+REVIEWER_PREAMBLE_PATH = 'skill/references/reviewer-preamble.md'
+_CRITICAL_EFFECTS = frozenset({'credentials', 'schema', 'process', 'filesystem'})
+_REGIME_DEFAULTS = {'lanes': 0, 'min_families': 0, 'fix_rounds': 0, 're_review': 'none', 'adjudicate': False, 'severity_floor': 'minor', 'max_task_calls': 0}
+_ADVERSARIAL_PERSONAS = frozenset({'refuter', 'attacker'})
+_CALL_CEILINGS = {'prose': 8, 'light': 8, 'standard': 12, 'critical': 24}
+_LEGACY_SCOPED_STAGE = 'fix' + '_review'
+_LEGACY_SCOPED_ADJUDICATION_STAGE = 'fix' + '_adjudicate'
+
+def _closed(plan, run=None):
+    if not plan.repo.is_dir() or not (plan.repo / '.beads').is_dir():
+        return set()
+    command = ['bd', '-C', str(plan.repo), 'list', '--metadata-field', f'plan={plan.name}', '--json', '-n', '0', '--all']
+    runner = run or subprocess.run
+    proc = runner(command, capture_output=True, text=True, check=False)
+    rendered = ' '.join(command)
+    if proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip()
+        raise PlanError('beads-query', f'`{rendered}` failed: {detail}')
+    try:
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise PlanError('beads-query', f'`{rendered}` returned invalid JSON: {exc}') from None
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list) or not all((isinstance(row, dict) for row in rows)):
+        raise PlanError('beads-query', f'`{rendered}` returned JSON that is not a list of beads')
+    closed = set()
+    for row in rows:
+        metadata = row.get('metadata', {})
+        if not isinstance(metadata, dict):
+            raise PlanError('beads-query', f'`{rendered}` returned a bead with invalid metadata')
+        task_id = metadata.get('task')
+        if row.get('status') == 'closed' and task_id:
+            closed.add(str(task_id))
+    return closed
+
+def _main_branch(plan):
+    if not plan.repo.is_dir():
+        return 'main'
+    proc = subprocess.run(['git', '-C', str(plan.repo), 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], capture_output=True, text=True, check=False)
+    branch = proc.stdout.strip().removeprefix('origin/') if proc.returncode == 0 else ''
+    if branch and branch != f'plan/{plan.name}':
+        return branch
+    for branch in ('main', 'master'):
+        proc = subprocess.run(['git', '-C', str(plan.repo), 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}'], capture_output=True, text=True, check=False)
+        if proc.returncode == 0:
+            return branch
+    return 'main'
+
+def _spine_head(plan):
+    if not plan.repo.is_dir():
+        return None
+    proc = subprocess.run(['git', '-C', str(plan.repo), 'rev-parse', f'plan/{plan.name}'], capture_output=True, text=True, check=False)
+    head = proc.stdout.strip()
+    return head if proc.returncode == 0 and head else None
+
+def _persona_roles():
+    persona_index = Path(__file__).resolve().parents[3] / 'skill/personas/index.toml'
+    try:
+        data = tomllib.loads(persona_index.read_text(encoding='utf-8'))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise PlanError('unknown-persona', f'cannot read {persona_index}: {exc}') from None
+    roles = {}
+    for name, entry in data.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get('role'), str):
+            raise PlanError('unknown-persona', f'persona `{name}` has no role in {persona_index}')
+        roles[name] = entry['role']
+    return roles
+
+def _resolve_pools(plan, overrides, persona_loader=None):
+    personas = (persona_loader or _persona_roles)()
+    executable = [task for task in plan.tasks if isinstance(task, ExecutableTask)]
+    for task in executable:
+        tier = _resolve_regime_name(task, plan)
+        if tier not in _plan_regimes(plan):
+            raise PlanError('tier-unsatisfiable', f'task `{task.id}` names undeclared review tier `{tier}`')
+        missing = [name for name in task.review.personas if name not in personas]
+        if missing:
+            raise PlanError('unknown-persona', f'task `{task.id}` names unknown persona(s): {missing}')
+    roles = {'executor', 'integrator', 'adjudicator', 'verifier'}
+    if _needs_fixer(plan, executable):
+        roles.add('fixer')
+    roles.update((task.role for task in executable))
+    roles.update((personas[name] for task in executable for name in task.review.personas))
+    pools = {}
+    for role in sorted(roles):
+        pool = routing.resolve(plan, role, overrides)
+        if not pool:
+            raise PlanError('unrouted-role', f'workflow stage role `{role}` has no route')
+        pools[role] = pool
+    return (pools, personas)
+
+def _host_side(task):
+    return any((Path(name).is_absolute() for name in task.owned_files))
+
+def _verify_count(tasks):
+    return len({(row.run, row.expect) for task in tasks for row in task.verify})
+
+def _route_data(pools):
+    return {role: [{'engine': route.engine, 'model': route.model, 'effort': route.effort, 'mode': route.mode} for route in pool] for role, pool in pools.items()}
+
+def _owned_map(task):
+    if _host_side(task):
+        return {task.id: [name for name in task.owned_files if not Path(name).is_absolute()]}
+    return {task.id: list(task.owned_files)}
+
+def _compact_owned(paths):
+    groups = {}
+    for path in paths:
+        parent, separator, name = str(path).rpartition('/')
+        groups.setdefault(parent if separator else '', []).append(name if separator else str(path))
+    return [(parent, names) for parent, names in groups.items()]
+
+def _stage_data(role, persona, isolation, schema, timeout=None):
+    return {'route_pool': role, 'persona': persona, 'isolation': isolation, 'schema': schema, 'timeout': resolve_timeout(role, timeout)}
+
+def _source_value(source, key, default=None):
+    if isinstance(source, dict):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+def _plan_regimes(plan):
+    regimes = _source_value(plan, 'regimes')
+    if isinstance(regimes, dict):
+        return regimes
+    legacy = _source_value(plan, 'review_tiers')
+    return legacy if isinstance(legacy, dict) else {}
+
+def _is_v2_plan(plan):
+    if not isinstance(_source_value(plan, 'regimes'), dict):
+        return False
+    advisories = _source_value(plan, 'advisories', ()) or ()
+    return 'deprecated-review-tiers' not in advisories
+
+def _needs_fixer(plan, tasks=None):
+    if not _is_v2_plan(plan):
+        return False
+    executable = tasks if tasks is not None else [task for task in plan.tasks if isinstance(task, ExecutableTask)]
+    return any((_regime_policy(task, plan)['fix_rounds'] for task in executable))
+
+def _resolve_regime_name(task, plan=None):
+    review = _source_value(task, 'review')
+    explicit = _source_value(review, 'tier')
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    effects = list(_source_value(task, 'effects', ()) or ())
+    if effects == ['docs']:
+        return 'prose'
+    if _CRITICAL_EFFECTS.intersection(effects):
+        return 'critical'
+    return 'standard'
+
+def _regime_policy(task_or_row, plan=None):
+    if isinstance(task_or_row, dict) and 'fix_rounds' in task_or_row:
+        source = task_or_row
+        name = source.get('regime', source.get('name'))
+        if not name:
+            name = 'prose' if source.get('adjudicate') is False else 'standard'
+        values = {key: source.get(key, default) for key, default in _REGIME_DEFAULTS.items()}
+    else:
+        name = _resolve_regime_name(task_or_row, plan)
+        regime = _plan_regimes(plan).get(name, {}) if plan is not None else {}
+        values = {key: _source_value(regime, key, default) for key, default in _REGIME_DEFAULTS.items()}
+    values['name'] = name
+    return values
+
+def regime_stages(task_or_row, plan=None):
+    policy = _regime_policy(task_or_row, plan)
+    stages = ['execute', 'review']
+    if policy['adjudicate']:
+        stages.append('adjudicate')
+    if policy['fix_rounds']:
+        stages.append('fix')
+        if policy['re_review'] == 'scoped':
+            stages.append('verify_fixes')
+    stages.append('done')
+    return stages
+
+def _adversarial_reviewer(persona, role, plan=None):
+    return plan is not None and (str(persona).strip().lower() in _ADVERSARIAL_PERSONAS or str(role).strip().lower() == 'attacker')
+
+def _workspace_token(value):
+    return ''.join((ch if ch.isalnum() or ch in '.-_' else '-' for ch in str(value)))
+
+def _task_timeout(task, plan, role):
+    bounds = _source_value(task, 'bounds')
+    task_timeout = _source_value(bounds, 'timeout')
+    pool = _source_value(_source_value(plan, 'routing', {}), role, [])
+    route_timeout = _source_value(pool, 'timeout')
+    return resolve_timeout(role, task_timeout=task_timeout, role_timeout=route_timeout, regime=_resolve_regime_name(task, plan), host=_host_side(task))
+
+def _task_data(task, path, persona_roles, wave, index, deps, review_workspace, plan=None):
+    policy = _regime_policy(task, plan)
+    v2 = _is_v2_plan(plan)
+    max_task_calls = int(policy['max_task_calls'] or _CALL_CEILINGS.get(policy['name'], 12))
+    row = {'id': task.id, 'wave': wave, 'index': index, 'deps': deps, **_stage_data(task.role, task.persona, 'none' if _host_side(task) else 'worktree', 'EXECUTE_RESULT', _task_timeout(task, plan, task.role) if plan is not None else None), 'expects': len(task.verify), 'regime': policy['name'], 'max_task_calls': max_task_calls, 'fix_rounds': policy['fix_rounds'] if v2 else 3 if policy['name'] == 'critical' else 2, 'brief': str(path), 'owned': _owned_map(task)[task.id], 'verifies': [(row.run, row.expect) for row in task.verify], 'host': _host_side(task), 'review_workspace': str(review_workspace)}
+    if v2:
+        row.update({'lanes': policy['lanes'], 'min_families': policy['min_families'], 're_review': policy['re_review'], 'adjudicate': policy['adjudicate'], 'severity_floor': policy['severity_floor'], 'max_task_calls': max_task_calls, 'v2': True, 'regime_data': _immutable_snapshot(policy), 'stages': regime_stages(policy)})
+    reviewers = []
+    for reviewer_index, persona in enumerate(task.review.personas):
+        role = persona_roles[persona]
+        isolated = _adversarial_reviewer(persona, role, plan)
+        workspace = str(review_workspace)
+        if isolated:
+            workspace += '-' + _workspace_token(persona) + '-' + str(reviewer_index)
+        reviewer = _stage_data(role, persona, 'worktree' if isolated else 'none', 'FINDINGS', _task_timeout(task, plan, role) if plan is not None else None)
+        reviewer.update({'review_workspace': workspace, 'porcelain_guard': not isolated, 'preamble': REVIEWER_PREAMBLE_PATH})
+        reviewers.append(reviewer)
+    row['reviewers'] = reviewers
+    if v2:
+        row['effects'] = list(_source_value(task, 'effects', ()) or ())
+        row['consumes'] = list(_source_value(task, 'consumes', ()) or ())
+        bounds = _source_value(task, 'bounds')
+        row['bounds'] = dict(bounds) if isinstance(bounds, dict) else None
+    return row
+
+def _serializable_regimes(plan):
+    result = {}
+    for name, regime in _plan_regimes(plan).items():
+        result[name] = {key: _source_value(regime, key, default) for key, default in _REGIME_DEFAULTS.items()}
+    return result
+
+def build_plan_data(plan, live_waves, brief_paths, persona_roles, main_branch, workspace, review_workspace):
+    live_ids = {task.id for _, tasks in live_waves for task in tasks}
+    edges = graph._edges(plan)
+    final_build_wave = max((number for number, tasks in live_waves if any((isinstance(task, ExecutableTask) and task.kind == 'build' for task in tasks))), default=None)
+    task_rows = []
+    waves_data = {}
+    checkpoints_data = []
+    for number, tasks in live_waves:
+        executable = [task for task in tasks if isinstance(task, ExecutableTask)]
+        checkpoints = [task for task in tasks if isinstance(task, (HumanCheckpoint, OracleGate))]
+        for index, task in enumerate(executable):
+            deps = [dep for dep in edges[task.id] if dep in live_ids]
+            if _host_side(task):
+                deps += [f'close:{earlier}' for earlier in waves_data]
+                deps += [row['id'] for row in task_rows if row.get('host')]
+            safe_task_id = ''.join((ch if ch.isalnum() or ch in '.-_' else '-' for ch in task.id))
+            task_row = _task_data(task, brief_paths[number, task.id], persona_roles, number, index, list(dict.fromkeys(deps)), Path(str(review_workspace) + '-' + safe_task_id), plan=plan)
+            task_row.pop('expects', None)
+            if not task_row.get('host'):
+                task_row.pop('host', None)
+            if not task_row.get('v2') and task_row.get('regime') == 'standard':
+                task_row.pop('regime', None)
+            for reviewer in task_row['reviewers']:
+                reviewer.pop('preamble', None)
+                reviewer.pop('schema', None)
+            task_rows.append(task_row)
+        if executable:
+            final_build = number == final_build_wave
+            workflow_rows = _final_close_verifies(plan) if final_build else []
+            close_prefix, close_body, close_final = _close_prompt_parts(plan, number, final_build)
+            close_data = {'wave': number, 'prefix': close_prefix, 'body': close_body, 'final': close_final, 'verifies': [(task.id, [(row.run, row.expect) for row in task.verify]) for task in executable], 'workflow_verifies': workflow_rows, 'expects': _verify_count(executable) + len(workflow_rows), 'task_ids': [task.id for task in executable], 'build_ids': [task.id for task in executable if task.kind == 'build'], 'final_build': final_build}
+            if sum((len(task.owned_files) for task in executable)) > 100:
+                close_data['owned_groups'] = {task.id: _compact_owned((name for name in task.owned_files if not Path(name).is_absolute())) for task in executable}
+            waves_data[str(number)] = {'task_ids': [task.id for task in executable], 'verifier': _stage_data('verifier', 'integrator', 'none', 'CLOSE_RESULT', resolve_timeout('executor') if final_build else resolve_timeout('verifier')), 'close': close_data}
+        for task in checkpoints:
+            own = [dep for dep in edges[task.id] if dep in live_ids]
+            payload = {'id': task.id, 'title': task.title, 'acceptance': task.acceptance, 'assignee': task.assignee}
+            if isinstance(task, OracleGate):
+                payload['oracle'] = 'fable'
+            checkpoints_data.append({'id': task.id, 'wave': number, 'deps': list(dict.fromkeys(own)), 'payload': payload})
+    checkpoint_ids = {entry['id'] for entry in checkpoints_data}
+    consumer_rows = [{'id': row['id'], 'deps': row['deps']} for row in task_rows]
+    consumer_rows += [{'id': entry['id'], 'deps': entry['deps']} for entry in checkpoints_data]
+    for entry in checkpoints_data:
+        entry['consumers'] = {row['id']: [dep for dep in row['deps'] if dep not in checkpoint_ids] for row in consumer_rows if entry['id'] in row['deps']}
+    derived_run_claim_ceiling = sum((row['max_task_calls'] for row in task_rows)) + len(waves_data)
+    authored_run_claim_ceiling = _source_value(plan, 'run_claim_ceiling')
+    resolved_run_claim_ceiling = authored_run_claim_ceiling if authored_run_claim_ceiling is not None else derived_run_claim_ceiling
+    return {'name': plan.name, 'spine': f'plan/{plan.name}', 'workspace': str(workspace), 'regimes': _serializable_regimes(plan), 'derived_run_claim_ceiling': derived_run_claim_ceiling, 'run_claim_ceiling': resolved_run_claim_ceiling, 'claim_warning_at': (resolved_run_claim_ceiling * 4 + 4) // 5, 'tasks': task_rows, 'waves': waves_data, 'checkpoints': checkpoints_data, 'adjudicator': _stage_data('adjudicator', 'adjudicator', 'none', 'ADJUDICATION'), 'fix': _stage_data('fixer' if _needs_fixer(plan) else 'executor', 'minimalist-implementer', 'none', 'EXECUTE_RESULT', resolve_timeout('fixer' if _needs_fixer(plan) else 'executor')), 'fix_verifier': _stage_data('verifier', 'fix-verifier', 'none', 'FIX_VERDICT')}
+MERGE_LOCK = threading.RLock()
+SPINE_READ_LOCK = threading.RLock()
+STATE_LOCK = threading.RLock()
+ITEM_CONDITION = threading.Condition()
+ABORT_EVENT = threading.Event()
+CURRENT_ITEM = threading.local()
+DECISION_TOMBSTONES = set()
+
+class ParkItem(Exception):
+    pass
+
+class RetryStage(Exception):
+    pass
+
+class FinishItem(Exception):
+    pass
+
+def with_results(instruction, results):
+    return 'RESULTS\n' + json.dumps(results, sort_keys=True, default=str) + '\n\n' + instruction
+
+def _immutable_snapshot(value):
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+def fix_prompt(task_id, fix_tasks):
+    return 'Apply these in the order given for ' + task_id + "; commit each, then report one EXECUTE_RESULT.\nYour write boundary for this round is the owned files in your brief plus each fix task's `owned_files`; the merge accepts exactly that union. If a fix needs a path outside it, make no change for that fix and report the conflict in `summary`.\n" + json.dumps(fix_tasks, sort_keys=True, default=str)
+
+def _fix_verifies(item):
+    return [(row.get('run', ''), row.get('expect', 'exit 0')) for fix_task in (item.get('adjudication') or {}).get('fix_tasks') or [] for row in fix_task.get('verify') or [] if isinstance(row, dict)]
+
+def route(spec, index):
+    routes = spec['routes']
+    return routes[index % len(routes)]
+
+def hydrate_routes(plan):
+    schemas = globals().get('SCHEMAS')
+    if isinstance(schemas, dict):
+        schemas.setdefault('FIX_VERDICT', FIX_VERDICT)
+    for name in ('adjudicator', 'fix'):
+        plan[name]['routes'] = ROUTES[plan[name]['route_pool']]
+    if 'fix_verifier' in plan:
+        plan['fix_verifier']['routes'] = ROUTES[plan['fix_verifier']['route_pool']]
+    for wave in plan['waves'].values():
+        wave['verifier']['routes'] = ROUTES[wave['verifier']['route_pool']]
+    for task in plan['tasks']:
+        task.setdefault('host', False)
+        task['routes'] = ROUTES[task['route_pool']]
+        for reviewer in task['reviewers']:
+            reviewer.setdefault('schema', 'FINDINGS')
+            reviewer['routes'] = ROUTES[reviewer['route_pool']]
+    return plan
+
+def sh(argv, cwd, timeout=None):
+    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    return (proc.returncode, proc.stdout + proc.stderr)
+
+def git(cwd, *argv):
+    return sh(['git', *argv], cwd)
+
+def _porcelain_snapshot(cwd):
+    if not cwd:
+        return ''
+    try:
+        _rc, output = git(cwd, 'status', '--porcelain=v1', '--untracked-files=all')
+    except (OSError, TypeError):
+        return ''
+    return output.strip()
+
+def recorded_head(key, head=None):
+    with SPINE_READ_LOCK:
+        if STATE['heads'].get(key) is None:
+            resolved = head or rev(WORKSPACE, 'HEAD')
+            if resolved is None:
+                return None
+            STATE['heads'][key] = resolved
+            save_state()
+        return STATE['heads'][key]
+
+def rev(cwd, ref):
+    if not ref or not isinstance(ref, str):
+        return None
+    try:
+        rc, out = git(cwd, 'rev-parse', '--verify', '--quiet', ref.strip() + '^{commit}')
+    except OSError:
+        return None
+    return out.strip() if rc == 0 and out.strip() else None
+
+def is_ancestor(cwd, commit, tip):
+    try:
+        return git(cwd, 'merge-base', '--is-ancestor', commit, tip)[0] == 0
+    except OSError:
+        return False
+
+def covered(path, owned):
+    path = canonical_test_path(str(path).rstrip('/'))
+    for entry in owned:
+        entry = canonical_test_path(str(entry).rstrip('/'))
+        if path == entry or path.startswith(entry + '/'):
+            return True
+    return False
+
+def rubric_class_path(path, rubric=None):
+    if not isinstance(path, str) or not path.strip():
+        return True
+    candidate = os.path.normpath(path)
+    data = rubric if isinstance(rubric, dict) else _source_value(globals().get('PLAN', {}), 'rubric', {})
+    exact = {os.path.normpath(str(data.get(name))) for name in ('plan', 'workflow', 'acceptance') if data.get(name)}
+    if candidate in exact:
+        return True
+    briefs = data.get('briefs')
+    if briefs:
+        prefix = os.path.normpath(str(briefs))
+        if candidate == prefix or candidate.startswith(prefix + os.sep):
+            return True
+    return candidate == os.path.normpath('tests/acceptance.sh')
+
+def effective_fix_boundary(task, fix_tasks, rubric=None):
+    paths = list(_source_value(task, 'owned', ()) or ())
+    paths.extend((path for fix_task in fix_tasks or [] for path in fix_task.get('owned_files', []) if isinstance(path, str) and (not rubric_class_path(path, rubric))))
+    return sorted(dict.fromkeys((str(path) for path in paths)))
+
+def _row_env():
+    env = dict(os.environ)
+    pin = env.pop('DELEGATE_WORKFLOW_PIN', None)
+    if pin:
+        pin_root = os.path.dirname(os.path.dirname(pin))
+        entries = [entry for entry in env.get('PYTHONPATH', '').split(os.pathsep) if entry and entry != pin_root and (not entry.startswith(pin_root + os.sep))]
+        if entries:
+            env['PYTHONPATH'] = os.pathsep.join(entries)
+        else:
+            env.pop('PYTHONPATH', None)
+    return env
+
+def sh_row(run, cwd, timeout):
+    proc = subprocess.Popen(['sh', '-c', run], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=_row_env())
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return (proc.returncode, out or '')
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+        proc.communicate()
+        return (124, 'timed out after ' + str(timeout) + 's')
+
+def run_verifies(cwd, verifies):
+    rows = []
+    for run, expect in verifies:
+        rc, out = sh_row(run, cwd, VERIFY_TIMEOUT)
+        passed = rc == 0 if expect == 'exit 0' else expect in out
+        rows.append({'run': run, 'exit': rc, 'expect': expect, 'passed': passed, 'note': out[-600:]})
+    return rows
+
+def _review_workspaces(item):
+    task = item.get('task') or {}
+    paths = [_source_value(task, 'review_workspace')]
+    for reviewer in _source_value(task, 'reviewers', ()) or ():
+        if _source_value(reviewer, 'isolation') == 'worktree':
+            paths.append(_source_value(reviewer, 'review_workspace'))
+    return list(dict.fromkeys((path for path in paths if path)))
+
+def sync_review_workspace(item):
+    task = item['task']
+    key = item['id'] + ':' + item['stage'] + ':' + str(item['rnd'])
+    with SPINE_READ_LOCK:
+        head = STATE['review_heads'].setdefault(key, item['head'])
+        save_state()
+        workspaces = _review_workspaces(item)
+        for review_ws in workspaces:
+            if not os.path.exists(review_ws):
+                rc, out = git(WORKSPACE, 'worktree', 'add', '--detach', review_ws, head)
+                if rc:
+                    raise SystemExit('review worktree add failed: ' + out[-400:])
+            rc, top = git(review_ws, 'rev-parse', '--show-toplevel')
+            if rc or os.path.realpath(top.strip()) != os.path.realpath(review_ws):
+                raise SystemExit('review workspace ' + review_ws + ' exists but is not a git worktree of its own; move it aside')
+            rc, out = git(review_ws, 'checkout', '--detach', '--force', head)
+            if rc:
+                raise SystemExit('review worktree checkout failed: ' + out[-400:])
+            git(review_ws, 'clean', '-fdq')
+            if rev(review_ws, 'HEAD') != head:
+                raise SystemExit('review worktree is not at ' + str(head))
+            modules = os.path.join(WORKSPACE, 'node_modules')
+            link = os.path.join(review_ws, 'node_modules')
+            if os.path.isdir(modules) and (not os.path.lexists(link)):
+                os.symlink(modules, link)
+        item['review_head'] = head
+        item['review_workspaces'] = workspaces
+
+def remove_review_workspace(item):
+    if item.get('kind') != 'task':
+        return
+    with SPINE_READ_LOCK:
+        workspaces = item.get('review_workspaces') or _review_workspaces(item)
+        for review_ws in workspaces:
+            if not os.path.exists(review_ws):
+                continue
+            rc, top = git(review_ws, 'rev-parse', '--show-toplevel')
+            if rc or os.path.realpath(top.strip()) != os.path.realpath(review_ws):
+                raise SystemExit('refusing to remove non-worktree review path ' + review_ws)
+            rc, out = git(WORKSPACE, 'worktree', 'remove', '--force', review_ws)
+            if rc:
+                raise SystemExit('review worktree remove failed: ' + out[-400:])
+
+def stage_phase(item, stage):
+    return 'wave-' + str(item.get('wave', '?')) + ':' + stage
+
+def merge_commit_of(item):
+    merged = (item.get('integration') or {}).get('merged') or []
+    return merged[0].get('merge_commit') if merged else item.get('head')
+
+def review_instruction(item, head, reviewer=None):
+    merged = (item.get('integration') or {}).get('merged') or []
+    state = globals().get('STATE')
+    state = state if isinstance(state, dict) else {'task_bases': {}, 'bases': {}}
+    base = merged[0].get('base') if merged else state.get('task_bases', {}).get(item['id'] + ':execute') or state.get('bases', {}).get(str(item.get('wave', '')))
+    task = item['task']
+    reviewer = reviewer or {}
+    workspace = reviewer.get('review_workspace') or task['review_workspace']
+    guard = ''
+    state_rule = 'do not edit files, create commits, or run git state commands there. '
+    if reviewer.get('porcelain_guard'):
+        state_rule = 'do not edit files or create commits there. '
+        guard = ' Record `git status --porcelain` immediately before and after the review; the two snapshots are the no-write guard and belong in the review receipt.'
+    return 'Review task ' + item['id'] + '. Run in ' + workspace + ", this task's frozen read-only checkout at " + str(head) + '; ' + state_rule + 'Read ' + REVIEWER_PREAMBLE_PATH + ' before applying the selected reviewer lens. ' + guard + "This task's merge commit is " + str(merge_commit_of(item)) + '; scope your review to `git diff ' + str(base) + ' ' + str(merge_commit_of(item)) + '` and the files it touches. Return only file:line findings.'
+
+def scoped_fix_prompt(item, head):
+    adopted = [row for row in item['adjudication'].get('dispositions') or [] if str(row.get('verdict', '')).upper() == 'ADOPT']
+    return 'Re-review fix round ' + str(item['rnd']) + ' of task ' + item['id'] + '. Run in ' + item['task']['review_workspace'] + ", this task's frozen read-only checkout at " + str(head) + '; do not edit files or create commits there. ' + 'Read ' + REVIEWER_PREAMBLE_PATH + ' before applying the selected reviewer lens. ' + 'The fix diff is `git diff ' + str(item['fix_before']) + ' ' + str(head) + '`. Adopted findings this round: ' + json.dumps(adopted, sort_keys=True, default=str) + '. Fix tasks: ' + json.dumps(item['adjudication'].get('fix_tasks'), sort_keys=True, default=str) + '. Report only adopted findings that are still open and regressions introduced by that diff, ' + 'as file:line findings; an empty list means the round is clean.'
+
+def select_reviewers(item):
+    reviewers = item['task']['reviewers']
+    personas = [reviewer['persona'] for reviewer in reviewers]
+    chosen = set()
+    for row in item['adjudication'].get('dispositions') or []:
+        if str(row.get('verdict', '')).upper() != 'ADOPT':
+            continue
+        persona = str(row.get('persona', ''))
+        if persona in personas:
+            chosen.add(personas.index(persona))
+            continue
+        lane = str(row.get('lane', '')).strip().lower()
+        if lane.startswith('lane') and lane[4:].isdigit() and (1 <= int(lane[4:]) <= len(reviewers)):
+            chosen.add(int(lane[4:]) - 1)
+    if not chosen:
+        log('scoped review ' + item['id'] + ': no adopted disposition names a reviewer; full panel re-reviews')
+        return reviewers
+    return [reviewers[index] for index in sorted(chosen)][:2]
+globals()['fix_' + 'reviewers'] = select_reviewers
+
+def _review_findings(task_id):
+    panels = globals().get('review', {})
+    panels = panels.get(task_id, []) if isinstance(panels, dict) else []
+    findings = []
+    for panel in panels:
+        entries = panel if isinstance(panel, list) else [panel]
+        findings.extend((row for row in entries if isinstance(row, dict) and row.get('id')))
+    return findings
+
+def _adopted_findings(item):
+    task_id = item['id']
+    by_id = {str(row['id']): row for row in _review_findings(task_id)}
+    adopted = []
+    for disposition in (item.get('adjudication') or {}).get('dispositions') or []:
+        if str(disposition.get('verdict', '')).upper() != 'ADOPT':
+            continue
+        finding_id = str(disposition.get('id', ''))
+        finding = by_id.get(finding_id)
+        if finding is None:
+            finding = disposition
+        adopted.append(_immutable_snapshot(finding))
+    return adopted
+
+def _unique_findings(findings):
+    by_id = {}
+    for finding in findings or []:
+        if isinstance(finding, dict) and finding.get('id'):
+            by_id.setdefault(str(finding['id']), finding)
+    return list(by_id.values())
+
+def _fix_verifier_spec(item):
+    plan = globals().get('PLAN')
+    spec = dict(_source_value(plan, 'fix_verifier', {}) or {})
+    task = item.get('task') or {}
+    spec['route_pool'] = 'verifier'
+    spec['persona'] = 'fix-verifier'
+    spec['isolation'] = 'none'
+    spec['schema'] = 'FIX_VERDICT'
+    spec['review_workspace'] = _source_value(task, 'review_workspace', '')
+    explicit = _source_value(_source_value(task, 'bounds'), 'timeout')
+    spec['timeout'] = explicit if explicit is not None else spec.get('timeout', resolve_timeout('verifier'))
+    return spec
+
+def verify_fixes_prompt(item):
+    task = item['task']
+    declared_verify = _source_value(task, 'verifies', ())
+    fix_diff = item.get('fix_diff')
+    if fix_diff is None:
+        fix_diff = {'before': item.get('fix_before'), 'after': item.get('head'), 'command': 'git diff ' + str(item.get('fix_before')) + ' ' + str(item.get('head'))}
+    payload = {'adopted_findings': _adopted_findings(item), 'declared_verify': list(declared_verify or []), 'fix_diff': fix_diff}
+    payload.update({'adopted': payload['adopted_findings'], 'verify_rows': payload['declared_verify'], 'diff': payload['fix_diff']})
+    frozen = _immutable_snapshot(payload)
+    item['fix_verifier_input'] = frozen
+    instruction = 'Verify the adopted findings for task ' + item['id'] + ' as fix-verifier in ' + str(_source_value(task, 'review_workspace', '')) + '. Use the frozen fix diff and declared verify rows. Return exactly one FIX_VERDICT marker with every adopted finding covered by one verdict or one non-empty unrun reason; include regressions introduced by this diff only.'
+    return with_results(instruction, frozen)
+_SEVERITY_RANK = {'blocker': 0, 'major': 1, 'minor': 2}
+
+def _severity_at_or_below(severity, floor):
+    return _SEVERITY_RANK.get(str(severity), -1) >= _SEVERITY_RANK.get(str(floor), 2)
+
+def _fix_task_finding_ids(adjudication):
+    return {str(finding_id) for fix_task in (adjudication or {}).get('fix_tasks') or [] for finding_id in fix_task.get('fixes') or []}
+
+def _disposition_severities(adjudication):
+    return {str(row.get('id')): row.get('severity') for row in (adjudication or {}).get('dispositions') or [] if row.get('id')}
+
+def _disposition_verdicts(adjudication):
+    return {str(row.get('id')): str(row.get('verdict', '')).upper() for row in (adjudication or {}).get('dispositions') or [] if row.get('id')}
+
+def _add_floor_residue(adjudication, unresolved, floor):
+    value = dict(adjudication or {})
+    residue = list(value.get('accepted_residue') or [])
+    severities = _disposition_severities(value)
+    for finding_id in unresolved:
+        if finding_id not in residue and _severity_at_or_below(severities.get(finding_id), floor):
+            residue.append(finding_id)
+    value['accepted_residue'] = residue
+    return _immutable_snapshot(value)
+
+def _partition_floor_fix_tasks(adjudication, floor):
+    value = dict(adjudication or {})
+    severities = _disposition_severities(value)
+    verdicts = _disposition_verdicts(value)
+    residue = list(value.get('accepted_residue') or [])
+    remaining = []
+    for fix_task in value.get('fix_tasks') or []:
+        low = []
+        high = []
+        for finding_id in fix_task.get('fixes') or []:
+            finding_key = str(finding_id)
+            (low if verdicts.get(finding_key) == 'ADOPT' and _severity_at_or_below(severities.get(finding_key), floor) else high).append(finding_id)
+        for finding_id in low:
+            if finding_id not in residue:
+                residue.append(finding_id)
+        if high:
+            if len(high) == len(fix_task.get('fixes') or []):
+                remaining.append(fix_task)
+            else:
+                narrowed = dict(fix_task)
+                narrowed['fixes'] = high
+                remaining.append(narrowed)
+    value['fix_tasks'] = remaining
+    value['accepted_residue'] = residue
+    return _immutable_snapshot(value)
+
+def _severity_floor_closes(adjudication, policy, unresolved=None):
+    unresolved = set(unresolved if unresolved is not None else _fix_task_finding_ids(adjudication))
+    if not unresolved:
+        return False
+    severities = _disposition_severities(adjudication)
+    verdicts = _disposition_verdicts(adjudication)
+    return all((verdicts.get(finding_id) == 'ADOPT' and _severity_at_or_below(severities.get(finding_id), policy['severity_floor']) for finding_id in unresolved))
+
+def _persist_coordinator_tasks(item, value):
+    tasks = value.get('coordinator_tasks') or []
+    if not tasks:
+        return []
+    records = _immutable_snapshot(tasks)
+    item['coordinator_tasks'] = records
+    state = globals().get('STATE')
+    if not isinstance(state, dict):
+        return records
+    coordinator = state.setdefault('coordinator', {})
+    by_task = state.setdefault('coordinator_tasks', {})
+    task_ids = [str(entry.get('id')) if isinstance(entry, dict) else str(entry) for entry in by_task.get(item['id']) or [] if not isinstance(entry, dict) or entry.get('id')]
+    for record in records:
+        record_id = str(record['id'])
+        coordinator[record_id] = _immutable_snapshot(record)
+        if record_id not in task_ids:
+            task_ids.append(record_id)
+    by_task[item['id']] = task_ids
+    save = globals().get('save_state')
+    if callable(save):
+        save()
+    return records
+
+def _coordinator_from_fix(task, fix_task):
+    return {'id': str(fix_task.get('id', task['id'] + '.coordinator')) + '.coordinator', 'finding_ids': [str(value) for value in fix_task.get('fixes') or []], 'why': 'generated fix work reaches the rubric class or has an invalid path', 'paths': [str(path) for path in fix_task.get('owned_files') or []], 'change': str(fix_task.get('change') or fix_task.get('delivers') or 'apply coordinator fix'), 'verify': _immutable_snapshot(fix_task.get('verify') or []), 'blocking': True}
+
+def reclassify_generated_fixes(task, fix_tasks, rubric=None):
+    lane = []
+    coordinator = []
+    for fix_task in fix_tasks or []:
+        paths = fix_task.get('owned_files') or []
+        invalid = any((not isinstance(path, str) or any((char in path for char in '*?')) or rubric_class_path(path, rubric) for path in paths))
+        (coordinator if invalid else lane).append(_coordinator_from_fix(task, fix_task) if invalid else fix_task)
+    return (lane, coordinator)
+
+def _prose_fix_plan(task, values):
+    findings = _unique_findings((row for panel in values or [] for row in (panel if isinstance(panel, list) else [panel])))
+    owned = _source_value(task, 'owned', ()) or ()
+    declared = list(_source_value(task, 'verifies', ()) or ())
+    verify = [{'run': run, 'expect': expect} for run, expect in declared]
+    if not verify:
+        verify = [{'run': 'true', 'expect': 'exit 0'}]
+    dispositions = []
+    fix_tasks = []
+    for index, finding in enumerate(findings):
+        finding_id = str(finding['id'])
+        file_name = finding.get('file', '')
+        disposition = {'id': finding_id, 'verdict': 'ADOPT', 'severity': finding.get('severity', 'minor'), 'lane': 'lane' + str(index + 1), 'persona': 'prose-reviewer', 'file': file_name, 'line': finding.get('line', 1), 'because': 'the prose reviewer supplied a reproducible finding'}
+        dispositions.append(disposition)
+        if isinstance(file_name, str) and covered(file_name, owned):
+            fix_tasks.append({'id': task['id'] + '.fix.' + finding_id, 'delivers': str(finding.get('fix', 'repair')), 'owned_files': [file_name], 'change': str(finding.get('fix', 'repair')), 'verify': verify, 'fixes': [finding_id]})
+    return {'decision': 'fix', 'dispositions': dispositions, 'fix_tasks': fix_tasks, 'accepted_residue': [], 'coordinator_tasks': []}
+
+def _adjudication_result_bad(value, task):
+    if not _source_value(task, 'v2', False) and isinstance(value, dict) and ('dry' in value):
+        return False
+    return failed(value, ADJUDICATION)
+
+def entries_for(item):
+    task = item.get('task')
+    stage = item['stage']
+    rnd = item['rnd']
+    if stage == 'execute':
+        return [{'spec': task, 'prompt': open(task['brief']).read(), 'slot': item['index'], 'label': 'execute:' + task['id'], 'retry_label': 'execute-retry:' + task['id'], 'phase': stage_phase(item, 'execute'), 'bad': lambda value: result_bad(value, EXECUTE_RESULT, task['verifies'], 'execute:' + task['id'], 'execute result invalid')}]
+    if stage == 'review':
+        entries = []
+        for index, reviewer in enumerate(task['reviewers']):
+            prompt = with_results(open(task['brief']).read() + '\n\n' + review_instruction(item, item.get('review_head') or item['head'], reviewer), {'integration': item['integration'], 'reviewer_preamble': REVIEWER_PREAMBLE_PATH})
+            entries.append({'spec': reviewer, 'prompt': prompt, 'slot': index, 'label': 'review:' + task['id'] + ':' + reviewer['persona'], 'retry_label': 'review-retry:' + task['id'] + ':' + reviewer['persona'], 'phase': stage_phase(item, 'review'), 'bad': lambda value: failed(value, FINDINGS), 'porcelain_guard': bool(reviewer.get('porcelain_guard')), 'review_workspace': reviewer.get('review_workspace')})
+        return entries
+    if stage == 'verify_fixes':
+        return [{'spec': _fix_verifier_spec(item), 'prompt': verify_fixes_prompt(item), 'slot': 0, 'label': 'verify-fixes:' + task['id'] + ':' + str(rnd), 'retry_label': 'verify-fixes-retry:' + task['id'] + ':' + str(rnd), 'phase': stage_phase(item, 'verify-fixes'), 'bad': lambda value: failed(value, FIX_VERDICT)}]
+    if stage == _LEGACY_SCOPED_STAGE:
+        prompt = with_results(scoped_fix_prompt(item, item.get('review_head') or item['head']), {'integration': item['integration']})
+        reviewers = select_reviewers(item)
+        return [{'spec': reviewer, 'prompt': prompt, 'slot': index + rnd + 1, 'label': 'review-fix:' + task['id'] + ':' + reviewer['persona'] + ':' + str(rnd), 'retry_label': 'review-fix-retry:' + task['id'] + ':' + reviewer['persona'] + ':' + str(rnd), 'phase': stage_phase(item, 'fix-review'), 'bad': lambda value: failed(value, FINDINGS)} for index, reviewer in enumerate(reviewers)]
+    if stage in ('adjudicate', _LEGACY_SCOPED_ADJUDICATION_STAGE):
+        fixing = stage == _LEGACY_SCOPED_ADJUDICATION_STAGE
+        instruction = ('Re-adjudicate task ' + task['id'] + ' after fix round ' + str(rnd) if fixing else 'Adjudicate all findings for task ' + task['id']) + '. Run in ' + task['review_workspace'] + ", the task's frozen read-only checkout at " + str(item.get('review_head') or item['head']) + "; this task's merge commit is " + str(merge_commit_of(item)) + '. Do not edit files there. Read ' + REVIEWER_PREAMBLE_PATH + ' before adjudicating. Drop any finding without a verified file:line. ' + ADJUDICATE_SCOPE
+        roster = select_reviewers(item) if fixing else task['reviewers']
+        findings = [{'lane': 'lane' + str(index + 1), 'persona': reviewer['persona'], 'findings': value} for index, (reviewer, value) in enumerate(zip(roster, review[task['id']]))]
+        prompt = with_results(instruction, {'integration': item['integration'], 'findings': findings})
+        suffix = task['id'] + (':' + str(rnd) if fixing else '')
+        adjudicator_spec = dict(PLAN['adjudicator'])
+        explicit_timeout = _source_value(_source_value(task, 'bounds'), 'timeout')
+        if explicit_timeout is not None:
+            adjudicator_spec['timeout'] = explicit_timeout
+        return [{'spec': adjudicator_spec, 'prompt': prompt, 'slot': rnd + 1 if fixing else 0, 'label': ('adjudicate-fix:' if fixing else 'adjudicate:') + suffix, 'retry_label': ('adjudicate-fix-retry:' if fixing else 'adjudicate-retry:') + suffix, 'phase': stage_phase(item, 'fix-adjudicate' if fixing else 'adjudicate'), 'bad': lambda value: _adjudication_result_bad(value, task)}]
+    if stage == 'fix':
+        fix_spec = dict(PLAN['fix'])
+        fix_spec['isolation'] = task['isolation']
+        explicit_timeout = _source_value(_source_value(task, 'bounds'), 'timeout')
+        if explicit_timeout is not None:
+            fix_spec['timeout'] = explicit_timeout
+        fix_tasks = item['adjudication'].get('fix_tasks') or []
+        fix_verifies = _fix_verifies(item)
+        prompt = open(task['brief']).read() + '\n\n' + fix_prompt(task['id'], fix_tasks)
+        return [{'spec': fix_spec, 'prompt': prompt, 'slot': rnd, 'label': 'fix:' + task['id'] + ':' + str(rnd), 'retry_label': 'fix-retry:' + task['id'] + ':' + str(rnd), 'phase': stage_phase(item, 'fix'), 'bad': lambda value: result_bad(value, EXECUTE_RESULT, fix_verifies, 'fix:' + task['id'] + ':' + str(rnd), 'fix result invalid', 'fix')}]
+    if stage == 'close':
+        return close_entries(item)
+    return []
+
+def verify_fixes(item):
+    if item.get('stage') != 'verify_fixes':
+        item = dict(item, stage='verify_fixes')
+    return entries_for(item)
+
+def thunk(entry, retry=False):
+
+    def invoke():
+        before = _porcelain_snapshot(entry.get('review_workspace')) if entry.get('porcelain_guard') else None
+        value = run_agent(entry['spec'], entry['prompt'], entry['slot'] + (1 if retry else 0), entry['retry_label'] if retry else entry['label'], entry['phase'])
+        if entry.get('porcelain_guard'):
+            entry['porcelain'] = {'before': before, 'after': _porcelain_snapshot(entry.get('review_workspace'))}
+        return value
+    return invoke
+
+def mark_done(item):
+    if item.get('kind') == 'task':
+        active_clock_pause(item['id'])
+    remove_review_workspace(item)
+    with ITEM_CONDITION:
+        item['stage'] = 'done'
+        ITEM_CONDITION.notify_all()
+
+def settle(item, values):
+    task = item.get('task')
+    stage = item['stage']
+    wave = item['wave']
+    if stage == 'execute':
+        value = values[0]
+        if result_bad(value, EXECUTE_RESULT, task['verifies'], 'execute:' + task['id'], 'execute result invalid'):
+            failure_gate('execute', wave, {'task': task['id'], 'result': value}, task['id'])
+        key = stage_key(item)
+        merge = merge_lane(task, value, task['owned'], key, task['verifies'])
+        if merge_bad(merge, key):
+            fallback = STATE['overrides'].setdefault(key, merge.get('head'))
+            save_state()
+            failure_gate('integrate', wave, dict(merge, note=MERGE_GATE_NOTE), task['id'])
+            merge = dict(merge, head=fallback)
+        item['integration'] = merge
+        item['head'] = merge['head']
+        item['stage'] = 'review'
+    elif stage in ('review', _LEGACY_SCOPED_STAGE):
+        review[task['id']] = values
+        failures = [index for index, value in enumerate(values) if failed(value, FINDINGS)]
+        if failures:
+            failure_gate('review' if stage == 'review' else 'fix-review', wave, {'failed_reviewers': failures, 'results': values}, task['id'])
+        if stage == 'review' and (not _source_value(task, 'adjudicate', True)):
+            policy = _regime_policy(task)
+            if _source_value(task, 'v2', False) and policy['fix_rounds']:
+                prose_value = _partition_floor_fix_tasks(_prose_fix_plan(task, values), policy['severity_floor'])
+                item['adjudication'] = prose_value
+                adjudication[task['id']] = prose_value
+                if prose_value.get('fix_tasks'):
+                    item['stage'] = 'fix'
+                    return
+            mark_done(item)
+            return
+        item['stage'] = 'adjudicate' if stage == 'review' else _LEGACY_SCOPED_ADJUDICATION_STAGE
+    elif stage == 'verify_fixes':
+        value = values[0]
+        frozen = item.get('fix_verifier_input') or {}
+        adopted = frozen.get('adopted_findings') or _adopted_findings(item)
+        findings = _unique_findings(_review_findings(task['id']))
+        try:
+            validate_fix_verdict(value, findings=findings or None, adopted=adopted, diff_finding_ids=item.get('fix_finding_ids') or item.get('diff_finding_ids'))
+        except (ContractError, TypeError, KeyError):
+            failure_gate('verify-fixes', wave, {'result': value}, task['id'])
+            return
+        item['fix_verdict'] = _immutable_snapshot(value)
+        unrun = value.get('unrun') or []
+        unresolved = {str(row.get('finding_id')) for row in value.get('verdicts') or [] if row.get('state') != 'fixed'}
+        regressions = value.get('regressions') or []
+        if unrun:
+            failure_gate('verify-fixes-unrun', wave, {'unrun': _immutable_snapshot(unrun)}, task['id'])
+            return
+        if not unresolved and (not regressions):
+            mark_done(item)
+            return
+        policy = _regime_policy(task)
+        if not regressions and _severity_floor_closes(item.get('adjudication'), policy, unresolved):
+            item['adjudication'] = _add_floor_residue(item['adjudication'], unresolved, policy['severity_floor'])
+            adjudication[task['id']] = item['adjudication']
+            mark_done(item)
+            return
+        item['rnd'] += 1
+        if item['rnd'] >= int(_source_value(task, 'fix_rounds', 0) or 0):
+            failure_gate('fix-rounds-exhausted', wave, {'rounds': _source_value(task, 'fix_rounds'), 'open': sorted(unresolved)}, task['id'])
+            mark_done(item)
+            return
+        item['stage'] = 'fix'
+    elif stage in ('adjudicate', _LEGACY_SCOPED_ADJUDICATION_STAGE):
+        value = values[0]
+        v2 = bool(_source_value(task, 'v2', False)) and stage == 'adjudicate'
+        if v2:
+            try:
+                validate_adjudication(value, _review_findings(task['id']) or None, _source_value(task, 'severity_floor', 'minor'))
+            except (ContractError, TypeError, KeyError):
+                failure_gate('adjudicate', wave, {'result': value}, task['id'])
+                return
+        adjudication[task['id']] = value
+        if _adjudication_result_bad(value, task):
+            failure_gate('adjudicate' if stage == 'adjudicate' else 'fix-adjudicate', wave, value, task['id'])
+            mark_done(item)
+            return
+        fix_tasks, reclassified = reclassify_generated_fixes(task, value.get('fix_tasks') or [])
+        value = dict(value, fix_tasks=fix_tasks)
+        if reclassified:
+            records = _persist_coordinator_tasks(item, {'coordinator_tasks': reclassified})
+            failure_gate('coordinate', wave, {'coordinator_tasks': records}, task['id'])
+        item['adjudication'] = _immutable_snapshot(value) if v2 else value
+        value = item['adjudication']
+        if v2 and value.get('coordinator_tasks'):
+            records = _persist_coordinator_tasks(item, value)
+            if any((record.get('blocking') for record in records)):
+                failure_gate('coordinate', wave, {'coordinator_tasks': records}, task['id'])
+        policy = _regime_policy(task)
+        if v2 and value.get('fix_tasks'):
+            value = _partition_floor_fix_tasks(value, policy['severity_floor'])
+            item['adjudication'] = value
+            adjudication[task['id']] = value
+        unresolved = _fix_task_finding_ids(value)
+        if v2 and _severity_floor_closes(value, policy, unresolved):
+            item['adjudication'] = _add_floor_residue(value, unresolved, policy['severity_floor'])
+            adjudication[task['id']] = item['adjudication']
+            mark_done(item)
+            return
+        if not v2 and value.get('dry') or not value.get('fix_tasks'):
+            mark_done(item)
+            return
+        if stage == _LEGACY_SCOPED_ADJUDICATION_STAGE:
+            item['rnd'] += 1
+        if item['rnd'] >= task['fix_rounds']:
+            failure_gate('fix-rounds-exhausted', wave, {'rounds': task['fix_rounds'], 'open': value.get('fix_tasks')}, task['id'])
+            mark_done(item)
+            return
+        item['stage'] = 'fix'
+    elif stage == 'fix':
+        value = values[0]
+        fixes[task['id']] = value
+        fix_tasks = item['adjudication'].get('fix_tasks') or []
+        additional = effective_fix_boundary({'owned': []}, fix_tasks)
+        item['fix_owned'] = sorted(set(item.get('fix_owned') or []) | set(additional))
+        if result_bad(value, EXECUTE_RESULT, _fix_verifies(item), 'fix:' + task['id'] + ':' + str(item['rnd']), 'fix result invalid', 'fix'):
+            failure_gate('fix', wave, {'fix_tasks': [fix_task.get('id') for fix_task in fix_tasks], 'result': value}, task['id'])
+        item['fix_before'] = item['head']
+        key = stage_key(item)
+        merge = merge_lane(task, value, effective_fix_boundary({'owned': list(task['owned']) + list(item['fix_owned'])}, []), key, task['verifies'])
+        if merge_bad(merge, key):
+            fallback = STATE['overrides'].setdefault(key, merge.get('head'))
+            save_state()
+            failure_gate('fix-integrate', wave, dict(merge, note=MERGE_GATE_NOTE), task['id'])
+            merge = dict(merge, head=fallback)
+        item['integration'] = merge
+        item['head'] = merge['head']
+        if _source_value(task, 'v2', False) and _source_value(task, 're_review') == 'scoped':
+            item['stage'] = 'verify_fixes'
+        elif _source_value(task, 'v2', False):
+            mark_done(item)
+        else:
+            item['stage'] = _LEGACY_SCOPED_STAGE
+    elif stage == 'close':
+        settle_close(item, values[0])
+
+def deps_done(item):
+    if not all((ITEMS[dep]['stage'] == 'done' for dep in item['deps'] if dep in ITEMS)):
+        return False
+    if item['kind'] != 'checkpoint':
+        return True
+    consumers = item.get('consumers') or {}
+    if not consumers:
+        return True
+    return any((all((ITEMS[dep]['stage'] == 'done' for dep in deps if dep in ITEMS)) for deps in consumers.values()))
+
+def seed_items():
+    seeds = args.get('seed') or {} if isinstance(args, dict) else {}
+    seed_adjudication = args.get('seed_adjudication') or {} if isinstance(args, dict) else {}
+    for number, base in (args.get('wave_base') or {} if isinstance(args, dict) else {}).items():
+        STATE['bases'].setdefault(str(number), base)
+    for task in PLAN['tasks']:
+        item = {'id': task['id'], 'kind': 'task', 'task': task, 'wave': task['wave'], 'deps': task['deps'], 'index': task['index'], 'stage': 'execute', 'rnd': 0, 'fix_owned': [], 'integration': None, 'head': None, 'review_head': None, 'adjudication': None, 'fix_before': None, 'fix_verifier_input': None, 'fix_verdict': None, 'coordinator_tasks': [], 'steps': 0}
+        seed = seeds.get(task['id'])
+        if seed:
+            item['head'] = recorded_head('seed:' + task['id'])
+            seed_merges = args.get('seed_merges') or {} if isinstance(args, dict) else {}
+            merge_commit = seed_merges.get(task['id']) or item['head']
+            item['integration'] = {'merged': [{'task': task['id'], 'branch': PLAN['spine'], 'merge_commit': merge_commit}], 'refused': [], 'conflicts': [], 'verify_results': [], 'head': item['head']}
+            item['fix_owned'] = list((args.get('seed_fix_owned') or {} if isinstance(args, dict) else {}).get(task['id'], []))
+            if seed == 'done':
+                item['stage'] = 'done'
+            elif seed == 'review':
+                item['stage'] = 'review'
+            elif seed == 'verify_fixes':
+                item['stage'] = 'verify_fixes'
+                item['adjudication'] = seed_adjudication[task['id']]
+                adjudication[task['id']] = item['adjudication']
+            elif seed in ('fix', _LEGACY_SCOPED_STAGE):
+                item['stage'] = seed
+                item['adjudication'] = seed_adjudication[task['id']]
+                adjudication[task['id']] = item['adjudication']
+                if seed == _LEGACY_SCOPED_STAGE:
+                    item['fix_before'] = (args.get('seed_fix_before') or {} if isinstance(args, dict) else {}).get(task['id']) or STATE['bases'].get(str(task['wave'])) or item['head']
+                    review[task['id']] = []
+            else:
+                raise SystemExit('unknown seed stage ' + repr(seed) + ' for ' + task['id'])
+        ITEMS[task['id']] = item
+    reseeded = [task['wave'] for task in PLAN['tasks'] if seeds.get(task['id']) not in (None, 'done')]
+    reseed_floor = min(reseeded) if reseeded else None
+    previous_close = None
+    for number in sorted(PLAN['waves'], key=int):
+        wave = PLAN['waves'][number]
+        close_id = 'close:' + number
+        if close_id in ITEMS:
+            raise SystemExit('item id ' + close_id + ' collides with the reserved close namespace')
+        item = {'id': close_id, 'kind': 'close', 'wave': int(number), 'deps': list(wave['task_ids']) + ([previous_close] if previous_close else []), 'stage': 'close', 'rnd': 0, 'result': None}
+        final_build = bool((wave.get('close') or {}).get('final_build'))
+        if _close_receipt_valid(close_id, int(number), reseed_floor, final_build):
+            receipt = STATE['close_receipts'][close_id]
+            item['stage'] = 'done'
+            item['result'] = receipt.get('result') or dict(receipt)
+        ITEMS[close_id] = item
+        previous_close = close_id
+    for checkpoint in PLAN['checkpoints']:
+        if checkpoint['id'] in ITEMS:
+            raise SystemExit('item id ' + checkpoint['id'] + ' collides with an existing item')
+        ITEMS[checkpoint['id']] = {'id': checkpoint['id'], 'kind': 'checkpoint', 'wave': checkpoint['wave'], 'deps': checkpoint['deps'], 'stage': 'checkpoint', 'rnd': 0, 'payload': checkpoint['payload'], 'consumers': checkpoint.get('consumers') or {}}
+    for item_id, item in ITEMS.items():
+        if not STATE['forced_done'].get(item_id) or seeds.get(item_id) is not None:
+            continue
+        if item.get('kind') == 'close' and reseed_floor is not None and (int(item['wave']) >= int(reseed_floor)):
+            continue
+        item['stage'] = 'done'
+
+def _close_receipt_valid(close_id, wave_number, reseed_floor, final_build):
+    receipt = STATE.get('close_receipts', {}).get(close_id)
+    if not isinstance(receipt, dict):
+        return False
+    if reseed_floor is not None and int(wave_number) >= int(reseed_floor):
+        return False
+    head = receipt.get('spine_head')
+    if not head:
+        return False
+    result = receipt.get('result')
+    acceptance = result.get('acceptance_commit') if isinstance(result, dict) else None
+    if final_build and (not acceptance):
+        return False
+    try:
+        if rev(WORKSPACE, head) is None or not is_ancestor(WORKSPACE, head, 'HEAD'):
+            return False
+        if acceptance and (rev(WORKSPACE, acceptance) is None or not is_ancestor(WORKSPACE, acceptance, 'HEAD')):
+            return False
+    except OSError:
+        return False
+    return True
+
+def stage_key(item):
+    return item['id'] + (':execute' if item['stage'] == 'execute' else ':fix:' + str(item['rnd']))
+
+def item_attempt_key(item):
+    return item['id'] + ':' + item['stage'] + ':' + str(item.get('rnd', 0))
+
+def record_base(item):
+    if item['kind'] != 'task' or item['stage'] not in ('execute', 'fix'):
+        return
+    with SPINE_READ_LOCK:
+        head = rev(WORKSPACE, 'HEAD')
+        if head is None:
+            raise SystemExit('cannot record dispatch base: unreadable HEAD in ' + str(WORKSPACE))
+        if item['stage'] == 'execute':
+            STATE['bases'].setdefault(str(item['wave']), head)
+        STATE['task_bases'].setdefault(stage_key(item), head)
+        save_state()
+
+def ordered_items():
+    remaining = list(ITEMS)
+    emitted = set()
+    ordered = []
+    while remaining:
+        ready = [item_id for item_id in remaining if all((dep not in ITEMS or dep in emitted for dep in ITEMS[item_id]['deps']))]
+        if not ready:
+            raise SystemExit('dependency cycle in rendered items: ' + repr(remaining))
+        for item_id in ready:
+            ordered.append(ITEMS[item_id])
+            emitted.add(item_id)
+            remaining.remove(item_id)
+    return ordered
+
+def wait_for_deps(item):
+    with ITEM_CONDITION:
+        while not deps_done(item) and (not ABORT_EVENT.is_set()):
+            ITEM_CONDITION.wait(0.2)
+        return not ABORT_EVENT.is_set()
+
+def collect_stage(item):
+    entries = entries_for(item)
+    attempt = int(STATE['attempts'].get(item_attempt_key(item), 0))
+    if attempt:
+        suffix = ':park-retry-' + str(attempt)
+        entries = [dict(entry, slot=entry['slot'] + attempt, label=entry['label'] + suffix, retry_label=entry['retry_label'] + suffix) for entry in entries]
+    item['steps'] = item.get('steps', 0) + 1
+    log('item ' + item['id'] + ' stage ' + item['stage'] + ': ' + ', '.join((entry['label'] for entry in entries)))
+    results = parallel([thunk(entry) for entry in entries])
+    retries = [position for position, entry in enumerate(entries) if entry['bad'](results[position])]
+    if retries:
+        retried = parallel([thunk(entries[position], retry=True) for position in retries])
+        for position, value in zip(retries, retried):
+            results[position] = value
+    guards = {entry['label']: _immutable_snapshot(entry['porcelain']) for entry in entries if entry.get('porcelain') is not None}
+    if guards:
+        item.setdefault('review_guards', {}).update(guards)
+        state = globals().get('STATE')
+        if isinstance(state, dict):
+            state.setdefault('review_guards', {}).setdefault(item['id'], {}).update(guards)
+            saver = globals().get('save_state')
+            if callable(saver):
+                saver()
+    return results
+
+def settle_stage(item, results):
+    attempt = item_attempt_key(item)
+    settle(item, results)
+    with STATE_LOCK:
+        if any((row.get('attempt') == attempt for row in approvals_of(item['id']))):
+            clear_approvals(item['id'], attempt)
+            save_state()
+
+def finish_parked_stage(item, results, exclusive):
+    while True:
+        try:
+            if exclusive:
+                with MERGE_LOCK:
+                    settle_stage(item, results)
+            else:
+                settle_stage(item, results)
+            return
+        except ParkItem:
+            await_decision(item)
+
+def process_item(previous, item, index):
+    try:
+        if not wait_for_deps(item):
+            return None
+        if item['kind'] == 'checkpoint':
+            if item['stage'] != 'done':
+                workflow('checkpoint', item['payload'], gate=not auto)
+                mark_done(item)
+            return item
+        while item['stage'] != 'done':
+            try:
+                CURRENT_ITEM.value = item
+                if item['id'] in STATE['parked']:
+                    await_decision(item)
+                stage = item['stage']
+                if item['kind'] == 'task' and stage in ('review', _LEGACY_SCOPED_STAGE, 'verify_fixes'):
+                    sync_review_workspace(item)
+                if item['kind'] == 'task' and stage in ('execute', 'fix'):
+                    record_base(item)
+                exclusive = item['kind'] == 'close' or (item['kind'] == 'task' and item['task']['host'] and (stage in ('execute', 'fix')))
+                if exclusive:
+                    parked = False
+                    admission_parked = False
+                    with MERGE_LOCK:
+                        try:
+                            results = collect_stage(item)
+                        except ParkItem:
+                            admission_parked = True
+                            results = None
+                        try:
+                            if not admission_parked:
+                                settle_stage(item, results)
+                        except ParkItem:
+                            parked = True
+                    if admission_parked:
+                        await_decision(item)
+                        continue
+                    if parked:
+                        finish_parked_stage(item, results, exclusive)
+                else:
+                    try:
+                        results = collect_stage(item)
+                    except ParkItem:
+                        await_decision(item)
+                        continue
+                    finish_parked_stage(item, results, exclusive)
+            except RetryStage:
+                continue
+            except FinishItem:
+                mark_done(item)
+        return item
+    except BaseException as exc:
+        if type(exc).__name__ == 'GateExit':
+            log('gate reached in item ' + item['id'] + '; unwinding workers for the pause')
+        ABORT_EVENT.set()
+        with ITEM_CONDITION:
+            ITEM_CONDITION.notify_all()
+        raise
+
+def run_plan():
+    seed_items()
+    cap = item_thread_cap()
+    if len(ITEMS) > cap:
+        raise SystemExit('plan has ' + str(len(ITEMS)) + ' items but the runtime admits ' + str(cap) + ' concurrent pipeline items; parked workers hold slots, so this could deadlock. Raise workflows.itemThreads or split the plan.')
+    results = pipeline(ordered_items(), process_item)
+    if ABORT_EVENT.is_set() or any((result is None for result in results)):
+        raise SystemExit('per-item scheduler aborted; inspect the first failed item event')
+    return {'rounds': sum((item.get('steps', 0) for item in ITEMS.values())), 'closes': {item['id']: item['result'] for item in ITEMS.values() if item['kind'] == 'close'}}
+"""Result predicates, declared-row policy, and cache rejection."""
+REQUIRED_ENGINE_PRIMITIVES = ('agent', 'parallel', 'pipeline', 'reject', 'workflow')
+STAGE_POLICY = {'execute': {'missing': False, 'failing': True, 'extra': False}, 'fix': {'missing': False, 'failing': True, 'extra': False}, 'close': {'missing': True, 'failing': True, 'extra': False}}
+
+def assert_engine_contract(namespace):
+    if namespace.get('agent') is None:
+        return
+    missing = []
+    if 'args' not in namespace:
+        missing.append('args')
+    missing.extend((name for name in REQUIRED_ENGINE_PRIMITIVES if not callable(namespace.get(name))))
+    if missing:
+        raise SystemExit('engine-contract-missing: ' + ', '.join(missing))
+
+def reject_cached(key_or_label, reason):
+    op = globals().get('reject')
+    if not callable(op):
+        return False
+    text = str(key_or_label)
+    parts = text.rsplit(':', 2)
+    labels = [key_or_label]
+    if text.endswith(':execute'):
+        labels.append('execute:' + text[:-8])
+    if len(parts) == 3 and parts[1] == 'fix':
+        labels.append('fix:' + parts[0] + ':' + parts[2])
+    for label in labels:
+        try:
+            op(label, reason)
+            return True
+        except Exception:
+            pass
+    return False
+
+def row_passed(row):
+    return isinstance(row, dict) and (row.get('passed') is True if 'passed' in row else row.get('exit') == 0)
+
+def stage_failed(value, declared, stage):
+    if not isinstance(value, dict):
+        return True
+    coverage = row_coverage(value, declared)
+    policy = STAGE_POLICY[stage]
+    return bool(policy['missing'] and coverage['missing'] or (policy['failing'] and coverage['failing']) or (policy['extra'] and coverage['extra']))
+
+def red(value, verifies):
+    return stage_failed(value, verifies, 'execute')
+
+def result_bad(value, schema, verifies, key_or_label, reason, stage='execute'):
+    invalid = schema is not None and failed(value, schema) or stage_failed(value, verifies, stage)
+    if invalid:
+        reject_cached(key_or_label, reason)
+    return invalid
+
+def close_failed(value, declared, task_ids, build_ids, final, main_branch=None, key_or_label='close'):
+    expected_branch = main_branch if main_branch is not None else globals().get('MAIN_BRANCH', 'main')
+    try:
+        validate_close_result(value, declared, task_ids, build_ids, final, expected_branch)
+    except (ContractError, TypeError, KeyError):
+        invalid = True
+    else:
+        invalid = value.get('status') != 'complete' or not value.get('main_head') or (final and value.get('main_head') != value.get('spine_head'))
+    if invalid:
+        reject_cached(key_or_label, 'close result invalid')
+    return invalid
+
+def conflicted(value):
+    return isinstance(value, dict) and bool(value.get('conflicts'))
+
+def refused(value):
+    return isinstance(value, dict) and bool(value.get('refused'))
+
+def merge_bad(value, key_or_label='merge'):
+    invalid = failed(value, INTEGRATE_RESULT) or conflicted(value) or refused(value) or any((not row_passed(row) for row in value.get('verify_results') or []))
+    if invalid:
+        reject_cached(key_or_label, 'merge result invalid')
+    return invalid
+"""Deterministic merge operations and refusal guards."""
+import os
+REFUSAL_PRECEDENCE = ('dirty', 'no-head', 'no-ancestor', 'outside', 'fake-contribution', 'empty', 'host-not-on-spine')
+_ANCESTOR_NOOP_REASON = 'reported head is on the spine first-parent history, not a lane contribution'
+if isinstance(INTEGRATE_RESULT, dict):
+    INTEGRATE_RESULT.setdefault('properties', {}).update({'recorded_head': {}, 'merged_head': {}})
+
+def _classify_refusals(facts):
+    return [name for name in REFUSAL_PRECEDENCE if facts.get(name)]
+
+def merge_refusals(facts):
+    return _classify_refusals(facts)
+
+def _decide_refusal(facts):
+    refusals = _effective_refusals(facts)
+    return refusals[0] if refusals else None
+
+def decide(facts):
+    return _decide_refusal(facts)
+
+def _effective_refusals(facts):
+    refusals = _classify_refusals(facts)
+    if facts.get('first_parent_noop'):
+        refusals = [name for name in refusals if name != 'fake-contribution']
+    return refusals
+
+def _canonical_owned(path):
+    return canonical_test_path(str(path).rstrip('/'))
+
+def _merge_covered(path, owned):
+    candidate = _canonical_owned(path)
+    for entry in owned:
+        entry = _canonical_owned(entry)
+        if candidate == entry or candidate.startswith(entry + '/'):
+            return True
+    return False
+
+def _split_lines(value):
+    return [line.strip() for line in str(value or '').splitlines() if line.strip()]
+
+def _merge_bases(ws, tip, spine):
+    if not tip or not spine:
+        return (1, [])
+    rc, output = git(ws, 'merge-base', '--all', tip, spine)
+    return (rc, _split_lines(output) if rc == 0 else [])
+
+def _merge_intents():
+    return STATE.setdefault('merge_intents', {})
+
+def _cached_success_is_live(ws, cached, recorded_head, merged_head, host=False):
+    if not isinstance(cached, dict):
+        return False
+    if cached.get('recorded_head') != recorded_head:
+        return False
+    if not host and cached.get('merged_head') != merged_head:
+        return False
+    merged = cached.get('merged') or []
+    if len(merged) != 1 or not isinstance(merged[0], dict):
+        return False
+    recorded = rev(ws, cached.get('recorded_head'))
+    merged_head = rev(ws, cached.get('merged_head'))
+    merge_commit = rev(ws, merged[0].get('merge_commit'))
+    spine_head = rev(ws, 'HEAD')
+    return bool(recorded and merged_head and merge_commit and spine_head and is_ancestor(ws, recorded, merged_head) and is_ancestor(ws, merged_head, merge_commit) and is_ancestor(ws, merge_commit, spine_head))
+
+def _save_merge_intent(key, facts, spine_head):
+    intent = {'branch': facts['branch'], 'recorded_head': facts['recorded_head'], 'merged_head': facts['merged_head'], 'spine_head': spine_head, 'base': spine_head}
+    _merge_intents()[key] = intent
+    save_state()
+    return intent
+
+def _intent_matches_facts(intent, facts):
+    return isinstance(intent, dict) and all((intent.get(name) == facts.get(name) for name in ('branch', 'recorded_head', 'merged_head')))
+
+def _created_merge_matches(ws, merge_commit, intent):
+    return bool(merge_commit and rev(ws, merge_commit + '^1') == intent.get('spine_head') and (rev(ws, merge_commit + '^2') == intent.get('merged_head')))
+
+def _recover_intent_merge(ws, intent):
+    current_head = rev(ws, 'HEAD')
+    saved_commit = rev(ws, intent.get('merge_commit'))
+    if saved_commit and current_head and _created_merge_matches(ws, saved_commit, intent) and is_ancestor(ws, saved_commit, current_head):
+        return saved_commit
+    if _created_merge_matches(ws, current_head, intent):
+        intent['merge_commit'] = current_head
+        save_state()
+        return current_head
+    return None
+
+def _collect_facts(task, result, owned, key, ws, spine_head, dirty):
+    result = result if isinstance(result, dict) else {}
+    branch = str(result.get('branch', ''))
+    recorded_head = rev(ws, result.get('head'))
+    merged_head = rev(ws, branch)
+    base_rc, bases = _merge_bases(ws, merged_head, spine_head)
+    one_base = base_rc == 0 and len(bases) == 1
+    contribution_base = bases[0] if one_base else None
+    recorded_is_ancestor = bool(recorded_head and merged_head and is_ancestor(ws, recorded_head, merged_head))
+    already_merged = bool(merged_head and spine_head and is_ancestor(ws, merged_head, spine_head))
+    first_parent = set(_split_lines(git(ws, 'rev-list', '--first-parent', spine_head)[1])) if already_merged else set()
+    first_parent_noop = bool(already_merged and merged_head in first_parent)
+    dispatch_base = globals().get('STATE', {}).get('task_bases', {}).get(key)
+    host_contribution = bool(task.get('host') and recorded_head and spine_head and is_ancestor(ws, recorded_head, spine_head))
+    if (not host_contribution and (task.get('host') or (already_merged and (not first_parent_noop)))) and dispatch_base:
+        contribution_base = dispatch_base
+    paths = []
+    if host_contribution:
+        paths = _split_lines(git(ws, 'diff-tree', '--no-commit-id', '--name-only', '-r', recorded_head)[1])
+    elif contribution_base and merged_head:
+        paths = _split_lines(git(ws, 'diff', '--name-only', contribution_base, merged_head)[1])
+    outside = [path for path in paths if not _merge_covered(path, owned)]
+    commit_count = '1' if host_contribution else ''
+    if not host_contribution and contribution_base and merged_head:
+        commit_count = git(ws, 'rev-list', '--count', contribution_base + '..' + merged_head)[1].strip()
+    no_head = not spine_head or not recorded_head or (not merged_head)
+    no_common_base = bool(merged_head and spine_head and (base_rc != 0 or not bases))
+    ambiguous_base = len(bases) > 1
+    no_ancestor = bool(recorded_head and merged_head and (not recorded_is_ancestor) or no_common_base or ambiguous_base)
+    fake_contribution = bool(first_parent_noop and (not task.get('host')) and (not dispatch_base))
+    empty = bool(merged_head and (not no_common_base) and (not ambiguous_base) and (commit_count in ('0', '')) and (not already_merged))
+    host_not_on_spine = bool(task.get('host') and merged_head and spine_head and (not is_ancestor(ws, merged_head, spine_head)))
+    return {'branch': branch, 'recorded_head': recorded_head, 'merged_head': merged_head, 'spine_head': spine_head, 'dirty_detail': dirty, 'base_rc': base_rc, 'bases': bases, 'contribution_base': contribution_base, 'dispatch_base': dispatch_base, 'recorded_is_ancestor': recorded_is_ancestor, 'already_merged': already_merged, 'first_parent_noop': first_parent_noop, 'paths': paths, 'outside_paths': outside, 'commit_count': commit_count, 'dirty': bool(dirty), 'no-head': no_head, 'no-ancestor': no_ancestor, 'outside': bool(outside), 'fake-contribution': fake_contribution, 'empty': empty, 'host-not-on-spine': host_not_on_spine}
+
+def _reason(code, facts):
+    if code == 'dirty':
+        return 'workspace has uncommitted tracked changes; clean it before resuming: ' + facts['dirty_detail'][:300]
+    if code == 'no-head':
+        missing = []
+        if not facts['recorded_head']:
+            missing.append('recorded head')
+        if not facts['merged_head']:
+            missing.append('branch tip')
+        if not facts['spine_head']:
+            missing.append('spine head')
+        return 'unknown or uncommitted ' + ' and '.join(missing)
+    if code == 'no-ancestor':
+        details = []
+        if facts['recorded_head'] and facts['merged_head'] and (not facts['recorded_is_ancestor']):
+            details.append('recorded head is not an ancestor of the resolved branch tip')
+        if facts['base_rc'] != 0 or not facts['bases']:
+            details.append('no common ancestor with the spine')
+        if len(facts['bases']) > 1:
+            details.append('multiple merge bases with the spine; contribution scope is ambiguous')
+        return '; '.join(details) or 'ancestry guard failed'
+    if code == 'outside':
+        return 'diff outside owned files: ' + repr(facts['outside_paths'][:25])
+    if code == 'fake-contribution':
+        return _ANCESTOR_NOOP_REASON
+    if code == 'empty':
+        base = facts['contribution_base'] or facts['dispatch_base'] or 'unknown base'
+        return 'lane produced no commits after its contribution base ' + str(base)
+    if code == 'host-not-on-spine':
+        return 'host-side commit is not on the spine'
+    return 'merge refusal: ' + code
+
+def _refusal_rows(task, facts, codes):
+    return [{'task': task['id'], 'branch': facts['branch'], 'reason': _reason(code, facts)} for code in codes]
+
+def merge_lane(task, result, owned, key, verifies):
+    with MERGE_LOCK:
+        return merge_lane_locked(task, result, owned, key, verifies)
+
+def merge_lane_locked(task, result, owned, key, verifies):
+    ws = WORKSPACE
+    result = result if isinstance(result, dict) else {}
+    recorded_head = rev(ws, result.get('head'))
+    merged_head = rev(ws, str(result.get('branch', '')))
+    cached = STATE.get('merges', {}).get(key)
+    if cached:
+        if _cached_success_is_live(ws, cached, recorded_head, merged_head, bool(task.get('host'))):
+            return cached
+        STATE['merges'].pop(key, None)
+        _merge_intents().pop(key, None)
+        save_state()
+    spine_head = rev(ws, 'HEAD')
+    dirty = git(ws, 'status', '--porcelain', '--untracked-files=no')[1].strip()
+    facts = _collect_facts(task, result, owned, key, ws, spine_head, dirty)
+    out = {'merged': [], 'refused': [], 'conflicts': [], 'verify_results': [], 'head': spine_head, 'recorded_head': facts['recorded_head'], 'merged_head': facts['merged_head']}
+    codes = _effective_refusals(facts)
+    intent = _merge_intents().get(key)
+    recovered_merge = _recover_intent_merge(ws, intent) if not codes and _intent_matches_facts(intent, facts) else None
+    if codes:
+        out['refused'] = _refusal_rows(task, facts, codes)
+    elif recovered_merge:
+        out['merged'].append({'task': task['id'], 'branch': facts['branch'], 'merge_commit': recovered_merge, 'base': intent['base']})
+    elif facts.get('already_merged'):
+        base = facts['contribution_base'] or (facts['bases'][0] if facts['bases'] else spine_head)
+        out['merged'].append({'task': task['id'], 'branch': facts['branch'], 'merge_commit': facts['merged_head'], 'base': base})
+        if facts.get('first_parent_noop'):
+            log('merge ' + key + ': ' + _ANCESTOR_NOOP_REASON)
+    elif task.get('host'):
+        out['refused'] = _refusal_rows(task, facts, ['host-not-on-spine'])
+    else:
+        intent = _save_merge_intent(key, facts, spine_head)
+        rc, text = git(ws, 'merge', '--no-ff', '--no-edit', '-m', 'merge ' + task['id'] + ' (' + facts['branch'] + ')', facts['merged_head'])
+        if rc:
+            unmerged = _split_lines(git(ws, 'diff', '--name-only', '--diff-filter=U')[1])
+            if rev(ws, 'MERGE_HEAD'):
+                git(ws, 'merge', '--abort')
+            _merge_intents().pop(key, None)
+            save_state()
+            out['conflicts'] = [{'task': task['id'], 'path': path, 'ours': spine_head, 'theirs': facts['merged_head']} for path in unmerged] or [{'task': task['id'], 'path': '(merge failed: ' + text[-300:] + ')', 'ours': spine_head, 'theirs': facts['merged_head']}]
+        else:
+            merge_commit = rev(ws, 'HEAD')
+            intent['merge_commit'] = merge_commit
+            save_state()
+            out['merged'].append({'task': task['id'], 'branch': facts['branch'], 'merge_commit': merge_commit, 'base': spine_head})
+    if out['merged'] and (not out['refused']):
+        hook = PLAN.get('post_merge')
+        triggers = PLAN.get('post_merge_triggers') or []
+        if hook and any((_merge_covered(path, triggers) or os.path.basename(path) in triggers for path in facts['paths'])):
+            log('post-merge hook for ' + task['id'])
+            rc, text = sh_row(hook, ws, VERIFY_TIMEOUT)
+            out['verify_results'].append({'run': hook, 'exit': rc, 'expect': 'exit 0', 'passed': rc == 0, 'note': text[-600:]})
+        out['verify_results'] += run_verifies(ws, verifies)
+        merge_commit = out['merged'][0]['merge_commit']
+        if any((not row['passed'] for row in out['verify_results'])) and merge_commit != facts['merged_head']:
+            current_head = rev(ws, 'HEAD')
+            parent = rev(ws, merge_commit + '^1')
+            if current_head == merge_commit and parent:
+                git(ws, 'reset', '--hard', parent)
+                log('merge ' + key + ': verify rows red; merge commit ' + merge_commit + ' reset off the spine')
+                out['refused'].append({'task': task['id'], 'branch': facts['branch'], 'reason': 'verify rows red after merge; the merge commit was reset off the spine'})
+                out['merged'] = []
+                _merge_intents().pop(key, None)
+                save_state()
+            else:
+                out['refused'].append({'task': task['id'], 'branch': facts['branch'], 'reason': 'verify rows red, but HEAD moved from our merge commit; refusing without reset'})
+    out['head'] = rev(ws, 'HEAD')
+    if not merge_bad(out, key):
+        STATE.setdefault('merges', {})[key] = out
+        _merge_intents().pop(key, None)
+        save_state()
+    log('merge ' + key + ': merged=' + str(len(out['merged'])) + ' refused=' + str(len(out['refused'])) + ' conflicts=' + str(len(out['conflicts'])) + ' red=' + str(sum((1 for row in out['verify_results'] if not row['passed']))))
+    return out
+"""Close-stage prompts and settlement."""
+from contextlib import nullcontext
+import json
+import os
+from pathlib import Path
+import subprocess
+CLOSE_VERIFIER_PERSONA = 'close-verifier'
+
+def _runtime_plan():
+    try:
+        return PLAN
+    except NameError:
+        return globals().get('PLAN')
+
+def _runtime_workspace():
+    try:
+        return WORKSPACE
+    except NameError:
+        return globals().get('WORKSPACE')
+
+def _close_declared_rows(close):
+    rows = list(close.get('verifies') or [])
+    workflow = list(close.get('workflow_verifies') or [])
+    if workflow:
+        rows.append(('__workflow__', workflow))
+    return rows
+
+def _close_prompt_rows(close):
+    plan = _runtime_plan() or {}
+    tasks = {str(task.get('id')): task for task in _value(plan, 'tasks', ()) or () if isinstance(task, dict)}
+    rows = []
+    owned_groups = close.get('owned_groups') or {}
+    for entry in close.get('verifies') or []:
+        if len(entry) == 3:
+            rows.append(entry)
+            continue
+        task_id, verifies = entry
+        owned = list(tasks.get(str(task_id), {}).get('owned', []))
+        if str(task_id) in owned_groups:
+            owned = [parent + '/' + name if parent else name for parent, names in owned_groups[str(task_id)] for name in names]
+        rows.append((task_id, owned, verifies))
+    return rows
+
+def _coordinator_entries(task_ids):
+    state = globals().get('STATE')
+    if not isinstance(state, dict):
+        return {}
+    coordinator = state.get('coordinator') or {}
+    by_task = state.get('coordinator_tasks') or {}
+    entries = {}
+    for task_id in task_ids:
+        for record_id in by_task.get(task_id, []) or []:
+            entry = coordinator.get(str(record_id))
+            if isinstance(entry, dict):
+                task = entry.get('task') if isinstance(entry.get('task'), dict) else entry
+                rendered = {'task': _immutable(task)}
+                acknowledgement = entry.get('acknowledgement') or coordinator.get(str(record_id) + ':acknowledgement')
+                if acknowledgement is not None:
+                    rendered['acknowledgement'] = _immutable(acknowledgement)
+                entries[str(record_id)] = rendered
+    return entries
+
+def _unacknowledged_coordinator(close):
+    (globals().get('refresh_state') or (lambda: None))()
+    pending = []
+    for record_id, entry in _coordinator_entries(close.get('task_ids') or []).items():
+        task = entry.get('task') if isinstance(entry.get('task'), dict) else entry
+        if task.get('blocking') is False and (not entry.get('acknowledgement')):
+            pending.append(record_id)
+    return pending
+
+def _close_result_failed(value, close):
+    pending = _unacknowledged_coordinator(close)
+    if pending:
+        reject_cached('close:' + str(close.get('wave', '?')), 'unacknowledged coordinator work: ' + ', '.join(pending))
+        return True
+    declared = _close_declared_rows(close)
+    return close_failed(value, declared, close.get('task_ids') or [], close.get('build_ids') or [], False, globals().get('MAIN_BRANCH', 'main'))
+
+def _value(source, key, default=None):
+    if isinstance(source, dict):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+def _close_plan(item=None):
+    plan = _runtime_plan()
+    if plan is not None:
+        return plan
+    if item and isinstance(item, dict) and (item.get('plan') is not None):
+        return item['plan']
+    return None
+
+def _workspace_for(plan, wave):
+    repo = _value(plan, 'repo')
+    if repo is None:
+        workspace = _runtime_workspace()
+        repo = Path(workspace).parent.parent if workspace else Path.cwd()
+    name = _value(plan, 'name', 'plan')
+    return Path(repo) / '.worktrees' / f'plan-{name}-close-{wave}'
+
+def _merge_lock_context():
+    lock = globals().get('MERGE_LOCK')
+    return lock if lock is not None else nullcontext()
+
+def _git_call(cwd, *argv):
+    runner = globals().get('git')
+    if callable(runner):
+        return runner(cwd, *argv)
+    proc = subprocess.run(['git', '-C', str(cwd), *argv], capture_output=True, text=True, check=False)
+    return (proc.returncode, (proc.stdout or '') + (proc.stderr or ''))
+
+def _save_runtime_state():
+    saver = globals().get('save_state')
+    if callable(saver):
+        saver()
+
+def _snapshot_head(item, wave):
+    key = 'close:' + str(wave)
+    reader = globals().get('recorded_head')
+    if callable(reader):
+        pinned = reader(key)
+        if pinned:
+            return pinned
+    state = globals().get('STATE')
+    if not isinstance(state, dict):
+        return None
+    heads = state.setdefault('heads', {})
+    if heads.get(key) is None:
+        workspace = _runtime_workspace()
+        ref_reader = globals().get('rev')
+        resolved = ref_reader(workspace, 'HEAD') if callable(ref_reader) else None
+        if resolved is None:
+            return None
+        heads[key] = resolved
+        _save_runtime_state()
+    return heads.get(key)
+
+def _immutable(value):
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+def _integration_receipts(task_ids):
+    state = globals().get('STATE')
+    merge_state = state.get('merges', {}) if isinstance(state, dict) else {}
+    receipts = {}
+    for task_id in task_ids:
+        keys = [key for key in merge_state if key == task_id + ':execute' or key.startswith(task_id + ':fix:')]
+        receipts[task_id] = [dict(row, stage=key) for key in sorted(keys) for row in (merge_state[key].get('merged', []) if isinstance(merge_state[key], dict) else [])]
+    return _immutable(receipts)
+
+def _task_baselines(task_ids, wave=None):
+    state = globals().get('STATE')
+    task_bases = state.get('task_bases', {}) if isinstance(state, dict) else {}
+    bases = {}
+    wanted = set(task_ids)
+    for key, value in task_bases.items():
+        if not isinstance(key, str):
+            continue
+        task_id = key.split(':', 1)[0]
+        if task_id in wanted:
+            bases[key] = value
+    return _immutable(bases)
+
+def _prepare_close_worktree(workspace, worktree, head):
+    if worktree.exists():
+        rc, top = _git_call(worktree, 'rev-parse', '--show-toplevel')
+        if rc or os.path.realpath(top.strip()) != os.path.realpath(str(worktree)):
+            raise RuntimeError('refusing to use non-worktree close path ' + str(worktree))
+        rc, output = _git_call(worktree, 'checkout', '--detach', '--force', str(head))
+        if rc:
+            raise RuntimeError('close worktree checkout failed: ' + output[-400:])
+        rc, output = _git_call(worktree, 'clean', '-fdq')
+        if rc:
+            raise RuntimeError('close worktree clean failed: ' + output[-400:])
+    else:
+        if Path(workspace).exists():
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+        rc, output = _git_call(workspace, 'worktree', 'add', '--detach', '--force', str(worktree), str(head))
+        if rc:
+            raise RuntimeError('close worktree add failed: ' + output[-400:])
+    rc, checked_out = _git_call(worktree, 'rev-parse', 'HEAD')
+    if rc or not checked_out.strip() or checked_out.strip() != str(head):
+        raise RuntimeError('close worktree is not pinned at ' + str(head))
+
+def _snapshot_close(item, plan, close):
+    state = globals().get('STATE')
+    if not isinstance(state, dict):
+        state = {}
+        globals()['STATE'] = state
+    snapshots = state.setdefault('close_snapshots', {})
+    close_id = str(item.get('id', 'close:' + str(item.get('wave'))))
+    wave = item.get('wave')
+    workspace = _runtime_workspace() or _value(plan, 'repo')
+    if not workspace:
+        raise RuntimeError('close workspace is unavailable')
+    head = _snapshot_head(item, wave)
+    existing = snapshots.get(close_id)
+    observed = _current_workspace_head()
+    if not head or not observed:
+        raise RuntimeError('cannot read integration HEAD for close snapshot')
+    if isinstance(existing, dict) and existing.get('spine_head') == head and (observed == head):
+        saved_worktree = Path(existing.get('worktree') or _workspace_for(plan, wave))
+        _prepare_close_worktree(workspace, saved_worktree, head)
+        return existing
+    if observed != head:
+        state.setdefault('heads', {}).pop(close_id, None)
+        state.setdefault('heads', {}).pop('close:' + str(wave), None)
+        snapshots.pop(close_id, None)
+        _save_runtime_state()
+        head = _snapshot_head(item, wave)
+        if not head or head != observed:
+            raise RuntimeError('integration HEAD moved while creating close snapshot')
+    worktree = _workspace_for(plan, wave)
+    _prepare_close_worktree(workspace, worktree, head)
+    snapshot = {'spine_head': head, 'worktree': str(worktree), 'receipts': _integration_receipts(close.get('task_ids') or []), 'task_baselines': _task_baselines(close.get('task_ids') or [], wave)}
+    snapshots[close_id] = _immutable(snapshot)
+    _save_runtime_state()
+    return snapshots[close_id]
+
+def _final_close_verifies(plan):
+    audit = f"bin/delegate-audit --since docs/acceptance/build-start.txt --plan {_value(plan, 'path')} --receipts docs/receipts/audit"
+    return [('tests/acceptance.sh', 'exit 0'), (audit, 'exit 0')]
+
+def _close_prompt_parts(plan, wave, final_build, close_workspace=None):
+    close_workspace = close_workspace or _workspace_for(plan, wave)
+    prefix = f'Run as {CLOSE_VERIFIER_PERSONA} in {close_workspace}, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave {wave}. Re-run every task verify row '
+    body = f"; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan={_value(plan, 'name')} and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {{task id: bool}} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. "
+    if final_build:
+        audit_run = _final_close_verifies(plan)[1][0]
+        body += f'Create acceptance_output=$(mktemp -p /tmp) and audit_output=$(mktemp -p /tmp), both outside the worktree. Run tests/acceptance.sh > "$acceptance_output". After it exits, cp "$acceptance_output" docs/acceptance/demo-output.md. Then run {audit_run} > "$audit_output". After it exits, cp "$audit_output" docs/acceptance/audit-report.md. List and review the files to stage: docs/acceptance/demo-output.md, docs/acceptance/audit-report.md, and every path printed by git ls-files --others --exclude-standard docs/receipts/audit. Then run git add -- with exactly those reviewed paths, never a directory, and commit them in the detached close worktree, reporting that commit as acceptance_commit. Do not merge or fast-forward any branch. These capture runs are the workflow-level verify-row executions: run each exactly once, do not execute the rows separately, and report their declared run and expect values without alteration. '
+    if final_build:
+        final = f"Report the current head of the branch checked out at {_value(plan, 'repo')} as main_head, its branch name as main_branch, and the pinned spine head as spine_head; the close coordinator validates and publishes acceptance_commit after this result is complete."
+    else:
+        final = f"Do not merge into {_value(plan, 'repo')}: later waves are already pipelined onto the spine and only the final build wave publishes. Report the current head of the branch checked out at {_value(plan, 'repo')} as main_head, its branch name as main_branch, and the spine head as spine_head."
+    final += _VERIFY_ADDENDUM
+    return (prefix, body, final)
+
+def _close_prompt(plan, wave, tasks, final_build, close_workspace=None):
+    verifies = [(task.id, [name for name in task.owned_files if not Path(name).is_absolute()], [(row.run, row.expect) for row in task.verify]) for task in tasks]
+    prefix, body, final = _close_prompt_parts(plan, wave, final_build, close_workspace)
+    prompt = prefix + repr(verifies)
+    if final_build:
+        prompt += '\n\nWorkflow-level rows (not tasks; no receipt, bead, diff_nonempty, or bead_closed entry): ' + repr(_final_close_verifies(plan))
+    return prompt + body + final
+
+def _with_results(instruction, results):
+    writer = globals().get('with_results')
+    if callable(writer):
+        return writer(instruction, results)
+    return 'RESULTS\n' + json.dumps(results, sort_keys=True, default=str) + '\n\n' + instruction
+
+def close_entries(item):
+    wave = PLAN['waves'][str(item['wave'])]
+    close = wave['close']
+    plan = _close_plan(item)
+    with _merge_lock_context():
+        snapshot = _snapshot_close(item, plan, close)
+    close_workspace = snapshot.get('worktree') if isinstance(snapshot, dict) else None
+    if close_workspace and _value(plan, 'path') is not None:
+        prefix, body, final = _close_prompt_parts(plan, item['wave'], close.get('final_build', False), close_workspace)
+        prompt = prefix + repr(_close_prompt_rows(close))
+        if close['workflow_verifies']:
+            prompt += '\n\nWorkflow-level rows (not tasks; no receipt, bead, diff_nonempty, or bead_closed entry): ' + repr(close['workflow_verifies'])
+        prompt += body + final
+    else:
+        prefix = close['prefix']
+        if close_workspace:
+            integration = str(_runtime_workspace() or '')
+            if integration and integration in prefix:
+                prefix = prefix.replace('Run in ' + integration, f'Run as {CLOSE_VERIFIER_PERSONA} in {close_workspace}, a pinned detached close worktree', 1)
+        prompt = prefix + repr(_close_prompt_rows(close))
+        if close['workflow_verifies']:
+            prompt += '\n\nWorkflow-level rows (not tasks; no receipt, bead, diff_nonempty, or bead_closed entry): ' + repr(close['workflow_verifies'])
+        prompt += close['body'] + close['final']
+    verifier = dict(wave.get('verifier') or {})
+    verifier['persona'] = CLOSE_VERIFIER_PERSONA
+    verifier['schema'] = 'CLOSE_RESULT'
+    merges = {task_id: globals().get('ITEMS', {}).get(task_id, {}).get('integration') for task_id in wave['task_ids'] if task_id in globals().get('ITEMS', {})}
+    merges = _immutable(merges)
+    receipts = snapshot.get('receipts', {}) if isinstance(snapshot, dict) else _integration_receipts(wave['task_ids'])
+    fix_owned = {task_id: globals().get('ITEMS', {}).get(task_id, {}).get('fix_owned', []) for task_id in wave['task_ids'] if task_id in globals().get('ITEMS', {})}
+    fix_owned = _immutable(fix_owned)
+    state = globals().get('STATE', {})
+    wave_base = state.get('bases', {}).get(str(item['wave'])) if isinstance(state, dict) else None
+    results = {'wave_' + str(item['wave']) + '_base': wave_base, 'integration': {'spine_head': snapshot.get('spine_head') if isinstance(snapshot, dict) else _snapshot_head(item, item['wave']), 'merges': merges, 'receipts': receipts, 'task_baselines': snapshot.get('task_baselines', {}) if isinstance(snapshot, dict) else _task_baselines(wave['task_ids'], item['wave']), 'accepted_residue': {task_id: [finding.get('id') for finding in findings] for task_id, findings in _accepted_residue(close) if findings}}, 'fix_owned': fix_owned, 'coordinator': _coordinator_entries(wave['task_ids'])}
+    return [{'spec': verifier, 'prompt': _with_results(prompt, results), 'slot': 0, 'label': 'close:' + str(item['wave']), 'retry_label': 'close-retry:' + str(item['wave']), 'phase': globals().get('stage_phase')(item, 'close') if callable(globals().get('stage_phase')) else 'wave-' + str(item['wave']) + ':close', 'bad': lambda value: _close_result_failed(value, close)}]
+
+def _invalidate_close_snapshot(item):
+    state = globals().get('STATE')
+    if not isinstance(state, dict):
+        return
+    close_id = str(item.get('id', 'close:' + str(item.get('wave'))))
+    heads = state.setdefault('heads', {})
+    heads.pop(close_id, None)
+    state.setdefault('close_snapshots', {}).pop(close_id, None)
+    _save_runtime_state()
+
+def _failure_gate(stage, wave, value):
+    gate = globals().get('failure_gate')
+    if callable(gate):
+        return gate(stage, wave, value)
+    raise RuntimeError(stage + ' close gate: ' + repr(value))
+
+def _mark_close_done(item):
+    marker = globals().get('mark_done')
+    if callable(marker):
+        marker(item)
+    else:
+        item['stage'] = 'done'
+
+def _close_snapshot_for(item):
+    state = globals().get('STATE')
+    if not isinstance(state, dict):
+        return {}
+    close_id = str(item.get('id', 'close:' + str(item.get('wave'))))
+    return state.get('close_snapshots', {}).get(close_id) or {}
+
+def _current_workspace_head():
+    workspace = globals().get('WORKSPACE')
+    reader = globals().get('rev')
+    return reader(workspace, 'HEAD') if callable(reader) and workspace else None
+
+def _accepted_residue(close):
+    items = globals().get('ITEMS', {})
+    adjudications = globals().get('adjudication', {})
+    reviews = globals().get('review', {})
+    collected = []
+    for task_id in close.get('task_ids') or []:
+        item = items.get(task_id, {}) if isinstance(items, dict) else {}
+        adjudication_value = item.get('adjudication') or (adjudications.get(task_id) if isinstance(adjudications, dict) else None) or {}
+        ids = adjudication_value.get('accepted_residue') or []
+        finding_by_id = {}
+        for panel in reviews.get(task_id, []) if isinstance(reviews, dict) else []:
+            entries = panel if isinstance(panel, list) else [panel]
+            for finding in entries:
+                if isinstance(finding, dict) and finding.get('id'):
+                    finding_by_id[str(finding['id'])] = finding
+        collected.append((task_id, [finding_by_id.get(str(finding_id), {'id': str(finding_id)}) for finding_id in ids]))
+    return collected
+
+def _standalone_residue_bead(repo, plan_name, task_id, finding):
+    if not (Path(repo) / '.beads').is_dir():
+        return None
+    finding_id = str(finding.get('id'))
+    metadata = {'plan': str(plan_name), 'task': str(task_id), 'finding_id': finding_id, 'discovered_from': 'accepted-residue'}
+    listing = subprocess.run(['bd', '-C', str(repo), 'list', '--json', '-n', '0', '--all'], capture_output=True, text=True, check=False)
+    if listing.returncode:
+        raise RuntimeError('residue bead lookup failed: ' + (listing.stderr or listing.stdout)[-300:])
+    try:
+        rows = json.loads(listing.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError('residue bead lookup returned invalid JSON: ' + str(exc)) from None
+    if isinstance(rows, dict):
+        rows = [rows]
+    matching = [row for row in rows if isinstance(row, dict) and (row.get('metadata') or {}).get('plan') == str(plan_name) and ((row.get('metadata') or {}).get('task') == str(task_id)) and ((row.get('metadata') or {}).get('finding_id') == finding_id)]
+    if matching:
+        bead_id = next((row.get('id') for row in matching if row.get('status') != 'closed'), matching[0].get('id'))
+        if not bead_id:
+            raise RuntimeError('residue bead lookup returned no id')
+        updated = subprocess.run(['bd', '-C', str(repo), 'update', str(bead_id), '--title', f'accepted residue {finding_id} ({task_id})', '--metadata', json.dumps(metadata)], capture_output=True, text=True, check=False)
+        if updated.returncode:
+            raise RuntimeError('residue bead update failed: ' + (updated.stderr or updated.stdout)[-300:])
+        return str(bead_id)
+    parent = next((row.get('id') for row in rows if isinstance(row, dict) and (row.get('metadata') or {}).get('plan') == str(plan_name) and ((row.get('metadata') or {}).get('task') == str(task_id))), None)
+    command = ['bd', '-C', str(repo), 'create', f'accepted residue {finding_id} ({task_id})', '-d', 'Accepted residue finding ' + finding_id, '--type', 'task', '--priority', '2', '--metadata', json.dumps(metadata), '--silent']
+    if parent:
+        command += ['--parent', str(parent)]
+    created = subprocess.run(command, capture_output=True, text=True, check=False)
+    if created.returncode:
+        raise RuntimeError('residue bead create failed: ' + (created.stderr or created.stdout)[-300:])
+    bead_id = created.stdout.strip().splitlines()[-1] if created.stdout.strip() else ''
+    if not bead_id:
+        raise RuntimeError('residue bead create returned no id')
+    return bead_id
+
+def _upsert_residue_receipts(plan, close):
+    adapter = globals().get('beads_adapter')
+    bulk = getattr(adapter, 'upsert_residue_beads', None) if adapter is not None else None
+    single = getattr(adapter, 'upsert_residue_bead', None) if adapter is not None else None
+    repo = _value(plan, 'repo')
+    if repo is None:
+        workspace = globals().get('WORKSPACE')
+        repo = Path(workspace).parent.parent if workspace else None
+    if repo is None:
+        return {}
+    name = _value(plan, 'name', 'plan')
+    result = {}
+    for task_id, findings in _accepted_residue(close):
+        if not findings:
+            continue
+        if callable(bulk):
+            mapping = bulk(repo, name, task_id, findings)
+        elif callable(single):
+            mapping = {str(finding.get('id')): single(repo, name, task_id, finding) for finding in findings}
+        else:
+            mapping = {str(finding.get('id')): _standalone_residue_bead(repo, name, task_id, finding) for finding in findings}
+        if isinstance(mapping, dict):
+            result[str(task_id)] = {str(key): str(value) for key, value in mapping.items() if value is not None}
+    return result
+
+def _attach_acceptance_commit(plan, pinned_head, acceptance_commit, close_worktree):
+    workspace = globals().get('WORKSPACE')
+    if not workspace:
+        return (None, 'integration workspace is unavailable')
+    rc, current = _git_call(workspace, 'rev-parse', 'HEAD')
+    if rc or not current.strip() or current.strip() != str(pinned_head):
+        return (None, 'integration HEAD moved before acceptance attachment')
+    rc, resolved = _git_call(workspace, 'rev-parse', '--verify', str(acceptance_commit) + '^{commit}')
+    resolved = resolved.strip()
+    if rc or not resolved:
+        return (None, 'cannot resolve acceptance_commit')
+    if not close_worktree:
+        return (None, 'saved close worktree is unavailable')
+    rc, saved_head = _git_call(close_worktree, 'rev-parse', 'HEAD')
+    saved_head = saved_head.strip()
+    if rc or not saved_head:
+        return (None, 'cannot read saved close worktree HEAD')
+    if saved_head != resolved:
+        return (None, 'acceptance_commit is not the saved close worktree HEAD')
+    if _git_call(workspace, 'merge-base', '--is-ancestor', str(pinned_head), resolved)[0]:
+        return (None, 'acceptance_commit is not based on the pinned spine')
+    rc, output = _git_call(workspace, 'merge', '--ff-only', resolved)
+    if rc:
+        return (None, 'acceptance attachment failed: ' + output[-300:])
+    rc, attached = _git_call(workspace, 'rev-parse', 'HEAD')
+    if rc or attached.strip() != resolved:
+        return (None, 'acceptance attachment did not land at ' + resolved)
+    return (resolved, None)
+
+def _fast_forward_main(plan, value, acceptance_commit):
+    repo = _value(plan, 'repo')
+    if repo is None:
+        workspace = globals().get('WORKSPACE')
+        repo = Path(workspace).parent.parent if workspace else None
+    if repo is None:
+        return 'main repository is unavailable'
+    expected_branch = str(value.get('main_branch', ''))
+    rc, branch = _git_call(repo, 'branch', '--show-current')
+    branch = branch.strip()
+    if rc:
+        return 'cannot read main branch: ' + branch[-300:]
+    if not branch:
+        return 'main checkout is detached'
+    if branch and expected_branch and (branch != expected_branch):
+        return 'main branch moved from ' + expected_branch + ' to ' + branch
+    rc, output = _git_call(repo, 'merge', '--ff-only', str(acceptance_commit))
+    if rc:
+        return 'final fast-forward failed: ' + output[-300:]
+    rc, head = _git_call(repo, 'rev-parse', 'HEAD')
+    observed = head.strip()
+    if rc or not observed or observed != str(acceptance_commit):
+        return 'final fast-forward landed at ' + observed + ', expected ' + str(acceptance_commit)
+    return None
+
+def settle_close(item, value):
+    wave = item['wave']
+    close = PLAN['waves'][str(wave)]['close']
+    if _close_result_failed(value, close):
+        _failure_gate('close', wave, value)
+        return
+    snapshot = _close_snapshot_for(item)
+    expected_head = snapshot.get('spine_head') or value.get('spine_head')
+    moved = False
+    unreadable = False
+    current_head = None
+    residue_beads = {}
+    residue_error = None
+    fast_forward_error = None
+    accepted_residue = {task_id: [finding.get('id') for finding in findings] for task_id, findings in _accepted_residue(close) if findings}
+    with _merge_lock_context():
+        current_head = _current_workspace_head()
+        unreadable = not expected_head or not current_head
+        moved = bool(not unreadable and current_head != expected_head)
+        if not unreadable and (not moved) and (value.get('spine_head') != expected_head):
+            moved = True
+        if not moved and (not unreadable):
+            try:
+                residue_beads = _upsert_residue_receipts(_close_plan(item), close)
+            except Exception as exc:
+                residue_error = str(exc)
+            if close.get('final_build') and (not residue_error):
+                acceptance_commit, attach_error = _attach_acceptance_commit(_close_plan(item), expected_head, value.get('acceptance_commit'), snapshot.get('worktree'))
+                if attach_error:
+                    fast_forward_error = attach_error
+                else:
+                    value['acceptance_commit'] = acceptance_commit
+                    fast_forward_error = _fast_forward_main(_close_plan(item), value, acceptance_commit)
+            if not residue_error and (not fast_forward_error):
+                item['result'] = value
+                state = globals().get('STATE')
+                if isinstance(state, dict):
+                    state.setdefault('close_receipts', {})[str(item.get('id'))] = {'spine_head': expected_head, 'row_coverage': _immutable(value.get('row_coverage', {})), 'accepted_residue': accepted_residue, 'residue_beads': residue_beads, 'result': _immutable(value)}
+                    state.setdefault('residue_beads', {})[str(item.get('id'))] = residue_beads
+                    _save_runtime_state()
+    if unreadable:
+        _invalidate_close_snapshot(item)
+        _failure_gate('close-head', wave, {'reason': 'cannot read integration HEAD'})
+        return
+    if moved:
+        _invalidate_close_snapshot(item)
+        _failure_gate('close-moved-head', wave, {'expected_spine_head': expected_head, 'observed_spine_head': current_head or value.get('spine_head'), 'note': 'close evidence was observed on a moved head; retry creates a fresh pinned snapshot'})
+        return
+    if residue_error:
+        _failure_gate('close-residue', wave, {'reason': residue_error})
+        return
+    if fast_forward_error:
+        _failure_gate('close-fast-forward', wave, {'reason': fast_forward_error})
+        return
+    _mark_close_done(item)
+"""Workflow admission, durable state, and execution safety bounds."""
+import fcntl
+import json
+import os
+import subprocess
+import threading
+from time import time as wall_time
+_TIMEOUTS = {'executor': 5400, 'senior-executor': 9000, 'integrator': 3600, 'reviewer': 3600, 'attacker': 3600, 'architect': 3600, 'adjudicator': 1800, 'verifier': 3600}
+_ROUTING_TIMEOUTS = {('executor', 'standard'): 1800, ('executor', 'critical'): 3000, ('executor', 'host'): 3000, ('senior-executor', 'standard'): 1800, ('senior-executor', 'critical'): 3000, ('senior-executor', 'host'): 3000, ('fixer', 'standard'): 1800, ('fixer', 'critical'): 3000, ('fixer', 'host'): 3000, ('reviewer', 'standard'): 600, ('reviewer', 'critical'): 900, ('attacker', 'standard'): 600, ('attacker', 'critical'): 900, ('verifier', 'standard'): 600, ('verifier', 'critical'): 900, ('adjudicator', 'default'): 900, ('integrator', 'default'): 600}
+WHOLE_TASK_ACTIVE_SECONDS = {'prose': 7200, 'light': 7200, 'standard': 7200, 'critical': 14400}
+CURRENT_RUN_CLAIMS = set()
+
+def resolve_timeout(role, task_timeout=None, role_timeout=None, regime=None, host=False):
+    if task_timeout is not None:
+        return task_timeout
+    if role_timeout is not None:
+        return role_timeout
+    key = 'host' if host and role in {'executor', 'senior-executor', 'fixer'} else regime
+    if (role, key) in _ROUTING_TIMEOUTS:
+        return _ROUTING_TIMEOUTS[role, key]
+    if (role, 'default') in _ROUTING_TIMEOUTS:
+        return _ROUTING_TIMEOUTS[role, 'default']
+    return _TIMEOUTS.get(role, 1800)
+
+def _active_record(task_id, regime='standard', now=None):
+    now = wall_time() if now is None else now
+    clocks = STATE.setdefault('active_clocks', {})
+    return clocks.setdefault(task_id, {'regime': regime, 'accumulated': 0.0, 'resumed_at': now, 'parked_at': None})
+
+def active_clock_resume(task_id, regime='standard', now=None):
+    now = wall_time() if now is None else now
+    record = _active_record(task_id, regime, now)
+    record['regime'] = regime or record.get('regime', 'standard')
+    if record.get('resumed_at') is None:
+        record['resumed_at'] = now
+    record['parked_at'] = None
+    return record
+
+def active_clock_pause(task_id, now=None):
+    now = wall_time() if now is None else now
+    record = _active_record(task_id, now=now)
+    resumed = record.get('resumed_at')
+    if resumed is not None:
+        record['accumulated'] = float(record.get('accumulated', 0.0)) + max(0.0, now - resumed)
+    record['resumed_at'] = None
+    record['parked_at'] = now
+    return record
+
+def active_seconds(task_id, now=None):
+    now = wall_time() if now is None else now
+    record = _active_record(task_id, now=now)
+    total = float(record.get('accumulated', 0.0))
+    if record.get('resumed_at') is not None:
+        total += max(0.0, now - record['resumed_at'])
+    return total
+
+def claim_counts():
+    claims = STATE.setdefault('claims', {})
+    return {'current_run': len(CURRENT_RUN_CLAIMS), 'cumulative_across_resumes': len(claims)}
+
+def _claim_launch_locked(label, task=None, plan=None, now=None):
+    claims = STATE.setdefault('claims', {})
+    if label in claims:
+        return False
+    item = getattr(CURRENT_ITEM, 'value', {}) or {}
+    task = task or item.get('task') or {}
+    plan = plan or globals().get('PLAN', {}) or {}
+    task_id = str(task.get('id') or item.get('id') or label)
+    regime = str(task.get('regime') or task.get('review_tier') or 'standard')
+    active_clock_resume(task_id, regime, now)
+    task_limit = int(task.get('max_task_calls') or 0)
+    task_total = sum((1 for claim in claims.values() if claim.get('task_id') == task_id))
+    run_limit = int(plan.get('run_claim_ceiling') or 0)
+    run_total = len(claims)
+    active_limit = WHOLE_TASK_ACTIVE_SECONDS.get(regime, WHOLE_TASK_ACTIVE_SECONDS['standard'])
+    active = active_seconds(task_id, now)
+    breached = None
+    if task_limit and task_total >= task_limit:
+        breached = {'kind': 'task-call-ceiling', 'limit': task_limit, 'observed': task_total}
+    elif run_limit and run_total >= run_limit:
+        breached = {'kind': 'run-claim-ceiling', 'limit': run_limit, 'observed': run_total}
+    elif active > active_limit:
+        breached = {'kind': 'active-clock', 'limit': active_limit, 'observed': active}
+    if breached:
+        failure_gate('guardrail', item.get('wave', '?'), breached, task_id)
+    claims[label] = {'id': label, 'task_id': task_id, 'regime': regime, 'phase': label.split(':', 1)[0]}
+    CURRENT_RUN_CLAIMS.add(label)
+    warning = int(plan.get('claim_warning_at') or 0)
+    if warning and len(claims) >= warning:
+        warned = STATE.setdefault('claim_warnings', {})
+        if str(warning) not in warned:
+            warned[str(warning)] = len(claims)
+            log('CLAIM WARNING ' + str(len(claims)) + '/' + str(run_limit))
+    save_state()
+    return True
+
+def claim_launch(label, task=None, plan=None, now=None):
+    with STATE_LOCK:
+        return _claim_launch_locked(label, task, plan, now)
+_VERIFY_ADDENDUM = '\n## Verify report contract\n\nReport each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n\n## Commit cadence\n\nCommit after each completed item, before starting the next; never hold more than one item\'s work uncommitted. A lane that times out uncommitted has nothing to salvage.\n'
+VERIFY_TIMEOUT = 1800
+MERGE_GATE_NOTE = 'A red merge was reset off the spine and a refusal merged nothing; this merge is not cached, so fix the lane branch or the spine by hand, then approve: the merge re-runs on resume. Approving without a change re-runs the same failing merge.'
+ADJUDICATE_SCOPE = "Scope rule: every fix_task verify row must be runnable inside that fix task's owned_files (a scoped test file, a node check on those paths, a targeted grep). Whole-repo format, lint, typecheck, or full-suite rows are forbidden here; the wave's close verifier runs those once. A fix_task's owned_files are an explicit additional grant beyond the parent task; rubric-class paths are reclassified as COORDINATOR work. owned_files are literal file or directory paths relative to the repo root, never globs. Every disposition carries `lane` as laneN (N = 1-based position in the findings list) and `persona` naming that reviewer. One disposition per finding; copy each finding's `severity` verbatim; `accepted_residue` lists only unfixed ADOPT dispositions; `fix` may carry coordinator_tasks."
+
+def failure_gate(stage, wave, result, task_id=None):
+    suffix = ' task ' + task_id if task_id else ''
+    payload = {'id': 'wave-' + str(wave) + '-' + stage + (':' + task_id if task_id else ''), 'title': 'Wave ' + str(wave) + suffix + ' ' + stage + ' failed', 'assignee': 'trey', 'failure': {'stage': stage, 'result': result}}
+    if not task_id:
+        workflow('checkpoint', payload, gate=True)
+        return
+    payload['task'] = task_id
+    active_clock_pause(task_id)
+    item = CURRENT_ITEM.value
+    attempt = item_attempt_key(item)
+    if approved_gate(task_id, stage, attempt):
+        return
+    with STATE_LOCK:
+        STATE['parked'][task_id] = {'stage': stage, 'payload': payload}
+        save_state()
+    log('PARKED ' + task_id + ' at ' + stage + '; other items continue. Unpark: plan-unpark <state> ' + task_id + ' continue|retry|done (retry rejects the cached input; continue replays it unchanged).')
+    raise ParkItem(stage)
+
+def load_state():
+    with STATE_LOCK:
+        directory = os.path.dirname(STATE_PATH) or '.'
+        os.makedirs(directory, exist_ok=True)
+        lock = open(STATE_PATH + '.lock', 'a+')
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(STATE_PATH) as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            data = {}
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+        for key in ('merges', 'bases', 'task_bases', 'heads', 'review_heads', 'overrides', 'parked', 'decisions', 'attempts', 'approved', 'forced_done', 'coordinator', 'coordinator_tasks', 'claims', 'claim_warnings', 'active_clocks'):
+            data.setdefault(key, {})
+        return data
+
+def save_state():
+    with STATE_LOCK:
+        directory = os.path.dirname(STATE_PATH) or '.'
+        os.makedirs(directory, exist_ok=True)
+        lock = open(STATE_PATH + '.lock', 'a+')
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                with open(STATE_PATH) as handle:
+                    disk = json.load(handle)
+            except (OSError, ValueError):
+                disk = {}
+            if isinstance(disk.get('decisions'), dict):
+                STATE['decisions'].update({key: value for key, value in disk['decisions'].items() if key not in DECISION_TOMBSTONES})
+            with open(STATE_PATH + '.tmp', 'w') as handle:
+                json.dump(STATE, handle, indent=1, sort_keys=True)
+            os.replace(STATE_PATH + '.tmp', STATE_PATH)
+            DECISION_TOMBSTONES.clear()
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+
+def refresh_state():
+    with STATE_LOCK:
+        lock = open(STATE_PATH + '.lock', 'a+')
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        try:
+            try:
+                with open(STATE_PATH) as handle:
+                    disk = json.load(handle)
+            except (OSError, ValueError):
+                disk = {}
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+        if isinstance(disk.get('decisions'), dict):
+            STATE['decisions'].update(disk['decisions'])
+        for key, value in (disk.get('coordinator') or {}).items():
+            mine = STATE.setdefault('coordinator', {}).get(key)
+            if key.endswith(':acknowledgement') and value and (not mine):
+                STATE['coordinator'][key] = value
+            elif isinstance(value, dict) and value.get('acknowledgement') and isinstance(mine, dict) and (not mine.get('acknowledgement')):
+                STATE['coordinator'][key] = dict(mine, acknowledgement=value['acknowledgement'])
+
+def park_poll_seconds(settings=None):
+    if isinstance(settings, dict):
+        source = settings
+    else:
+        harness_args = globals().get('args', {})
+        source = harness_args if isinstance(harness_args, dict) else {}
+    value = source.get('park_poll_seconds', 1.0)
+    return value if isinstance(value, (int, float)) and value > 0 else 1.0
+
+def approvals_of(task_id):
+    entry = STATE['approved'].get(task_id)
+    if isinstance(entry, dict):
+        return [entry]
+    return [row for row in entry if isinstance(row, dict)] if isinstance(entry, list) else []
+
+def approved_gate(task_id, stage, attempt):
+    return any((row.get('stage') == stage and row.get('attempt') == attempt for row in approvals_of(task_id)))
+
+def approve_gate(task_id, stage, attempt):
+    rows = approvals_of(task_id)
+    if not approved_gate(task_id, stage, attempt):
+        rows.append({'stage': stage, 'attempt': attempt})
+    STATE['approved'][task_id] = rows
+
+def clear_approvals(task_id, attempt=None):
+    rows = [row for row in approvals_of(task_id) if attempt is not None and row.get('attempt') != attempt]
+    if rows:
+        STATE['approved'][task_id] = rows
+    else:
+        STATE['approved'].pop(task_id, None)
+
+def _invalidate_settled_closes(wave):
+    if wave is None:
+        return
+    for name in ('close_receipts', 'close_snapshots', 'heads', 'forced_done'):
+        table = STATE.get(name)
+        if not isinstance(table, dict):
+            continue
+        for key in list(table):
+            number = str(key)[len('close:'):] if str(key).startswith('close:') else ''
+            if number.isascii() and number.isdigit() and (int(number) >= int(wave)):
+                table.pop(key)
+
+def await_decision(item):
+    task_id = item['id']
+    while True:
+        if ABORT_EVENT.is_set():
+            raise SystemExit('item ' + task_id + ' was parked when the workflow paused; resume re-parks it')
+        refresh_state()
+        decision = STATE['decisions'].get(task_id)
+        action = str(decision.get('action', '')).lower() if isinstance(decision, dict) else ''
+        if action in ('continue', 'done', 'retry'):
+            parked = STATE['parked'].get(task_id) or {}
+            attempt = item_attempt_key(item)
+            with STATE_LOCK:
+                if action == 'continue':
+                    approve_gate(task_id, parked.get('stage'), attempt)
+                elif action == 'retry':
+                    target = stage_key(item) if item.get('kind') == 'task' and item.get('stage') in ('execute', 'fix') else item_attempt_key(item)
+                    reject_cached(target, str(decision.get('reason') or 'plan-unpark retry rejects cached result'))
+                    STATE['attempts'][attempt] = int(STATE['attempts'].get(attempt, 0)) + 1
+                    clear_approvals(task_id, attempt)
+                    if item['stage'] in ('execute', 'fix'):
+                        STATE['overrides'].pop(stage_key(item), None)
+                    _invalidate_settled_closes(item.get('wave'))
+                else:
+                    STATE['forced_done'][task_id] = True
+                    clear_approvals(task_id)
+                STATE['parked'].pop(task_id, None)
+                STATE['decisions'].pop(task_id, None)
+                DECISION_TOMBSTONES.add(task_id)
+                save_state()
+            if action != 'done':
+                task = item.get('task') or {}
+                active_clock_resume(task_id, str(task.get('regime') or task.get('review_tier') or 'standard'))
+            log('UNPARKED ' + task_id + ' with action ' + action)
+            if action == 'retry':
+                raise RetryStage()
+            if action == 'done':
+                raise FinishItem()
+            return
+        threading.Event().wait(park_poll_seconds())
+
+def run_agent(spec, prompt, route_index, label, phase_name):
+    selected = route(spec, route_index)
+    item = getattr(CURRENT_ITEM, 'value', {}) or {}
+    claim_launch(label, item.get('task'), globals().get('PLAN'))
+    return agent(prompt, engine=selected['engine'], model=selected['model'], effort=selected['effort'], mode=selected['mode'], persona=spec['persona'], isolation=spec['isolation'], schema=SCHEMAS[spec['schema']], label=label, phase=phase_name, timeout=spec['timeout'], retries=1)
+
+def item_thread_cap():
+    path = os.path.expanduser('~/.delegate/config.json')
+    try:
+        with open(path) as handle:
+            config = json.load(handle)
+    except (OSError, ValueError):
+        config = {}
+    value = (config.get('workflows') or {}).get('itemThreads') if isinstance(config, dict) else None
+    return value if isinstance(value, int) and value > 0 else 64
+assert_engine_contract(globals())
+auto = args.get('auto_approve', False) if isinstance(args, dict) else False
+SCHEMAS = {'EXECUTE_RESULT': EXECUTE_RESULT, 'INTEGRATE_RESULT': INTEGRATE_RESULT,
+           'FINDINGS': FINDINGS, 'ADJUDICATION': ADJUDICATION,
+           'FIX_VERDICT': FIX_VERDICT, 'CLOSE_RESULT': CLOSE_RESULT}
+ROUTES = {'adjudicator': [{'engine': 'claude', 'model': 'opus', 'effort': 'high', 'mode': 'work'}, {'engine': 'codex', 'model': 'sol', 'effort': 'xhigh', 'mode': 'work'}],
+ 'attacker': [{'engine': 'grok', 'model': 'grok-4.6', 'effort': 'high', 'mode': 'work'}, {'engine': 'codex', 'model': 'sol', 'effort': 'xhigh', 'mode': 'work'}],
+ 'executor': [{'engine': 'codex', 'model': 'luna', 'effort': 'max', 'mode': 'work'}, {'engine': 'omp', 'model': 'glm', 'effort': 'high', 'mode': 'work'}],
+ 'fixer': [{'engine': 'codex', 'model': 'luna', 'effort': 'max', 'mode': 'work'}, {'engine': 'omp', 'model': 'glm', 'effort': 'high', 'mode': 'work'}],
+ 'integrator': [{'engine': 'codex', 'model': 'luna', 'effort': 'medium', 'mode': 'work'}],
+ 'reviewer': [{'engine': 'claude', 'model': 'opus', 'effort': 'high', 'mode': 'work'}, {'engine': 'codex', 'model': 'sol', 'effort': 'xhigh', 'mode': 'work'}, {'engine': 'cursor', 'model': 'grok-4.6-xhigh-fast', 'effort': 'high', 'mode': 'work'}, {'engine': 'omp', 'model': 'glm', 'effort': 'high', 'mode': 'work'}],
+ 'verifier': [{'engine': 'codex', 'model': 'luna', 'effort': 'max', 'mode': 'work'}, {'engine': 'omp', 'model': 'glm', 'effort': 'high', 'mode': 'work'}]}
+VERIFY_ADDENDUM = '\n## Verify report contract\n\nReport each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n\n## Commit cadence\n\nCommit after each completed item, before starting the next; never hold more than one item\'s work uncommitted. A lane that times out uncommitted has nothing to salvage.\n'
+MAIN_BRANCH = 'main'
+WORKSPACE = '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer'
+if os.path.isdir(WORKSPACE) and not (isinstance(args, dict) and args.get('skip_workspace_check')) and os.path.realpath(os.getcwd()) != os.path.realpath(WORKSPACE): raise SystemExit('launch from ' + WORKSPACE)
+STATE_PATH = args.get('state_path') if isinstance(args, dict) and args.get('state_path') else os.path.join(WORKSPACE, '.delegate', 'plan-state.json')
+review = {}
+adjudication = {}
+fixes = {}
+ITEMS = {}
+PLAN = {'name': 'plan-b-stateful-read-layer',
+ 'spine': 'plan/plan-b-stateful-read-layer',
+ 'workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer',
+ 'regimes': {'prose': {'lanes': 1, 'min_families': 1, 'fix_rounds': 0, 're_review': 'none', 'adjudicate': False, 'severity_floor': 'minor', 'max_task_calls': 8}, 'standard': {'lanes': 2, 'min_families': 2, 'fix_rounds': 1, 're_review': 'scoped', 'adjudicate': True, 'severity_floor': 'major', 'max_task_calls': 12}, 'critical': {'lanes': 3, 'min_families': 3, 'fix_rounds': 2, 're_review': 'scoped', 'adjudicate': True, 'severity_floor': 'blocker', 'max_task_calls': 24}},
+ 'derived_run_claim_ceiling': 150,
+ 'run_claim_ceiling': 150,
+ 'claim_warning_at': 120,
+ 'tasks': [{'id': 'B1',
+            'wave': 1,
+            'index': 0,
+            'deps': [],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 3000,
+            'regime': 'critical',
+            'max_task_calls': 24,
+            'fix_rounds': 2,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/1/B1.md',
+            'owned': ['src/cursor_state.rs', 'src/channel_state.rs', 'src/lib.rs', 'tests/common/mod.rs', 'tests/cli.rs'],
+            'verifies': [('cargo test cursor_state', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B1',
+            'lanes': 3,
+            'min_families': 3,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'blocker',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 2, 'lanes': 3, 'max_task_calls': 24, 'min_families': 3, 'name': 'critical', 're_review': 'scoped', 'severity_floor': 'blocker'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B1-refuter-0', 'porcelain_guard': False}, {'route_pool': 'reviewer', 'persona': 'test-skeptic', 'isolation': 'none', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B1', 'porcelain_guard': True},
+                          {'route_pool': 'reviewer', 'persona': 'guess-hunter', 'isolation': 'none', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B1', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': [],
+            'bounds': None},
+           {'id': 'B2',
+            'wave': 2,
+            'index': 0,
+            'deps': ['B1'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 1800,
+            'regime': 'standard',
+            'max_task_calls': 12,
+            'fix_rounds': 1,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/2/B2.md',
+            'owned': ['src/commands/catchup.rs', 'src/commands/mod.rs', 'src/cli.rs', 'src/migration_fence.rs', 'src/output.rs', 'tests/catchup.rs'],
+            'verifies': [('cargo test --test catchup', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B2',
+            'lanes': 2,
+            'min_families': 2,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'major',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 1, 'lanes': 2, 'max_task_calls': 12, 'min_families': 2, 'name': 'standard', 're_review': 'scoped', 'severity_floor': 'major'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B2-refuter-0', 'porcelain_guard': False}, {'route_pool': 'reviewer', 'persona': 'spec-fidelity', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B2', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': [],
+            'bounds': None},
+           {'id': 'B3',
+            'wave': 2,
+            'index': 1,
+            'deps': ['B1'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 3000,
+            'regime': 'critical',
+            'max_task_calls': 24,
+            'fix_rounds': 2,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/2/B3.md',
+            'owned': ['src/commands/chat.rs', 'src/commands/read.rs', 'src/mailbox.rs', 'tests/consuming.rs', 'tests/cli.rs'],
+            'verifies': [('cargo test --test consuming', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B3',
+            'lanes': 3,
+            'min_families': 3,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'blocker',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 2, 'lanes': 3, 'max_task_calls': 24, 'min_families': 3, 'name': 'critical', 're_review': 'scoped', 'severity_floor': 'blocker'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B3-refuter-0', 'porcelain_guard': False}, {'route_pool': 'reviewer', 'persona': 'test-skeptic', 'isolation': 'none', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B3', 'porcelain_guard': True},
+                          {'route_pool': 'reviewer', 'persona': 'seam-verifier', 'isolation': 'none', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B3', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': ['src/cursor_state.rs'],
+            'bounds': None},
+           {'id': 'B4',
+            'wave': 3,
+            'index': 0,
+            'deps': ['B1', 'B2'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 1800,
+            'regime': 'standard',
+            'max_task_calls': 12,
+            'fix_rounds': 1,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/3/B4.md',
+            'owned': ['src/commands/channels.rs', 'src/commands/inbox.rs', 'src/output.rs', 'src/channel.rs', 'src/cursor_state.rs', 'tests/counts.rs'],
+            'verifies': [('cargo test --test counts', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B4',
+            'lanes': 2,
+            'min_families': 2,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'major',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 1, 'lanes': 2, 'max_task_calls': 12, 'min_families': 2, 'name': 'standard', 're_review': 'scoped', 'severity_floor': 'major'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B4-refuter-0', 'porcelain_guard': False}, {'route_pool': 'reviewer', 'persona': 'conventions', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B4', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': ['src/cursor_state.rs'],
+            'bounds': None},
+           {'id': 'B9',
+            'wave': 3,
+            'index': 1,
+            'deps': ['B1', 'B3'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 1800,
+            'regime': 'standard',
+            'max_task_calls': 12,
+            'fix_rounds': 1,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/3/B9.md',
+            'owned': ['src/commands/watch.rs', 'tests/watch_preview.rs', 'tests/cli.rs'],
+            'verifies': [('cargo test --test watch_preview', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B9',
+            'lanes': 2,
+            'min_families': 2,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'major',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 1, 'lanes': 2, 'max_task_calls': 12, 'min_families': 2, 'name': 'standard', 're_review': 'scoped', 'severity_floor': 'major'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B9-refuter-0', 'porcelain_guard': False}, {'route_pool': 'reviewer', 'persona': 'spec-fidelity', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B9', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': ['tests/cli.rs'],
+            'bounds': None},
+           {'id': 'B5',
+            'wave': 4,
+            'index': 0,
+            'deps': ['B1', 'B2', 'B4'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 1800,
+            'regime': 'standard',
+            'max_task_calls': 12,
+            'fix_rounds': 1,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/4/B5.md',
+            'owned': ['src/commands/search.rs', 'src/commands/mod.rs', 'src/cli.rs', 'src/migration_fence.rs', 'src/output.rs', 'tests/search.rs'],
+            'verifies': [('cargo test --test search', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B5',
+            'lanes': 2,
+            'min_families': 2,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'major',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 1, 'lanes': 2, 'max_task_calls': 12, 'min_families': 2, 'name': 'standard', 're_review': 'scoped', 'severity_floor': 'major'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'attacker', 'persona': 'attacker', 'isolation': 'worktree', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B5-attacker-0', 'porcelain_guard': False}, {'route_pool': 'reviewer', 'persona': 'spec-fidelity', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B5', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': [],
+            'bounds': None},
+           {'id': 'B7',
+            'wave': 4,
+            'index': 1,
+            'deps': ['B2', 'B3', 'B4', 'B9'],
+            'route_pool': 'executor',
+            'persona': 'test-first-writer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 1800,
+            'regime': 'standard',
+            'max_task_calls': 12,
+            'fix_rounds': 1,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/4/B7.md',
+            'owned': ['tests/doorbell.rs', 'tests/cli.rs'],
+            'verifies': [('cargo test --test doorbell', 'exit 0'), ('cargo test --test cli', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B7',
+            'lanes': 2,
+            'min_families': 2,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'major',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 1, 'lanes': 2, 'max_task_calls': 12, 'min_families': 2, 'name': 'standard', 're_review': 'scoped', 'severity_floor': 'major'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'test-skeptic', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B7', 'porcelain_guard': True}, {'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B7-refuter-1', 'porcelain_guard': False}],
+            'effects': ['code'],
+            'consumes': ['src/commands/catchup.rs', 'src/commands/chat.rs', 'src/commands/channels.rs'],
+            'bounds': None},
+           {'id': 'B6',
+            'wave': 5,
+            'index': 0,
+            'deps': ['B2', 'B3', 'B4', 'B5', 'B9'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 3000,
+            'regime': 'critical',
+            'max_task_calls': 24,
+            'fix_rounds': 2,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/5/B6.md',
+            'owned': ['CONTRACT.md', 'src/commands/schema.rs', 'src/commands/doctor.rs', 'src/output.rs', 'tests/schema_surface.rs', 'tests/cli.rs', 'README.md', 'CHANGELOG.md', 'skills/post/SKILL.md'],
+            'verifies': [('cargo test --test schema_surface', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B6',
+            'lanes': 3,
+            'min_families': 3,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'blocker',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 2, 'lanes': 3, 'max_task_calls': 24, 'min_families': 3, 'name': 'critical', 're_review': 'scoped', 'severity_floor': 'blocker'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'spec-fidelity', 'isolation': 'none', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B6', 'porcelain_guard': True}, {'route_pool': 'reviewer', 'persona': 'refuter', 'isolation': 'worktree', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B6-refuter-1', 'porcelain_guard': False},
+                          {'route_pool': 'reviewer', 'persona': 'conventions', 'isolation': 'none', 'timeout': 900, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B6', 'porcelain_guard': True}],
+            'effects': ['code', 'docs'],
+            'consumes': ['src/commands/catchup.rs', 'src/commands/search.rs', 'src/commands/chat.rs', 'src/commands/channels.rs'],
+            'bounds': None},
+           {'id': 'B8',
+            'wave': 6,
+            'index': 0,
+            'deps': ['B6', 'B7'],
+            'route_pool': 'executor',
+            'persona': 'minimalist-implementer',
+            'isolation': 'worktree',
+            'schema': 'EXECUTE_RESULT',
+            'timeout': 1800,
+            'regime': 'standard',
+            'max_task_calls': 12,
+            'fix_rounds': 1,
+            'brief': '/home/trey-agent/Code/post/docs/plans/briefs/6/B8.md',
+            'owned': ['scripts/smoke-installed.sh'],
+            'verifies': [('cargo build --release', 'exit 0'), ('bash scripts/smoke-installed.sh target/release/post', 'exit 0'), ('bash scripts/gate.sh', 'GATE PASS')],
+            'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B8',
+            'lanes': 2,
+            'min_families': 2,
+            're_review': 'scoped',
+            'adjudicate': True,
+            'severity_floor': 'major',
+            'v2': True,
+            'regime_data': {'adjudicate': True, 'fix_rounds': 1, 'lanes': 2, 'max_task_calls': 12, 'min_families': 2, 'name': 'standard', 're_review': 'scoped', 'severity_floor': 'major'},
+            'stages': ['execute', 'review', 'adjudicate', 'fix', 'verify_fixes', 'done'],
+            'reviewers': [{'route_pool': 'reviewer', 'persona': 'conventions', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B8', 'porcelain_guard': True}, {'route_pool': 'verifier', 'persona': 'close-verifier', 'isolation': 'none', 'timeout': 600, 'review_workspace': '/home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-review-B8', 'porcelain_guard': True}],
+            'effects': ['code'],
+            'consumes': ['tests/doorbell.rs', 'src/commands/schema.rs'],
+            'bounds': None}],
+ 'waves': {'1': {'task_ids': ['B1'],
+                 'verifier': {'route_pool': 'verifier', 'persona': 'integrator', 'isolation': 'none', 'schema': 'CLOSE_RESULT', 'timeout': 3600},
+                 'close': {'wave': 1,
+                           'prefix': 'Run as close-verifier in /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-close-1, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave 1. Re-run every task verify row ',
+                           'body': "; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a "
+                                   "live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan=plan-b-stateful-read-layer and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {task id: bool} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. ",
+                           'final': 'Do not merge into /home/trey-agent/Code/post: later waves are already pipelined onto the spine and only the final build wave publishes. Report the current head of the branch checked out at /home/trey-agent/Code/post as main_head, its branch name as main_branch, and the spine head as spine_head.\n'
+                                    '## Verify report contract\n'
+                                    '\n'
+                                    'Report each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n'
+                                    '\n'
+                                    '## Commit cadence\n'
+                                    '\n'
+                                    "Commit after each completed item, before starting the next; never hold more than one item's work uncommitted. A lane that times out uncommitted has nothing to salvage.\n",
+                           'verifies': [('B1', [('cargo test cursor_state', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')])],
+                           'workflow_verifies': [],
+                           'expects': 4,
+                           'task_ids': ['B1'],
+                           'build_ids': ['B1'],
+                           'final_build': False}},
+           '2': {'task_ids': ['B2', 'B3'],
+                 'verifier': {'route_pool': 'verifier', 'persona': 'integrator', 'isolation': 'none', 'schema': 'CLOSE_RESULT', 'timeout': 3600},
+                 'close': {'wave': 2,
+                           'prefix': 'Run as close-verifier in /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-close-2, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave 2. Re-run every task verify row ',
+                           'body': "; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a "
+                                   "live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan=plan-b-stateful-read-layer and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {task id: bool} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. ",
+                           'final': 'Do not merge into /home/trey-agent/Code/post: later waves are already pipelined onto the spine and only the final build wave publishes. Report the current head of the branch checked out at /home/trey-agent/Code/post as main_head, its branch name as main_branch, and the spine head as spine_head.\n'
+                                    '## Verify report contract\n'
+                                    '\n'
+                                    'Report each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n'
+                                    '\n'
+                                    '## Commit cadence\n'
+                                    '\n'
+                                    "Commit after each completed item, before starting the next; never hold more than one item's work uncommitted. A lane that times out uncommitted has nothing to salvage.\n",
+                           'verifies': [('B2', [('cargo test --test catchup', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')]), ('B3', [('cargo test --test consuming', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')])],
+                           'workflow_verifies': [],
+                           'expects': 5,
+                           'task_ids': ['B2', 'B3'],
+                           'build_ids': ['B2', 'B3'],
+                           'final_build': False}},
+           '3': {'task_ids': ['B4', 'B9'],
+                 'verifier': {'route_pool': 'verifier', 'persona': 'integrator', 'isolation': 'none', 'schema': 'CLOSE_RESULT', 'timeout': 3600},
+                 'close': {'wave': 3,
+                           'prefix': 'Run as close-verifier in /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-close-3, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave 3. Re-run every task verify row ',
+                           'body': "; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a "
+                                   "live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan=plan-b-stateful-read-layer and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {task id: bool} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. ",
+                           'final': 'Do not merge into /home/trey-agent/Code/post: later waves are already pipelined onto the spine and only the final build wave publishes. Report the current head of the branch checked out at /home/trey-agent/Code/post as main_head, its branch name as main_branch, and the spine head as spine_head.\n'
+                                    '## Verify report contract\n'
+                                    '\n'
+                                    'Report each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n'
+                                    '\n'
+                                    '## Commit cadence\n'
+                                    '\n'
+                                    "Commit after each completed item, before starting the next; never hold more than one item's work uncommitted. A lane that times out uncommitted has nothing to salvage.\n",
+                           'verifies': [('B4', [('cargo test --test counts', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')]), ('B9', [('cargo test --test watch_preview', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')])],
+                           'workflow_verifies': [],
+                           'expects': 5,
+                           'task_ids': ['B4', 'B9'],
+                           'build_ids': ['B4', 'B9'],
+                           'final_build': False}},
+           '4': {'task_ids': ['B5', 'B7'],
+                 'verifier': {'route_pool': 'verifier', 'persona': 'integrator', 'isolation': 'none', 'schema': 'CLOSE_RESULT', 'timeout': 3600},
+                 'close': {'wave': 4,
+                           'prefix': 'Run as close-verifier in /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-close-4, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave 4. Re-run every task verify row ',
+                           'body': "; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a "
+                                   "live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan=plan-b-stateful-read-layer and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {task id: bool} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. ",
+                           'final': 'Do not merge into /home/trey-agent/Code/post: later waves are already pipelined onto the spine and only the final build wave publishes. Report the current head of the branch checked out at /home/trey-agent/Code/post as main_head, its branch name as main_branch, and the spine head as spine_head.\n'
+                                    '## Verify report contract\n'
+                                    '\n'
+                                    'Report each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n'
+                                    '\n'
+                                    '## Commit cadence\n'
+                                    '\n'
+                                    "Commit after each completed item, before starting the next; never hold more than one item's work uncommitted. A lane that times out uncommitted has nothing to salvage.\n",
+                           'verifies': [('B5', [('cargo test --test search', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')]), ('B7', [('cargo test --test doorbell', 'exit 0'), ('cargo test --test cli', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')])],
+                           'workflow_verifies': [],
+                           'expects': 6,
+                           'task_ids': ['B5', 'B7'],
+                           'build_ids': ['B5', 'B7'],
+                           'final_build': False}},
+           '5': {'task_ids': ['B6'],
+                 'verifier': {'route_pool': 'verifier', 'persona': 'integrator', 'isolation': 'none', 'schema': 'CLOSE_RESULT', 'timeout': 3600},
+                 'close': {'wave': 5,
+                           'prefix': 'Run as close-verifier in /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-close-5, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave 5. Re-run every task verify row ',
+                           'body': "; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a "
+                                   "live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan=plan-b-stateful-read-layer and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {task id: bool} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. ",
+                           'final': 'Do not merge into /home/trey-agent/Code/post: later waves are already pipelined onto the spine and only the final build wave publishes. Report the current head of the branch checked out at /home/trey-agent/Code/post as main_head, its branch name as main_branch, and the spine head as spine_head.\n'
+                                    '## Verify report contract\n'
+                                    '\n'
+                                    'Report each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n'
+                                    '\n'
+                                    '## Commit cadence\n'
+                                    '\n'
+                                    "Commit after each completed item, before starting the next; never hold more than one item's work uncommitted. A lane that times out uncommitted has nothing to salvage.\n",
+                           'verifies': [('B6', [('cargo test --test schema_surface', 'exit 0'), ('cargo test', 'exit 0'), ('cargo clippy --all-targets --all-features -- -D warnings', 'exit 0'), ('cargo fmt --check', 'exit 0')])],
+                           'workflow_verifies': [],
+                           'expects': 4,
+                           'task_ids': ['B6'],
+                           'build_ids': ['B6'],
+                           'final_build': False}},
+           '6': {'task_ids': ['B8'],
+                 'verifier': {'route_pool': 'verifier', 'persona': 'integrator', 'isolation': 'none', 'schema': 'CLOSE_RESULT', 'timeout': 5400},
+                 'close': {'wave': 6,
+                           'prefix': 'Run as close-verifier in /home/trey-agent/Code/post/.worktrees/plan-plan-b-stateful-read-layer-close-6, a pinned detached close worktree created from the integration worktree on the spine. Verify and close wave 6. Re-run every task verify row ',
+                           'body': "; before any close-side write, confirm the pinned spine HEAD equals integration.spine_head; each task's receipts are the explicit merge commits and bases listed for it under integration.receipts; confirm each receipt is a commit whose diff touches only the owned files listed for that task above plus the fix-task owned files attached as fix_owned for that task. Measure each receipt only as `git diff <base> <merge_commit>` using its attached immutable base; union those paths for the task. Do not attribute paths with a "
+                                   "live wave-base..HEAD range. Refuse an empty build diff, and close each bead found by metadata plan=plan-b-stateful-read-layer and task id with commit and verify evidence. Report diff_nonempty and bead_closed as {task id: bool} maps covering every real task in the task verify rows. The task_baselines in RESULTS are immutable persisted values: never re-observe HEAD at integrate start. Report each row's four-key declared_row_id; missing rows belong in refused_rows, never in a vacuous complete report. Create "
+                                   'acceptance_output=$(mktemp -p /tmp) and audit_output=$(mktemp -p /tmp), both outside the worktree. Run tests/acceptance.sh > "$acceptance_output". After it exits, cp "$acceptance_output" docs/acceptance/demo-output.md. Then run bin/delegate-audit --since docs/acceptance/build-start.txt --plan /home/trey-agent/Code/post/docs/plans/plan-b-stateful-read-layer.md --receipts docs/receipts/audit > "$audit_output". After it exits, cp "$audit_output" docs/acceptance/audit-report.md. List and review the files to stage: '
+                                   'docs/acceptance/demo-output.md, docs/acceptance/audit-report.md, and every path printed by git ls-files --others --exclude-standard docs/receipts/audit. Then run git add -- with exactly those reviewed paths, never a directory, and commit them in the detached close worktree, reporting that commit as acceptance_commit. Do not merge or fast-forward any branch. These capture runs are the workflow-level verify-row executions: run each exactly once, do not execute the rows separately, and report their declared run and '
+                                   'expect values without alteration. ',
+                           'final': 'Report the current head of the branch checked out at /home/trey-agent/Code/post as main_head, its branch name as main_branch, and the pinned spine head as spine_head; the close coordinator validates and publishes acceptance_commit after this result is complete.\n'
+                                    '## Verify report contract\n'
+                                    '\n'
+                                    'Report each verify row as `{run, exit, expect, passed, note}`. "exit 0" means the return code; any other string is a substring match on combined stdout+stderr; `passed` is the lane\'s verdict under that rule. Report exactly the declared rows in verify_results; note pre-existing or incidental failures in summary, never as extra rows.\n'
+                                    '\n'
+                                    '## Commit cadence\n'
+                                    '\n'
+                                    "Commit after each completed item, before starting the next; never hold more than one item's work uncommitted. A lane that times out uncommitted has nothing to salvage.\n",
+                           'verifies': [('B8', [('cargo build --release', 'exit 0'), ('bash scripts/smoke-installed.sh target/release/post', 'exit 0'), ('bash scripts/gate.sh', 'GATE PASS')])],
+                           'workflow_verifies': [('tests/acceptance.sh', 'exit 0'), ('bin/delegate-audit --since docs/acceptance/build-start.txt --plan /home/trey-agent/Code/post/docs/plans/plan-b-stateful-read-layer.md --receipts docs/receipts/audit', 'exit 0')],
+                           'expects': 5,
+                           'task_ids': ['B8'],
+                           'build_ids': ['B8'],
+                           'final_build': True}}},
+ 'checkpoints': [],
+ 'adjudicator': {'route_pool': 'adjudicator', 'persona': 'adjudicator', 'isolation': 'none', 'schema': 'ADJUDICATION', 'timeout': 900},
+ 'fix': {'route_pool': 'fixer', 'persona': 'minimalist-implementer', 'isolation': 'none', 'schema': 'EXECUTE_RESULT', 'timeout': 1800},
+ 'fix_verifier': {'route_pool': 'verifier', 'persona': 'fix-verifier', 'isolation': 'none', 'schema': 'FIX_VERDICT', 'timeout': 3600},
+ 'rubric': {'plan': '/home/trey-agent/Code/post/docs/plans/plan-b-stateful-read-layer.md', 'briefs': '/home/trey-agent/Code/post/docs/plans/briefs', 'workflow': '/home/trey-agent/Code/post/docs/plans/wf.py', 'acceptance': '/home/trey-agent/Code/post/tests/acceptance.sh'}}
+hydrate_routes(PLAN)
+PLAN['post_merge'] = args.get('post_merge') if isinstance(args, dict) else None
+PLAN['post_merge_triggers'] = (args.get('post_merge_triggers') if isinstance(args, dict) else None) or ['package.json', 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock']
+STATE = load_state()
+globals().update({'PLAN': PLAN, 'WORKSPACE': WORKSPACE, 'STATE': STATE, 'ITEMS': ITEMS, 'adjudication': adjudication, 'review': review, 'git': git, 'rev': rev, 'recorded_head': recorded_head, 'save_state': save_state, 'failure_gate': failure_gate, 'mark_done': mark_done, 'with_results': with_results, 'stage_phase': stage_phase})
+return run_plan()
