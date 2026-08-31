@@ -4,6 +4,7 @@ mod channel_state;
 mod cli;
 mod command_result;
 mod commands;
+mod cursor_state;
 mod error;
 mod mailbox;
 mod migration_fence;
