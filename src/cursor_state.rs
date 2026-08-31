@@ -87,6 +87,14 @@ impl Snapshot {
             .and_then(|seen| seen.last())
             .map(String::as_str)
     }
+
+    pub(crate) fn mail_seen_count(&self) -> usize {
+        self.mail.len()
+    }
+
+    pub(crate) fn channel_seen_count(&self, channel: &str) -> usize {
+        self.channels.get(channel).map(|set| set.len()).unwrap_or(0)
+    }
 }
 
 impl State {
