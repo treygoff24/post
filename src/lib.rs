@@ -10,6 +10,7 @@ mod mailbox;
 mod migration_fence;
 mod model;
 pub mod output;
+pub use commands::watch::sanitize_preview;
 mod presence;
 mod profile;
 #[cfg(test)]

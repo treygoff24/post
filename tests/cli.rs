@@ -2601,10 +2601,18 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
     let events = watch_events(&watched.stdout);
     assert!(events.iter().any(|event| matches!(
         event,
-        WatchEvent::ChannelMessage { id, from, channel, .. }
+        WatchEvent::ChannelMessage { id, from, channel, preview, .. }
             if id == &backlog.message.id && from == "alpha" && channel == "tax"
+                && preview.as_deref() == Some("WATCH-CHANNEL-BODY-A")
     )));
-    assert!(!stdout(&watched).contains("WATCH-CHANNEL-BODY"));
+    // B9 preview contract: the body reaches watch output ONLY as the
+    // sanitized preview field, never as a raw body dump.
+    let raw = stdout(&watched);
+    assert_eq!(raw.matches("WATCH-CHANNEL-BODY").count(), 1, "{raw}");
+    assert!(
+        raw.contains("\"preview\":\"WATCH-CHANNEL-BODY-A\""),
+        "{raw}"
+    );
 
     let unread_after_watch: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
@@ -2645,10 +2653,17 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
     let events = watch_events(&output.stdout);
     assert!(events.iter().any(|event| matches!(
         event,
-        WatchEvent::ChannelMessage { id, from, .. }
+        WatchEvent::ChannelMessage { id, from, preview, .. }
             if id == &live.message.id && from == "beta"
+                && preview.as_deref() == Some("WATCH-CHANNEL-BODY-B")
     )));
-    assert!(!stdout(&output).contains("WATCH-CHANNEL-BODY"));
+    // B9 preview contract: live body appears only as its sanitized preview.
+    let raw = stdout(&output);
+    assert_eq!(raw.matches("WATCH-CHANNEL-BODY").count(), 1, "{raw}");
+    assert!(
+        raw.contains("\"preview\":\"WATCH-CHANNEL-BODY-B\""),
+        "{raw}"
+    );
 
     let _: ChatReadOutput = from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
     let own: ChatSendOutput = from_stdout(&sandbox.run_in(
@@ -2965,7 +2980,18 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
     assert!(err.contains("bad-members"), "{err}");
     assert!(err.contains("bad-messages"), "{err}");
     assert!(err.contains("unreadable channel message"), "{err}");
-    assert!(!stdout(&output).contains("healthy body must not print"));
+    // B9 preview contract: the healthy body rings only as the sanitized
+    // preview field; unreadable stores contribute no preview at all.
+    let raw = stdout(&output);
+    assert_eq!(
+        raw.matches("healthy body must not print").count(),
+        1,
+        "{raw}"
+    );
+    assert!(
+        raw.contains("\"preview\":\"healthy body must not print\""),
+        "{raw}"
+    );
 }
 
 #[test]
@@ -3630,7 +3656,7 @@ fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {
 }
 
 #[test]
-fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
+fn watch_emits_backlog_then_live_arrivals_and_prints_sanitized_previews() {
     let sandbox = Sandbox::new();
     let first = sandbox.send_json("watcher-test", "WATCH-SECRET-BODY-A");
     let mut child = post_command()
@@ -3662,9 +3688,23 @@ fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
         vec![first.envelope.id.as_str(), second.envelope.id.as_str()]
     );
     let raw = stdout(&output);
+    // Check that previews are present (they should be truncated to 80 chars)
     assert!(
-        !raw.contains("WATCH-SECRET-BODY"),
-        "watch output must never contain body content: {raw}"
+        raw.contains("WATCH-SECRET-BODY-A"),
+        "watch output must contain sanitized preview of first body: {raw}"
+    );
+    assert!(
+        raw.contains("WATCH-SECRET-BODY-B"),
+        "watch output must contain sanitized preview of second body: {raw}"
+    );
+    // Verify previews are present in JSON as preview fields
+    assert!(
+        raw.contains("\"preview\":\"WATCH-SECRET-BODY-A\""),
+        "JSON output must contain preview field for first body: {raw}"
+    );
+    assert!(
+        raw.contains("\"preview\":\"WATCH-SECRET-BODY-B\""),
+        "JSON output must contain preview field for second body: {raw}"
     );
 }
 
@@ -3946,18 +3986,23 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
         let events = watch_events(&output.stdout);
         assert!(events.iter().any(|event| matches!(
             event,
-            WatchEvent::Mail { room, item, .. }
+            WatchEvent::Mail { room, item, preview, .. }
                 if room == "beta" && item.id == mail_sent.envelope.id
+                    && preview.as_deref() == Some("SNAPSHOT-MAIL-BODY")
         )));
         assert!(events.iter().any(|event| matches!(
             event,
-            WatchEvent::ChannelMessage { id, from, channel, .. }
+            WatchEvent::ChannelMessage { id, from, channel, preview, .. }
                 if id == &channel_sent.message.id && from == "alpha" && channel == "tax"
+                    && preview.as_deref() == Some("SNAPSHOT-CHANNEL-BODY")
         )));
-        assert!(
-            !stdout(&output).contains("SNAPSHOT-"),
-            "snapshot must never print bodies: {}",
-            stdout(&output)
+        // B9 preview contract: bodies reach snapshot output only as sanitized
+        // preview fields — once each, never as raw body dumps.
+        let raw = stdout(&output);
+        assert_eq!(
+            raw.matches("SNAPSHOT-").count(),
+            2,
+            "bodies must appear only as previews: {raw}"
         );
     }
 
@@ -4162,7 +4207,12 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let events = watch_events(&output.stdout);
     match &events[0] {
-        WatchEvent::Unreadable { room, id, reason } => {
+        WatchEvent::Unreadable {
+            room,
+            id,
+            reason,
+            preview: _,
+        } => {
             assert_eq!(room, "claude-space");
             assert_eq!(id, "20260721-010101-abcdef");
             assert_eq!(*reason, WatchReason::Mail);
@@ -4214,7 +4264,13 @@ fn watch_text_mode_escapes_control_characters_in_subjects() {
         raw.contains("\\n"),
         "subject newline should render escaped: {raw}"
     );
-    assert!(!raw.contains("body"), "text mode must not print bodies");
+    // B9 preview contract: the body renders only as the trailing sanitized
+    // preview, still on the single escaped event line.
+    assert!(
+        raw.trim_end().ends_with("  body"),
+        "body should render as the trailing preview: {raw}"
+    );
+    assert_eq!(raw.matches("body").count(), 1, "{raw}");
 }
 
 #[test]
