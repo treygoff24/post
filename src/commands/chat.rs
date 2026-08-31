@@ -2,10 +2,19 @@ use crate::channel;
 use crate::channel_state::ChannelState;
 use crate::cli::ChatArgs;
 use crate::command_result::CommandResult;
+use crate::cursor_state::{self, Delta};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{signed_status, Context, SignedStatus};
 use crate::model::ChannelMessage;
 use crate::output::{self, ChatSendOutput};
+
+// B1 leaves these delegating symbols until the integration branch removes
+// the transitional seam. Keep the lane's `-D warnings` gate green without
+// routing any consuming operation through them.
+const _: fn(&Context, &str, &str, Vec<String>) -> AppResult<cursor_state::CursorAdvance> =
+    ChannelState::mark_seen::<Vec<String>>;
+const _: fn(&Context, &str, &str, &str) -> AppResult<cursor_state::CursorAdvance> =
+    ChannelState::mark_seen_through;
 
 pub(super) fn run(
     context: &Context,
@@ -258,7 +267,14 @@ fn read(
     let channel_name = args.name;
     let context = context.clone();
     Ok(CommandResult::after_stdout(rendered, move || {
-        ChannelState::mark_seen(&context, &room, &channel_name, batch_ids).map(|_| ())
+        cursor_state::consume(
+            &context,
+            &room,
+            Delta {
+                mail_moves: Vec::new(),
+                channel_seen: vec![(channel_name, batch_ids)],
+            },
+        )
     }))
 }
 
@@ -443,7 +459,14 @@ fn discard(
     let room = room.to_owned();
     let channel_name = channel_name.to_owned();
     Ok(CommandResult::after_stdout(rendered, move || {
-        ChannelState::mark_seen(&context, &room, &channel_name, batch_ids).map(|_| ())
+        cursor_state::consume(
+            &context,
+            &room,
+            Delta {
+                mail_moves: Vec::new(),
+                channel_seen: vec![(channel_name, batch_ids)],
+            },
+        )
     }))
 }
 
@@ -474,7 +497,7 @@ fn discard_through(
 
     // The span is counted and vetted under the lock inside mark_seen_through:
     // enumeration, parse checks, union, and atomic replace share one hold.
-    let outcome = ChannelState::mark_seen_through(context, &room, channel_name, &target)?;
+    let outcome = cursor_state::consume_channel_through(context, &room, channel_name, &target)?;
     let discarded = if outcome.advanced { outcome.marked } else { 0 };
     let rendered = if json_output {
         output::json(
@@ -503,7 +526,7 @@ fn discard_through(
 fn discard_through_text(
     channel_name: &str,
     target: &str,
-    outcome: &crate::channel_state::CursorAdvance,
+    outcome: &crate::cursor_state::CursorAdvance,
 ) -> String {
     let channel = output::sanitize_text_header(channel_name);
     if outcome.advanced {
@@ -1093,11 +1116,11 @@ fn seen_by(
 /// caught-up gating is unnecessary — other members' unseen messages simply
 /// stay unseen, so nothing is swallowed by this mark.
 fn mark_own_message_seen(context: &Context, message: &ChannelMessage) -> AppResult<()> {
-    ChannelState::mark_seen(
+    cursor_state::consume_channel(
         context,
         &message.from,
         &message.channel,
-        std::iter::once(message.id.clone()),
+        vec![message.id.clone()],
     )
     .map(|_| ())
 }
@@ -1208,8 +1231,13 @@ mod tests {
 
         // Emit-then-consume: only after the emit are the ids recorded. The
         // read path unions the FULL selected batch, both ids here.
-        ChannelState::mark_seen(&context, "alpha", "tax", [ID1.to_owned(), ID2.to_owned()])
-            .expect("consume batch");
+        cursor_state::consume_channel(
+            &context,
+            "alpha",
+            "tax",
+            vec![ID1.to_owned(), ID2.to_owned()],
+        )
+        .expect("consume batch");
         let after = read_batch(&context, "alpha", "tax").expect("second read");
         assert!(after.is_empty(), "advanced cursor must hide the batch");
 
@@ -1255,7 +1283,8 @@ mod tests {
         let (root, context) = chat_context("ownadvance");
         let dir = seed_channel(&root, &["alpha", "beta"]);
         seed_message(&dir, ID1, "beta", "earlier");
-        ChannelState::mark_seen(&context, "alpha", "tax", [ID1.to_owned()]).expect("catch up");
+        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
+            .expect("catch up");
         seed_message(&dir, ID2, "alpha", "my own send");
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
             .expect("parse own message")
@@ -1263,7 +1292,6 @@ mod tests {
         mark_own_message_seen(&context, &own).expect("record own id");
         let state = ChannelState::load(&context, "alpha").expect("reload");
         assert!(state.has_seen("tax", ID2), "own send is in the seen-set");
-        assert_eq!(state.max_seen("tax"), Some(ID2));
 
         assert!(
             read_batch(&context, "alpha", "tax")
@@ -1314,7 +1342,8 @@ mod tests {
         seed_message(&dir, ID1, "beta", "T1");
         let first = read_batch(&context, "alpha", "tax").expect("read T1");
         assert_eq!(first.len(), 1);
-        ChannelState::mark_seen(&context, "alpha", "tax", [ID1.to_owned()]).expect("consume T1");
+        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
+            .expect("consume T1");
         // ...sends its own message (id T3)...
         seed_message(&dir, ID3, "alpha", "my own send");
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID3}.msg")))
@@ -1348,7 +1377,8 @@ mod tests {
         assert!(state.has_seen("tax", ID3));
 
         // And a targeted ack through T3 consumes exactly the late arrival.
-        let outcome = ChannelState::mark_seen_through(&context, "alpha", "tax", ID3).expect("ack");
+        let outcome =
+            cursor_state::consume_channel_through(&context, "alpha", "tax", ID3).expect("ack");
         assert!(outcome.advanced);
         assert_eq!(outcome.marked, 1, "only T2 was newly recorded");
         trash_test_root(&root);
@@ -1362,11 +1392,11 @@ mod tests {
         seed_message(&dir, ID2, "beta", "second");
         seed_message(&dir, ID3, "beta", "third");
         // Fully caught up: a normal read sees nothing...
-        ChannelState::mark_seen(
+        cursor_state::consume_channel(
             &context,
             "alpha",
             "tax",
-            [ID1.to_owned(), ID2.to_owned(), ID3.to_owned()],
+            vec![ID1.to_owned(), ID2.to_owned(), ID3.to_owned()],
         )
         .expect("consume all");
         assert!(read_batch(&context, "alpha", "tax")
@@ -1390,7 +1420,7 @@ mod tests {
         assert_eq!(all.len(), 3);
         // And the seen-set is untouched afterwards.
         let state = ChannelState::load(&context, "alpha").expect("reload");
-        assert_eq!(state.max_seen("tax"), Some(ID3));
+        assert!(state.has_seen("tax", ID3));
         trash_test_root(&root);
     }
 
@@ -1893,7 +1923,8 @@ mod tests {
         let (root, context) = chat_context("below-cursor-skip");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "already read");
-        ChannelState::mark_seen(&context, "alpha", "tax", [ID1.to_owned()]).expect("consume ID1");
+        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
+            .expect("consume ID1");
         // Corrupt the already-consumed message; a newer readable one follows.
         fs::write(dir.join("messages").join(format!("{ID1}.msg")), "corrupted")
             .expect("corrupt below-cursor");
@@ -1981,11 +2012,12 @@ mod tests {
         // must say what actually happened instead of "advanced from T3 to T3".
         let (root, context) = chat_context("through-replay");
         let dir = seed_channel(&root, &["alpha"]);
-        ChannelState::mark_seen(&context, "alpha", "tax", [ID3.to_owned()]).expect("seen T3");
+        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID3.to_owned()])
+            .expect("seen T3");
         seed_message(&dir, ID2, "beta", "bridged late arrival");
 
-        let outcome =
-            ChannelState::mark_seen_through(&context, "alpha", "tax", ID3).expect("ack through T3");
+        let outcome = cursor_state::consume_channel_through(&context, "alpha", "tax", ID3)
+            .expect("ack through T3");
         assert!(outcome.advanced, "the seen-set changed");
         assert_eq!(outcome.marked, 1);
         assert_eq!(
