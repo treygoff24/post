@@ -3630,7 +3630,7 @@ fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {
 }
 
 #[test]
-fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
+fn watch_emits_backlog_then_live_arrivals_and_prints_sanitized_previews() {
     let sandbox = Sandbox::new();
     let first = sandbox.send_json("watcher-test", "WATCH-SECRET-BODY-A");
     let mut child = post_command()
@@ -3662,9 +3662,23 @@ fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
         vec![first.envelope.id.as_str(), second.envelope.id.as_str()]
     );
     let raw = stdout(&output);
+    // Check that previews are present (they should be truncated to 80 chars)
     assert!(
-        !raw.contains("WATCH-SECRET-BODY"),
-        "watch output must never contain body content: {raw}"
+        raw.contains("WATCH-SECRET-BODY-A"),
+        "watch output must contain sanitized preview of first body: {raw}"
+    );
+    assert!(
+        raw.contains("WATCH-SECRET-BODY-B"),
+        "watch output must contain sanitized preview of second body: {raw}"
+    );
+    // Verify previews are present in JSON as preview fields
+    assert!(
+        raw.contains("\"preview\":\"WATCH-SECRET-BODY-A\""),
+        "JSON output must contain preview field for first body: {raw}"
+    );
+    assert!(
+        raw.contains("\"preview\":\"WATCH-SECRET-BODY-B\""),
+        "JSON output must contain preview field for second body: {raw}"
     );
 }
 
@@ -4162,7 +4176,12 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let events = watch_events(&output.stdout);
     match &events[0] {
-        WatchEvent::Unreadable { room, id, reason } => {
+        WatchEvent::Unreadable {
+            room,
+            id,
+            reason,
+            preview: _,
+        } => {
             assert_eq!(room, "claude-space");
             assert_eq!(id, "20260721-010101-abcdef");
             assert_eq!(*reason, WatchReason::Mail);

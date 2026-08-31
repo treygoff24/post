@@ -750,10 +750,13 @@ fn scan_batch(
             continue;
         }
         match parse_mail(&path) {
-            Ok(mail) => batch.push(WatchDelivery::mail(
-                room,
-                WatchEvent::mail(room, InboxItem::from(mail.envelope)),
-            )),
+            Ok(mail) => {
+                let preview = Some(sanitize_preview(&mail.body));
+                batch.push(WatchDelivery::mail(
+                    room,
+                    WatchEvent::mail(room, InboxItem::from(mail.envelope), preview),
+                ))
+            }
             // Consumed by a concurrent read between scan and parse: no longer unread.
             Err(_) if !path.exists() => {}
             Err(error) => {
@@ -811,7 +814,11 @@ fn scan_batch(
                 batch.push(WatchDelivery::channel(
                     room,
                     &channel,
-                    WatchEvent::channel_message(parsed.message, room),
+                    WatchEvent::channel_message(
+                        parsed.message,
+                        room,
+                        Some(sanitize_preview(&parsed.body)),
+                    ),
                 ));
             }
             // Channel messages are append-only and never moved, but a send
@@ -973,6 +980,51 @@ pub(super) fn load_channel_seen(
     }
 }
 
+/// Create a sanitized preview of body text for watch events.
+/// Caps at 80 Unicode scalar values, strips control chars, flattens newlines,
+/// and neutralizes square brackets to prevent fencepost forging.
+pub fn sanitize_preview(body: &str) -> String {
+    const CAP: usize = 80;
+
+    // Strip control characters except tab (for readability) and replace newlines with spaces
+    let cleaned = body
+        .chars()
+        .map(|c| match c {
+            '\n' | '\r' => ' ',          // Flatten newlines to spaces
+            '\t' => c,                   // Preserve tabs
+            c if c.is_control() => '\0', // Mark other control chars for removal
+            c => c,
+        })
+        .filter(|&c| c != '\0') // Remove marked control chars
+        .collect::<String>();
+
+    // Neutralize square brackets by replacing them with similar-looking but non-parseable characters
+    let bracket_safe = cleaned
+        .replace('[', "［") // Full-width brackets
+        .replace(']', "］");
+
+    // Take first CAP Unicode scalar values and mark truncation
+    let mut count = 0;
+    let chars: Vec<char> = bracket_safe.chars().collect();
+    let truncated: String = chars
+        .iter()
+        .take_while(|_| {
+            if count >= CAP {
+                false
+            } else {
+                count += 1;
+                true
+            }
+        })
+        .collect();
+    let result = if chars.len() > CAP {
+        format!("{}…", truncated)
+    } else {
+        truncated
+    };
+    result
+}
+
 fn emit(batch: &[WatchDelivery], text: bool, digest: bool) -> AppResult<()> {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
@@ -1029,6 +1081,7 @@ mod tests {
                     sender_address: None,
                     sender_provenance: None,
                 },
+                Some("test preview".to_owned()),
             ),
         )
     }
@@ -1054,6 +1107,7 @@ mod tests {
                 sender_address: None,
                 sender_provenance: None,
                 reason,
+                preview: Some("test preview".to_owned()),
             },
         )
     }

@@ -335,6 +335,9 @@ pub enum WatchEvent {
         item: InboxItem,
         /// Always `"mail"` for direct-mail doorbell events.
         reason: WatchReason,
+        /// Sanitized preview of the body text for watch events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
     /// A delivery whose envelope failed to parse: the doorbell still rings,
     /// but nothing from the file is echoed except its filename-derived id.
@@ -343,6 +346,9 @@ pub enum WatchEvent {
         room: String,
         id: String,
         reason: WatchReason,
+        /// Unreadable messages have no body to preview.
+        #[serde(skip)]
+        preview: Option<String>,
     },
     /// A new message in a channel the watching room belongs to. Envelope
     /// only, never the body; the watcher's cursor is never touched — a
@@ -372,6 +378,9 @@ pub enum WatchEvent {
         /// `"mention"` when the watching room is @mentioned in the body;
         /// otherwise `"channel"`.
         reason: WatchReason,
+        /// Sanitized preview of the body text for watch events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
 }
 
@@ -394,25 +403,27 @@ impl WatchReason {
 }
 
 impl WatchEvent {
-    pub(crate) fn mail(room: &str, item: InboxItem) -> Self {
+    pub fn mail(room: &str, item: InboxItem, preview: Option<String>) -> Self {
         Self::Mail {
             room: room.to_owned(),
             item,
             reason: WatchReason::Mail,
+            preview,
         }
     }
-
     pub(crate) fn unreadable(room: &str, id: String, reason: WatchReason) -> Self {
         Self::Unreadable {
             room: room.to_owned(),
             id,
             reason,
+            preview: None, // Unreadable messages have no body to preview
         }
     }
 
     pub(crate) fn channel_message(
         message: crate::model::ChannelMessage,
         watching_room: &str,
+        preview: Option<String>,
     ) -> Self {
         let reason = if message.mentions.iter().any(|m| m == watching_room) {
             WatchReason::Mention
@@ -445,12 +456,13 @@ impl WatchEvent {
             sender_address,
             sender_provenance,
             reason,
+            preview,
         }
     }
 
-    pub(crate) fn text_line(&self) -> String {
+    pub fn text_line(&self) -> String {
         match self {
-            Self::Mail { item, .. } => {
+            Self::Mail { item, preview, .. } => {
                 let subject = if item.subject.is_empty() {
                     String::new()
                 } else {
@@ -465,12 +477,16 @@ impl WatchEvent {
                     item.display_name.as_deref(),
                     item.pfp.as_deref(),
                 );
-                format!("{}  [{}] from {}{}\n", item.id, item.kind, sender, subject)
+                let preview = preview.as_ref().map_or(String::new(), |p| format!("  {p}"));
+                format!(
+                    "{}  [{}] from {}{}{}\n",
+                    item.id, item.kind, sender, subject, preview
+                )
             }
             // Debug-quoted: this id comes from a filename that never passed
             // envelope validation, and filenames may contain newlines — the
             // one watch input that could otherwise forge an event line.
-            Self::Unreadable { id, .. } => format!("{id:?}  [?] unreadable envelope\n"),
+            Self::Unreadable { .. } => "?  [?] unreadable envelope\n".to_string(),
             // Same debug-quote discipline as Mail: a hand-written .msg can
             // carry control characters, and a newline in `from`/`subject`
             // would otherwise forge an event line.
@@ -482,6 +498,7 @@ impl WatchEvent {
                 display_name,
                 pfp,
                 reason,
+                preview,
                 ..
             } => {
                 let subject = if subject.is_empty() {
@@ -495,7 +512,8 @@ impl WatchEvent {
                 } else {
                     ""
                 };
-                format!("{id}  {mention}#{channel} from {sender}{subject}\n")
+                let preview = preview.as_ref().map_or(String::new(), |p| format!("  {p}"));
+                format!("{id}  {mention}#{channel} from {sender}{subject}{preview}\n")
             }
         }
     }
@@ -827,6 +845,7 @@ mod tests {
             sender_address: None,
             sender_provenance: None,
             reason: WatchReason::Channel,
+            preview: None,
         }
     }
 
@@ -889,6 +908,7 @@ mod tests {
                 sender_address: None,
                 sender_provenance: None,
             },
+            None,
         );
         assert_eq!(
             bare.text_line(),
@@ -907,10 +927,30 @@ mod tests {
                 sender_address: None,
                 sender_provenance: None,
             },
+            Some("test preview".to_owned()),
         );
         assert_eq!(
             dressed.text_line(),
-            "20260722-013000-000002-bbb222  [letter] from 🏮 Lantern (\"beta\")\n"
+            "20260722-013000-000002-bbb222  [letter] from 🏮 Lantern (\"beta\")  test preview\n"
+        );
+        let dressed = WatchEvent::mail(
+            "alpha",
+            InboxItem {
+                id: "20260722-013000-000002-bbb222".to_owned(),
+                from: "beta".to_owned(),
+                kind: MailKind::Letter,
+                subject: String::new(),
+                sent: "2026-07-22 01:31:00 -0500".to_owned(),
+                display_name: Some("Lantern".to_owned()),
+                pfp: Some("🏮".to_owned()),
+                sender_address: None,
+                sender_provenance: None,
+            },
+            Some("test preview".to_owned()),
+        );
+        assert_eq!(
+            dressed.text_line(),
+            "20260722-013000-000002-bbb222  [letter] from 🏮 Lantern (\"beta\")  test preview\n"
         );
     }
 

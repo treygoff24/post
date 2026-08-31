@@ -9,7 +9,7 @@ mod read;
 mod rooms;
 mod schema;
 mod send;
-mod watch;
+pub mod watch;
 mod who;
 
 use crate::cli::{Cli, Command};
