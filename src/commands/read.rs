@@ -1,7 +1,8 @@
 use crate::cli::{FramingMode, ReadArgs};
 use crate::command_result::CommandResult;
+use crate::cursor_state::{self, Delta, MailMove, Snapshot};
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{exclusive_move, mail_files, parse_mail, Context, MoveError};
+use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::model::ParsedMail;
 use crate::output::{self, Framing, ReadOutput};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,11 @@ pub(super) fn run(
             "post: reading room '{room}' (identity inferred from cwd); pass --room <ROOM> to choose another"
         );
     }
-    let matches = prefix_matches(&inbox, &args.id)?;
+    let snapshot = Snapshot::load(context, &room);
+    let matches = prefix_matches(&inbox, &args.id)?
+        .into_iter()
+        .filter(|path| !is_committed_duplicate(path, &read, &snapshot))
+        .collect::<Vec<_>>();
     if matches.len() > 1 {
         return Err(ambiguous(&matches, &args.id, &room, "unread"));
     }
@@ -44,40 +49,32 @@ pub(super) fn run(
     }
     let destination = read.join(format!("{}.mail", mail.envelope.id));
     let source = path.clone();
+    let context = context.clone();
     Ok(CommandResult::after_stdout(rendered, move || {
-        match exclusive_move(&source, &destination) {
-            Ok(()) => Ok(()),
-            Err(MoveError::Link(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(AppError::new(
-                    ErrorCode::IoError,
-                    format!(
-                        "cannot mark mail '{}' read because '{}' already exists",
-                        mail.envelope.id,
-                        destination.display()
-                    ),
-                    "Run `post doctor`; resolve the duplicate without deleting either copy.",
-                )
-                .input(mail.envelope.id)
-                .reason("read destination already exists"))
-            }
-            Err(MoveError::Link(error)) => Err(AppError::io(
-                "move mail from inbox to read",
-                &destination,
-                error,
-            )),
-            Err(MoveError::Unlink(error)) => Err(AppError::new(
-                ErrorCode::DeliveredOutputFailure,
-                format!(
-                    "mail '{}' was printed but could not be removed from inbox '{}': {error}; it now appears in both inbox and read",
-                    mail.envelope.id,
-                    source.display()
-                ),
-                "Do not treat the next inbox listing of this id as new mail; run `post doctor` and reconcile the duplicate links by hand.",
-            )
-            .input(mail.envelope.id)
-            .reason("inbox link removal failed after read link was committed")),
-        }
+        cursor_state::consume(
+            &context,
+            &room,
+            Delta {
+                mail_moves: vec![MailMove {
+                    id: mail.envelope.id,
+                    source,
+                    destination,
+                }],
+                channel_seen: Vec::new(),
+            },
+        )
     }))
+}
+
+/// A cursor-marked inbox copy is the residue of a committed read link whose
+/// source unlink failed. Treat the physical read copy as authoritative and
+/// serve it through `already_read`; an unmarked collision still reaches the
+/// normal move path and reports the existing destination error.
+fn is_committed_duplicate(path: &Path, read: &Path, snapshot: &Snapshot) -> bool {
+    let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    snapshot.mail_has_seen(id) && read.join(format!("{id}.mail")).is_file()
 }
 
 /// Serve mail that is no longer unread. A consumed message is not lost — it is
