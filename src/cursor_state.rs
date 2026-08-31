@@ -55,7 +55,9 @@ impl Snapshot {
             Err(_) => return Self::default(),
         };
         match read_cursor(&path) {
-            CursorRead::Missing => load_legacy_state(context, room).into_snapshot(),
+            CursorRead::Missing => load_legacy_state(context, room)
+                .unwrap_or_default()
+                .into_snapshot(),
             CursorRead::Valid(state) => state.into_snapshot(),
             CursorRead::Invalid => {
                 warn_invalid_cursor(room);
@@ -166,7 +168,7 @@ fn consume_inner(
         .map_err(|error| AppError::io("create cursor state directory", parent, error))?;
     let _lock = lock_room_cursors(context, room)?;
     ensure_cursor_destination_safe(&path)?;
-    let mut state = load_for_write(context, room, &path);
+    let mut state = load_for_write(context, room, &path)?;
     let prior = outcome_channel.and_then(|channel| {
         state
             .channels
@@ -208,7 +210,10 @@ fn consume_inner(
         requested_channels.entry(channel).or_default().extend(ids);
     }
     if let Some((channel, _)) = through {
-        requested_channels.insert(channel.to_owned(), through_ids);
+        requested_channels
+            .entry(channel.to_owned())
+            .or_default()
+            .extend(through_ids);
     }
 
     let mut marked_channels = 0;
@@ -451,34 +456,47 @@ fn cursor_write_refused(path: &Path, reason: &str) -> AppError {
     .reason(reason)
 }
 
-fn load_for_write(context: &Context, room: &str, path: &Path) -> State {
+fn load_for_write(context: &Context, room: &str, path: &Path) -> AppResult<State> {
     match read_cursor(path) {
-        CursorRead::Valid(state) => state,
+        CursorRead::Valid(state) => Ok(state),
         CursorRead::Missing => load_legacy_state(context, room),
-        CursorRead::Invalid => State::default(),
+        CursorRead::Invalid => Ok(State::default()),
     }
 }
 
-fn load_legacy_state(context: &Context, room: &str) -> State {
+fn load_legacy_state(context: &Context, room: &str) -> AppResult<State> {
     let path = match crate::channel::channel_state_path(context, room) {
         Ok(path) => path,
-        Err(_) => return State::default(),
+        Err(_) => return Ok(State::default()),
     };
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(_) => return State::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(State::default());
+        }
+        Err(_) => {
+            warn_invalid_cursor(room);
+            return Ok(State::default());
+        }
     };
     if !metadata.file_type().is_file() || metadata.nlink() != 1 {
-        return State::default();
+        warn_invalid_cursor(room);
+        return Ok(State::default());
     }
     let raw = match fs::read(&path) {
         Ok(raw) => raw,
-        Err(_) => return State::default(),
+        Err(_) => {
+            warn_invalid_cursor(room);
+            return Ok(State::default());
+        }
     };
     match parse_legacy(&raw) {
         Ok(LegacyStored::V1(cursors)) => migrate_v1(context, cursors),
-        Ok(LegacyStored::V2(state)) => state,
-        Err(_) => State::default(),
+        Ok(LegacyStored::V2(state)) => Ok(state),
+        Err(_) => {
+            warn_invalid_cursor(room);
+            Ok(State::default())
+        }
     }
 }
 
@@ -547,7 +565,7 @@ pub(crate) fn legacy_stored_shape_is_valid(bytes: &[u8]) -> bool {
     parse_legacy(bytes).is_ok()
 }
 
-fn migrate_v1(context: &Context, cursors: BTreeMap<String, String>) -> State {
+fn migrate_v1(context: &Context, cursors: BTreeMap<String, String>) -> AppResult<State> {
     let mut channels = BTreeMap::new();
     for (channel, cursor) in cursors {
         let directory = context
@@ -557,8 +575,13 @@ fn migrate_v1(context: &Context, cursors: BTreeMap<String, String>) -> State {
             .join("messages");
         let files = match channel::message_files(&directory) {
             Ok(files) => files,
-            Err(error) if error.code == ErrorCode::IoError && !directory.exists() => Vec::new(),
-            Err(_) => return State::default(),
+            Err(error) if error.code == ErrorCode::IoError => match fs::metadata(&directory) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    Vec::new()
+                }
+                _ => return Err(error),
+            },
+            Err(error) => return Err(error),
         };
         let mut seen = BTreeSet::new();
         for path in files {
@@ -570,10 +593,10 @@ fn migrate_v1(context: &Context, cursors: BTreeMap<String, String>) -> State {
         }
         channels.insert(channel, seen);
     }
-    State {
+    Ok(State {
         mail: BTreeSet::new(),
         channels,
-    }
+    })
 }
 
 fn unseen_candidates(
@@ -804,11 +827,18 @@ mod tests {
         assert_eq!(before, fs::read_dir(&root).expect("root").count());
         fs::create_dir_all(root.join("alpha")).expect("room");
         fs::write(root.join("alpha/cursors.json"), b"{not json").expect("malformed");
+        let legacy = format!(r#"{{"tax":"{ID1}"}}"#);
+        fs::write(root.join("alpha/channel-state.json"), &legacy).expect("legacy");
         let malformed = Snapshot::load(&context, "alpha");
         assert!(!malformed.mail_has_seen(MAIL_ID));
+        assert!(!malformed.channel_has_seen("tax", ID1));
         assert_eq!(
             fs::read(root.join("alpha/cursors.json")).expect("read"),
             b"{not json"
+        );
+        assert_eq!(
+            fs::read(root.join("alpha/channel-state.json")).expect("read legacy"),
+            legacy.as_bytes()
         );
         assert!(!root.join("alpha/.cursors.lock").exists());
         trash_test_root(&root);
@@ -873,6 +903,54 @@ mod tests {
         assert!(snapshot.channel_has_seen("tax", ID1));
         assert!(snapshot.channel_has_seen("tax", ID2));
         assert!(snapshot.channel_has_seen("tax", ID3));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn legacy_v2_import_is_read_only_then_materialized_without_touching_legacy() {
+        let (root, context) = context("legacy-v2");
+        let legacy = format!(
+            r#"{{"version":2,"channels":{{"tax":{{"seen":["{}","{}"]}}}}}}"#,
+            ID1, ID2
+        );
+        write_legacy_v1(&root, "alpha", &legacy);
+        let legacy_path = root.join("alpha/channel-state.json");
+        let snapshot = Snapshot::load(&context, "alpha");
+        assert!(snapshot.channel_has_seen("tax", ID1));
+        assert!(snapshot.channel_has_seen("tax", ID2));
+        assert!(!snapshot.channel_has_seen("tax", ID3));
+        assert!(!root.join("alpha/cursors.json").exists());
+        assert_eq!(fs::read(&legacy_path).expect("legacy"), legacy.as_bytes());
+
+        consume_channel(&context, "alpha", "tax", vec![ID3.to_owned()]).expect("materialize");
+        let snapshot = Snapshot::load(&context, "alpha");
+        assert!(snapshot.channel_has_seen("tax", ID1));
+        assert!(snapshot.channel_has_seen("tax", ID2));
+        assert!(snapshot.channel_has_seen("tax", ID3));
+        assert_eq!(fs::read(&legacy_path).expect("legacy"), legacy.as_bytes());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn legacy_v1_migration_error_refuses_write_without_losing_prior_channels() {
+        let (root, context) = context("legacy-v1-permission");
+        seed_message(&root, "aaa", ID1, "beta");
+        let locked_directory = root.join(CHANNELS_DIR).join("zzz").join("messages");
+        fs::create_dir_all(&locked_directory).expect("locked directory");
+        let legacy = format!(r#"{{"aaa":"{}","zzz":"{}"}}"#, ID1, ID2);
+        write_legacy_v1(&root, "alpha", &legacy);
+        fs::set_permissions(&locked_directory, fs::Permissions::from_mode(0o000))
+            .expect("lock messages directory");
+
+        let error = consume_channel(&context, "alpha", "aaa", vec![ID3.to_owned()])
+            .expect_err("writer must refuse unreadable legacy channel");
+        assert_eq!(error.code, ErrorCode::IoError);
+        assert!(!root.join("alpha/cursors.json").exists());
+
+        fs::set_permissions(&locked_directory, fs::Permissions::from_mode(0o700))
+            .expect("restore messages directory");
+        let snapshot = Snapshot::load(&context, "alpha");
+        assert!(snapshot.channel_has_seen("aaa", ID1));
         trash_test_root(&root);
     }
 
@@ -942,6 +1020,7 @@ mod tests {
         let (root, context) = context("symlink");
         fs::create_dir_all(root.join("alpha")).expect("room");
         fs::write(root.join("target.json"), b"{}").expect("target");
+        let target_before = fs::read(root.join("target.json")).expect("target");
         std::os::unix::fs::symlink(root.join("target.json"), root.join("alpha/cursors.json"))
             .expect("symlink");
         let snapshot = Snapshot::load(&context, "alpha");
@@ -950,6 +1029,10 @@ mod tests {
             .expect_err("writer must refuse symlink");
         assert_eq!(error.code, ErrorCode::ConfigInvalid);
         assert!(root.join("alpha/cursors.json").is_symlink());
+        assert_eq!(
+            fs::read(root.join("target.json")).expect("target"),
+            target_before
+        );
         trash_test_root(&root);
     }
 
