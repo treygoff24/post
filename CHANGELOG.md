@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-08-31
 
 ### Fixed
 - First-run doctor bootstrap: an empty `rooms.json` is now a healthy info-only
