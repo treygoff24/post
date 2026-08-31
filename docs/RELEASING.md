@@ -61,6 +61,9 @@ and verifies the installer from the live URL.
 
 ## After the release
 
+- Smoke the installed binary: `scripts/smoke-installed.sh /path/to/post`
+  runs a live end-to-end pass (doctor bootstrap, watch semantics, digest
+  fencepost) against a throwaway mail root — safe to run anywhere.
 - Upgrade the estate: Mac `~/.local/bin/post` and the devbox (host
   `/usr/local/bin` + trey/jc/matt cell system binaries; fc/sol manage their
   own). Announce in `#machineroom-devbox`; leave running watches on their
