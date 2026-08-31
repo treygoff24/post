@@ -241,6 +241,13 @@ pub struct ChannelListItem {
     pub description: Option<String>,
     pub members: Vec<String>,
     pub messages: usize,
+    /// The acting room for unread count calculation, null when no acting room
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
+    /// Unread count for this channel from the acting room's perspective,
+    /// null when not a member or no acting room
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -508,6 +515,8 @@ pub struct InboxOutput {
     pub unread: Vec<InboxItem>,
     pub count: usize,
     pub skipped_unreadable: usize,
+    /// Unread count from cursor state perspective for this room's mail
+    pub unread_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

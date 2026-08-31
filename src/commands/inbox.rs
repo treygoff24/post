@@ -1,9 +1,9 @@
 use crate::cli::InboxArgs;
 use crate::command_result::CommandResult;
+use crate::cursor_state::Snapshot;
 use crate::error::{AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::output::{self, InboxItem, InboxOutput};
-
 pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<CommandResult> {
     let (room, inbox, _) = context.resolved_mailbox_dirs(args.room)?;
     let mut unread = Vec::new();
@@ -33,6 +33,11 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
     }
     unread.sort_by(|left, right| left.id.cmp(&right.id));
     let count = unread.len();
+
+    // Calculate unread_count from cursor state perspective
+    let cursor_snapshot = Snapshot::load(context, &room);
+    let seen_count = cursor_snapshot.mail_seen_count();
+    let unread_count = count.saturating_sub(seen_count);
     if args.text {
         let room = output::sanitize_text_header(&room);
         let rendered = if unread.is_empty() {
@@ -66,6 +71,7 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
         unread,
         count,
         skipped_unreadable,
+        unread_count,
     };
     CommandResult::json(&output, pretty)
 }
