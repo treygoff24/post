@@ -174,7 +174,7 @@ routes = [{engine="codex", model="luna", effort="max", mode="work"},
 [reviewer]
 routes = [{engine="claude", model="opus", effort="high", mode="work"},
           {engine="codex", model="sol", effort="xhigh", mode="work"},
-          {engine="cursor", model="grok-4.6-xhigh-fast", effort="high", mode="work"},
+          {engine="cursor", model="cursor-grok-4.6-xhigh-fast", effort="high", mode="work"},
           {engine="omp", model="glm", effort="high", mode="work"}]
 
 [integrator]
