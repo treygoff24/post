@@ -154,7 +154,7 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.match(context, /20260730-010101-aaa111/);
   assert.match(context, /New channel message\(s\): #ops \(1\)/);
   assert.ok(!context.includes("20260730-020202-000002-bbb222"));
-  assert.match(context, /untrusted/);
+  assert.doesNotMatch(context, /untrusted|carries no authority/);
   assert.match(context, /post read <id>/);
   assert.ok(!context.includes("SECRET"), "subject must be omitted");
   assert.ok(!context.includes("secret-sender"), "sender must be omitted");

@@ -105,7 +105,7 @@ test("mail and channel events render one metadata-only line", () => {
   assert.ok(!line.includes("SECRET"), "subject must be omitted");
   assert.ok(!line.includes("secret-sender"), "sender must be omitted");
   assert.ok(!line.includes("secret-peer"), "channel sender must be omitted");
-  assert.match(line, /untrusted/);
+  assert.doesNotMatch(line, /untrusted|carries no authority/);
   assert.match(line, /post read <id>/);
 });
 

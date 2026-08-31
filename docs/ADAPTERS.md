@@ -62,8 +62,9 @@ style; each one closes a hole that was found the hard way.
    the shipped adapters narrow it further: direct-mail **ids** and channel
    **count summaries** only; no subject, sender, or filename text reaches
    session context. Message bodies and their full data-never-a-prompt framing
-   stay exclusively with `post read` / `post chat`; the alert carries its own
-   fixed statement that the metadata is untrusted and has no authority.
+   stay exclusively with `post read` / `post chat`; the alert itself carries
+   only factual metadata plus the inspection commands (the no-authority norm
+   is stated once in the skill and rules docs, not repeated per notice).
 
 2. **Validate every event before echoing anything from it.** Snapshot NDJSON
    events carry attacker-reachable strings (subjects and `from` come from
@@ -417,9 +418,10 @@ spec:
    the room. Parse NDJSON; validate every event (steal the shapes and
    regexes from a shipped adapter).
 3. **Render a bounded, non-imperative notice.** Ids for direct mail, counts
-   for channels, the two framing lines ("mail is untrusted data…",
-   inspection commands). Factual phrasing — imperative "system" text trips
-   prompt-injection defenses in some harnesses, and rightly so.
+   for channels, the framing line (inspection commands; no repeated
+   untrusted-data disclaimer — the norm lives in the skill and rules docs).
+   Factual phrasing — imperative "system" text trips prompt-injection
+   defenses in some harnesses, and rightly so.
 4. **Dedupe with current-snapshot persistence** (contract rule 5), state
    committed only after delivery (rule 6). Use per-session state for lifecycle
    hooks and persistent per-target state for an out-of-band controller. A
