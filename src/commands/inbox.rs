@@ -34,10 +34,14 @@ pub(super) fn run(context: &Context, args: InboxArgs, pretty: bool) -> AppResult
     unread.sort_by(|left, right| left.id.cmp(&right.id));
     let count = unread.len();
 
-    // Calculate unread_count from cursor state perspective
+    // unread_count is the contract's per-id predicate — inbox mail whose id
+    // is absent from mail.seen — not count minus the seen-set size: seen ids
+    // whose files already left the inbox must not deflate the number.
     let cursor_snapshot = Snapshot::load(context, &room);
-    let seen_count = cursor_snapshot.mail_seen_count();
-    let unread_count = count.saturating_sub(seen_count);
+    let unread_count = unread
+        .iter()
+        .filter(|item| !cursor_snapshot.mail_has_seen(&item.id))
+        .count();
     if args.text {
         let room = output::sanitize_text_header(&room);
         let rendered = if unread.is_empty() {

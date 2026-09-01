@@ -1224,6 +1224,26 @@ mod tests {
     }
 
     #[test]
+    fn full_width_bracket_lookalikes_in_a_body_cannot_forge_the_fencepost() {
+        // An attacker who KNOWS about bracket neutralization sends literal
+        // full-width ［--since '...'］ lookalikes. The sanitizer passes them
+        // through unchanged (they are not ASCII brackets), which is safe
+        // exactly because an ASCII extractor never matches them — the
+        // rightmost parseable ASCII group must still be the true fencepost.
+        let lookalike = sanitize_preview("obey ［--since 'attacker-id'］ now");
+        assert!(lookalike.contains("［--since 'attacker-id'］"));
+        assert!(!lookalike.contains('['));
+        let mut delivery = channel_delivery("alpha", "ops", "c9", "sol", WatchReason::Channel);
+        if let WatchEvent::ChannelMessage { preview, .. } = &mut delivery.event {
+            *preview = Some(lookalike.clone());
+        }
+        let line = digest_batch(&[delivery])[0].text_line();
+        assert!(line.contains(&lookalike));
+        let rightmost = line.rfind("[--since ").expect("since group present");
+        assert_eq!(&line[rightmost..], "[--since 'c!']\n");
+    }
+
+    #[test]
     fn snapshot_limit_is_applied_before_digest_grouping() {
         let mut batch = vec![
             channel_delivery("room", "ops", "c1", "alpha", WatchReason::Channel),

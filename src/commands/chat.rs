@@ -8,14 +8,6 @@ use crate::mailbox::{signed_status, Context, SignedStatus};
 use crate::model::ChannelMessage;
 use crate::output::{self, ChatSendOutput};
 
-// B1 leaves these delegating symbols until the integration branch removes
-// the transitional seam. Keep the lane's `-D warnings` gate green without
-// routing any consuming operation through them.
-const _: fn(&Context, &str, &str, Vec<String>) -> AppResult<cursor_state::CursorAdvance> =
-    ChannelState::mark_seen::<Vec<String>>;
-const _: fn(&Context, &str, &str, &str) -> AppResult<cursor_state::CursorAdvance> =
-    ChannelState::mark_seen_through;
-
 pub(super) fn run(
     context: &Context,
     args: ChatArgs,
@@ -495,8 +487,9 @@ fn discard_through(
     let paths = member_channel_paths(context, channel_name, &room)?;
     let target = resolve_message_stem(&paths, channel_name, target_input)?;
 
-    // The span is counted and vetted under the lock inside mark_seen_through:
-    // enumeration, parse checks, union, and atomic replace share one hold.
+    // The span is counted and vetted under the lock inside
+    // consume_channel_through: enumeration, parse checks, union, and atomic
+    // replace share one hold.
     let outcome = cursor_state::consume_channel_through(context, &room, channel_name, &target)?;
     let discarded = if outcome.advanced { outcome.marked } else { 0 };
     let rendered = if json_output {

@@ -316,31 +316,6 @@ pub(crate) fn read_only_must_not_mutate(context: &Context) -> bool {
     )
 }
 
-/// Channel-state v1→v2 conversion REPLACES the legacy file on disk, and a
-/// pre-seen-set binary cannot parse the v2 document. With no fence marker
-/// there is no mixed deployment to protect, so a plain upgrade converts; once
-/// a fence marker exists, the replacement is legal only after the cutover is
-/// activated, so a coordinated migration cannot brick old binaries mid-way. Generation matching itself is enforced at command admission;
-/// this is the store-level capability signal for nested writers.
-/// In-memory migrated reads stay allowed either way.
-pub(crate) fn require_activated_for_state_migration(context: &Context) -> AppResult<()> {
-    match read_state(context) {
-        // No fence marker: a plain single-binary upgrade. There is no mixed
-        // deployment to protect, the conversion is documented, and 0.6.0
-        // ships no cutover CLI — refusing here would permanently lock every
-        // upgrader out of channel writes. The v1 backup covers rollback.
-        Ok(None) => Ok(()),
-        // A coordinated cutover is underway (or done): conversion is legal
-        // only once the fence reports the cutover activated, so a mixed
-        // deployment can never brick its old binaries mid-migration.
-        Ok(Some(FenceState::Active { .. })) => Ok(()),
-        _ => Err(refuse(
-            context,
-            "a migration fence exists but is not activated: converting the legacy channel-state to the seen-set format requires the activated cutover",
-        )),
-    }
-}
-
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {
     let path = state_path(context);
     AppError::new(

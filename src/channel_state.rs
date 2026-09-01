@@ -9,13 +9,6 @@ use crate::error::AppResult;
 use crate::mailbox::Context;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) use crate::cursor_state::CursorAdvance;
-
-// Keep the migration helper linked while the legacy writer seam is waiting
-// for its B3 removal; the unified cursor path intentionally does not invoke it.
-const _: fn(&Context) -> AppResult<()> =
-    crate::migration_fence::require_activated_for_state_migration;
-
 #[derive(Debug, Default)]
 pub(crate) struct ChannelState {
     channels: BTreeMap<String, BTreeSet<String>>,
@@ -34,37 +27,8 @@ impl ChannelState {
             .is_some_and(|seen| seen.contains(id))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn max_seen(&self, channel: &str) -> Option<&str> {
-        self.channels
-            .get(channel)
-            .and_then(|seen| seen.last())
-            .map(String::as_str)
-    }
-
     pub(crate) fn into_channels(self) -> BTreeMap<String, BTreeSet<String>> {
         self.channels
-    }
-
-    pub(crate) fn mark_seen<I>(
-        context: &Context,
-        room: &str,
-        channel: &str,
-        ids: I,
-    ) -> AppResult<CursorAdvance>
-    where
-        I: IntoIterator<Item = String>,
-    {
-        cursor_state::consume_channel(context, room, channel, ids.into_iter().collect())
-    }
-
-    pub(crate) fn mark_seen_through(
-        context: &Context,
-        room: &str,
-        channel: &str,
-        target: &str,
-    ) -> AppResult<CursorAdvance> {
-        cursor_state::consume_channel_through(context, room, channel, target)
     }
 }
 
