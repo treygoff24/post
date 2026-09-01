@@ -1,0 +1,382 @@
+mod common;
+
+use common::{
+    assert_success, from_stdout, register_alpha_beta, write_bad_channel, write_custom_mail, Sandbox,
+};
+use post::output::{DoctorOutput, DoctorSeverity, SchemaOutput};
+use serde_json::Value;
+use std::collections::BTreeSet;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+fn json_object(output: &std::process::Output) -> Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "expected JSON output: {error}\nstdout: {}\nstderr: {}",
+            common::stdout(output),
+            common::stderr(output)
+        )
+    })
+}
+
+fn keys(value: &Value) -> BTreeSet<String> {
+    value
+        .as_object()
+        .expect("JSON object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn assert_keys_in_shape(shape: &[String], expected: &[&str]) {
+    let shape = shape.join("\n");
+    for field in expected {
+        assert!(
+            shape.contains(field),
+            "schema shape omitted field {field:?}: {shape}"
+        );
+    }
+}
+
+fn assert_keys_are_documented(actual: &BTreeSet<String>, shape: &[String]) {
+    let shape = shape.join("\n");
+    for field in actual {
+        assert!(
+            shape.contains(field),
+            "real output field {field:?} is absent from schema shape: {shape}"
+        );
+    }
+}
+
+fn option_names(text: &str) -> BTreeSet<String> {
+    text.split_whitespace()
+        .filter_map(|token| {
+            let token = token.get(token.find("--")?..)?;
+            let name = token
+                .split(|character: char| {
+                    matches!(character, '<' | '>' | '|' | ']' | ')' | ',' | '=')
+                })
+                .next()?;
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn schema_matches_catchup_and_search_help_and_json() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    write_bad_channel(
+        &sandbox,
+        "tax",
+        Some(r#"{"alpha":"joined","beta":"joined"}"#),
+        true,
+        r#"{"name":"tax","created":"2026-08-20 12:00:00 +0000","created_by":"alpha"}"#,
+    );
+    let mail_id = "20260820-120000-aaaaaa";
+    let inbox = sandbox.mail_root.join("beta/inbox");
+    fs::create_dir_all(&inbox).expect("inbox");
+    write_custom_mail(
+        &inbox,
+        mail_id,
+        &serde_json::json!({
+            "id": mail_id,
+            "from": "alpha",
+            "to": "beta",
+            "kind": "note",
+            "subject": "schema mail",
+            "sent": "2026-08-20 12:00:00 +0000"
+        }),
+        "schema surface marker",
+    );
+    let channel_id = "20260820-120000-000001-aaaaaa";
+    fs::write(
+        sandbox
+            .mail_root
+            .join(format!("channels/tax/messages/{channel_id}.msg")),
+        format!(
+            "{{\"id\":\"{channel_id}\",\"from\":\"alpha\",\"channel\":\"tax\",\"subject\":\"schema channel\",\"sent\":\"2026-08-20 12:00:00 +0000\"}}\n---\nschema surface marker"
+        ),
+    )
+    .expect("channel message");
+    write_bad_channel(
+        &sandbox,
+        "private",
+        Some(r#"{"alpha":"joined"}"#),
+        true,
+        r#"{"name":"private","created":"2026-08-20 12:00:00 +0000","created_by":"alpha"}"#,
+    );
+
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    let catchup = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "catchup")
+        .expect("catchup command in schema");
+    let search = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "search")
+        .expect("search command in schema");
+    for token in [
+        "<channel>",
+        "--mail",
+        "--all",
+        "--framing auto|full|compact",
+    ] {
+        assert!(
+            catchup.usage.contains(token),
+            "catchup usage omitted {token}"
+        );
+    }
+    for token in [
+        "<pattern>",
+        "--mail",
+        "--channel <channel>",
+        "--limit <1..=1000>",
+        "--framing auto|full|compact",
+    ] {
+        assert!(search.usage.contains(token), "search usage omitted {token}");
+    }
+    for (usage, args, tokens) in [
+        (
+            &catchup.usage,
+            vec!["catchup", "--all", "--help"],
+            vec!["--mail", "--all", "--framing"],
+        ),
+        (
+            &search.usage,
+            vec!["search", "marker", "--help"],
+            vec!["--mail", "--channel", "--limit", "--framing"],
+        ),
+    ] {
+        let help = sandbox.run(&args);
+        assert_success(&help);
+        let text = common::stdout(&help);
+        for token in tokens {
+            assert!(text.contains(token), "help omitted {token}: {text}");
+        }
+        let mut help_options = option_names(&text);
+        for global in ["--json", "--pretty", "--help"] {
+            help_options.remove(global);
+        }
+        assert_eq!(
+            help_options,
+            option_names(usage),
+            "schema usage and clap help disagree about command options"
+        );
+    }
+
+    let catchup_output = sandbox.run_in(&["catchup", "--all", "--json"], None, &beta);
+    assert_success(&catchup_output);
+    let catchup_json = json_object(&catchup_output);
+    let catchup_top = ["ok", "room", "targets", "count"];
+    assert_keys_in_shape(&schema.output_shapes.catchup, &catchup_top);
+    let catchup_top_keys = keys(&catchup_json);
+    assert_keys_are_documented(&catchup_top_keys, &schema.output_shapes.catchup);
+    assert_eq!(
+        catchup_top_keys,
+        catchup_top.iter().map(|key| (*key).to_owned()).collect()
+    );
+    let targets = catchup_json["targets"].as_array().expect("catchup targets");
+    assert!(targets.iter().any(|target| target["source"] == "mail"));
+    assert!(targets.iter().any(|target| target["source"] == "channel"));
+    let target_fields = ["source", "framing", "messages", "count"];
+    assert_keys_in_shape(&schema.output_shapes.catchup, &target_fields);
+    for target in targets {
+        let actual = keys(target);
+        assert_keys_are_documented(&actual, &schema.output_shapes.catchup);
+        assert!(actual.contains("source"));
+        assert!(actual.contains("framing"));
+        assert!(actual.contains("messages"));
+        assert!(actual.contains("count"));
+        let framing_keys = keys(&target["framing"]);
+        assert_eq!(
+            framing_keys,
+            ["source", "authority", "laws"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        let messages = target["messages"].as_array().expect("target messages");
+        for message in messages {
+            let message_keys = keys(message);
+            if target["source"] == "mail" {
+                assert!(message_keys.contains("envelope"));
+                assert!(message_keys.contains("body"));
+            } else {
+                for field in ["id", "from", "channel", "subject", "sent", "body"] {
+                    assert!(
+                        message_keys.contains(field),
+                        "channel catchup message omitted {field}: {message}"
+                    );
+                }
+            }
+        }
+        if target["source"] == "channel" {
+            assert!(actual.contains("channel"));
+        }
+    }
+
+    let search_output = sandbox.run_in(&["search", "schema surface marker", "--json"], None, &beta);
+    assert_success(&search_output);
+    let search_json = json_object(&search_output);
+    let search_top = [
+        "ok",
+        "framing",
+        "room",
+        "pattern",
+        "match",
+        "results",
+        "count",
+        "limit",
+        "truncated",
+    ];
+    assert_keys_in_shape(&schema.output_shapes.search, &search_top);
+    assert_keys_in_shape(
+        &schema.output_shapes.search,
+        &["source", "authority", "laws"],
+    );
+    let search_top_keys = keys(&search_json);
+    assert_keys_are_documented(&search_top_keys, &schema.output_shapes.search);
+    assert_eq!(
+        search_top_keys,
+        search_top.iter().map(|key| (*key).to_owned()).collect()
+    );
+    let results = search_json["results"].as_array().expect("search results");
+    assert!(!results.is_empty());
+    let framing_keys = keys(&search_json["framing"]);
+    assert_eq!(
+        framing_keys,
+        ["source", "authority", "laws"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let result_fields = [
+        "source", "channel", "id", "from", "sent", "subject", "preview", "matched",
+    ];
+    assert_keys_in_shape(&schema.output_shapes.search, &result_fields);
+    assert_keys_in_shape(&schema.output_shapes.search, &["kind"]);
+    for result in results {
+        let actual = keys(result);
+        assert_keys_are_documented(&actual, &schema.output_shapes.search);
+        for field in result_fields {
+            assert!(
+                actual.contains(field),
+                "search result omitted {field}: {result}"
+            );
+        }
+        if result["source"] == "mail" {
+            assert!(
+                actual.contains("kind"),
+                "mail result omitted kind: {result}"
+            );
+        } else {
+            assert!(
+                !actual.contains("kind"),
+                "channel result unexpectedly has kind: {result}"
+            );
+        }
+    }
+
+    let channels_output = sandbox.run_in(&["channels"], None, &beta);
+    assert_success(&channels_output);
+    let channels_json = json_object(&channels_output);
+    assert_keys_in_shape(&schema.output_shapes.channels, &["room", "unread"]);
+    for channel in channels_json["channels"].as_array().expect("channels") {
+        let channel_keys = keys(channel);
+        assert!(channel_keys.contains("room"));
+        assert!(channel_keys.contains("unread"));
+    }
+    let private = channels_json["channels"]
+        .as_array()
+        .expect("channels")
+        .iter()
+        .find(|channel| channel["name"] == "private")
+        .expect("private channel");
+    assert_eq!(private["room"], "beta");
+    assert!(private["unread"].is_null());
+
+    let inbox_output = sandbox.run_in(&["inbox", "--room", "beta"], None, &beta);
+    assert_success(&inbox_output);
+    let inbox_json = json_object(&inbox_output);
+    assert_keys_in_shape(&schema.output_shapes.inbox, &["unread_count"]);
+    assert!(keys(&inbox_json).contains("unread_count"));
+}
+
+#[test]
+fn doctor_reports_cursor_state_without_repairing_it() {
+    let sandbox = Sandbox::new();
+    let room_dir = sandbox.mail_root.join("claude-space");
+    fs::create_dir_all(room_dir.join("inbox")).expect("inbox");
+    fs::create_dir_all(room_dir.join("read")).expect("read");
+    let cursor = room_dir.join("cursors.json");
+    fs::write(&cursor, b"{malformed").expect("malformed cursor");
+    #[cfg(unix)]
+    fs::set_permissions(&cursor, fs::Permissions::from_mode(0o600)).expect("cursor mode");
+    let before = fs::read(&cursor).expect("cursor bytes");
+
+    let diagnosed = sandbox.run(&["doctor"]);
+    assert_eq!(diagnosed.status.code(), Some(1));
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    let invalid = report
+        .checks
+        .iter()
+        .find(|check| check.id == "cursor_state.claude-space.invalid")
+        .expect("malformed cursor check");
+    assert_eq!(invalid.severity, DoctorSeverity::Warning);
+    assert!(invalid.message.contains("all unread"));
+
+    let fixed = sandbox.run(&["doctor", "--fix"]);
+    assert_eq!(fixed.status.code(), Some(1));
+    assert_eq!(fs::read(&cursor).expect("cursor after --fix"), before);
+    assert!(!room_dir.join(".cursors.lock").exists());
+}
+
+#[test]
+fn doctor_reports_legacy_state_as_info_and_downgrades_inert_legacy_errors() {
+    let sandbox = Sandbox::new();
+    let room_dir = sandbox.mail_root.join("claude-space");
+    fs::create_dir_all(room_dir.join("inbox")).expect("inbox");
+    fs::create_dir_all(room_dir.join("read")).expect("read");
+    let legacy = room_dir.join("channel-state.json");
+    fs::write(&legacy, r#"{"version":2,"channels":{"tax":{"seen":[]}}}"#).expect("legacy state");
+    let diagnosed = sandbox.run(&["doctor"]);
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    let info = report
+        .checks
+        .iter()
+        .find(|check| check.id == "cursor_state.claude-space.legacy")
+        .expect("legacy info check");
+    assert_eq!(info.severity, DoctorSeverity::Info);
+
+    fs::write(&legacy, b"not json").expect("malformed legacy state");
+    let cursor = room_dir.join("cursors.json");
+    fs::write(
+        &cursor,
+        b"{\"version\":1,\"mail\":{\"seen\":[]},\"channels\":{}}\n",
+    )
+    .expect("valid cursor state");
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&cursor, fs::Permissions::from_mode(0o600)).expect("cursor mode");
+        let lock = room_dir.join(".cursors.lock");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&lock)
+            .expect("cursor lock");
+        drop(file);
+    }
+    let diagnosed = sandbox.run(&["doctor"]);
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    let legacy_invalid = report
+        .checks
+        .iter()
+        .find(|check| check.id == "channel_state.claude-space.invalid")
+        .expect("inert legacy check");
+    assert_eq!(legacy_invalid.severity, DoctorSeverity::Warning);
+}

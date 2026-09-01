@@ -10,11 +10,32 @@ fn nonempty_without_controls(value: &str) -> Result<String, String> {
     without_controls(value)
 }
 
+fn nonempty_search_pattern(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("value must not be empty".to_owned());
+    }
+    if value.chars().any(crate::mailbox::refused_profile_char) {
+        return Err("value must not contain control or directional characters".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
 fn without_controls(value: &str) -> Result<String, String> {
     if value.chars().any(char::is_control) {
         return Err("value must not contain control characters".to_owned());
     }
     Ok(value.to_owned())
+}
+
+fn search_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be an integer from 1 through 1000".to_owned())?;
+    if (1..=1000).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be an integer from 1 through 1000".to_owned())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -53,6 +74,10 @@ pub(crate) enum Command {
     Inbox(InboxArgs),
     /// Read one unread message by full id or unique prefix.
     Read(ReadArgs),
+    /// Consume and print the complete unread slice for mail, a channel, or all targets.
+    Catchup(CatchupArgs),
+    /// Search party-visible mail and joined channels by literal substring.
+    Search(SearchArgs),
     /// List or register rooms.
     Rooms(RoomsArgs),
     /// Show or change this room's display name and emoji pfp (presentation only; identity stays the room id).
@@ -67,6 +92,65 @@ pub(crate) enum Command {
     Watch(WatchArgs),
     /// Report which rooms have a live watch and when they were last seen (no PIDs).
     Who(WhoArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    override_usage = "post catchup [<CHANNEL> | --mail | --all] [--framing auto|full|compact]"
+)]
+pub(crate) struct CatchupArgs {
+    /// Channel name; catches up exactly this joined channel.
+    #[arg(value_name = "CHANNEL", value_parser = nonempty_without_controls, conflicts_with_all = ["mail", "all"])]
+    pub channel: Option<String>,
+
+    /// Catch up direct mail only.
+    #[arg(long, conflicts_with_all = ["channel", "all"])]
+    pub mail: bool,
+
+    /// Catch up direct mail and every joined channel (the default).
+    #[arg(long, conflicts_with_all = ["channel", "mail"])]
+    pub all: bool,
+
+    /// Banner form for body-bearing catchup output. Auto emits one compact
+    /// banner per non-empty invocation; JSON carries the structured framing.
+    #[arg(long, value_enum)]
+    pub framing: Option<FramingMode>,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    override_usage = "post search <PATTERN> [--mail | --channel <CHANNEL>] [--limit <1..=1000>] [--framing auto|full|compact]"
+)]
+pub(crate) struct SearchArgs {
+    /// Literal, case-insensitive Unicode substring to find.
+    #[arg(value_name = "PATTERN", value_parser = nonempty_search_pattern)]
+    pub pattern: String,
+
+    /// Restrict the search to direct mail visible to the acting room.
+    #[arg(long, conflicts_with = "channel")]
+    pub mail: bool,
+
+    /// Restrict the search to one channel; the acting room must be a member.
+    #[arg(
+        long,
+        value_name = "CHANNEL",
+        value_parser = nonempty_without_controls,
+        conflicts_with = "mail"
+    )]
+    pub channel: Option<String>,
+
+    /// Maximum number of results (default 100; hard cap 1000).
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 100,
+        value_parser = search_limit
+    )]
+    pub limit: usize,
+
+    /// Banner form for non-empty text output; JSON carries structured framing.
+    #[arg(long, value_enum)]
+    pub framing: Option<FramingMode>,
 }
 
 #[derive(Debug, Args)]

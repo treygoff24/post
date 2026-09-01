@@ -3,6 +3,7 @@ use crate::channel_state;
 use crate::cli::DoctorArgs;
 use crate::command_result::CommandResult;
 use crate::commands::schema::doctor_exit_codes;
+use crate::cursor_state::{CURSORS_FILE, CURSORS_LOCK_FILE};
 use crate::error::{AppError, AppResult};
 use crate::mailbox::{
     parse_mail, validate_component, validate_room_name, Context, DEFAULT_ROOMS_JSON,
@@ -10,8 +11,10 @@ use crate::mailbox::{
 };
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{DoctorCheck, DoctorOutput, DoctorSeverity};
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResult<CommandResult> {
@@ -239,6 +242,7 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
                 &format!("room.{name}.read_missing"),
                 &mut checks,
             );
+            detect_cursor_state(context, &name, &mut checks);
         }
     }
 
@@ -251,10 +255,10 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
 }
 
 /// Validate the channel store: each channel's channel.json and members.json
-/// parse, members are registered rooms, messages/ exists and holds only
-/// well-formed .msg files, and each reader's channel-state.json (if any) is a
-/// valid cursor map. Read-only, like the rest of doctor — nothing is fixed or
-/// moved; a channel is never a `--fix` target because its history is immutable.
+/// parse, members are registered rooms, and messages/ exists and holds only
+/// well-formed .msg files. Read-only, like the rest of doctor — nothing is
+/// fixed or moved; a channel is never a `--fix` target because its history is
+/// immutable.
 fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
     let channels_root = context.root.join(CHANNELS_DIR);
     let Ok(entries) = fs::read_dir(&channels_root) else {
@@ -367,31 +371,177 @@ fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
             }
         }
     }
-    // Reader state lives in each room's own tree; a corrupt one can only
-    // hurt that room, but a bad JSON blob silently breaks its reads, so flag
-    // it. Both shapes are valid: the legacy v1 {channel: last-read-id} map
-    // and the v2 {"version": 2, "channels": {ch: {seen: [...]}}} document.
-    for name in rooms.keys() {
-        let Ok(state_path) = channel_state_path(context, name) else {
-            continue;
-        };
-        if !state_path.is_file() {
-            continue;
-        }
-        let valid = fs::read(&state_path)
-            .map(|bytes| channel_state::stored_shape_is_valid(&bytes))
-            .unwrap_or(false);
-        if !valid {
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorSetShape {
+    seen: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorDocumentShape {
+    version: u64,
+    mail: CursorSetShape,
+    channels: BTreeMap<String, CursorSetShape>,
+}
+
+/// Check one room's unified cursor state and its lock without opening or
+/// repairing either path. Runtime reads intentionally degrade malformed state
+/// to an empty snapshot; doctor keeps that degradation visible to operators.
+fn detect_cursor_state(context: &Context, room: &str, checks: &mut Vec<DoctorCheck>) {
+    let room_dir = context.root.join(room);
+    let cursor_path = room_dir.join(CURSORS_FILE);
+    let lock_path = room_dir.join(CURSORS_LOCK_FILE);
+    let legacy_path = match channel_state_path(context, room) {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let cursor_exists = match fs::symlink_metadata(&cursor_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
+    if cursor_exists {
+        if let Err(reason) = validate_cursor_file(&cursor_path) {
             checks.push(check(
-                &format!("channel_state.{name}.invalid"),
-                DoctorSeverity::Error,
-                &state_path,
-                "channel-state.json is neither a v1 {channel: last-read-id} map nor a v2 seen-set document",
+                &format!("cursor_state.{room}.invalid"),
+                DoctorSeverity::Warning,
+                &cursor_path,
+                &format!("cursors.json cannot be used ({reason}); reads degrade to all unread"),
                 false,
-                "Correct or remove the reader's channel-state.json by hand; the channel history is untouched.",
+                "Inspect or remove cursors.json by hand; reads currently degrade to all unread and `post doctor --fix` never changes cursor state.",
             ));
         }
     }
+
+    let lock_invalid = match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => !trusted_cursor_lock(&metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => cursor_exists,
+        Err(_) => true,
+    };
+    if lock_invalid {
+        let reason = if cursor_exists {
+            "cursor state exists without a trusted solitary 0600 lock"
+        } else {
+            "cursor lock is not a solitary regular 0600 file"
+        };
+        checks.push(check(
+            &format!("cursor_lock.{room}.invalid"),
+            DoctorSeverity::Warning,
+            &lock_path,
+            reason,
+            false,
+            "Inspect or remove the cursor lock path by hand; `post doctor --fix` never creates, repairs, or deletes cursor state.",
+        ));
+    }
+
+    // The legacy file remains useful rollback evidence after materialization,
+    // but is no longer a live reader state once cursors.json exists. Before
+    // materialization it is the read baseline and keeps the old error check.
+    let legacy_exists = match fs::symlink_metadata(&legacy_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
+    if !legacy_exists {
+        return;
+    }
+    let legacy_valid = fs::symlink_metadata(&legacy_path)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.nlink() == 1)
+        && fs::read(&legacy_path)
+            .map(|bytes| channel_state::stored_shape_is_valid(&bytes))
+            .unwrap_or(false);
+    if legacy_valid {
+        if !cursor_exists {
+            checks.push(check(
+                &format!("cursor_state.{room}.legacy"),
+                DoctorSeverity::Info,
+                &legacy_path,
+                "valid channel-state.json will import on the first consuming cursor write",
+                false,
+                "Run a consuming read or catchup to materialize cursors.json; the legacy file remains untouched.",
+            ));
+        }
+    } else {
+        checks.push(check(
+            &format!("channel_state.{room}.invalid"),
+            if cursor_exists {
+                DoctorSeverity::Warning
+            } else {
+                DoctorSeverity::Error
+            },
+            &legacy_path,
+            "channel-state.json is neither a v1 {channel: last-read-id} map nor a v2 seen-set document",
+            false,
+            "Correct or remove the reader's channel-state.json by hand; the channel history is untouched.",
+        ));
+    }
+}
+
+fn validate_cursor_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err("path is a symlink".to_owned());
+    }
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err("path is not a solitary regular file".to_owned());
+    }
+    if metadata.permissions().mode() & 0o7777 != 0o600 {
+        return Err("path is not mode 0600".to_owned());
+    }
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let document: CursorDocumentShape =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if document.version != 1 {
+        return Err(format!(
+            "unsupported version {}; expected v1",
+            document.version
+        ));
+    }
+    validate_seen_ids(&document.mail.seen, "mail", is_canonical_mail_id)?;
+    for (channel, set) in document.channels {
+        crate::channel::validate_channel_name(&channel)
+            .map_err(|_| format!("invalid channel name '{channel}'"))?;
+        validate_seen_ids(
+            &set.seen,
+            "channel",
+            crate::channel::is_canonical_channel_message_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_seen_ids(ids: &[String], kind: &str, is_valid: fn(&str) -> bool) -> Result<(), String> {
+    let mut previous = None;
+    for id in ids {
+        if !is_valid(id) {
+            return Err(format!("invalid {kind} id '{id}'"));
+        }
+        if previous.is_some_and(|prior: &str| prior >= id.as_str()) {
+            return Err(format!("{kind} ids must be sorted and duplicate-free"));
+        }
+        previous = Some(id.as_str());
+    }
+    Ok(())
+}
+
+fn is_canonical_mail_id(id: &str) -> bool {
+    let id = id.as_bytes();
+    id.len() == 22
+        && id[..8].iter().all(u8::is_ascii_digit)
+        && id[8] == b'-'
+        && id[9..15].iter().all(u8::is_ascii_digit)
+        && id[15] == b'-'
+        && id[16..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn trusted_cursor_lock(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_file()
+        && metadata.nlink() == 1
+        && metadata.permissions().mode() & 0o7777 == 0o600
 }
 
 fn detect_rooms(context: &Context, path: &Path, checks: &mut Vec<DoctorCheck>) -> Option<RoomMap> {

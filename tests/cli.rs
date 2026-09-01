@@ -3,227 +3,17 @@ use post::output::{
     ChatSendOutput, DoctorOutput, DoctorSeverity, ErrorEnvelope, InboxOutput, ReadOutput,
     RoomsOutput, SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct Sandbox {
-    path: PathBuf,
-    home: PathBuf,
-    mail_root: PathBuf,
-}
-
-impl Sandbox {
-    fn new() -> Self {
-        let sandbox = Self::new_unseeded();
-        // The suite's fixture universe: three registered rooms and one armed
-        // rule. Seeded explicitly because the shipped first-run defaults are
-        // deliberately empty (a public binary must not seed anyone's personal
-        // room map — v0.2.3).
-        fs::create_dir_all(&sandbox.mail_root).expect("create sandbox mail root");
-        fs::write(
-            sandbox.mail_root.join("rooms.json"),
-            r#"{
-  "claude-space": "~/claude-space",
-  "pact": "~/pact",
-  "agent-memory": "~/agent-memory"
-}
-"#,
-        )
-        .expect("seed sandbox rooms");
-        fs::write(
-            sandbox.mail_root.join("rules.json"),
-            r#"{
-  "blocked": [
-    {
-      "from": "*",
-      "to": "agent-memory",
-      "reason": "ARMED INSTRUMENT: no contact with the armed room until its closeout exists. Remove this rule only after the closeout is written and the affect check has fired."
-    }
-  ]
-}
-"#,
-        )
-        .expect("seed sandbox rules");
-        #[cfg(unix)]
-        for name in ["rooms.json", "rules.json"] {
-            fs::set_permissions(
-                sandbox.mail_root.join(name),
-                fs::Permissions::from_mode(0o600),
-            )
-            .expect("restrict seeded config perms");
-        }
-        sandbox
-    }
-
-    /// A sandbox whose mail root does not exist yet — for tests that assert
-    /// first-run seeding or no-write-on-error behavior.
-    fn new_unseeded() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("test clock should follow Unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "post-cli-{}-{nanos}-{}",
-            std::process::id(),
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let home = path.join("home");
-        fs::create_dir_all(&home).expect("create sandbox home");
-        let mail_root = path.join("mail");
-        Self {
-            path,
-            home,
-            mail_root,
-        }
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        self.run_in(args, None, &self.path)
-    }
-
-    fn run_with_stdin(&self, args: &[&str], input: &str) -> Output {
-        self.run_in(args, Some(input), &self.path)
-    }
-
-    /// Run a suggested `exact_fix` through a shell with `post` resolved to the
-    /// binary under test. The point of the field is that it runs as written.
-    fn run_fix(&self, fix: &str, cwd: &Path) -> Output {
-        let script = fix.replacen("post ", &format!("'{}' ", env!("CARGO_BIN_EXE_post")), 1);
-        Command::new("sh")
-            .arg("-c")
-            .arg(&script)
-            .current_dir(cwd)
-            .env("HOME", &self.home)
-            .env("POST_MAIL_ROOT", &self.mail_root)
-            // Hermetic like run_in_env: a developer shell launched through
-            // agent-session exports POST_FROM, which must never leak into a
-            // fix executed under test.
-            .env_remove("POST_FROM")
-            .env_remove("POST_FRAMING")
-            .env_remove("POST_SENDER_ADDRESS")
-            .env_remove("POST_ARX_GENERATION")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .output()
-            .expect("run the suggested fix through a shell")
-    }
-
-    /// Run with stdout pointed at the null device: the shape that used to
-    /// consume a channel's unread batch without ever showing it.
-    fn run_in_discarding_stdout(&self, args: &[&str], cwd: &Path) -> Output {
-        post_command()
-            .args(args)
-            .current_dir(cwd)
-            .env("HOME", &self.home)
-            .env("POST_MAIL_ROOT", &self.mail_root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .output()
-            .expect("run post with stdout discarded")
-    }
-
-    fn run_in(&self, args: &[&str], input: Option<&str>, cwd: &Path) -> Output {
-        self.run_in_env(args, input, cwd, &[])
-    }
-
-    /// Hermetic runner with explicit identity environment. The two identity
-    /// variables are ALWAYS cleared first so a developer shell that exports
-    /// POST_FROM can never leak into unrelated tests; `envs` re-adds exactly
-    /// what a test declares.
-    fn run_in_env(
-        &self,
-        args: &[&str],
-        input: Option<&str>,
-        cwd: &Path,
-        envs: &[(&str, &str)],
-    ) -> Output {
-        let mut command = post_command();
-        command
-            .args(args)
-            .current_dir(cwd)
-            .env("HOME", &self.home)
-            .env("POST_MAIL_ROOT", &self.mail_root)
-            .env_remove("POST_FROM")
-            .env_remove("POST_FRAMING")
-            .env_remove("POST_SENDER_ADDRESS")
-            .env_remove("POST_ARX_GENERATION");
-        for (key, value) in envs {
-            command.env(key, value);
-        }
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            });
-        let mut child = command.spawn().expect("spawn post binary");
-        if let Some(input) = input {
-            // A BrokenPipe here is the child exiting without reading stdin, which
-            // is correct behaviour for several of these cases -- when a real
-            // --body-file path wins, the binary never reads the '-' stream at all.
-            // Panicking on it made the outcome depend on whether the parent
-            // finished writing before the child finished exiting, so the suite
-            // failed under load and passed in isolation. Any other error is still
-            // a real failure.
-            match child
-                .stdin
-                .as_mut()
-                .expect("piped stdin should exist")
-                .write_all(input.as_bytes())
-            {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-                Err(e) => panic!("write command stdin: {e:?}"),
-            }
-        }
-        child.wait_with_output().expect("wait for post binary")
-    }
-
-    fn send_json(&self, sender: &str, body: &str) -> SendOutput {
-        let output = self.run(&[
-            "send",
-            "--to",
-            "claude-space",
-            "--from",
-            sender,
-            "--body",
-            body,
-            "--json",
-        ]);
-        assert_success(&output);
-        from_stdout(&output)
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        if !self.path.exists() {
-            return;
-        }
-        // The sandbox is a uniquely named temp dir this test created; plain
-        // stdlib removal is the portable cleanup, no external binary involved.
-        if let Err(error) = fs::remove_dir_all(&self.path) {
-            eprintln!(
-                "failed to remove test sandbox '{}': {error}",
-                self.path.display()
-            );
-        }
-    }
-}
+use std::time::SystemTime;
+mod common;
+use common::*;
 
 #[test]
 fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
@@ -296,7 +86,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 12);
+    assert_eq!(schema.commands.len(), 14);
     assert!(schema
         .error_codes
         .iter()
@@ -350,8 +140,8 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
-        "send", "chat", "channels", "inbox", "read", "rooms", "profile", "owner", "schema",
-        "doctor", "watch", "who",
+        "send", "chat", "channels", "inbox", "read", "catchup", "search", "rooms", "profile",
+        "owner", "schema", "doctor", "watch", "who",
     ];
     let command_names: Vec<&str> = schema
         .commands
@@ -384,10 +174,10 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp, sender_address, sender_provenance]",
-            "unreadable: event, room, id, reason=mail|channel",
-            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
-            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed",
+            "mail: event, room, id, from, kind, subject, sent, reason=mail, preview? [, display_name, pfp, sender_address, sender_provenance]",
+            "unreadable: event, room, id, reason=mail|channel (no preview)",
+            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
+            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]
     );
     assert!(
@@ -2811,10 +2601,18 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
     let events = watch_events(&watched.stdout);
     assert!(events.iter().any(|event| matches!(
         event,
-        WatchEvent::ChannelMessage { id, from, channel, .. }
+        WatchEvent::ChannelMessage { id, from, channel, preview, .. }
             if id == &backlog.message.id && from == "alpha" && channel == "tax"
+                && preview.as_deref() == Some("WATCH-CHANNEL-BODY-A")
     )));
-    assert!(!stdout(&watched).contains("WATCH-CHANNEL-BODY"));
+    // B9 preview contract: the body reaches watch output ONLY as the
+    // sanitized preview field, never as a raw body dump.
+    let raw = stdout(&watched);
+    assert_eq!(raw.matches("WATCH-CHANNEL-BODY").count(), 1, "{raw}");
+    assert!(
+        raw.contains("\"preview\":\"WATCH-CHANNEL-BODY-A\""),
+        "{raw}"
+    );
 
     let unread_after_watch: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
@@ -2855,10 +2653,17 @@ fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors(
     let events = watch_events(&output.stdout);
     assert!(events.iter().any(|event| matches!(
         event,
-        WatchEvent::ChannelMessage { id, from, .. }
+        WatchEvent::ChannelMessage { id, from, preview, .. }
             if id == &live.message.id && from == "beta"
+                && preview.as_deref() == Some("WATCH-CHANNEL-BODY-B")
     )));
-    assert!(!stdout(&output).contains("WATCH-CHANNEL-BODY"));
+    // B9 preview contract: live body appears only as its sanitized preview.
+    let raw = stdout(&output);
+    assert_eq!(raw.matches("WATCH-CHANNEL-BODY").count(), 1, "{raw}");
+    assert!(
+        raw.contains("\"preview\":\"WATCH-CHANNEL-BODY-B\""),
+        "{raw}"
+    );
 
     let _: ChatReadOutput = from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
     let own: ChatSendOutput = from_stdout(&sandbox.run_in(
@@ -3175,7 +2980,18 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
     assert!(err.contains("bad-members"), "{err}");
     assert!(err.contains("bad-messages"), "{err}");
     assert!(err.contains("unreadable channel message"), "{err}");
-    assert!(!stdout(&output).contains("healthy body must not print"));
+    // B9 preview contract: the healthy body rings only as the sanitized
+    // preview field; unreadable stores contribute no preview at all.
+    let raw = stdout(&output);
+    assert_eq!(
+        raw.matches("healthy body must not print").count(),
+        1,
+        "{raw}"
+    );
+    assert!(
+        raw.contains("\"preview\":\"healthy body must not print\""),
+        "{raw}"
+    );
 }
 
 #[test]
@@ -3252,275 +3068,6 @@ fn codex_identity_cannot_impersonate_registered_rooms_but_aliases_remain_allowed
     assert!(stdout(&inferred).contains("workspace -> workspace"));
 }
 
-fn seed_fence_store(sandbox: &Sandbox, state: &str) {
-    fs::create_dir_all(&sandbox.mail_root).expect("fence root");
-    fs::create_dir_all(sandbox.home.join("dest")).expect("fence room path");
-    fs::write(
-        sandbox.mail_root.join("rooms.json"),
-        r#"{"dest":"~/dest"}
-"#,
-    )
-    .expect("fence rooms");
-    fs::write(
-        sandbox.mail_root.join("rules.json"),
-        r#"{"blocked":[]}
-"#,
-    )
-    .expect("fence rules");
-    fs::write(sandbox.mail_root.join(".post-arx.json"), state).expect("fence state");
-    fs::write(sandbox.mail_root.join(".post-arx.lock"), b"").expect("fence lock");
-}
-
-fn seed_channel_fixture(sandbox: &Sandbox) {
-    let channel = sandbox.mail_root.join("channels/tax");
-    fs::create_dir_all(channel.join("messages")).expect("channel messages");
-    fs::write(
-        channel.join("channel.json"),
-        r#"{"name":"tax","created":"2026-08-20 12:00:00 -0500","created_by":"dest"}"#,
-    )
-    .expect("channel info");
-    fs::write(
-        channel.join("members.json"),
-        r#"{"dest":"2026-08-20 12:00:00 -0500"}"#,
-    )
-    .expect("channel members");
-    fs::write(
-        channel.join("messages/20260820-120000-000001-aaaaaa.msg"),
-        "{\"id\":\"20260820-120000-000001-aaaaaa\",\"from\":\"other\",\"channel\":\"tax\",\"subject\":\"\",\"sent\":\"2026-08-20 12:00:00 -0500\"}\n---\nfixture\n",
-    )
-    .expect("channel message");
-}
-
-#[cfg(unix)]
-fn fence_under_external_lock(sandbox: &Sandbox, generation: u64) -> std::time::SystemTime {
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(sandbox.mail_root.join(".post-arx.lock"))
-        .expect("open migration lock");
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-
-    let heartbeat = sandbox.mail_root.join("dest/watch.heartbeat");
-    let before = fs::metadata(&heartbeat)
-        .expect("heartbeat exists under transition lock")
-        .modified()
-        .expect("heartbeat mtime");
-    write_fence_state_locked(&sandbox.mail_root, generation);
-    drop(lock);
-    before
-}
-
-#[cfg(unix)]
-fn write_fence_state_locked(root: &Path, generation: u64) {
-    let temporary = root.join(format!(
-        "..post-arx.json.{}.tmp",
-        TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut state = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&temporary)
-        .expect("create fence temp");
-    writeln!(
-        state,
-        "{{\"state\":\"fenced\",\"generation\":{generation}}}"
-    )
-    .expect("write fence temp");
-    state.sync_all().expect("sync fence temp");
-    fs::rename(&temporary, root.join(".post-arx.json")).expect("commit fence");
-    File::open(root)
-        .expect("open mailbox root")
-        .sync_all()
-        .expect("sync mailbox root");
-}
-
-fn write_reference_mail(inbox: &Path, id: &str, body: &str) {
-    let envelope = serde_json::json!({
-        "id": id,
-        "from": "fixture",
-        "to": "claude-space",
-        "kind": "note",
-        "subject": "",
-        "sent": "2026-07-15 12:00:00 -0400"
-    });
-    write_custom_mail(inbox, id, &envelope, body);
-}
-
-fn write_custom_mail(
-    inbox: &Path,
-    filename_id: &str,
-    envelope: &impl serde::Serialize,
-    body: &str,
-) {
-    fs::write(
-        inbox.join(format!("{filename_id}.mail")),
-        format!(
-            "{}\n---\n{body}",
-            serde_json::to_string_pretty(envelope).expect("serialize custom envelope")
-        ),
-    )
-    .expect("write custom mail fixture");
-}
-
-fn register_alpha_beta(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
-    assert_success(&sandbox.run(&["rooms"]));
-    create_default_room_paths(sandbox);
-    let alpha = sandbox.path.join("alpha");
-    let beta = sandbox.path.join("beta");
-    fs::create_dir(&alpha).expect("create alpha room path");
-    fs::create_dir(&beta).expect("create beta room path");
-    register_room(sandbox, "alpha", &alpha);
-    register_room(sandbox, "beta", &beta);
-    (alpha, beta)
-}
-
-fn create_default_room_paths(sandbox: &Sandbox) {
-    for relative in ["agent-memory", "claude-space", "pact"] {
-        fs::create_dir_all(sandbox.home.join(relative)).expect("create default room path");
-    }
-}
-
-fn register_room(sandbox: &Sandbox, name: &str, path: &Path) {
-    let output = sandbox.run(&["rooms", "add", name, path.to_string_lossy().as_ref()]);
-    assert_success(&output);
-}
-
-fn join_channel(sandbox: &Sandbox, channel: &str, cwd: &Path) {
-    let output = sandbox.run_in(&["chat", channel, "--join", "--json"], None, cwd);
-    assert_success(&output);
-}
-
-fn write_channel_message(
-    sandbox: &Sandbox,
-    channel: &str,
-    id: &str,
-    from: &str,
-    subject: &str,
-    body: &str,
-) {
-    let message = serde_json::json!({
-        "id": id,
-        "from": from,
-        "channel": channel,
-        "subject": subject,
-        "sent": "2026-07-22 01:01:01 -0500"
-    });
-    fs::write(
-        sandbox
-            .mail_root
-            .join("channels")
-            .join(channel)
-            .join("messages")
-            .join(format!("{id}.msg")),
-        format!(
-            "{}\n---\n{body}",
-            serde_json::to_string_pretty(&message).expect("serialize channel message")
-        ),
-    )
-    .expect("write channel message fixture");
-}
-
-fn write_bad_channel(
-    sandbox: &Sandbox,
-    name: &str,
-    members: Option<&str>,
-    messages_dir: bool,
-    channel_json: &str,
-) {
-    let dir = sandbox.mail_root.join("channels").join(name);
-    fs::create_dir_all(&dir).expect("create bad channel dir");
-    fs::write(dir.join("channel.json"), channel_json).expect("write bad channel info");
-    if let Some(members) = members {
-        fs::write(dir.join("members.json"), members).expect("write bad channel members");
-    }
-    if messages_dir {
-        fs::create_dir_all(dir.join("messages")).expect("create bad channel messages dir");
-    }
-}
-
-/// Every direct spawn of the binary under test routes through here: the two
-/// identity variables are cleared up front, so a developer shell launched
-/// through agent-session (which pins POST_FROM) can never leak into a test.
-/// Tests that need a pin re-add it explicitly via run_in_env/env().
-fn post_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_post"));
-    command
-        .env_remove("POST_FROM")
-        .env_remove("POST_SENDER_ADDRESS")
-        .env_remove("POST_ARX_GENERATION");
-    command
-}
-
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "status: {:?}\nstdout: {}\nstderr: {}",
-        output.status.code(),
-        stdout(output),
-        stderr(output)
-    );
-    let rendered = stderr(output);
-    let unexpected: Vec<_> = rendered
-        .lines()
-        .filter(|line| !line.trim().is_empty() && !is_identity_notice(line))
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "unexpected stderr: {}",
-        unexpected.join("\n")
-    );
-}
-
-fn assert_migration_refused(output: &Output) {
-    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(output));
-    let error: ErrorEnvelope = from_stderr(output);
-    assert_eq!(error.error.code, "config_invalid");
-    assert!(
-        error
-            .error
-            .message
-            .to_ascii_lowercase()
-            .contains("migration fence"),
-        "missing migration-fence refusal: {}",
-        error.error.message
-    );
-}
-
-/// The cwd-identity notice is a deliberate receipt, not noise: mutating and
-/// consuming commands name the room they resolved to before they act. Every
-/// other line on a successful run is still a test failure.
-fn is_identity_notice(line: &str) -> bool {
-    line.contains("(identity inferred from cwd)") || line.contains("(POST_FROM pin")
-}
-
-fn from_stdout<T: serde::de::DeserializeOwned>(output: &Output) -> T {
-    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "stdout was not expected JSON: {error}\nstdout: {}\nstderr: {}",
-            stdout(output),
-            stderr(output)
-        )
-    })
-}
-
-fn from_stderr<T: serde::de::DeserializeOwned>(output: &Output) -> T {
-    let raw = stderr(output);
-    let json_line = raw
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with('{'))
-        .unwrap_or(raw.trim());
-    serde_json::from_str(json_line).unwrap_or_else(|error| {
-        panic!(
-            "stderr was not expected JSON: {error}\nstdout: {}\nstderr: {}",
-            stdout(output),
-            raw
-        )
-    })
-}
-
 #[test]
 fn body_help_steers_shell_sensitive_prose_to_file_or_stdin() {
     let sandbox = Sandbox::new();
@@ -3535,14 +3082,6 @@ fn body_help_steers_shell_sensitive_prose_to_file_or_stdin() {
             );
         }
     }
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 #[test]
@@ -3999,14 +3538,9 @@ fn discard_through_refuses_to_leap_over_an_unreadable_predecessor() {
     assert_eq!(refused.status.code(), Some(78));
     let error: ErrorEnvelope = from_stderr(&refused);
     assert_eq!(error.error.code, "config_invalid");
-    let state: serde_json::Value = serde_json::from_slice(
-        &fs::read(sandbox.mail_root.join("beta").join("channel-state.json"))
-            .unwrap_or_else(|_| b"{}".to_vec()),
-    )
-    .expect("cursor state is JSON");
     assert!(
-        state.get("tax").is_none(),
-        "a refused ack must leave the cursor untouched: {state}"
+        !sandbox.mail_root.join("beta").join("cursors.json").exists(),
+        "a refused ack must leave the cursor untouched"
     );
 
     // Acking through a target BEFORE the corruption is still allowed.
@@ -4062,13 +3596,12 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
     }
 
     let state: serde_json::Value = serde_json::from_slice(
-        &fs::read(sandbox.mail_root.join("beta").join("channel-state.json"))
-            .expect("read channel state"),
+        &fs::read(sandbox.mail_root.join("beta").join("cursors.json")).expect("read cursor state"),
     )
-    .expect("channel state is JSON");
+    .expect("cursor state is JSON");
     assert_eq!(
-        state["version"], 2,
-        "the store must be v2 after a write: {state}"
+        state["version"], 1,
+        "the store must be v1 after a write: {state}"
     );
     for (channel, target) in ["tax", "build"].iter().zip(&targets) {
         let seen: Vec<&str> = state["channels"][channel]["seen"]
@@ -4082,6 +3615,56 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
             "{channel}'s ack was lost to the other process: {state}"
         );
     }
+
+    // The next public listing must see both surviving seen-sets: exactly one
+    // new message is unread after adding one message to only one channel.
+    let fresh: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "one new message",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let listed: ChannelsOutput = from_stdout(&sandbox.run_in(&["channels"], None, &beta));
+    let tax = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "tax")
+        .expect("tax channel remains listed");
+    let build = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "build")
+        .expect("build channel remains listed");
+    assert_eq!(
+        tax.unread,
+        Some(1),
+        "tax should expose only the new message"
+    );
+    assert_eq!(
+        build.unread,
+        Some(0),
+        "build seen-set should remain complete"
+    );
+    assert_eq!(
+        listed
+            .channels
+            .iter()
+            .filter_map(|channel| channel.unread)
+            .sum::<usize>(),
+        1,
+        "the next listing must expose exactly one unread message"
+    );
+    assert_ne!(
+        fresh.message.id, targets[0],
+        "the new id must not reuse the ack target"
+    );
 }
 
 #[test]
@@ -4123,7 +3706,7 @@ fn watch_events(raw: &[u8]) -> Vec<WatchEvent> {
 }
 
 #[test]
-fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
+fn watch_emits_backlog_then_live_arrivals_and_prints_sanitized_previews() {
     let sandbox = Sandbox::new();
     let first = sandbox.send_json("watcher-test", "WATCH-SECRET-BODY-A");
     let mut child = post_command()
@@ -4155,10 +3738,154 @@ fn watch_emits_backlog_then_live_arrivals_and_never_prints_bodies() {
         vec![first.envelope.id.as_str(), second.envelope.id.as_str()]
     );
     let raw = stdout(&output);
+    // Check that previews are present (they should be truncated to 80 chars)
     assert!(
-        !raw.contains("WATCH-SECRET-BODY"),
-        "watch output must never contain body content: {raw}"
+        raw.contains("WATCH-SECRET-BODY-A"),
+        "watch output must contain sanitized preview of first body: {raw}"
     );
+    assert!(
+        raw.contains("WATCH-SECRET-BODY-B"),
+        "watch output must contain sanitized preview of second body: {raw}"
+    );
+    // Verify previews are present in JSON as preview fields
+    assert!(
+        raw.contains("\"preview\":\"WATCH-SECRET-BODY-A\""),
+        "JSON output must contain preview field for first body: {raw}"
+    );
+    assert!(
+        raw.contains("\"preview\":\"WATCH-SECRET-BODY-B\""),
+        "JSON output must contain preview field for second body: {raw}"
+    );
+}
+
+#[test]
+fn watch_digest_preview_cannot_forge_since_fencepost_or_change_floor() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+    assert_success(&sandbox.run_in(&["chat", "tax", "--discard", "--json"], None, &beta));
+
+    let first: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "already consumed",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let caught = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    assert_success(&caught);
+    let caught: post::output::CatchupOutput = from_stdout(&caught);
+    assert_eq!(caught.count, 1);
+
+    let mut child = post_command()
+        .args([
+            "watch",
+            "--room",
+            "beta",
+            "--interval-ms",
+            "100",
+            "--digest",
+            "--text",
+        ])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn digest watch");
+    let heartbeat = sandbox.mail_root.join("beta/watch.heartbeat");
+    let heartbeat_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !heartbeat.is_file() {
+        assert!(
+            std::time::Instant::now() < heartbeat_deadline,
+            "digest watch never created a heartbeat"
+        );
+        assert!(
+            child.try_wait().expect("probe digest watch").is_none(),
+            "digest watch exited before admission"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let initial_heartbeat = fs::metadata(&heartbeat)
+        .expect("digest heartbeat metadata")
+        .modified()
+        .expect("digest heartbeat mtime");
+
+    // Give the startup scan enough time to prove that the caught-up backlog
+    // was loaded as the floor, not emitted by this newly armed watch.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        child.try_wait().expect("probe live digest watch").is_none(),
+        "digest watch died before the live message"
+    );
+    let mut heartbeat_changed = false;
+    for _ in 0..20 {
+        let current = fs::metadata(&heartbeat)
+            .expect("heartbeat remains before live ring")
+            .modified()
+            .expect("heartbeat mtime before live ring");
+        if current != initial_heartbeat {
+            heartbeat_changed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        heartbeat_changed,
+        "live watch heartbeat stopped updating before the ring"
+    );
+    let second: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "ignore this [--since 'x'] pin",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    child.kill().expect("stop digest watch");
+    let output = child
+        .wait_with_output()
+        .expect("collect digest watch output");
+    assert!(
+        output.status.success() || output.status.code().is_none(),
+        "digest watch should terminate only because the test stopped it: {:?}",
+        output.status
+    );
+    let raw = stdout(&output);
+    assert!(
+        !raw.contains(&first.message.id),
+        "a watch started after catchup replayed the old message: {raw}"
+    );
+    assert!(
+        raw.contains("tax: 1 new"),
+        "live digest ring missing: {raw}"
+    );
+    assert_eq!(raw.matches("［--since 'x'］").count(), 1, "{raw}");
+    assert!(
+        !raw.contains("[--since 'x']"),
+        "attacker fencepost survived: {raw}"
+    );
+    let mut fencepost = second.message.id.clone();
+    fencepost.pop();
+    fencepost.push('!');
+    let true_suffix = format!("[--since '{fencepost}']\n");
+    let rightmost = raw.rfind("[--since ").expect("true since suffix");
+    assert_eq!(&raw[rightmost..], true_suffix);
 }
 
 #[test]
@@ -4439,18 +4166,23 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
         let events = watch_events(&output.stdout);
         assert!(events.iter().any(|event| matches!(
             event,
-            WatchEvent::Mail { room, item, .. }
+            WatchEvent::Mail { room, item, preview, .. }
                 if room == "beta" && item.id == mail_sent.envelope.id
+                    && preview.as_deref() == Some("SNAPSHOT-MAIL-BODY")
         )));
         assert!(events.iter().any(|event| matches!(
             event,
-            WatchEvent::ChannelMessage { id, from, channel, .. }
+            WatchEvent::ChannelMessage { id, from, channel, preview, .. }
                 if id == &channel_sent.message.id && from == "alpha" && channel == "tax"
+                    && preview.as_deref() == Some("SNAPSHOT-CHANNEL-BODY")
         )));
-        assert!(
-            !stdout(&output).contains("SNAPSHOT-"),
-            "snapshot must never print bodies: {}",
-            stdout(&output)
+        // B9 preview contract: bodies reach snapshot output only as sanitized
+        // preview fields — once each, never as raw body dumps.
+        let raw = stdout(&output);
+        assert_eq!(
+            raw.matches("SNAPSHOT-").count(),
+            2,
+            "bodies must appear only as previews: {raw}"
         );
     }
 
@@ -4655,7 +4387,12 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let events = watch_events(&output.stdout);
     match &events[0] {
-        WatchEvent::Unreadable { room, id, reason } => {
+        WatchEvent::Unreadable {
+            room,
+            id,
+            reason,
+            preview: _,
+        } => {
             assert_eq!(room, "claude-space");
             assert_eq!(id, "20260721-010101-abcdef");
             assert_eq!(*reason, WatchReason::Mail);
@@ -4707,7 +4444,13 @@ fn watch_text_mode_escapes_control_characters_in_subjects() {
         raw.contains("\\n"),
         "subject newline should render escaped: {raw}"
     );
-    assert!(!raw.contains("body"), "text mode must not print bodies");
+    // B9 preview contract: the body renders only as the trailing sanitized
+    // preview, still on the single escaped event line.
+    assert!(
+        raw.trim_end().ends_with("  body"),
+        "body should render as the trailing preview: {raw}"
+    );
+    assert_eq!(raw.matches("body").count(), 1, "{raw}");
 }
 
 #[test]
@@ -4921,18 +4664,64 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     assert!(!fenced.mail_root.join("archive").exists());
     assert!(!fenced.mail_root.join("dest/watch.heartbeat").exists());
 
+    // Catchup is the new consuming writer and must hit the same migration
+    // fence before it can create a room, cursor, or move any mail.
+    let refused_catchup = fenced.run(&["catchup", "--mail", "--json"]);
+    assert_migration_refused(&refused_catchup);
+    assert!(refused_catchup.stdout.is_empty());
+    assert!(!fenced.mail_root.join("dest/cursors.json").exists());
+
     let inbox = fenced.run(&["inbox", "--room", "dest"]);
     assert_success(&inbox);
-    assert_success(&fenced.run(&["schema"]));
+    let channels = fenced.run(&["channels"]);
+    assert_success(&channels);
+    let schema_output = fenced.run(&["schema"]);
+    assert_success(&schema_output);
+    let schema: SchemaOutput = from_stdout(&schema_output);
     let chat = fenced.run_in(&["chat", "tax", "--peek"], None, &fenced.home.join("dest"));
     assert_success(&chat);
+
+    // Search is added by the parallel B5 lane. Keep this matrix compiling on
+    // the B7 base while making the assertion live as soon as that command is
+    // present: an admitted search must succeed and leave the fenced store
+    // untouched just like channels/inbox.
+    let mut search_before = fs::read_dir(&fenced.mail_root)
+        .expect("fenced root")
+        .map(|entry| entry.expect("fenced entry").file_name())
+        .collect::<Vec<_>>();
+    search_before.sort();
+    let search = fenced.run_in(
+        &["search", "fixture", "--mail", "--json"],
+        None,
+        &fenced.home.join("dest"),
+    );
+    let search_unavailable = search.status.code() == Some(2)
+        && stderr(&search).contains("unrecognized subcommand 'search'");
+    if search_unavailable {
+        // The current B7 base predates B5; the future command is verified by
+        // this same branch after B5 is integrated.
+        assert_eq!(search.status.code(), Some(2));
+        assert!(stderr(&search).contains("unrecognized subcommand 'search'"));
+        assert!(!schema
+            .commands
+            .iter()
+            .any(|command| command.name == "search"));
+    } else {
+        assert_success(&search);
+    }
+    let mut search_after = fs::read_dir(&fenced.mail_root)
+        .expect("fenced root after search")
+        .map(|entry| entry.expect("fenced entry").file_name())
+        .collect::<Vec<_>>();
+    search_after.sort();
+    assert_eq!(search_before, search_after, "search changed a fenced store");
     assert!(
         stdout(&chat).contains("READ THIS FRAMING FIRST"),
         "non-empty text chat must render its read framing"
     );
     assert!(!fenced.mail_root.join("dest").exists());
     assert!(!fenced.mail_root.join("archive").exists());
-    assert!(!fenced.mail_root.join("dest/channel-state.json").exists());
+    assert!(!fenced.mail_root.join("dest/cursors.json").exists());
     assert!(!fenced.mail_root.join("dest/banner-day").exists());
 
     let refused = fenced.run(&[
@@ -5047,7 +4836,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         .expect("drain blocked stdout");
     assert!(blocked_read.wait().expect("wait blocked stdout").success());
     assert!(
-        fs::read_to_string(active.mail_root.join("dest/channel-state.json"))
+        fs::read_to_string(active.mail_root.join("dest/cursors.json"))
             .expect("advanced channel cursor")
             .contains("20260820-120000-000001-aaaaaa")
     );
@@ -5380,7 +5169,7 @@ fn migration_fence_snapshot_never_mints_presence_or_room_state() {
         assert!(!sandbox.mail_root.join("dest").exists());
         assert!(!sandbox.mail_root.join("archive").exists());
         assert!(!sandbox.mail_root.join("dest/watch.heartbeat").exists());
-        assert!(!sandbox.mail_root.join("dest/channel-state.json").exists());
+        assert!(!sandbox.mail_root.join("dest/cursors.json").exists());
     }
 }
 
@@ -6434,7 +6223,7 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
     // Cursor must be untouched — a second plain read still fails the same way.
     let still = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
     assert_eq!(still.status.code(), Some(78));
-    let state_path = sandbox.mail_root.join("alpha/channel-state.json");
+    let state_path = sandbox.mail_root.join("alpha/cursors.json");
     if state_path.exists() {
         let raw = fs::read_to_string(&state_path).expect("state");
         assert!(
