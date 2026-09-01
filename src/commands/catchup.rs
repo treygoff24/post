@@ -30,49 +30,24 @@ pub(super) fn run(
     };
     let selector_for_refusal = selector.clone();
 
-    let mut delta = Delta::default();
-    let mut targets = Vec::new();
+    let (rendered, delta) = {
+        let _read_only = mailbox::enter_read_only_command(true);
+        let mut delta = Delta::default();
+        let mut targets = Vec::new();
 
-    match selector {
-        Selector::Mail => {
-            let (messages, moves) = collect_mail(context, &room, &snapshot)?;
-            delta.mail_moves = moves;
-            targets.push(CatchupTarget::Mail {
-                count: messages.len(),
-                framing: mail_framing(framing),
-                messages,
-            });
-        }
-        Selector::Channel(channel_name) => {
-            let paths = member_channel_paths(context, &channel_name, &room)?;
-            let owner = mailbox::resolve_owner(context)?;
-            let (messages, ids) =
-                collect_channel(&room, &channel_name, &paths, &snapshot, owner.as_ref())?;
-            if !ids.is_empty() {
-                delta.channel_seen.push((channel_name.clone(), ids));
+        match selector {
+            Selector::Mail => {
+                let (messages, moves) = collect_mail(context, &room, &snapshot)?;
+                delta.mail_moves = moves;
+                targets.push(CatchupTarget::Mail {
+                    count: messages.len(),
+                    framing: mail_framing(framing),
+                    messages,
+                });
             }
-            targets.push(CatchupTarget::Channel {
-                channel: channel_name,
-                count: messages.len(),
-                framing: channel_framing(framing),
-                messages,
-            });
-        }
-        Selector::All => {
-            let joined = joined_channels(context, &room)?;
-            let owner = if joined.is_empty() {
-                None
-            } else {
-                mailbox::resolve_owner(context)?
-            };
-            let (messages, moves) = collect_mail(context, &room, &snapshot)?;
-            delta.mail_moves = moves;
-            targets.push(CatchupTarget::Mail {
-                count: messages.len(),
-                framing: mail_framing(framing),
-                messages,
-            });
-            for (channel_name, paths) in joined {
+            Selector::Channel(channel_name) => {
+                let paths = member_channel_paths(context, &channel_name, &room)?;
+                let owner = mailbox::resolve_owner(context)?;
                 let (messages, ids) =
                     collect_channel(&room, &channel_name, &paths, &snapshot, owner.as_ref())?;
                 if !ids.is_empty() {
@@ -85,26 +60,69 @@ pub(super) fn run(
                     messages,
                 });
             }
+            Selector::All => {
+                let joined = joined_channels(context, &room)?;
+                let owner = if joined.is_empty() {
+                    None
+                } else {
+                    mailbox::resolve_owner(context)?
+                };
+                let (messages, moves) = collect_mail(context, &room, &snapshot)?;
+                delta.mail_moves = moves;
+                targets.push(CatchupTarget::Mail {
+                    count: messages.len(),
+                    framing: mail_framing(framing),
+                    messages,
+                });
+                for (channel_name, paths) in joined {
+                    let (messages, ids) = match collect_channel(
+                        &room,
+                        &channel_name,
+                        &paths,
+                        &snapshot,
+                        owner.as_ref(),
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            eprintln!(
+                                "post: warning: skipped channel {:?}: {}",
+                                channel_name, error.message
+                            );
+                            (Vec::new(), Vec::new())
+                        }
+                    };
+                    if !ids.is_empty() {
+                        delta.channel_seen.push((channel_name.clone(), ids));
+                    }
+                    targets.push(CatchupTarget::Channel {
+                        channel: channel_name,
+                        count: messages.len(),
+                        framing: channel_framing(framing),
+                        messages,
+                    });
+                }
+            }
         }
-    }
 
-    let count = targets.iter().map(CatchupTarget::count).sum();
-    if count > 0 && output::stdout_is_null_device() {
-        return Err(null_stdout_refusal(&selector_for_refusal, count));
-    }
+        let count = targets.iter().map(CatchupTarget::count).sum();
+        if count > 0 && output::stdout_is_null_device() {
+            return Err(null_stdout_refusal(&selector_for_refusal, count));
+        }
 
-    let rendered = if json_output {
-        output::json(
-            &CatchupOutput {
-                ok: true,
-                room: room.clone(),
-                targets,
-                count,
-            },
-            pretty,
-        )?
-    } else {
-        render_text(&room, &targets, count, framing)
+        let rendered = if json_output {
+            output::json(
+                &CatchupOutput {
+                    ok: true,
+                    room: room.clone(),
+                    targets,
+                    count,
+                },
+                pretty,
+            )?
+        } else {
+            render_text(&room, &targets, count, framing)
+        };
+        (rendered, delta)
     };
 
     if delta.mail_moves.is_empty() && delta.channel_seen.is_empty() {
@@ -113,6 +131,9 @@ pub(super) fn run(
 
     let context = context.clone();
     Ok(CommandResult::after_stdout(rendered, move || {
+        if !delta.mail_moves.is_empty() {
+            context.mailbox_dirs(&room)?;
+        }
         cursor_state::consume(&context, &room, delta)
     }))
 }
@@ -126,14 +147,16 @@ enum Selector {
 
 fn mail_framing(mode: FramingMode) -> output::Framing {
     match mode {
-        FramingMode::Auto | FramingMode::Full => output::Framing::default(),
+        FramingMode::Auto => output::Framing::compact(),
+        FramingMode::Full => output::Framing::default(),
         FramingMode::Compact => output::Framing::compact(),
     }
 }
 
 fn channel_framing(mode: FramingMode) -> output::ChannelFraming {
     match mode {
-        FramingMode::Auto | FramingMode::Full => output::ChannelFraming::default(),
+        FramingMode::Auto => output::ChannelFraming::compact(),
+        FramingMode::Full => output::ChannelFraming::default(),
         FramingMode::Compact => output::ChannelFraming::compact(),
     }
 }
@@ -246,7 +269,16 @@ fn joined_channels(context: &Context, room: &str) -> AppResult<Vec<(String, Chan
         if !paths.exists() {
             continue;
         }
-        let members = paths.load_members()?;
+        let members = match paths.load_members() {
+            Ok(members) => members,
+            Err(error) => {
+                eprintln!(
+                    "post: warning: unreadable channel state for room {room:?} in channel {name:?}: {}",
+                    error.message
+                );
+                continue;
+            }
+        };
         if members.contains_key(room) {
             channels.push((name, paths));
         }
@@ -428,12 +460,13 @@ fn render_mail_item(rendered: &mut String, item: &CatchupMailItem) {
         )
     };
     rendered.push_str(&format!(
-        "--- {}   {}   {}{subject} ---\n",
+        "--- {}   Kind: {}   {}   {}{subject} ---\n",
         output::sender_label(
             &envelope.from,
             envelope.display_name.as_deref(),
             envelope.pfp.as_deref()
         ),
+        envelope.kind,
         output::sanitize_text_header(&envelope.sent),
         output::sanitize_text_header(&envelope.id),
     ));
@@ -522,6 +555,8 @@ impl CatchupTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
 
     #[test]
     fn empty_text_has_no_banner() {
@@ -546,5 +581,68 @@ mod tests {
         let rendered = render_text("alpha", &targets, 1, FramingMode::Auto);
         assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 1);
         assert!(rendered.contains(output::LAW_COMPACT));
+    }
+
+    #[test]
+    fn selected_delta_does_not_consume_messages_arriving_after_selection() {
+        let root = test_root("catchup-delta-fixed");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let messages = root.join("channels/tax/messages");
+        fs::create_dir_all(&messages).expect("message directory");
+        fs::write(
+            root.join("channels/tax/channel.json"),
+            r#"{"name":"tax","created":"2026-08-20 12:00:00 -0500","created_by":"alpha"}"#,
+        )
+        .expect("channel info");
+        let first_id = "20260831-171234-000001-a1b2c3";
+        let late_id = "20260831-171234-000002-b2c3d4";
+        let write_message = |id: &str| {
+            let message = ChannelMessage {
+                id: id.to_owned(),
+                from: "beta".to_owned(),
+                channel: "tax".to_owned(),
+                subject: String::new(),
+                sent: "2026-08-31 17:12:34 +0000".to_owned(),
+                event: None,
+                display_name: None,
+                pfp: None,
+                re: None,
+                mentions: Vec::new(),
+                signature_ref: None,
+                sender_address: None,
+                sender_provenance: None,
+            };
+            fs::write(
+                messages.join(format!("{id}.msg")),
+                channel::encode_message(&message, "body").expect("encode message"),
+            )
+            .expect("write message");
+        };
+        write_message(first_id);
+
+        let paths = ChannelPaths::new(&context, "tax").expect("channel paths");
+        let snapshot = Snapshot::load(&context, "alpha");
+        let (_selected, selected_ids) =
+            collect_channel("alpha", "tax", &paths, &snapshot, None).expect("collect");
+        let delta = Delta {
+            mail_moves: Vec::new(),
+            channel_seen: vec![("tax".to_owned(), selected_ids)],
+        };
+        write_message(late_id);
+
+        cursor_state::consume(&context, "alpha", delta).expect("consume fixed delta");
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("alpha/cursors.json")).expect("cursor state"),
+        )
+        .expect("valid cursor state");
+        let seen = persisted["channels"]["tax"]["seen"]
+            .as_array()
+            .expect("channel seen set");
+        assert!(seen.iter().any(|id| id == first_id));
+        assert!(!seen.iter().any(|id| id == late_id));
+        trash_test_root(&root);
     }
 }

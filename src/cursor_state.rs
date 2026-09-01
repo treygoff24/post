@@ -195,20 +195,18 @@ fn consume_inner(
     };
 
     let mut committed_mail = BTreeSet::new();
-    let mut move_error = None;
+    let mut move_errors = Vec::new();
     for mail_move in delta.mail_moves {
         match exclusive_move(&mail_move.source, &mail_move.destination) {
             Ok(()) => {
                 committed_mail.insert(mail_move.id);
             }
             Err(error @ MoveError::Link(_)) => {
-                move_error = Some(mail_move_error(&mail_move, error));
-                break;
+                move_errors.push(mail_move_error(&mail_move, error));
             }
             Err(error @ MoveError::Unlink(_)) => {
                 committed_mail.insert(mail_move.id.clone());
-                move_error = Some(mail_move_error(&mail_move, error));
-                break;
+                move_errors.push(mail_move_error(&mail_move, error));
             }
         }
     }
@@ -251,7 +249,14 @@ fn consume_inner(
     if changed {
         replace_state(&path, &state)?;
     }
-    if let Some(error) = move_error {
+    let mut move_errors = move_errors.into_iter();
+    if let Some(error) = move_errors.next() {
+        for warning in move_errors {
+            eprintln!(
+                "post: warning: additional mail move failure: {}",
+                warning.message
+            );
+        }
         return Err(error);
     }
 
@@ -1020,6 +1025,57 @@ mod tests {
         assert!(!snapshot.mail_has_seen(mail_ids[1]));
         assert!(snapshot.mail_has_seen(mail_ids[2]));
         assert!(inbox.join(format!("{}.mail", mail_ids[1])).exists());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn mail_move_failure_does_not_stop_later_moves() {
+        let (root, context) = context("mail-failure-continues");
+        let inbox = root.join("alpha/inbox");
+        let read = root.join("alpha/read");
+        fs::create_dir_all(&inbox).expect("inbox");
+        fs::create_dir_all(&read).expect("read");
+        let duplicate_id = "20260831-171234-a1b2c3";
+        let later_id = "20260831-171235-b2c3d4";
+        fs::write(
+            inbox.join(format!("{duplicate_id}.mail")),
+            b"duplicate unread",
+        )
+        .expect("duplicate inbox mail");
+        fs::write(inbox.join(format!("{later_id}.mail")), b"later unread")
+            .expect("later inbox mail");
+        fs::write(read.join(format!("{duplicate_id}.mail")), b"existing read")
+            .expect("existing read copy");
+
+        let error = consume(
+            &context,
+            "alpha",
+            Delta {
+                mail_moves: vec![
+                    MailMove {
+                        id: duplicate_id.to_owned(),
+                        source: inbox.join(format!("{duplicate_id}.mail")),
+                        destination: read.join(format!("{duplicate_id}.mail")),
+                    },
+                    MailMove {
+                        id: later_id.to_owned(),
+                        source: inbox.join(format!("{later_id}.mail")),
+                        destination: read.join(format!("{later_id}.mail")),
+                    },
+                ],
+                channel_seen: Vec::new(),
+            },
+        )
+        .expect_err("duplicate destination should still surface an error");
+        assert_eq!(error.code, ErrorCode::IoError);
+        assert!(error.message.contains(duplicate_id));
+        assert!(inbox.join(format!("{duplicate_id}.mail")).exists());
+        assert!(read.join(format!("{duplicate_id}.mail")).exists());
+        assert!(!inbox.join(format!("{later_id}.mail")).exists());
+        assert!(read.join(format!("{later_id}.mail")).exists());
+        let snapshot = Snapshot::load(&context, "alpha");
+        assert!(!snapshot.mail_has_seen(duplicate_id));
+        assert!(snapshot.mail_has_seen(later_id));
         trash_test_root(&root);
     }
 
