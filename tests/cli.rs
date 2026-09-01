@@ -86,7 +86,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 12);
+    assert_eq!(schema.commands.len(), 14);
     assert!(schema
         .error_codes
         .iter()
@@ -140,8 +140,8 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
-        "send", "chat", "channels", "inbox", "read", "rooms", "profile", "owner", "schema",
-        "doctor", "watch", "who",
+        "send", "chat", "channels", "inbox", "read", "catchup", "search", "rooms", "profile",
+        "owner", "schema", "doctor", "watch", "who",
     ];
     let command_names: Vec<&str> = schema
         .commands
@@ -174,10 +174,10 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, room, id, from, kind, subject, sent, reason=mail [, display_name, pfp, sender_address, sender_provenance]",
-            "unreadable: event, room, id, reason=mail|channel",
-            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention [, display_name, pfp, sender_address, sender_provenance]",
-            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed",
+            "mail: event, room, id, from, kind, subject, sent, reason=mail, preview? [, display_name, pfp, sender_address, sender_provenance]",
+            "unreadable: event, room, id, reason=mail|channel (no preview)",
+            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
+            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]
     );
     assert!(
