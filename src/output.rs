@@ -227,6 +227,40 @@ pub struct CatchupOutput {
     pub count: usize,
 }
 
+/// One bounded, preview-only result from `post search`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchResult {
+    /// `mail` or `channel`.
+    pub source: String,
+    /// Null for direct mail; the channel name for channel results.
+    pub channel: Option<String>,
+    pub id: String,
+    pub from: String,
+    pub sent: String,
+    pub subject: String,
+    pub preview: String,
+    /// Fields that matched, in stable body/subject/from/id order.
+    pub matched: Vec<String>,
+    /// Present only for direct-mail results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<MailKind>,
+}
+
+/// Stable envelope for the cursorless, visibility-filtered search command.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchOutput {
+    pub ok: bool,
+    pub framing: Framing,
+    pub room: String,
+    pub pattern: String,
+    #[serde(rename = "match")]
+    pub match_kind: String,
+    pub results: Vec<SearchResult>,
+    pub count: usize,
+    pub limit: usize,
+    pub truncated: bool,
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
