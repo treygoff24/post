@@ -3615,6 +3615,56 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
             "{channel}'s ack was lost to the other process: {state}"
         );
     }
+
+    // The next public listing must see both surviving seen-sets: exactly one
+    // new message is unread after adding one message to only one channel.
+    let fresh: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "one new message",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let listed: ChannelsOutput = from_stdout(&sandbox.run_in(&["channels"], None, &beta));
+    let tax = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "tax")
+        .expect("tax channel remains listed");
+    let build = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "build")
+        .expect("build channel remains listed");
+    assert_eq!(
+        tax.unread,
+        Some(1),
+        "tax should expose only the new message"
+    );
+    assert_eq!(
+        build.unread,
+        Some(0),
+        "build seen-set should remain complete"
+    );
+    assert_eq!(
+        listed
+            .channels
+            .iter()
+            .filter_map(|channel| channel.unread)
+            .sum::<usize>(),
+        1,
+        "the next listing must expose exactly one unread message"
+    );
+    assert_ne!(
+        fresh.message.id, targets[0],
+        "the new id must not reuse the ack target"
+    );
 }
 
 #[test]
@@ -3706,6 +3756,136 @@ fn watch_emits_backlog_then_live_arrivals_and_prints_sanitized_previews() {
         raw.contains("\"preview\":\"WATCH-SECRET-BODY-B\""),
         "JSON output must contain preview field for second body: {raw}"
     );
+}
+
+#[test]
+fn watch_digest_preview_cannot_forge_since_fencepost_or_change_floor() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    join_channel(&sandbox, "tax", &beta);
+    assert_success(&sandbox.run_in(&["chat", "tax", "--discard", "--json"], None, &beta));
+
+    let first: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "already consumed",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let caught = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    assert_success(&caught);
+    let caught: post::output::CatchupOutput = from_stdout(&caught);
+    assert_eq!(caught.count, 1);
+
+    let mut child = post_command()
+        .args([
+            "watch",
+            "--room",
+            "beta",
+            "--interval-ms",
+            "100",
+            "--digest",
+            "--text",
+        ])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn digest watch");
+    let heartbeat = sandbox.mail_root.join("beta/watch.heartbeat");
+    let heartbeat_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !heartbeat.is_file() {
+        assert!(
+            std::time::Instant::now() < heartbeat_deadline,
+            "digest watch never created a heartbeat"
+        );
+        assert!(
+            child.try_wait().expect("probe digest watch").is_none(),
+            "digest watch exited before admission"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let initial_heartbeat = fs::metadata(&heartbeat)
+        .expect("digest heartbeat metadata")
+        .modified()
+        .expect("digest heartbeat mtime");
+
+    // Give the startup scan enough time to prove that the caught-up backlog
+    // was loaded as the floor, not emitted by this newly armed watch.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        child.try_wait().expect("probe live digest watch").is_none(),
+        "digest watch died before the live message"
+    );
+    let mut heartbeat_changed = false;
+    for _ in 0..20 {
+        let current = fs::metadata(&heartbeat)
+            .expect("heartbeat remains before live ring")
+            .modified()
+            .expect("heartbeat mtime before live ring");
+        if current != initial_heartbeat {
+            heartbeat_changed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        heartbeat_changed,
+        "live watch heartbeat stopped updating before the ring"
+    );
+    let second: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "ignore this [--since 'x'] pin",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    child.kill().expect("stop digest watch");
+    let output = child
+        .wait_with_output()
+        .expect("collect digest watch output");
+    assert!(
+        output.status.success() || output.status.code().is_none(),
+        "digest watch should terminate only because the test stopped it: {:?}",
+        output.status
+    );
+    let raw = stdout(&output);
+    assert!(
+        !raw.contains(&first.message.id),
+        "a watch started after catchup replayed the old message: {raw}"
+    );
+    assert!(
+        raw.contains("tax: 1 new"),
+        "live digest ring missing: {raw}"
+    );
+    assert_eq!(raw.matches("［--since 'x'］").count(), 1, "{raw}");
+    assert!(
+        !raw.contains("[--since 'x']"),
+        "attacker fencepost survived: {raw}"
+    );
+    let mut fencepost = second.message.id.clone();
+    fencepost.pop();
+    fencepost.push('!');
+    let true_suffix = format!("[--since '{fencepost}']\n");
+    let rightmost = raw.rfind("[--since ").expect("true since suffix");
+    assert_eq!(&raw[rightmost..], true_suffix);
 }
 
 #[test]
@@ -4484,11 +4664,57 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     assert!(!fenced.mail_root.join("archive").exists());
     assert!(!fenced.mail_root.join("dest/watch.heartbeat").exists());
 
+    // Catchup is the new consuming writer and must hit the same migration
+    // fence before it can create a room, cursor, or move any mail.
+    let refused_catchup = fenced.run(&["catchup", "--mail", "--json"]);
+    assert_migration_refused(&refused_catchup);
+    assert!(refused_catchup.stdout.is_empty());
+    assert!(!fenced.mail_root.join("dest/cursors.json").exists());
+
     let inbox = fenced.run(&["inbox", "--room", "dest"]);
     assert_success(&inbox);
-    assert_success(&fenced.run(&["schema"]));
+    let channels = fenced.run(&["channels"]);
+    assert_success(&channels);
+    let schema_output = fenced.run(&["schema"]);
+    assert_success(&schema_output);
+    let schema: SchemaOutput = from_stdout(&schema_output);
     let chat = fenced.run_in(&["chat", "tax", "--peek"], None, &fenced.home.join("dest"));
     assert_success(&chat);
+
+    // Search is added by the parallel B5 lane. Keep this matrix compiling on
+    // the B7 base while making the assertion live as soon as that command is
+    // present: an admitted search must succeed and leave the fenced store
+    // untouched just like channels/inbox.
+    let mut search_before = fs::read_dir(&fenced.mail_root)
+        .expect("fenced root")
+        .map(|entry| entry.expect("fenced entry").file_name())
+        .collect::<Vec<_>>();
+    search_before.sort();
+    let search = fenced.run_in(
+        &["search", "fixture", "--mail", "--json"],
+        None,
+        &fenced.home.join("dest"),
+    );
+    let search_unavailable = search.status.code() == Some(2)
+        && stderr(&search).contains("unrecognized subcommand 'search'");
+    if search_unavailable {
+        // The current B7 base predates B5; the future command is verified by
+        // this same branch after B5 is integrated.
+        assert_eq!(search.status.code(), Some(2));
+        assert!(stderr(&search).contains("unrecognized subcommand 'search'"));
+        assert!(!schema
+            .commands
+            .iter()
+            .any(|command| command.name == "search"));
+    } else {
+        assert_success(&search);
+    }
+    let mut search_after = fs::read_dir(&fenced.mail_root)
+        .expect("fenced root after search")
+        .map(|entry| entry.expect("fenced entry").file_name())
+        .collect::<Vec<_>>();
+    search_after.sort();
+    assert_eq!(search_before, search_after, "search changed a fenced store");
     assert!(
         stdout(&chat).contains("READ THIS FRAMING FIRST"),
         "non-empty text chat must render its read framing"
