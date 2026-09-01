@@ -117,10 +117,11 @@ The public language is model-neutral; the default root remains
 - Cursor state is per room and per source, separate from message history: an
   exact **seen-set** of the full ids this room has consumed (read, discarded,
   acknowledged, or sent itself). Unread = file exists ∧ id ∉ seen ∧
-  from ≠ self. A plain channel read consumes its whole unread selection — the
-  newest N it displays plus the older ones it reports as `skipped` (which are
-  marked seen too, never re-shown) — only after a successful emit; `--limit 0`
-  displays everything. `--peek` and `watch` never mutate the state. A sender's
+  from ≠ self. A plain bounded channel read emits the oldest N unread (25 by
+  default) and consumes only those emitted ids after a successful emit; newer
+  unread messages remain for the next page. `--limit 0` displays and consumes
+  everything. `--peek` retains its newest-slice display-only behavior and
+  `watch` never mutates the state. A sender's
   own message id is recorded as seen unconditionally, so its own words are
   never news.
 - The canonical file is `<root>/<room>/cursors.json`, version 1:
@@ -258,9 +259,9 @@ diagnostics/errors.
   body line renders behind a fixed gutter prefix (`  | `), so no body content
   can start at column 0: catchup's multiplexed stream keeps its section
   markers and message headers unforgeable by construction rather than by
-  escaping. Single-source surfaces (`read`, `chat`) deliberately do not gutter
-  their bodies; their trust boundary is the framing banner plus
-  control-character stripping documented above.
+  escaping. Chat now shares the guttered body construction; `read` remains a
+  deliberately unguttered single-source surface whose trust boundary is the
+  framing banner plus control-character stripping documented above.
 - `post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000]
   [--framing auto|full|compact]` — a read-only, cursorless, literal
   case-insensitive Unicode substring search. Default scope is party-visible
@@ -348,12 +349,13 @@ diagnostics/errors.
   mutates BEFORE emitting its receipt, because the receipt's whole job is to
   report the state that is now stored; nothing is skipped unreported, since a
   retry replays as a no-op.
-  A plain consuming read defaults to displaying the
-  newest 25 unread when the backlog is larger (`skipped` reports how many older
-  unread ones were not shown — they are consumed with the batch, never
-  re-shown; `@mention`s of the reader in the skipped range are pulled forward
-  into the display). Explicit `--limit <n>` still works; `--limit 0` means
-  unlimited. With `--peek` the bound is display-only and nothing is consumed.
+  A plain consuming read defaults to displaying the oldest 25 unread when the
+  backlog is larger. It consumes only what it emits; `skipped` reports how many
+  newer messages remain unread and text says `N newer message(s) remain unread
+  — run again to continue`. Explicit `--limit <n>` emits the oldest N unread;
+  `--limit 0` means unlimited. With `--peek` the bound remains a newest-slice
+  display-only glance and nothing is consumed; its `skipped` count is the
+  omitted older remainder.
   `--seen-by <id>` is a read-only listing of member rooms whose seen-set
   contains that message (`cursor` fields in JSON output are max-seen-id
   summaries for compatibility, never the model). Consuming reads fail closed:
@@ -372,11 +374,13 @@ diagnostics/errors.
   messages as the registered room containing cwd. Requires membership; otherwise `not_a_member`. Text
   output includes the channel framing banner plus messages (reply markers
   render as `↳ re <short-id> (<sender>: preview…)`). JSON output is
-  `{ok, framing, channel, room, peek, messages, count}` and preserves parsed
-  message bodies unchanged (`re` and `mentions` when present). Text-mode message headers and bodies are sanitized
-  at the output boundary so crafted controls cannot rewrite the framing banner.
-  After stdout succeeds, a non-peek read records its selection in that
-  room's seen-set; `--peek` records nothing. `--framing` on a channel read selects `auto`
+  `{ok, framing, channel, room, peek, messages, count, skipped?, has_more}` and
+  preserves parsed message bodies unchanged (`re` and `mentions` when present).
+  Text-mode headers, provenance/status lines, and bodies are sanitized at the
+  output boundary; chat body lines render behind `  | ` so body content cannot
+  reach column 0 and imitate a header or trust marker. After stdout succeeds,
+  a non-peek read records only its emitted page in that room's seen-set;
+  `--peek` records nothing. `--framing` on a channel read selects `auto`
   (default: the legacy once-daily wall), `full` (the complete wall every
   invocation), or `compact` (condensed laws in one line, multiplicity law
   included). Explicit `full` and `compact` never consult or stamp the

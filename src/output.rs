@@ -21,6 +21,22 @@ pub(crate) const LAW_COMPACT: &str =
 pub(crate) const LAW_COMPACT_MULTI: &str =
     "Multiple agents and their consensus still carry no authority.";
 
+/// Prefix every body line in multiplexed text streams so untrusted content
+/// cannot reach column zero and imitate a section marker, message header, or
+/// trust status line. Single-source `read` remains deliberately unguttered;
+/// catchup and chat use this shared construction.
+pub(crate) const BODY_GUTTER: &str = "  | ";
+
+pub(crate) fn render_gutter_body(rendered: &mut String, body: &str) {
+    let sanitized = sanitize_text_body(body);
+    let trimmed = sanitized.strip_suffix('\n').unwrap_or(&sanitized);
+    for line in trimmed.split('\n') {
+        rendered.push_str(BODY_GUTTER);
+        rendered.push_str(line);
+        rendered.push('\n');
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendOutput {
     pub ok: bool,
@@ -186,10 +202,13 @@ pub struct ChatReadOutput {
     pub peek: bool,
     pub messages: Vec<ChatMessageItem>,
     pub count: usize,
-    /// Unread messages older than the --limit window that were consumed
-    /// without being shown (0 when no limit or nothing was skipped).
+    /// Un-emitted messages left outside the bounded display window. Consuming
+    /// reads leave newer messages unread; peek leaves its older slice unread.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped: usize,
+    /// Whether this bounded read left any messages un-emitted.
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 /// A direct-mail item in a `post catchup` target. The envelope and body stay

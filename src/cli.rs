@@ -227,9 +227,9 @@ pub(crate) struct SendArgs {
        ...prose belongs on stdin or in a file. A body on argv is parsed by your shell first:\n       \
        ...backticks and $(...) inside double quotes execute and splice their output into the message.\n       \
        ...add [--anyway] to send past unread messages, [--re ID] to reply, [--oversize] to exceed the size cap\n       \
-     post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default last 25 unread)\n       \
+     post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default oldest 25 unread)\n       \
      post chat <CHANNEL> --peek [--framing MODE]     (read without advancing)\n       \
-     post chat <CHANNEL> --limit <N> [--framing MODE] (last N unread; --limit 0 = all)\n       \
+     post chat <CHANNEL> --limit <N> [--framing MODE] (oldest N unread; --limit 0 = all)\n       \
      post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
      post chat <CHANNEL> --since <ID> [--framing MODE] (messages after ID, cursor untouched)\n       \
      post chat <CHANNEL> --discard                   (mark all unread seen without printing)\n       \
@@ -324,9 +324,9 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["peek", "send", "join", "seen_by"])]
     pub discard: bool,
 
-    /// Bounded catch-up: show only the last N unread (default 25 when omitted).
-    /// `--limit 0` means unlimited. Mentions of the reading room in the
-    /// skipped range are never silently dropped.
+    /// Bounded catch-up: consume only the oldest N unread (default 25 when
+    /// omitted). `--limit 0` means unlimited. Use `--peek` for the newest-slice
+    /// glance without advancing the cursor.
     #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"])]
     pub limit: Option<usize>,
 

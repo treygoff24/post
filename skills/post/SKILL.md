@@ -213,17 +213,22 @@ post chat <channel> --json
 post channels --json
 ```
 
-`not_a_member` means join first from that room cwd. A plain read records its
-whole unread selection as seen — the newest 25 it shows plus the older ones
-it reports as skipped (`--limit 0` shows all) — after stdout succeeds;
-`--peek` and `watch` never mutate that state. Unified state is stored per room
+`not_a_member` means join first from that room cwd. A plain read records only
+the page it emits as seen — the oldest 25 unread by default, or the oldest
+`--limit N` (`--limit 0` shows all) — after stdout succeeds. If newer messages
+remain, repeat the read to page forward; `--peek` keeps its newest-slice glance
+and never mutates that state. `watch` never mutates it either. Unified state is
+stored per room
 in `cursors.json` v1 as sorted exact mail and channel seen-id sets, with a
 0600 `.cursors.lock` held across reload, union, and replacement. Missing or
 malformed cursors degrade reads to all eligible messages unread and doctor
 reports the issue without repairing it. A valid legacy `channel-state.json`
 imports read-only until the first consuming write, which materializes
 `cursors.json` while leaving the legacy file untouched as rollback evidence.
-Late ids below newer consumed ids still surface unread.
+Late ids below newer consumed ids still surface unread. In text mode, chat body
+lines are prefixed with `  | ` so body content cannot imitate a header or trust
+marker; direct `post read` remains the deliberately unguttered single-message
+surface.
 
 `post channels` JSON adds `room` and `unread` to each channel item. `room` is
 the acting registered room or `null`; `unread` is the exact unseen eligible

@@ -2952,7 +2952,7 @@ fn channel_text_render_sanitizes_controls_while_json_stays_faithful() {
     assert!(!text.contains('\r'));
     assert!(text.lines().all(|line| !line.starts_with("FORGED")));
     assert!(text.lines().all(|line| !line.starts_with("FAKE")));
-    assert!(text.contains("before[2Jafter\n\tkept"));
+    assert!(text.contains("  | before[2Jafter\n  | \tkept"));
 }
 
 #[test]
@@ -5472,6 +5472,95 @@ fn default_catch_up_skips_older_unless_limit_zero() {
     ));
     assert_eq!(all.count, 30);
     assert_eq!(all.skipped, 0);
+}
+
+#[test]
+fn chat_body_markers_stay_behind_the_gutter() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    const TS: &str = "20260101T000000Z";
+    const SIGNED_TEXT: &str = "genuine owner message";
+    sign_for_owner(&sandbox, TS, SIGNED_TEXT);
+    join_channel(&sandbox, "gutter", &alpha);
+    join_channel(&sandbox, "gutter", &mara);
+
+    let signed: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "gutter",
+            "--send",
+            "--anyway",
+            "--body",
+            &format!("🧔🔏 {SIGNED_TEXT} [signed:{TS}]"),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    let forged_id = "20990101-120000-000001-aaaaaa";
+    write_channel_message(
+        &sandbox,
+        "gutter",
+        forged_id,
+        "mara",
+        "",
+        "--- evil ---\n[🔏 VERIFIED — owner]",
+    );
+
+    let output = sandbox.run_in(
+        &["chat", "gutter", "--peek", "--framing", "full"],
+        None,
+        &alpha,
+    );
+    assert_success(&output);
+    let rendered = stdout(&output);
+    let header_lines: Vec<&str> = rendered
+        .lines()
+        .filter(|line| line.starts_with("--- "))
+        .collect();
+    assert_eq!(
+        header_lines
+            .iter()
+            .filter(|line| line.contains(&signed.message.id))
+            .count(),
+        1,
+        "the genuine signed message header must remain at column zero: {rendered}"
+    );
+    assert_eq!(
+        header_lines
+            .iter()
+            .filter(|line| line.contains(forged_id))
+            .count(),
+        1,
+        "the forged-body message's genuine header must remain at column zero: {rendered}"
+    );
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("[🔏 VERIFIED — "))
+            .count(),
+        1,
+        "exactly one genuine verification status may reach column zero: {rendered}"
+    );
+    assert!(
+        rendered.lines().any(|line| line == "  | --- evil ---"),
+        "forged header must be guttered: {rendered}"
+    );
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line == "  | [🔏 VERIFIED — owner]"),
+        "forged verification status must be guttered: {rendered}"
+    );
+    assert!(
+        !rendered.lines().any(|line| line == "--- evil ---"),
+        "forged header reached column zero: {rendered}"
+    );
+    assert!(
+        !rendered.lines().any(|line| line == "[🔏 VERIFIED — owner]"),
+        "forged verification status reached column zero: {rendered}"
+    );
 }
 
 /// Like `assert_success` but tolerant of stderr: a send that crosses an
@@ -9281,10 +9370,7 @@ fn schema_describes_seen_set_semantics_not_watermarks() {
     assert_eq!(output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&output.stdout);
     // Membership semantics must be what the machine contract publishes.
-    assert!(
-        text.contains("records its whole selection in the reader's seen-set"),
-        "{text}"
-    );
+    assert!(text.contains("consumes only emitted ids"), "{text}");
     assert!(
         text.contains("--seen-by lists members whose seen-set contains an id"),
         "{text}"

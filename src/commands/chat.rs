@@ -137,12 +137,9 @@ fn read(
     } else {
         read_batch(context, &room, &args.name)?
     };
-    // The full pre-trim batch ids are the exact consumption set: the union
-    // below records precisely what this call selected, so a message that
-    // arrives between selection and the post-emit mutation (a bridged late
-    // arrival) is NOT silently swallowed — it stays unseen and surfaces next
-    // read.
-    let batch_ids: Vec<String> = if cursorless {
+    // Keep the full unread selection for --discard: it deliberately consumes
+    // everything, independent of the display bound used by ordinary reads.
+    let selected_ids: Vec<String> = if cursorless {
         Vec::new()
     } else {
         batch
@@ -154,18 +151,37 @@ fn read(
     // trimming is a display concern; applying it first undercounted receipts
     // when unread > 25 while still consuming everything.
     if args.discard {
-        return discard(context, &args.name, &room, batch_ids, json_output, pretty);
+        return discard(
+            context,
+            &args.name,
+            &room,
+            selected_ids,
+            json_output,
+            pretty,
+        );
     }
-    // Default bounded catch-up: plain cursor reads show the newest 25 unread
-    // when the backlog is larger. --limit 0 means unlimited; explicit --limit N
-    // still works. Mentions of the reading room in the skipped range are
-    // never silently dropped — they are pulled forward into the display.
+    // Consuming reads page from the oldest unread message forward, so the
+    // cursor can advance only through ids that were actually emitted. Peek
+    // keeps its newest-slice glance behavior and remains cursorless.
     let skipped = if cursorless {
         0
+    } else if args.peek {
+        apply_peek_catch_up(&mut batch, args.limit, &room)?
     } else {
-        apply_catch_up(&mut batch, args.limit, &room)?
+        apply_consuming_catch_up(&mut batch, args.limit)
     };
-    // Emitting into /dev/null still consumes the batch, so the read is
+    // The consuming delta is the post-bound batch: no bounded read may mark an
+    // unseen message that it did not emit. A message that arrives after this
+    // selection is likewise left for the next read.
+    let batch_ids: Vec<String> = if cursorless || args.peek {
+        Vec::new()
+    } else {
+        batch
+            .iter()
+            .map(|(message, _)| message.id.clone())
+            .collect()
+    };
+    // Emitting into /dev/null still consumes the emitted batch, so the read is
     // refused before anything is emitted: nothing is written and nothing is
     // marked seen, so nothing is lost.
     if !args.peek && !batch_ids.is_empty() && output::stdout_is_null_device() {
@@ -205,6 +221,7 @@ fn read(
                 peek: args.peek || cursorless,
                 count: batch.len(),
                 skipped,
+                has_more: skipped > 0,
                 messages: batch
                     .into_iter()
                     .map(|(message, body)| {
@@ -232,20 +249,14 @@ fn read(
             owner.as_ref(),
         );
         if skipped > 0 {
-            let tail = if args.peek {
-                "cursor untouched".to_owned()
-            } else {
+            let notice = if args.peek {
                 format!(
-                    "cursor advances past them; use --limit 0 for all, or `post chat {} --history` to revisit",
-                    crate::mailbox::shell_quote(&args.name)
+                    "post: skipped {skipped} older messages (use --limit 0 for all; cursor untouched)\n"
                 )
+            } else {
+                format!("post: {skipped} newer message(s) remain unread — run again to continue\n")
             };
-            text.insert_str(
-                0,
-                &format!(
-                    "post: skipped {skipped} older messages (use --limit 0 for all; {tail})\n"
-                ),
-            );
+            text.insert_str(0, &notice);
         }
         text
     };
@@ -272,10 +283,10 @@ fn read(
 
 const DEFAULT_CATCH_UP: usize = 25;
 
-/// Apply default/explicit catch-up limit, pulling @mentions of `room` out of
-/// the skipped range so they are never silently dropped. Returns how many
-/// older messages were neither shown nor rescued.
-fn apply_catch_up(
+/// Apply the display-only newest-slice bound used by `--peek`. Mentions in the
+/// omitted older range remain rescued here for compatibility with peek's
+/// existing glance behavior; no cursor mutation can consume them.
+fn apply_peek_catch_up(
     batch: &mut Vec<(ChannelMessage, String)>,
     limit: Option<usize>,
     room: &str,
@@ -303,6 +314,26 @@ fn apply_catch_up(
     display.append(batch);
     *batch = display;
     Ok(skipped)
+}
+
+/// Apply the consuming read bound from the oldest unread message forward.
+/// Returns how many newer messages remain unread after this page. The caller
+/// advances only through the retained, emitted ids.
+fn apply_consuming_catch_up(
+    batch: &mut Vec<(ChannelMessage, String)>,
+    limit: Option<usize>,
+) -> usize {
+    let n = match limit {
+        None => DEFAULT_CATCH_UP,
+        Some(0) => return 0,
+        Some(n) => n,
+    };
+    if batch.len() <= n {
+        return 0;
+    }
+    let skipped = batch.len() - n;
+    batch.truncate(n);
+    skipped
 }
 
 fn filter_grep(
@@ -839,10 +870,7 @@ fn render_text(
                 output::sanitize_text_header(address)
             ));
         }
-        out.push_str(&output::sanitize_text_body(body));
-        if !body.ends_with('\n') {
-            out.push('\n');
-        }
+        output::render_gutter_body(&mut out, body);
         match signed_status(owner, message, body, storage_channel) {
             Some(SignedStatus::Verified { ts, age_minutes }) => {
                 // A Verified status implies an owner resolved (signed_status
@@ -1418,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_trims_to_newest_and_reports_skip_while_last_id_covers_whole_batch() {
+    fn peek_catch_up_trims_to_newest_and_reports_older_slice() {
         let (root, context) = chat_context("limit");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "oldest");
@@ -1426,18 +1454,11 @@ mod tests {
         seed_message(&dir, ID3, "beta", "newest");
 
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        // read() computes the cursor target from the FULL batch before the trim.
-        let last_id = batch.last().map(|(m, _)| m.id.clone());
-        let skipped = apply_catch_up(&mut batch, Some(2), "alpha").expect("limit");
+        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha").expect("limit");
         assert_eq!(skipped, 1);
         assert_eq!(batch.len(), 2);
-        assert_eq!(batch[0].0.id, ID2, "oldest must be the one dropped");
+        assert_eq!(batch[0].0.id, ID2, "peek keeps the newest slice");
         assert_eq!(batch[1].0.id, ID3);
-        assert_eq!(
-            last_id.as_deref(),
-            Some(ID3),
-            "cursor target passes the WHOLE batch, including the skipped tail"
-        );
         trash_test_root(&root);
     }
 
@@ -1445,12 +1466,12 @@ mod tests {
     fn catch_up_larger_than_batch_is_a_plain_read() {
         let mut batch = vec![];
         assert_eq!(
-            apply_catch_up(&mut batch, Some(5), "alpha").expect("empty"),
+            apply_peek_catch_up(&mut batch, Some(5), "alpha").expect("empty"),
             0
         );
         // Default (None) on an empty batch is also a no-op.
         assert_eq!(
-            apply_catch_up(&mut batch, None, "alpha").expect("default"),
+            apply_peek_catch_up(&mut batch, None, "alpha").expect("default"),
             0
         );
     }
@@ -1461,9 +1482,11 @@ mod tests {
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "only");
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        let skipped = apply_catch_up(&mut batch, Some(0), "alpha").expect("unlimited");
+        let skipped = apply_peek_catch_up(&mut batch, Some(0), "alpha").expect("unlimited");
         assert_eq!(skipped, 0);
         assert_eq!(batch.len(), 1, "limit 0 must keep every message");
+        assert_eq!(apply_consuming_catch_up(&mut batch, Some(0)), 0);
+        assert_eq!(batch.len(), 1, "consuming limit 0 must keep every message");
         trash_test_root(&root);
     }
 
@@ -1481,7 +1504,7 @@ mod tests {
         seed_message(&dir, ID2, "beta", "middle");
         seed_message(&dir, ID3, "beta", "newest");
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        let skipped = apply_catch_up(&mut batch, Some(2), "alpha").expect("catch-up");
+        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha").expect("catch-up");
         assert_eq!(skipped, 0, "the mention must not count as silently skipped");
         assert_eq!(batch.len(), 3);
         assert_eq!(batch[0].0.id, ID1);

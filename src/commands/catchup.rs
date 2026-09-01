@@ -483,7 +483,7 @@ fn render_mail_item(rendered: &mut String, item: &CatchupMailItem) {
             output::sanitize_text_header(address)
         ));
     }
-    render_gutter_body(rendered, &item.body);
+    output::render_gutter_body(rendered, &item.body);
 }
 
 fn render_channel_item(rendered: &mut String, item: &ChatMessageItem) {
@@ -524,24 +524,7 @@ fn render_channel_item(rendered: &mut String, item: &ChatMessageItem) {
             output::sanitize_text_header(address)
         ));
     }
-    render_gutter_body(rendered, &item.body);
-}
-
-/// COORD-B2-1 (Option B ruling): every body line in catchup's multiplexed
-/// stream sits behind this gutter, so untrusted body content can never reach
-/// column 0 and forge a `=== ... ===` section marker or `--- ... ---` message
-/// header. Single-source surfaces (read, chat) deliberately do not gutter;
-/// CONTRACT.md records the divergence.
-const BODY_GUTTER: &str = "  | ";
-
-fn render_gutter_body(rendered: &mut String, body: &str) {
-    let sanitized = output::sanitize_text_body(body);
-    let trimmed = sanitized.strip_suffix('\n').unwrap_or(&sanitized);
-    for line in trimmed.split('\n') {
-        rendered.push_str(BODY_GUTTER);
-        rendered.push_str(line);
-        rendered.push('\n');
-    }
+    output::render_gutter_body(rendered, &item.body);
 }
 
 impl CatchupTarget {
