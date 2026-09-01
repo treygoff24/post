@@ -6,6 +6,10 @@
 # smoke mints itself, and the full gate passes.
 set -eu
 cd "$(dirname "$0")/.."
+if grep -nE '^[[:space:]]*/[^[:space:]]*/cp[[:space:]]' scripts/smoke-installed.sh >&2; then
+    printf '%s\n' 'acceptance: smoke helper must resolve cp from PATH' >&2
+    exit 1
+fi
 cargo build --release
 bash scripts/smoke-installed.sh target/release/post
 bash scripts/gate.sh

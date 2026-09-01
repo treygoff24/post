@@ -215,7 +215,7 @@ ids = [message["id"] for message in targets[0]["messages"]] if targets else []
 if data["count"] != 1 or ids != [expected_id]:
     raise SystemExit(f"backlog catchup mismatch: {data}")
 PY
-/usr/bin/cp "$BASE/mail/gamma/cursors.json" "$BASE/bell-cursor-before-ring"
+cp "$BASE/mail/gamma/cursors.json" "$BASE/bell-cursor-before-ring"
 BELL_SECOND=$(cd "$BASE/alpha" && "$BIN" chat "$WATCH_CHANNEL" --send --anyway --body "bell after catchup" --json)
 BELL_SECOND_ID=$(printf '%s' "$BELL_SECOND" | python3 -c 'import json,sys; print(json.load(sys.stdin)["message"]["id"])')
 wait_for_watch_id "$BELL_SECOND_ID"
