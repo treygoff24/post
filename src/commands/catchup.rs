@@ -627,17 +627,13 @@ mod tests {
         let snapshot = Snapshot::load(&context, "alpha");
         let (_selected, selected_ids) =
             collect_channel("alpha", "tax", &paths, &snapshot, None).expect("collect");
+        let delta = Delta {
+            mail_moves: Vec::new(),
+            channel_seen: vec![("tax".to_owned(), selected_ids)],
+        };
         write_message(late_id);
 
-        cursor_state::consume(
-            &context,
-            "alpha",
-            Delta {
-                mail_moves: Vec::new(),
-                channel_seen: vec![("tax".to_owned(), selected_ids)],
-            },
-        )
-        .expect("consume fixed delta");
+        cursor_state::consume(&context, "alpha", delta).expect("consume fixed delta");
         let persisted: serde_json::Value = serde_json::from_slice(
             &fs::read(root.join("alpha/cursors.json")).expect("cursor state"),
         )
