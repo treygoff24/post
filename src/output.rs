@@ -186,10 +186,13 @@ pub struct ChatReadOutput {
     pub peek: bool,
     pub messages: Vec<ChatMessageItem>,
     pub count: usize,
-    /// Unread messages older than the --limit window that were consumed
-    /// without being shown (0 when no limit or nothing was skipped).
+    /// Un-emitted messages left outside the bounded display window. Consuming
+    /// reads leave newer messages unread; peek leaves its older slice unread.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped: usize,
+    /// Whether this bounded read left any messages un-emitted.
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 /// A direct-mail item in a `post catchup` target. The envelope and body stay

@@ -244,6 +244,136 @@ fn chat_late_arrival_below_seen_ids_stays_unread() {
 }
 
 #[test]
+fn bounded_chat_consumes_oldest_pages_and_leaves_newer_unread() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "paged", &alpha);
+    join_channel(&sandbox, "paged", &beta);
+    assert_success(&sandbox.run_in(&["chat", "paged", "--discard", "--json"], None, &beta));
+
+    let ids = [
+        "20990101-000000-000001-aaaa01",
+        "20990101-000000-000002-aaaa02",
+        "20990101-000000-000003-aaaa03",
+        "20990101-000000-000004-aaaa04",
+        "20990101-000000-000005-aaaa05",
+    ];
+    for (index, id) in ids.iter().enumerate() {
+        write_channel_message(
+            &sandbox,
+            "paged",
+            id,
+            "alpha",
+            &format!("subject-{index}"),
+            &format!("body-{index}"),
+        );
+    }
+
+    let first_output = sandbox.run_in(&["chat", "paged", "--limit", "2", "--json"], None, &beta);
+    assert_success(&first_output);
+    let first: ChatReadOutput = from_stdout(&first_output);
+    assert_eq!(
+        first
+            .messages
+            .iter()
+            .map(|message| message.message.id.as_str())
+            .collect::<Vec<_>>(),
+        ids[..2],
+        "the first bounded page must emit the two oldest unread messages"
+    );
+    assert_eq!(first.messages[0].message.subject, "subject-0");
+    assert_eq!(first.messages[1].message.subject, "subject-1");
+    assert_eq!(first.skipped, 3);
+    let first_json: serde_json::Value = from_stdout(&first_output);
+    assert_eq!(first_json["has_more"], true);
+
+    let first_state = cursor(&sandbox, "beta");
+    let seen = first_state["channels"]["paged"]["seen"]
+        .as_array()
+        .expect("paged seen set");
+    assert!(seen.iter().any(|id| id == ids[0]));
+    assert!(seen.iter().any(|id| id == ids[1]));
+    assert!(ids[2..]
+        .iter()
+        .all(|id| !seen.iter().any(|seen_id| seen_id == id)));
+    let cursor_max = seen
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .max()
+        .expect("first page leaves a cursor");
+    assert_eq!(
+        cursor_max, ids[1],
+        "cursor must stop at the last emitted id"
+    );
+
+    let second_output = sandbox.run_in(&["chat", "paged", "--limit", "2", "--json"], None, &beta);
+    assert_success(&second_output);
+    let second: ChatReadOutput = from_stdout(&second_output);
+    assert_eq!(
+        second
+            .messages
+            .iter()
+            .map(|message| message.message.id.as_str())
+            .collect::<Vec<_>>(),
+        ids[2..4],
+        "the second page must continue with the next two unread messages"
+    );
+    assert_eq!(second.skipped, 1);
+    let second_json: serde_json::Value = from_stdout(&second_output);
+    assert_eq!(second_json["has_more"], true);
+
+    let third_output = sandbox.run_in(&["chat", "paged", "--limit", "2", "--json"], None, &beta);
+    assert_success(&third_output);
+    let third: ChatReadOutput = from_stdout(&third_output);
+    assert_eq!(third.messages.len(), 1);
+    assert_eq!(third.messages[0].message.id, ids[4]);
+    assert_eq!(third.skipped, 0);
+    let third_json: serde_json::Value = from_stdout(&third_output);
+    assert_eq!(third_json["has_more"], false);
+
+    let fourth_output = sandbox.run_in(&["chat", "paged", "--limit", "2", "--json"], None, &beta);
+    assert_success(&fourth_output);
+    let fourth: ChatReadOutput = from_stdout(&fourth_output);
+    assert_eq!(fourth.count, 0);
+    assert_eq!(fourth.skipped, 0);
+    let fourth_json: serde_json::Value = from_stdout(&fourth_output);
+    assert_eq!(fourth_json["has_more"], false);
+
+    join_channel(&sandbox, "paged-text", &alpha);
+    join_channel(&sandbox, "paged-text", &beta);
+    assert_success(&sandbox.run_in(&["chat", "paged-text", "--discard", "--json"], None, &beta));
+    write_channel_message(
+        &sandbox,
+        "paged-text",
+        "20990101-000000-000011-aaaa11",
+        "alpha",
+        "old-subject",
+        "old-body",
+    );
+    write_channel_message(
+        &sandbox,
+        "paged-text",
+        "20990101-000000-000012-aaaa12",
+        "alpha",
+        "new-subject",
+        "new-body",
+    );
+    let text_output = sandbox.run_in(
+        &["chat", "paged-text", "--limit", "1", "--framing", "compact"],
+        None,
+        &beta,
+    );
+    assert_success(&text_output);
+    let text = common::stdout(&text_output);
+    assert!(
+        text.contains("post: 1 newer message(s) remain unread — run again to continue\n"),
+        "bounded text read must report the newer remainder honestly: {text}"
+    );
+    assert!(text.contains("old-subject"));
+    assert!(!text.contains("new-subject"));
+}
+
+#[test]
 fn discard_through_and_seen_by_use_the_unified_cursor() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);

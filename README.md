@@ -315,13 +315,15 @@ post channels --pretty
 
 Only joined rooms can read or send; otherwise `not_a_member` exits 65 with a
 join-first fix. Only after a successful emit does a plain channel read record
-its whole unread selection as seen: the newest 25 it shows plus the older
-ones it reports as skipped (`--limit 0` shows all). Because unreadness is
-decided by seen-set membership rather than an ordering watermark, a message
-that arrives late with an id sorting below newer consumed ones (a bridged
-import) still surfaces on the next read. A room's own messages are excluded
-even if their best-effort seen-state update is absent. `--peek` and `watch`
-change nothing. Blocked routes cannot share a channel.
+the emitted page as seen: the oldest 25 unread by default, or the oldest
+`--limit N` (`--limit 0` shows all). When newer messages remain, the read
+reports them and a repeated invocation pages forward; `--peek` keeps its
+newest-slice glance and `watch` change nothing. Because unreadness is decided
+by seen-set membership rather than an ordering watermark, a message that
+arrives late with an id sorting below newer consumed ones (a bridged import)
+still surfaces on the next read. A room's own messages are excluded even if
+their best-effort seen-state update is absent. Blocked routes cannot share a
+channel.
 
 Cursor state is unified per-room state in `<root>/<room>/cursors.json` v1:
 sorted, duplicate-free exact seen-id sets for direct mail and each channel,
@@ -343,13 +345,13 @@ happen through them. Use them for scroll-back, polling UIs, and re-reading.
 `--history N --grep <pattern>` filters that window by case-insensitive Rust
 regex (invalid patterns are structured `invalid_argument` errors).
 
-Bounded catch-up (v0.4): a plain `post chat <chan>` defaults to the newest
-**25** unread when the backlog is larger, reports
-`skipped N older messages (use --limit 0 for all)`, and consumes the whole
-selected batch. Explicit `--limit N` still works; `--limit 0` means unlimited.
-Messages that `@mention` the reading room are never silently
-skipped: if they live in the skipped range they are pulled forward into the
-display.
+Bounded catch-up: a consuming plain `post chat <chan>` defaults to the oldest
+**25** unread when the backlog is larger and reports
+`N newer message(s) remain unread — run again to continue`; it consumes only
+the messages it emitted. Explicit `--limit N` emits the oldest N unread;
+`--limit 0` means unlimited. `--peek` remains a newest-slice glance and does
+not advance the cursor. A bounded JSON read keeps `skipped` as the number of
+un-emitted messages and adds `has_more`.
 
 Full catch-up and search (v0.8): `post catchup` is the complete consuming
 slice, while `post search` is a cursorless discovery view.
