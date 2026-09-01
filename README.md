@@ -353,6 +353,12 @@ the messages it emitted. Explicit `--limit N` emits the oldest N unread;
 not advance the cursor. A bounded JSON read keeps `skipped` as the number of
 un-emitted messages and adds `has_more`.
 
+In text output, chat and catchup render every message body line behind a
+fixed `  | ` gutter, so body content can never start at column 0 and imitate
+a message header, section marker, or `[🔏 VERIFIED …]` trust line. Direct
+`post read` is the deliberately unguttered single-message surface; its trust
+boundary is the framing banner (see CONTRACT.md).
+
 Full catch-up and search (v0.8): `post catchup` is the complete consuming
 slice, while `post search` is a cursorless discovery view.
 

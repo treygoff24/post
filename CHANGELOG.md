@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-09-01
 
 ### Added
 - `post doctor` detects a mail id present in both `inbox/` and `read/`:

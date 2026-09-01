@@ -112,8 +112,11 @@ Global flags:
 Channel ergonomics (v0.4):
 
 - Descriptions: `--join --description` sets norms (any member, 1 KiB cap).
-- Catch-up defaults to last 25 unread; `--limit 0` = all; @mentions of you are
-  never silently skipped.
+- Catch-up pages oldest-first: a consuming read emits the oldest 25 unread
+  (or `--limit N`) and marks seen only what it emitted — newer messages stay
+  unread; run again to continue (JSON carries `has_more`). `--limit 0` = all.
+  `--peek` is a newest-slice glance, cursorless, with @mentions of you pulled
+  forward so they are never silently hidden.
 - Crossed-send bounce: unseen ordinary messages from others refuse `--send`
   with `crossed_send` (+ last 10 missed); `--anyway` overrides. Direct mail is
   unaffected.

@@ -420,7 +420,11 @@ diagnostics/errors.
   `--fix` creates missing dirs/defaults only — never touches rules content,
   mail, channel history, membership, cursor state, or cursor locks. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
-  manual reconciliation. `rooms.json` may be an empty JSON object on a fresh
+  manual reconciliation, and a mail id present in both `inbox/` and `read/`:
+  identical content is `state.read_duplicate` (warning — an interrupted
+  consume left the inbox copy behind; remove it by hand), differing content is
+  `state.read_duplicate_mismatch` (error — reconcile by hand, delete nothing).
+  `rooms.json` may be an empty JSON object on a fresh
   mailbox: doctor reports it as an info-only `config.rooms_empty` check with a
   `post rooms add` suggestion and exits 0, so `doctor --fix && doctor` succeeds
   under `set -e` before the first room is registered. Malformed, non-object, or
