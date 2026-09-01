@@ -719,13 +719,53 @@ fn scan_mailbox_state(context: &Context, checks: &mut Vec<DoctorCheck>) {
                             "Restore a valid envelope/body separator or move the file aside by hand; nothing is deleted.",
                         )),
                         Ok(_) if !is_archive => {
-                            check_archive_copy(context, &mail_path, checks)
+                            check_archive_copy(context, &mail_path, checks);
+                            if dir.file_name().and_then(|name| name.to_str()) == Some("inbox") {
+                                check_read_duplicate(&mail_path, checks);
+                            }
                         }
                         Ok(_) => {}
                     }
                 }
             }
         }
+    }
+}
+
+/// An id present in both inbox/ and read/ is an interrupted or failed
+/// consume: `exclusive_move` hard-linked the mail into read/ but the inbox
+/// unlink never completed. The read-path error for this state points people
+/// at doctor, so doctor must actually see it. Detect-only, like the archive
+/// checks — resolution stays a human decision.
+fn check_read_duplicate(delivered: &Path, checks: &mut Vec<DoctorCheck>) {
+    let (Some(filename), Some(inbox_dir)) = (delivered.file_name(), delivered.parent()) else {
+        return;
+    };
+    let Some(room_dir) = inbox_dir.parent() else {
+        return;
+    };
+    let read_copy = room_dir.join("read").join(filename);
+    let Ok(read_bytes) = fs::read(&read_copy) else {
+        return; // no read/ copy is the healthy state
+    };
+    match fs::read(delivered) {
+        Ok(inbox_bytes) if inbox_bytes == read_bytes => checks.push(check(
+            "state.read_duplicate",
+            DoctorSeverity::Warning,
+            delivered,
+            "mail exists in both inbox/ and read/ with identical content — an interrupted consume left the inbox copy behind",
+            false,
+            "Remove the inbox copy by hand to complete the interrupted consume; the read/ copy is the surviving record.",
+        )),
+        Ok(_) => checks.push(check(
+            "state.read_duplicate_mismatch",
+            DoctorSeverity::Error,
+            delivered,
+            "mail exists in both inbox/ and read/ with differing content",
+            false,
+            "Inspect both copies and reconcile them by hand without deleting either one.",
+        )),
+        Err(_) => {}
     }
 }
 

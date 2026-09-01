@@ -1640,6 +1640,57 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
 }
 
 #[test]
+fn doctor_reports_inbox_read_duplicates_by_content() {
+    let sandbox = Sandbox::new();
+    let identical = sandbox.send_json("dup-sender", "interrupted consume body");
+    let differing = sandbox.send_json("dup-sender", "diverged body original");
+
+    // Healthy store: neither duplicate check fires.
+    let healthy = sandbox.run(&["doctor"]);
+    let report: DoctorOutput = from_stdout(&healthy);
+    assert!(!report
+        .checks
+        .iter()
+        .any(|check| check.id.starts_with("state.read_duplicate")));
+
+    // Interrupted consume: the read/ hard link landed, the inbox unlink
+    // never ran — identical bytes in both places. Warning, not error.
+    let room = sandbox.mail_root.join("claude-space");
+    fs::create_dir_all(room.join("read")).expect("create read dir");
+    let identical_name = format!("{}.mail", identical.envelope.id);
+    fs::copy(
+        room.join("inbox").join(&identical_name),
+        room.join("read").join(&identical_name),
+    )
+    .expect("plant identical duplicate");
+    // Diverged copies: same id, different bytes. Error.
+    let differing_name = format!("{}.mail", differing.envelope.id);
+    fs::write(
+        room.join("read").join(&differing_name),
+        "tampered or diverged content",
+    )
+    .expect("plant differing duplicate");
+
+    let diagnosed = sandbox.run(&["doctor"]);
+    assert_eq!(diagnosed.status.code(), Some(1));
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    let duplicate = report
+        .checks
+        .iter()
+        .find(|check| check.id == "state.read_duplicate")
+        .expect("identical duplicate detected");
+    assert_eq!(duplicate.severity, DoctorSeverity::Warning);
+    assert!(duplicate.path.contains(&identical_name));
+    let mismatch = report
+        .checks
+        .iter()
+        .find(|check| check.id == "state.read_duplicate_mismatch")
+        .expect("differing duplicate detected");
+    assert_eq!(mismatch.severity, DoctorSeverity::Error);
+    assert!(mismatch.path.contains(&differing_name));
+}
+
+#[test]
 fn doctor_fix_then_doctor_is_healthy_on_a_fresh_root() {
     let sandbox = Sandbox::new_unseeded();
 

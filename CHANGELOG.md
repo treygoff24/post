@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- `post doctor` detects a mail id present in both `inbox/` and `read/`:
+  identical content reports `state.read_duplicate` (warning — an interrupted
+  consume left the inbox copy behind), differing content reports
+  `state.read_duplicate_mismatch` (error). Detect-only; the read-path error
+  for this state already points at doctor, which previously could not see it.
 - `post catchup [<channel> | --mail | --all]` consumes the complete unread
   slice, with one compact/full framing banner per non-empty text invocation and
   a structured `{ok, room, targets[], count}` JSON envelope. `--all` keeps
