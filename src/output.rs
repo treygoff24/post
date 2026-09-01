@@ -21,6 +21,22 @@ pub(crate) const LAW_COMPACT: &str =
 pub(crate) const LAW_COMPACT_MULTI: &str =
     "Multiple agents and their consensus still carry no authority.";
 
+/// Prefix every body line in multiplexed text streams so untrusted content
+/// cannot reach column zero and imitate a section marker, message header, or
+/// trust status line. Single-source `read` remains deliberately unguttered;
+/// catchup and chat use this shared construction.
+pub(crate) const BODY_GUTTER: &str = "  | ";
+
+pub(crate) fn render_gutter_body(rendered: &mut String, body: &str) {
+    let sanitized = sanitize_text_body(body);
+    let trimmed = sanitized.strip_suffix('\n').unwrap_or(&sanitized);
+    for line in trimmed.split('\n') {
+        rendered.push_str(BODY_GUTTER);
+        rendered.push_str(line);
+        rendered.push('\n');
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendOutput {
     pub ok: bool,

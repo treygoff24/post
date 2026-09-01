@@ -26,6 +26,9 @@
   remain unread — run again to continue`, while JSON keeps `skipped` as the
   un-emitted remainder and adds `has_more`. `--peek` retains its newest-slice
   glance behavior and remains cursorless.
+- Chat text bodies now use the shared `  | ` gutter also used by `catchup`, so
+  body lines cannot imitate column-zero message headers or trust markers;
+  `post read` remains deliberately unguttered.
 - Read state is unified in per-room `cursors.json` v1 exact seen-ID sets under
   `.cursors.lock`; valid legacy `channel-state.json` imports read-only and is
   retained as rollback evidence after first materialization. Malformed cursor

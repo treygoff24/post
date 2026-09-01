@@ -870,10 +870,7 @@ fn render_text(
                 output::sanitize_text_header(address)
             ));
         }
-        out.push_str(&output::sanitize_text_body(body));
-        if !body.ends_with('\n') {
-            out.push('\n');
-        }
+        output::render_gutter_body(&mut out, body);
         match signed_status(owner, message, body, storage_channel) {
             Some(SignedStatus::Verified { ts, age_minutes }) => {
                 // A Verified status implies an owner resolved (signed_status

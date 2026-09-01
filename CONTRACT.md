@@ -259,9 +259,9 @@ diagnostics/errors.
   body line renders behind a fixed gutter prefix (`  | `), so no body content
   can start at column 0: catchup's multiplexed stream keeps its section
   markers and message headers unforgeable by construction rather than by
-  escaping. Single-source surfaces (`read`, `chat`) deliberately do not gutter
-  their bodies; their trust boundary is the framing banner plus
-  control-character stripping documented above.
+  escaping. Chat now shares the guttered body construction; `read` remains a
+  deliberately unguttered single-source surface whose trust boundary is the
+  framing banner plus control-character stripping documented above.
 - `post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000]
   [--framing auto|full|compact]` — a read-only, cursorless, literal
   case-insensitive Unicode substring search. Default scope is party-visible

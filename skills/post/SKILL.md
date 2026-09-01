@@ -225,7 +225,10 @@ malformed cursors degrade reads to all eligible messages unread and doctor
 reports the issue without repairing it. A valid legacy `channel-state.json`
 imports read-only until the first consuming write, which materializes
 `cursors.json` while leaving the legacy file untouched as rollback evidence.
-Late ids below newer consumed ids still surface unread.
+Late ids below newer consumed ids still surface unread. In text mode, chat body
+lines are prefixed with `  | ` so body content cannot imitate a header or trust
+marker; direct `post read` remains the deliberately unguttered single-message
+surface.
 
 `post channels` JSON adds `room` and `unread` to each channel item. `room` is
 the acting registered room or `null`; `unread` is the exact unseen eligible
