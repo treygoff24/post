@@ -1,0 +1,14 @@
+workspace: /home/trey-agent/Code/post (git, from --cwd)
+delegate run omp completed in 2m39s
+alias: omp-6
+status: succeeded
+source: /home/trey-agent/Code/post
+execution: /tmp/delegate-safe-7d7w3omt/wt
+isolation: worktree temporary
+safe workspace method: git-worktree
+warning: omp reasoning effort was validated against a harness-wide enum; model-specific levels are partial evidence.
+snapshot: delegate --cwd /home/trey-agent/Code/post snapshot omp-6
+completion report: delegate --cwd /home/trey-agent/Code/post run-output omp-6 --completion-report
+completion report source: child
+inspect: git -C /tmp/delegate-safe-7d7w3omt/wt status --short
+review diff: git -C /tmp/delegate-safe-7d7w3omt/wt diff --stat HEAD

@@ -1,0 +1,10 @@
+workspace: /home/trey-agent/Code/post (git, from cwd)
+delegate run codex completed in 13m21s
+alias: codex-14
+status: succeeded
+source: /home/trey-agent/Code/post
+execution: /home/trey-agent/Code/post
+isolation: none
+snapshot: delegate --cwd /home/trey-agent/Code/post snapshot codex-14
+completion report: delegate --cwd /home/trey-agent/Code/post run-output codex-14 --completion-report
+completion report source: child
