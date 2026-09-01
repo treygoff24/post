@@ -2901,7 +2901,7 @@ fn channel_text_render_sanitizes_controls_while_json_stays_faithful() {
     assert!(!text.contains('\r'));
     assert!(text.lines().all(|line| !line.starts_with("FORGED")));
     assert!(text.lines().all(|line| !line.starts_with("FAKE")));
-    assert!(text.contains("before[2Jafter\n\tkept"));
+    assert!(text.contains("  | before[2Jafter\n  | \tkept"));
 }
 
 #[test]
@@ -9319,10 +9319,7 @@ fn schema_describes_seen_set_semantics_not_watermarks() {
     assert_eq!(output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&output.stdout);
     // Membership semantics must be what the machine contract publishes.
-    assert!(
-        text.contains("records its whole selection in the reader's seen-set"),
-        "{text}"
-    );
+    assert!(text.contains("consumes only emitted ids"), "{text}");
     assert!(
         text.contains("--seen-by lists members whose seen-set contains an id"),
         "{text}"
