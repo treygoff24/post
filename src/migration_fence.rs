@@ -496,6 +496,7 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
             command: Some(crate::cli::ProfileCommand::Set(_) | crate::cli::ProfileCommand::Clear),
         })
         | Command::Catchup(_) => true,
+        Command::Search(_) => false,
         Command::Read(args) => !args.peek,
         Command::Chat(args) => {
             args.join
@@ -573,6 +574,7 @@ mod tests {
             &["post", "profile", "show"],
             &["post", "owner", "show"],
             &["post", "watch", "--snapshot"],
+            &["post", "search", "needle"],
             &["post", "who"],
         ] {
             assert!(!classify_write(&parse(args)), "read-only: {args:?}");

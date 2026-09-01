@@ -8,6 +8,7 @@ mod profile;
 mod read;
 mod rooms;
 mod schema;
+mod search;
 mod send;
 pub mod watch;
 mod who;
@@ -32,8 +33,10 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         && admission
             .as_ref()
             .is_some_and(migration_fence::WriteAdmission::is_enrolled);
-    let fenced_read =
-        enrolled_watch || (!writes && migration_fence::read_only_must_not_mutate(&context));
+    let fenced_read = enrolled_watch
+        || (!writes
+            && (migration_fence::read_only_must_not_mutate(&context)
+                || matches!(&cli.command, Command::Search(_))));
     let _read_only = crate::mailbox::enter_read_only_command(fenced_read);
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;
@@ -71,6 +74,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Inbox(args) => inbox::run(&context, args, pretty),
         Command::Read(args) => read::run(&context, args, json, pretty),
         Command::Catchup(args) => catchup::run(&context, args, json, pretty),
+        Command::Search(args) => search::run(&context, args, json, pretty),
         Command::Rooms(args) => rooms::run(&context, args, pretty),
         Command::Profile(args) => profile::run(&context, args, pretty),
         Command::Owner(args) => owner::run(&context, args, pretty),
