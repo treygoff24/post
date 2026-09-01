@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `post catchup [<channel> | --mail | --all]` consumes the complete unread
+  slice, with one compact/full framing banner per non-empty text invocation and
+  a structured `{ok, room, targets[], count}` JSON envelope. `--all` keeps
+  broken joined channels as zero-count targets and warns when an unloadable
+  never-joined channel is skipped; a positional channel remains fail-closed.
+- `post search <pattern>` provides a cursorless, party-visible literal
+  case-insensitive search across direct mail and joined channels. Results are
+  newest first, capped at 100 by default and 1000 at most, with sanitized
+  previews and matched-field lists.
+- Channel listings expose `room` and `unread`; inbox JSON exposes
+  `unread_count`. Watch ring and digest lines now carry sanitized one-line
+  body previews, capped at 80 Unicode scalar values with controls flattened or
+  stripped and ASCII brackets neutralized. Digest previews stay before the
+  copyable `[first..last] [--since ...]` suffix, and NDJSON adds an optional
+  `preview` field.
+
+### Changed
+- Read state is unified in per-room `cursors.json` v1 exact seen-ID sets under
+  `.cursors.lock`; valid legacy `channel-state.json` imports read-only and is
+  retained as rollback evidence after first materialization. Malformed cursor
+  state degrades reads to all-unread and doctor reports it without repairing it.
+- The machine-readable schema now advertises fourteen commands, including the
+  catchup/search grammar and all new output fields. Doctor distinguishes invalid
+  cursor state, invalid cursor locks, and legacy state without allowing
+  `--fix` to touch cursor files.
+
 ## 0.8.0 — 2026-08-31
 
 ### Fixed

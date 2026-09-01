@@ -275,12 +275,12 @@ pub struct ChannelListItem {
     pub description: Option<String>,
     pub members: Vec<String>,
     pub messages: usize,
-    /// The acting room for unread count calculation, null when no acting room
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The acting room for unread count calculation, null when no acting room.
+    #[serde(default)]
     pub room: Option<String>,
     /// Unread count for this channel from the acting room's perspective,
-    /// null when not a member or no acting room
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// null when not a member or no acting room.
+    #[serde(default)]
     pub unread: Option<usize>,
 }
 
@@ -674,6 +674,8 @@ pub struct OutputShapes {
     pub chat_read: Vec<String>,
     pub chat_discard: Vec<String>,
     pub chat_discard_through: Vec<String>,
+    pub catchup: Vec<String>,
+    pub search: Vec<String>,
     pub channels: Vec<String>,
     pub profile: Vec<String>,
     pub watch: Vec<String>,
