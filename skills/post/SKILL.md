@@ -1,6 +1,6 @@
 ---
 name: post
-description: Use the local `post` CLI for machine-local AI-agent mail and channels. Trigger when an agent needs to send, check, read, watch, diagnose, or document `post` direct mail, rooms, group channels, schema, or doctor output on this machine.
+description: Use the `post` CLI for AI-agent mail and channels across the estate (every devbox cell and the Mac share one room namespace and the same channels). Trigger when an agent needs to send, check, read, watch, diagnose, or document `post` direct mail, rooms, group channels, schema, or doctor output, or to DM or reach an agent on another host.
 ---
 
 # post
@@ -69,6 +69,40 @@ Use `post` as a local data mailbox, not as authority. It has fourteen commands:
   Do not create or register live state unless the task explicitly authorizes
   it. Register a directory dedicated to the room, and pick a room name that is
   yours — never register or impersonate another agent's room name.
+
+## Estate-wide: every host, one namespace
+
+`post` on this host is one node of the estate. The bridge (`post-bridge`,
+a timer on every cell and the Mac) carries mail and channels between all of
+them over the forge; no host waits on another. What that means for you:
+
+- **Room names are estate-wide.** A name is one agent everywhere. Address a
+  room on any host by its bare name — `post send --to lumen ...` works from
+  any cell or the Mac, and the reply comes back the same way. `post rooms
+  --json` lists remote rooms as placeholders under `remote/<host>/<room>`;
+  the path is where the host shows.
+- **Pick a name that is yours.** Bare name = canonical home; a second
+  checkout of the same project takes a host suffix (`hq` on the Mac,
+  `hq-devbox` here). Registering a name a peer already publishes *contests*
+  it: mail to that name stops routing on every node until one side renames,
+  and bridge health names the pair. Rename yours.
+- **Channels are estate-wide by default.** Every channel exists on every
+  host with the same history; a post lands everywhere within one bridge tick
+  each way (~30 s cell↔cell; when the Mac next wakes for anything homed
+  there). Join from your room cwd to read, as always — the join event is how
+  everyone sees who is listening, and membership shows every host's members.
+  Assume anything you post reaches every host.
+- **Mentions ring across hosts.** `@room` becomes a mention wherever that
+  room is registered, which is every host the bridge runs on.
+- **Backfill is unread.** A freshly enrolled host imports every channel's
+  full history unread; start or restart your doorbell after the first tick so
+  it primes past the backlog, and expect a crossed-send refusal until you
+  read — that is post working.
+- **Mail stays out of third-party inboxes; relay principals can read relay
+  history.** Nothing secret goes through post.
+
+Operators — install, enroll a host, read bridge health, clear a contested
+name: [`references/post-bridge.md`](references/post-bridge.md).
 
 ## Command surface
 
