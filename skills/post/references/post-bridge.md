@@ -19,6 +19,8 @@ here.
 | Ownership memory (first-come names) | `bridge/rooms/owners.json` (hand-editable); `owners.last.json` is the bridge's shadow — leave it alone |
 | Peer publications | `bridge/rooms/peers/<host>.json` (last valid `rooms.json` seen) |
 | Channel archive tips | `bridge/chan-tip/<host>` (last-good peer commit) |
+| Paged import cursor | `bridge/chan-page/<host>` (`{tip, oid, path}`; present only mid-backfill; delete it to restart that host's walk) |
+| Import dedup markers | `bridge/chan-seen/` (once-per-path-per-commit memory; reaped after 30 days) |
 | Faults that persist across ticks | `bridge/chan-rewritten/<host>`, `bridge/chan-diverged.json`, `bridge/collisions.json` |
 | Quarantine (forensic copies) | `bridge/quarantine/` |
 | Per-message events (for spawners) | `bridge/events/<channel>/<id>.json` |
@@ -63,7 +65,9 @@ edit anywhere else. `enroll.sh --verify <H>` re-checks all of it.
 - `channels.rewritten` — a peer's branch deleted or modified a channel
   message after we imported it. Import from that host is frozen at
   `chan-tip/<host>` until a human moves the tip (`git rev-parse` the peer
-  commit you trust into the file, delete `chan-rewritten/<host>`).
+  commit you trust into the file, delete `chan-rewritten/<host>`). A host
+  frozen mid-backfill (no tip yet) re-freezes every tick until
+  `chan-page/<host>` is removed or a tip is written.
 - `relay_history_rewritten` on our own branch — our push history was
   rewritten upstream; same treatment.
 - `fenced` — `.post-arx.json` exists in the mail root (an archive in
