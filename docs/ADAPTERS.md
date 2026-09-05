@@ -46,7 +46,7 @@ still complete mail notification — it is simply activity-gated.
 | Shell only | Manual loop | No |
 | Lifecycle hooks | In-session adapter | No; notices arrive on next activity |
 | Claude Code hooks | Shipped lifecycle adapter | Requires a validated Monitor controller; none ships here |
-| Codex CLI hooks | Shipped lifecycle adapter | No native idle wake; shipped macOS option uses external Herdr |
+| Codex CLI hooks | Shipped lifecycle adapter | No native idle wake; shipped macOS/Linux options use external Herdr |
 | Cursor CLI hooks | Shipped lifecycle adapter | Native: wrap `post watch --once` with `watch-notice.mjs` (Cursor starts a turn on background-task completion). Herdr doorbell also wakes `--kind cursor` |
 | Grok Build hooks | Shipped lifecycle adapter (UserPromptSubmit only) | Native: point Grok `monitor` at `watch-notice.mjs`, never at raw `post watch`. Herdr doorbell also wakes `--kind grok` |
 | Addressable session controller | Lifecycle adapter plus controller port | Yes, after controller acceptance |
@@ -322,7 +322,18 @@ exit 0. Scan failure: one UNKNOWN line, exit 1. A malformed batch is one
 UNKNOWN line with no event fields echoed. It never pins `--room` unless the
 caller passed it. Never `pgrep` / `pkill`.
 
-## Shipped wake layer: launchd doorbell → Herdr (macOS)
+## Shipped wake layer: doorbell → Herdr
+
+On Linux, use `node skills/post/hooks/install-systemd-doorbell.mjs --room
+<room> --agent <herdr-agent>` (the same channel and interval flags as below).
+It creates a private `~/.local/state/post-codex-doorbell` log/state directory
+before enabling the per-agent user timer; timer accuracy is 1 s. Uninstall with
+the same script's `--uninstall --agent <herdr-agent>`.
+
+The separate `post-doorbell` repository provides a continuous-watch Linux
+service (`post-doorbell@.service`); see its README for behavior. Its service PATH
+includes `%h/.local/bin` for `post` and `herdr`. Choose one wake mechanism per
+agent rather than running both. The launchd instructions below are macOS-only.
 
 Files: `skills/post/hooks/codex-notify-monitor.mjs`,
 `install-codex-doorbell.mjs` (+ tests).

@@ -75,6 +75,7 @@ fs.writeFileSync(
     `fs.appendFileSync(${JSON.stringify(SYSTEMCTL_CALLS)}, JSON.stringify(args) + "\\n");`,
     `const control = JSON.parse(fs.readFileSync(${JSON.stringify(CONTROL)}, "utf8"));`,
     "const action = args[1] === \"daemon-reload\" ? \"DaemonReload\" : args[1] === \"enable\" ? \"Enable\" : \"Disable\";",
+    "if (control.requireStateDir) { const st = fs.lstatSync(control.requireStateDir); if (!st.isDirectory() || (st.mode & 0o777) !== 0o700) process.exit(99); }",
     "if (control[`systemctl${action}Stderr`]) process.stderr.write(control[`systemctl${action}Stderr`]);",
     "process.exit(control[`systemctl${action}Exit`] ?? 0);",
     "",
@@ -143,6 +144,43 @@ function run(args, control = OK, env = {}) {
 function homeFor(name) {
   return path.join(ROOT, `home-${name}`);
 }
+
+test("fresh private log parent exists before systemctl and reinstall is safe", () => {
+  const home = homeFor("private-state");
+  const dir = path.dirname(statePath(home));
+  for (let i = 0; i < 2; i++) {
+    const result = run(["--room", "ops", "--agent", AGENT],
+      { ...OK, requireStateDir: dir }, { POST_CODEX_DOORBELL_HOME: home, POST_CODEX_DOORBELL_INSTALL_DIR: path.join(home, "hooks") });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.lstatSync(dir).mode & 0o777, 0o700);
+  }
+});
+
+test("state path collisions refuse before systemctl without changing targets", () => {
+  for (const kind of ["file", "symlink"]) {
+    const home = homeFor(`collision-${kind}`);
+    const dir = path.dirname(statePath(home));
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    const target = path.join(ROOT, `target-${kind}`);
+    fs.mkdirSync(target, { mode: 0o755 });
+    if (kind === "file") fs.writeFileSync(dir, "keep");
+    else fs.symlinkSync(target, dir);
+    const before = calls(SYSTEMCTL_CALLS).length;
+    const result = run(["--room", "ops", "--agent", AGENT], OK, { POST_CODEX_DOORBELL_HOME: home });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /state path must be a real directory/);
+    assert.equal(calls(SYSTEMCTL_CALLS).length, before);
+    assert.equal(fs.statSync(target).mode & 0o777, 0o755);
+  }
+});
+
+test("short timer intervals do not inherit minute-long coalescing", () => {
+  const home = homeFor("accuracy");
+  const result = run(["--room", "ops", "--agent", AGENT, "--interval-seconds", "1"], OK,
+    { POST_CODEX_DOORBELL_HOME: home, POST_CODEX_DOORBELL_INSTALL_DIR: path.join(home, "hooks") });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(fs.readFileSync(unitPath(home, "timer"), "utf8"), /^AccuracySec=1s$/m);
+});
 
 function unitPath(home, suffix, agent = AGENT) {
   return path.join(home, ".config", "systemd", "user", `post-codex-doorbell@${agent}.${suffix}`);

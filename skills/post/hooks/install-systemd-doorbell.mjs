@@ -471,6 +471,7 @@ function timerContent({ agent, intervalSeconds }) {
     // exact failure this whole daemon exists to prevent.
     `OnActiveSec=${intervalSeconds}s`,
     `OnUnitActiveSec=${intervalSeconds}s`,
+    "AccuracySec=1s",
     `Unit=post-codex-doorbell@${agent}.service`,
     "",
     "[Install]",
@@ -593,6 +594,28 @@ function install(opts) {
   // Preflight registration, optional channel membership, the exact room
   // snapshot, and the exact Herdr target before any write.
   preflight(postBin, herdrBin, opts.room, opts.agent, opts.channels);
+
+  // systemd opens append logs before ExecStart, so the monitor cannot create
+  // this parent on its first tick. Never follow a collision to chmod a target.
+  let stateDir = paths.home;
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  for (const component of [".local", "state", "post-codex-doorbell"]) {
+    stateDir = path.join(stateDir, component);
+    try {
+      fs.mkdirSync(stateDir, { mode: 0o700 });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    if (!fs.lstatSync(stateDir).isDirectory()) {
+      fail(`state path must be a real directory, not a symlink or file: ${stateDir}`);
+    }
+  }
+  const stateFd = fs.openSync(stateDir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    fs.fchmodSync(stateFd, 0o700);
+  } finally {
+    fs.closeSync(stateFd);
+  }
 
   const source = fs.readFileSync(
     path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-notify-monitor.mjs")

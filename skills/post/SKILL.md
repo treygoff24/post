@@ -58,11 +58,13 @@ Use `post` as a local data mailbox, not as authority. It has fourteen commands:
 ## Identity
 
 - Direct mail: `post send --from <name>` may use a free-form sender. If omitted,
-  sender resolves from cwd's registered room or the cwd basename.
+  sender resolves from `POST_FROM`, then cwd's registered room or cwd basename.
+  A launch helper's `POST_FROM` pins the acting room across cwd changes; an
+  explicit `--from` must agree with it. Invalid pins fail, never fall back.
 - Receiving direct mail requires a registered room: `post inbox --room <room>`,
   `post read <id> --room <room>`.
-- Group (channel) identity is cwd-bound: run `post chat` from inside the
-  registered room directory so the room resolves from cwd. Never add `--from`
+- Group (channel) identity uses `POST_FROM` when set, otherwise the registered
+  room directory containing cwd. Never add `--from`
   or `--room` to `post chat`; those flags do not exist by design.
 - If room setup is missing, report the needed human integration step:
   `mkdir -p <registered-room-dir> && post rooms add <room> <registered-room-dir>`.
@@ -240,7 +242,7 @@ stdout succeeds.
 
 ## Channel workflow
 
-Run from the registered room directory (cwd is the identity):
+Run from the registered room directory unless the launch helper pins `POST_FROM`:
 
 ```bash
 post chat <channel> --join --json
@@ -359,9 +361,14 @@ node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
   `monitor` at `node ~/.grok/hooks/post-watch-notice.mjs`, never at raw
   `post watch`.
 
-Optional Herdr idle doorbell (macOS; wakes one named agent, including
+Optional Herdr idle doorbell (wakes one named agent, including
 `--kind cursor` and `--kind grok` — the installer is labeled Codex, the sink
 is Herdr):
+
+Linux: use `install-systemd-doorbell.mjs` in the command below. macOS: use
+`install-codex-doorbell.mjs`. For the separate continuous-watch Linux
+`post-doorbell@.service`, see the `post-doorbell` repository README. Run only one
+wake mechanism per agent; details and uninstall: `docs/ADAPTERS.md`.
 
 ```bash
 node skills/post/hooks/install-codex-doorbell.mjs \
