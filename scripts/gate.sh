@@ -48,7 +48,11 @@ fi
 # CONTRIBUTING invariant 2: post schema is the contract. A schema that cannot be
 # emitted is a broken contract regardless of what the unit tests say.
 step "schema"
-target/release/post schema >/dev/null || err "post schema"
+if release_bin=$(node scripts/cargo-release-bin.mjs); then
+  "$release_bin" schema >/dev/null || err "post schema"
+else
+  err "resolve release binary via cargo metadata"
+fi
 
 rust_ver=$(cargo --version 2>/dev/null | awk '{print $2}')
 node_ver=$(node --version 2>/dev/null || echo "absent")

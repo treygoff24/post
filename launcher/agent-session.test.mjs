@@ -9,11 +9,12 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../scripts/cargo-release-bin.mjs";
 
 const LAUNCHER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HELPER = path.join(LAUNCHER_DIR, "agent-session");
 const REPO = path.resolve(LAUNCHER_DIR, "..");
-const BIN = path.join(REPO, "target/release/post");
+const BIN = cargoReleaseBin(REPO);
 
 const ADDRESS_RE = /^[a-z0-9-]+\.[a-z0-9-]+-[0-9a-f]{8}\.[0-9a-f-]+$/;
 
