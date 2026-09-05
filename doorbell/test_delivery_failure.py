@@ -31,13 +31,13 @@ FAKE_POST = """#!/bin/sh
 for a in "$@"; do
   if [ "$a" = "--snapshot" ]; then
     [ -f "$FAKE_CWD/started" ] || exit 0
-    echo '{"event":"digest","source":"mail","count":1,"last_id":"20260825-170000-aaaaaa","reason":"mail"}'
+    echo '{"event":"mail","room":"r","id":"20260825-170000-aaaaaa","reason":"mail"}'
     exit 0
   fi
 done
 touch "$FAKE_CWD/started"
 while true; do
-  echo '{"event":"digest","room":"r","source":"mail","count":1,"first_id":"20260825-170000-aaaaaa","last_id":"20260825-170000-aaaaaa","reason":"mail"}'
+  echo '{"event":"mail","room":"r","id":"20260825-170000-aaaaaa","reason":"mail"}'
   sleep 1
 done
 """
@@ -71,8 +71,8 @@ class FailedDeliveryDoesNotRetireTheMessage(unittest.TestCase):
                           "a rejected prompt must be reported, not swallowed")
             marks_file = state / "post-doorbell" / "fake.json"
             marks = json.loads(marks_file.read_text()) if marks_file.exists() else {}
-            self.assertNotEqual(marks.get("mail"), "20260825-170000-aaaaaa",
-                                "an undelivered wake must not advance the watermark")
+            self.assertNotIn(["mail", "r", "20260825-170000-aaaaaa"], marks.get("keys", []),
+                             "an undelivered wake must not acknowledge the key")
             # And it must keep trying: more than one failure in the window.
             self.assertGreaterEqual(err.count("wake not delivered"), 2,
                                     "the doorbell must re-attempt a wake it could not deliver")

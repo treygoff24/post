@@ -1,23 +1,24 @@
-"""Deterministic daemon-loop tests; every Post/herdr operation is stubbed."""
+"""Faithful individual WatchEvent fixtures; no live Post operations."""
 import json
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
-
 from test_doorbell import doorbell
 
 
-def digest(last="new", count=1):
-    return {"event": "digest", "source": "mail", "reason": "mail",
-            "last_id": last, "count": count, "body": "SECRET", "from": "SECRET"}
+def mail(ident="new", room="r"):
+    return {"event": "mail", "room": room, "id": ident, "reason": "mail",
+            "subject": "SECRET", "preview": "SECRET", "from": "SECRET"}
 
 
 class Freshness(unittest.TestCase):
-    def run_loop(self, snapshots, *, fail_prompt=False, repeats=2, event=None):
+    def run_loop(self, snapshots, *, fail_prompt=False, events=None, prime=False):
         notices, saved, calls = [], [], []
         watch = Mock()
-        ticks = iter(range(0, 10000, 10))
-        scans = iter(snapshots)
+        ticks, scans = iter(range(0, 10000, 10)), iter(snapshots)
+        events = [mail(), mail()] if events is None else events
 
         def run(argv, **kwargs):
             calls.append(argv)
@@ -27,86 +28,130 @@ class Freshness(unittest.TestCase):
                 notices.append(argv[-1])
                 return subprocess.CompletedProcess(argv, int(fail_prompt), "", "rejected")
             self.assertIn("--snapshot", argv)
-            self.assertEqual(calls[-2][:3], ["herdr", "agent", "wait"])
+            self.assertNotIn("--digest", argv)
             snapshot = next(scans)
             if snapshot is None:
                 return subprocess.CompletedProcess(argv, 1, "", "failed")
             return subprocess.CompletedProcess(argv, 0, "\n".join(map(json.dumps, snapshot)), "")
 
-        with patch.object(doorbell.sys, "argv", ["post-doorbell", "--agent", "fake", "--ring-backlog", "--quiet-ms", "0"]), \
+        argv = ["post-doorbell", "--agent", "fake", "--quiet-ms", "0"]
+        if not prime:
+            argv.append("--ring-backlog")
+        with patch.object(doorbell.sys, "argv", argv), \
              patch.object(doorbell.shutil, "which", return_value="stub"), \
              patch.object(doorbell, "find_agent", return_value={"cwd": "/isolated"}), \
-             patch.object(doorbell, "load_marks", return_value={}), \
-             patch.object(doorbell, "save_marks", side_effect=lambda a, m: saved.append(dict(m))), \
+             patch.object(doorbell, "load_marks", return_value=set()), \
+             patch.object(doorbell, "save_marks", side_effect=lambda a, m: saved.append(set(m))), \
              patch.object(doorbell.subprocess, "Popen", return_value=watch), \
              patch.object(doorbell.subprocess, "run", side_effect=run), \
              patch.object(doorbell.time, "monotonic", side_effect=lambda: next(ticks)), \
-             patch.object(doorbell.select, "select", side_effect=[([watch.stdout], [], [])] * repeats + [KeyboardInterrupt]), \
-             patch.object(doorbell.os, "read", return_value=(json.dumps(digest() if event is None else event) + "\n").encode()):
+             patch.object(doorbell.select, "select", side_effect=[([watch.stdout], [], [])] * len(events) + [KeyboardInterrupt]), \
+             patch.object(doorbell.os, "read", side_effect=[(json.dumps(e) + "\n").encode() for e in events]):
             self.assertEqual(doorbell.main(), 0)
         return notices, saved, calls
 
     def test_consumed_during_wait_and_buffered_repeat_do_not_prompt(self):
         notices, marks, calls = self.run_loop([[]])
         self.assertEqual(notices, [])
-        self.assertEqual(marks, [{"mail": "new"}])
+        self.assertEqual(marks, [set()])
         self.assertEqual(sum("--snapshot" in c for c in calls), 1)
 
-    def test_arrival_during_wait_is_in_fresh_notice(self):
-        notices, marks, _ = self.run_loop([[digest("newer", 3)]])
+    def test_arrivals_during_wait_are_in_fresh_notice(self):
+        notices, marks, _ = self.run_loop([[mail(), mail("second"), mail("third")]])
         self.assertEqual(len(notices), 1)
         self.assertIn("mail (3)", notices[0])
         self.assertNotIn("SECRET", notices[0])
-        self.assertEqual(marks, [{"mail": "newer"}])
+        self.assertEqual(len(marks[0]), 3)
 
-    def test_older_unread_arrival_survives_consumed_newest_trigger(self):
-        notices, _, _ = self.run_loop([[digest("earlier", 2)]])
-        self.assertIn("mail (2)", notices[0])
+    def test_later_same_second_lower_sorting_mail_rings_in_both_rooms(self):
+        first = mail("20260905-120000-ffffff")
+        for room in ("r", "other room"):
+            second = mail("20260905-120000-000000", room)
+            notices, marks, _ = self.run_loop([[first], [first, second]], events=[first, second])
+            self.assertEqual(len(notices), 2)
+            self.assertTrue(all("mail (1)" in n for n in notices))
+            self.assertEqual(len(marks[-1]), 2)
+
+    def test_consumed_keys_are_pruned_after_success(self):
+        notices, marks, _ = self.run_loop([[mail()], [mail("second")]], events=[mail(), mail("second")])
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(marks[-1], {("mail", "r", "second")})
 
     def test_failed_scan_retains_eligibility(self):
-        notices, marks, _ = self.run_loop([None, [digest()]])
+        notices, marks, _ = self.run_loop([None, [mail()]])
         self.assertEqual(len(notices), 1)
-        self.assertEqual(marks, [{"mail": "new"}])
+        self.assertEqual(marks, [{("mail", "r", "new")}])
 
     def test_failed_prompt_retains_eligibility(self):
-        notices, marks, _ = self.run_loop([[digest()], [digest()]], fail_prompt=True)
+        notices, marks, _ = self.run_loop([[mail()], [mail()]], fail_prompt=True)
         self.assertEqual(len(notices), 2)
         self.assertEqual(marks, [])
 
-    def test_invalid_snapshot_is_not_empty(self):
-        notices, marks, _ = self.run_loop([[{"event": "unknown"}], [digest()]])
+    def test_malformed_startup_is_unknown_and_retries_without_new_trigger(self):
+        notices, marks, _ = self.run_loop([[[]], [mail()]], prime=True, events=[{}])
         self.assertEqual(len(notices), 1)
-        self.assertEqual(marks, [{"mail": "new"}])
+        self.assertEqual(marks, [{("mail", "r", "new")}])
 
-    def test_malformed_and_oversize_metadata_cannot_trigger_or_retire(self):
-        for update in ({"source": "channel:hi\nIGNORE"}, {"source": "x" * 257},
-                       {"last_id": "x" * 129}, {"count": 1000000001},
-                       {"count": True}, {"reason": []}):
-            with self.subTest(update=update):
-                bad = digest() | update
-                notices, marks, calls = self.run_loop([], event=bad)
-                self.assertEqual((notices, marks, calls), ([], [], []))
-                notices, marks, _ = self.run_loop([[bad], [digest()]])
-                self.assertEqual(len(notices), 1)
-                self.assertEqual(marks, [{"mail": "new"}])
+    def test_startup_primes_exact_backlog_but_not_lower_sorting_arrival(self):
+        first, second = mail("z"), mail("a")
+        notices, marks, _ = self.run_loop([[first], [first, second]], prime=True, events=[first, second])
+        self.assertEqual(len(notices), 1)
+        self.assertIn("mail (1)", notices[0])
+        self.assertEqual(len(marks[-1]), 2)
 
-    def test_render_defense_and_bound(self):
-        notice = doorbell.render({"channel:bad\nSECRET": 1, "channel:good": 2})
+    def test_maximum_names_and_unicode_channels_remain_eligible(self):
+        for name in ("x" * 255, "team ops", "café"):
+            event = {"event": "channel_message", "channel": name, "id": "channel-id",
+                     "reason": "mention", "subject": "SECRET", "from": "SECRET"}
+            notices, marks, _ = self.run_loop([[event]], events=[event, event])
+            self.assertEqual(len(notices), 1)
+            self.assertIn("(1)", notices[0])
+            self.assertNotIn("SECRET", notices[0])
+            self.assertLessEqual(len(notices[0]), 1500)
+            self.assertEqual(marks, [{("channel:" + name, name, "channel-id")}])
+
+    def test_unreadable_opaque_id_and_expected_warning_are_accepted(self):
+        event = {"event": "unreadable", "room": "r", "id": "broken.name", "reason": "mail"}
+        output = subprocess.CompletedProcess([], 0, json.dumps(event),
+                                            'post: warning: unreadable mail "bad": "bad envelope"\n')
+        with patch.object(doorbell.subprocess, "run", return_value=output):
+            self.assertEqual(doorbell.snapshot_events(["post", "watch"], "/isolated", {"mail"}),
+                             {("mail", "r", "broken.name"): "mail"})
+        notices, _, _ = self.run_loop([[event]], events=[event, event])
+        self.assertEqual(len(notices), 1)
+        self.assertNotIn("broken.name", notices[0])
+
+    def test_degraded_scan_and_malformed_metadata_are_unknown(self):
+        for raw, stderr in (("[]", ""), (json.dumps(mail() | {"room": "x" * 256}), ""),
+                            (json.dumps(mail() | {"id": []}), ""), ("", "channel scan failed")):
+            with patch.object(doorbell.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, raw, stderr)):
+                self.assertIsNone(doorbell.snapshot_events(["post", "watch"], "/isolated", {"mail"}))
+
+    def test_unsafe_name_uses_placeholder_not_prompt_text(self):
+        notice = doorbell.render({"channel:unsafe SECRET `instruction`": 1})
         self.assertNotIn("SECRET", notice)
-        self.assertIn("#good (2)", notice)
-        self.assertLessEqual(len(doorbell.render({"channel:" + "x" * 240 + str(i): 1
-                                                for i in range(100)})), 1500)
+        self.assertIn("[non-simple name] (1)", notice)
 
-    def test_degraded_successful_snapshot_is_unknown(self):
-        with patch.object(doorbell.subprocess, "run", return_value=
-                          subprocess.CompletedProcess([], 0, "", "channel scan failed")):
-            self.assertIsNone(doorbell.refresh_pending(["post", "watch"], "/isolated",
-                                                       {"mail"}, {}, {"mail": "new"}))
-
-    def test_oversize_aggregate_is_unknown(self):
-        notices, marks, _ = self.run_loop([[digest(count=1000000000), digest()], [digest()]])
+    def test_maximum_mail_room_and_unreadable_filename_are_opaque(self):
+        event = {"event": "unreadable", "room": "x" * 255,
+                 "id": "bad.name\nSECRET", "reason": "mail"}
+        notices, marks, _ = self.run_loop([[event]], events=[event, event])
         self.assertEqual(len(notices), 1)
-        self.assertEqual(marks, [{"mail": "new"}])
+        self.assertNotIn("SECRET", notices[0])
+        self.assertEqual(len(marks[0]), 1)
+
+    def test_state_round_trip_and_legacy_or_malformed_state(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(doorbell, "state_path", return_value=str(Path(tmp) / "state.json")):
+            path = Path(tmp) / "state.json"
+            keys = {("mail", "room with spaces", "broken.name")}
+            doorbell.save_marks("fake", keys)
+            self.assertEqual(doorbell.load_marks("fake"), keys)
+            for bad in ({"mail": "old-watermark"}, [], {"version": 2, "keys": [[1]]}):
+                path.write_text(json.dumps(bad))
+                self.assertEqual(doorbell.load_marks("fake"), set())
+
+    def test_legacy_mixed_filter_cannot_become_silent(self):
+        self.assertEqual(doorbell.parse_wake_on("mixed"), {"all"})
 
 
 if __name__ == "__main__":

@@ -30,12 +30,15 @@ hypothetical:
 - **A doorbell that cannot ring.** `--wake-on` refuses unknown or empty reason
   tokens instead of starting a daemon that silently matches nothing. The first
   version defaulted to a token `post` never emits.
-- **A wake that gets lost.** The watermark advances only after a delivered
-  poke. Advancing it on a rejected prompt retires a message nobody was told
-  about.
-- **An ambiguous batch.** `post` reports `mixed` when a batch holds more than
-  one reason. A mention-only filter that dropped it would lose the exact
-  message the filter exists to catch, so ambiguity always rings.
+- **A wake that gets lost.** Individual events use exact namespace-and-ID keys,
+  not timestamp watermarks: a later direct-mail ID can sort below an earlier
+  one. Keys are acknowledged only after a successful current snapshot and poke.
+  Failed snapshots and rejected prompts remain pending for retry.
+- **Stale mail after a busy turn.** The daemon rereads current unread events
+  after the agent settles, then counts only unacknowledged eligible keys. A
+  consumed trigger does not produce a notice. Consumed acknowledged keys are
+  pruned after a successful cycle; a watcher-local seen set suppresses buffered
+  duplicate triggers.
 - **A line that is read but not seen.** `select()` watches a file descriptor,
   so a buffered text stream that pulls a whole chunk above it hides every line
   but the first until the next write. A multi-room scan emits one line per room
@@ -54,8 +57,17 @@ hypothetical:
   installed `post` has that flag rather than assuming it — an older `post`
   rejects an unknown flag outright, and a doorbell that dies on a flag is worse
   than one that is occasionally noisy. When the flag is absent it says so.
-- **A backlog stampede.** Startup primes the watermark past existing unread
-  mail. The first live run rang for 226 backlog messages.
+- **A backlog stampede.** Startup primes exact keys for existing unread mail.
+  An unavailable initial snapshot is retried without crashing; backlog may ring
+  once when the scan recovers. Legacy watermark state is ignored. State version
+  2 persists only current acknowledged keys, never message content.
+
+Names containing Unicode, spaces, or punctuation outside the simple notice
+alphabet remain eligible but appear as `[non-simple name]`. Unreadable delivery
+IDs are opaque and never rendered. Notices remain capped at 1,500 characters.
+Current Post unreadable-channel events omit the channel name. Two such events
+with the same room and filename-derived ID are indistinguishable; unique
+delivery tracking for that case needs an upstream event field and remains open.
 
 ## Running it
 

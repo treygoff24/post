@@ -78,17 +78,16 @@ class ADoorbellThatCannotRingIsRefused(unittest.TestCase):
             doorbell.parse_wake_on("nonsense")
 
 
-class WatermarkOrdering(unittest.TestCase):
-    """Dedupe rests on post ids sorting lexicographically into time order."""
+class OpaqueIdentity(unittest.TestCase):
+    def test_same_second_ids_are_distinct_without_ordering(self):
+        keys = {doorbell.event_metadata({"event": "mail", "room": "r", "reason": "mail", "id": ident})[0]
+                for ident in ("20260905-120000-ffffff", "20260905-120000-000000")}
+        self.assertEqual(len(keys), 2)
 
-    def test_real_post_ids_sort_chronologically_as_strings(self):
-        ids = ["20260825-165753-d9619c", "20260825-170447-0f17d7", "20260825-093000-aaaaaa"]
-        self.assertEqual(sorted(ids)[0], "20260825-093000-aaaaaa")
-        self.assertEqual(sorted(ids)[-1], "20260825-170447-0f17d7")
-
-    def test_channel_and_mail_id_shapes_both_order(self):
-        earlier, later = "20260825-165007-338782-894aaf", "20260825-165417-357184-fb5917"
-        self.assertLess(earlier, later)
+    def test_same_id_in_two_rooms_is_distinct(self):
+        keys = {doorbell.event_metadata({"event": "mail", "room": room, "reason": "mail", "id": "same"})[0]
+                for room in ("a", "b")}
+        self.assertEqual(len(keys), 2)
 
 
 if __name__ == "__main__":

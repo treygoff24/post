@@ -43,8 +43,8 @@ case "$1" in
     done
     touch "$FAKE_CWD/started"
     printf '%s\\n%s\\n' \\
-      '{"event":"digest","source":"channel:alpha","count":1,"last_id":"20260825-180000-aaaaaa","reason":"mail"}' \\
-      '{"event":"digest","source":"channel:beta","count":1,"last_id":"20260825-180000-bbbbbb","reason":"mail"}'
+      '{"event":"channel_message","channel":"alpha","id":"20260825-180000-aaaaaa","reason":"mention"}' \\
+      '{"event":"channel_message","channel":"beta","id":"20260825-180000-bbbbbb","reason":"mention"}'
     [ "$snapshot" = true ] && exit 0
     exec sleep 30 ;;
 esac
