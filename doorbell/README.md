@@ -68,9 +68,13 @@ alphabet remain eligible but appear as `[non-simple name]`. Unreadable delivery
 IDs are opaque and never rendered. Notices remain capped at 1,500 characters.
 New Post unreadable-channel events include the channel name, so identical
 filenames in different channels have distinct keys. Older producers omit it
-and can drop collisions before emission. Legacy events remain accepted but are
-not persistently acknowledged as unique; they may re-ring. Upgrade Post too,
-not just the daemon, to recover the producer-side identity guarantee.
+and can drop collisions before emission. Their presence starts one degraded
+episode: an accepted compatibility warning sets a class sentinel, not a message
+acknowledgement. Subsequent snapshots stay quiet until a successful clear scan.
+The daemon polls while that episode is present so clearing does not require new
+mail. Ordinary events remain independently eligible; failed scans or prompts
+preserve prior state. Startup never primes an unaccepted warning. Upgrade Post
+too, not just the daemon, to recover the producer-side identity guarantee.
 
 ## Running it
 

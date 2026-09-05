@@ -28,6 +28,9 @@ import time
 
 POLL_SETTLE_MS = 2000
 NOTICE_CAP = 1500
+LEGACY_CHANNEL_EPISODE = ("legacy-channel-episode", "", "")
+LEGACY_WARNING = ("Post compatibility warning: unreadable channel data from an older Post "
+                  "lacks channel identity. Per-message delivery is unknown; upgrade Post.")
 
 
 def log(message):
@@ -135,6 +138,8 @@ def event_metadata(event):
         source = "mail" if reason == "mail" else "unreadable-channel"
     if not component(namespace):
         raise ValueError("invalid event namespace")
+    if source == "unreadable-channel":
+        return LEGACY_CHANNEL_EPISODE, source, reason
     return (source, namespace, ident), source, reason
 
 
@@ -225,7 +230,7 @@ def load_marks(agent):
         if not isinstance(keys, list) or any(not isinstance(k, list) or len(k) != 3
                 or any(not isinstance(v, str) for v in k) for k in keys):
             return set()
-        return {tuple(key) for key in keys}
+        return {tuple(key) for key in keys if key[0] != "unreadable-channel"}
     except (OSError, ValueError):
         return set()
 
@@ -341,15 +346,23 @@ def main():
     log(f"doorbell: watching for {args.agent} (cwd {cwd}), waking on {sorted(wake_on) or ['all']}")
 
     marks = load_marks(args.agent)
-    prime_failed = False
+    initial_check = False
     if not args.ring_backlog:
         initial = snapshot_events(command, cwd, wake_on)
         if initial is None:
-            prime_failed = True
+            initial_check = True
             log("doorbell: priming unavailable; retrying, backlog may ring once")
         else:
-            marks = set(initial)
+            # Priming can acknowledge ordinary backlog, not an undelivered
+            # compatibility warning. Preserve only a previously accepted episode.
+            warned = LEGACY_CHANNEL_EPISODE in marks
+            marks = set(initial) - {LEGACY_CHANNEL_EPISODE}
+            if LEGACY_CHANNEL_EPISODE in initial:
+                if warned:
+                    marks.add(LEGACY_CHANNEL_EPISODE)
+                initial_check = True  # check/warn, then poll until the episode clears
             save_marks(args.agent, marks)
+    initial_check = initial_check or LEGACY_CHANNEL_EPISODE in marks
 
     # Binary pipe, read with os.read: a buffered text stream would pull a
     # whole chunk into Python's own buffer, and select() -- which watches the
@@ -359,7 +372,7 @@ def main():
     # Verified: two lines in one write, select then times out holding line 2.
     watch = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE)
     buffered = b""
-    deadline = time.monotonic() if prime_failed else None
+    deadline = time.monotonic() if initial_check else None
     watch_died = False
     try:
         while True:
@@ -408,22 +421,23 @@ def main():
                     continue
                 pending = {}
                 for key, source in refreshed.items():
-                    if key not in marks:
+                    if key != LEGACY_CHANNEL_EPISODE and key not in marks:
                         pending[source] = pending.get(source, 0) + 1
-                if pending and not deliver(args.agent, render(pending)):
-                    log(f"doorbell: wake not delivered; {sum(pending.values())} unread stays pending")
+                warn = LEGACY_CHANNEL_EPISODE in refreshed and LEGACY_CHANNEL_EPISODE not in marks
+                notice = ((LEGACY_WARNING + " " if warn else "") +
+                          (render(pending) if pending else ""))[:NOTICE_CAP]
+                if notice and not deliver(args.agent, notice):
+                    log("doorbell: wake not delivered; current notice stays pending")
                     deadline = time.monotonic() + max(args.quiet_ms, POLL_SETTLE_MS) / 1000.0
                     continue
                 if pending:
                     log(f"doorbell: woke {args.agent} for {sum(pending.values())} unread")
-                # Current identifiable keys are now acknowledged; prune consumed
-                # keys only after the scan and sink succeeded.
-                # A legacy unreadable-channel event lacks channel identity.
-                # Never pretend that its room/ID fallback uniquely acknowledges
-                # a delivery; older producers can therefore re-ring this case.
-                marks = {key for key in refreshed if key[0] != "unreadable-channel"}
+                # Exact current identities plus a presence-only episode sentinel.
+                # Neither failed snapshots nor failed warnings change this state.
+                marks = set(refreshed)
                 save_marks(args.agent, marks)
-                deadline = None
+                deadline = (time.monotonic() + max(args.interval_ms, POLL_SETTLE_MS) / 1000.0
+                            if LEGACY_CHANNEL_EPISODE in marks else None)
     except KeyboardInterrupt:
         pass
     finally:

@@ -14,10 +14,11 @@ def mail(ident="new", room="r"):
 
 
 class Freshness(unittest.TestCase):
-    def run_loop(self, snapshots, *, fail_prompt=False, events=None, prime=False):
+    def run_loop(self, snapshots, *, fail_prompt=False, events=None, prime=False, prior=None):
         notices, saved, calls = [], [], []
         watch = Mock()
         ticks, scans = iter(range(0, 10000, 10)), iter(snapshots)
+        prompt_results = iter(fail_prompt) if isinstance(fail_prompt, list) else None
         events = [mail(), mail()] if events is None else events
 
         def run(argv, **kwargs):
@@ -26,7 +27,8 @@ class Freshness(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0)
             if argv[:3] == ["herdr", "agent", "prompt"]:
                 notices.append(argv[-1])
-                return subprocess.CompletedProcess(argv, int(fail_prompt), "", "rejected")
+                failed = next(prompt_results) if prompt_results is not None else fail_prompt
+                return subprocess.CompletedProcess(argv, int(failed), "", "rejected")
             self.assertIn("--snapshot", argv)
             self.assertNotIn("--digest", argv)
             snapshot = next(scans)
@@ -40,7 +42,7 @@ class Freshness(unittest.TestCase):
         with patch.object(doorbell.sys, "argv", argv), \
              patch.object(doorbell.shutil, "which", return_value="stub"), \
              patch.object(doorbell, "find_agent", return_value={"cwd": "/isolated"}), \
-             patch.object(doorbell, "load_marks", return_value=set()), \
+             patch.object(doorbell, "load_marks", return_value=set() if prior is None else prior), \
              patch.object(doorbell, "save_marks", side_effect=lambda a, m: saved.append(set(m))), \
              patch.object(doorbell.subprocess, "Popen", return_value=watch), \
              patch.object(doorbell.subprocess, "run", side_effect=run), \
@@ -168,14 +170,57 @@ class Freshness(unittest.TestCase):
             doorbell.save_marks("fake", marks[0])
             self.assertEqual(doorbell.load_marks("fake"), marks[0])
 
-    def test_legacy_channel_unreadables_remain_eligible_without_unique_ack(self):
+    def test_legacy_channel_episode_warns_once_without_unique_ack(self):
         event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
-        notices, marks, _ = self.run_loop([[event], [event]], events=[event, event])
-        self.assertEqual(len(notices), 2)
-        self.assertEqual(marks, [set(), set()])
+        notices, marks, _ = self.run_loop([[event]] * 5, events=[event] * 5)
+        self.assertEqual(len(notices), 1)
+        self.assertIn("Per-message delivery is unknown", notices[0])
+        self.assertEqual(marks, [{doorbell.LEGACY_CHANNEL_EPISODE}] * 5)
         self.assertTrue(all("same.bad" not in notice for notice in notices))
         with self.assertRaises(ValueError):
             doorbell.event_metadata(event | {"channel": "../unsafe"})
+
+    def test_startup_does_not_prime_legacy_ids_or_an_unaccepted_warning(self):
+        event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
+        notices, marks, _ = self.run_loop([[event]] * 3, prime=True)
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(marks[0], set())
+        self.assertEqual(marks[-1], {doorbell.LEGACY_CHANNEL_EPISODE})
+        notices, _, _ = self.run_loop([[event]] * 3, prime=True,
+                                     prior={doorbell.LEGACY_CHANNEL_EPISODE})
+        self.assertEqual(notices, [])
+
+    def test_legacy_episode_clear_reappear_and_new_mail(self):
+        event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
+        notices, marks, _ = self.run_loop([[event], [event, mail()], [], [event]],
+                                          events=[event, mail(), event, event])
+        self.assertEqual(len(notices), 3)
+        self.assertIn("compatibility warning", notices[0])
+        self.assertIn("mail (1)", notices[1])
+        self.assertNotIn("compatibility warning", notices[1])
+        self.assertIn("compatibility warning", notices[2])
+        self.assertEqual(marks[-2], set())
+
+    def test_failed_warning_and_failed_scan_do_not_ack_or_clear_episode(self):
+        event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
+        notices, marks, _ = self.run_loop([[event], [event], None, [event]],
+                                          events=[event] * 4, fail_prompt=[True, False])
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(marks, [{doorbell.LEGACY_CHANNEL_EPISODE}] * 2)
+
+    def test_warning_and_valid_mail_share_one_accepted_notice(self):
+        event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
+        notices, marks, _ = self.run_loop([[event, mail()]] * 2, events=[event, event])
+        self.assertEqual(len(notices), 1)
+        self.assertIn("compatibility warning", notices[0])
+        self.assertIn("mail (1)", notices[0])
+        self.assertEqual(marks[-1], {doorbell.LEGACY_CHANNEL_EPISODE, ("mail", "r", "new")})
+
+    def test_restored_episode_checks_for_clear_even_with_ring_backlog(self):
+        notices, marks, _ = self.run_loop([[]], events=[{}],
+                                          prior={doorbell.LEGACY_CHANNEL_EPISODE})
+        self.assertEqual(notices, [])
+        self.assertEqual(marks, [set()])
 
 
 if __name__ == "__main__":

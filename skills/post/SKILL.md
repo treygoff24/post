@@ -331,8 +331,10 @@ Watch event variants:
 
 Unreadable channel identity is (channel, opaque ID), not (room, ID). New Post
 always emits the channel field; older producers omit it and may drop same-ID
-collisions across channels. Adapters accept legacy events without claiming a
-unique acknowledgement, so those events may re-ring. Never render their IDs.
+collisions across channels. Stateful adapters give one compatibility warning
+per continuous legacy-presence episode, recording a class sentinel only after
+accepted delivery and clearing it after a successful absence scan. This is not
+a per-message acknowledgement. Never render legacy IDs or claim their counts.
 
 Warnings such as unregistered room, unreadable entries, or corrupt channel state
 are stderr diagnostics; stdout remains event data.

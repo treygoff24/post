@@ -158,7 +158,8 @@ test("unreadable channel identity is validated but never rendered; legacy is acc
     setStub({ events: [candidate] });
     const result = run();
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Unreadable mail: 1/);
+    assert.match(result.stdout, candidate.channel === undefined ?
+      /Per-message delivery is unknown/ : /Unreadable mail: 1/);
     assert.ok(!result.stdout.includes("same.bad"));
     assert.ok(!result.stdout.includes("first"));
   }

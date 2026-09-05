@@ -179,10 +179,13 @@ function validUnreadable(event, allowedRooms) {
   );
 }
 
+const LEGACY_CHANNEL_EPISODE = "legacy-channel-episode";
+const LEGACY_WARNING = "Post compatibility warning: unreadable channel data from an older Post lacks channel identity. Per-message delivery is unknown; upgrade Post.";
+
 function eventKey(event) {
   if (event.event === "unreadable") {
     if (event.reason === "channel") {
-      return event.channel === undefined ? null : JSON.stringify(["unreadable", event.channel, event.id]);
+      return event.channel === undefined ? LEGACY_CHANNEL_EPISODE : JSON.stringify(["unreadable", event.channel, event.id]);
     }
     return JSON.stringify(["unreadable-mail", event.room, event.id]);
   }
@@ -218,6 +221,10 @@ function verbFor(count) {
 }
 
 function herdrPrompt(fresh) {
+  if (fresh.some((event) => eventKey(event) === LEGACY_CHANNEL_EPISODE)) {
+    const ordinary = fresh.filter((event) => eventKey(event) !== LEGACY_CHANNEL_EPISODE);
+    return LEGACY_WARNING + (ordinary.length ? " " + herdrPrompt(ordinary) : "");
+  }
   const directCount = fresh.filter((e) => e.reason === "mail").length;
   const channelCount = fresh.length - directCount;
   const total = fresh.length;
@@ -234,6 +241,10 @@ function herdrPrompt(fresh) {
 }
 
 function cmuxBody(fresh) {
+  if (fresh.some((event) => eventKey(event) === LEGACY_CHANNEL_EPISODE)) {
+    const ordinary = fresh.filter((event) => eventKey(event) !== LEGACY_CHANNEL_EPISODE);
+    return LEGACY_WARNING + (ordinary.length ? " " + cmuxBody(ordinary) : "");
+  }
   const directCount = fresh.filter((e) => e.reason === "mail").length;
   const channelCount = fresh.length - directCount;
   const summary = waitingSummary(directCount, channelCount);
@@ -314,13 +325,13 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
       for (const event of eligible) {
         const key = eventKey(event);
         if (!seen.has(key)) fresh.push(event);
-        if (key !== null) seen.add(key);
+        seen.add(key);
       }
       // On delivery, persist the exact current eligible snapshot keys, not
       // prior∪fresh sliced: a cap below the backlog size would forget a
       // different still-unread key each run and re-ring it forever. Consumed
       // ids leave the snapshot and prune after a successful scan/delivery.
-      const eligibleKeys = eligible.map((event) => eventKey(event)).filter((key) => key !== null);
+      const eligibleKeys = [...new Set(eligible.map((event) => eventKey(event)))];
       if (fresh.length > 0) {
         let delivered = false;
         if (herdrAgent) {

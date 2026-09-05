@@ -139,11 +139,16 @@ adapters key new unreadable channel events by channel and opaque ID, never by
 room and ID alone; unreadable IDs remain count-only in notices.
 
 Older producers omit channel identity and may already have dropped collisions
-between channels. Consumers accept these legacy events conservatively but do
-not persist them as uniquely acknowledged; they can re-ring until consumed.
+between channels. Stateful consumers treat their presence as a degraded episode:
+one bounded compatibility warning, followed by silence until a successful
+snapshot clears that presence. A persisted class sentinel records accepted
+warning delivery, never per-message IDs or counts. Failed scans or sinks retain
+prior state; ordinary new-format events remain independently eligible.
 Upgrading consumers alone cannot recover events an old producer omitted.
 The notify monitor includes unreadable direct mail and selected-channel
 deliveries; legacy channel unreadables are eligible when any channel is selected.
+The stateless watch-notice renderer reports the same warning without claiming
+per-message delivery; lifecycle hooks and controllers own persisted suppression.
 
 Empty scan → no output. It never moves mail and never mutates channel
 seen-state. On a legacy (unfenced) store a snapshot may still run first-use

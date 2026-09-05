@@ -95,6 +95,12 @@ function channelSummary(channel) {
 }
 
 function contextFor(events) {
+  const ordinary = events.filter((event) => !(event.event === "unreadable" &&
+    event.reason === "channel" && event.channel === undefined));
+  if (ordinary.length !== events.length) {
+    const warning = "Post compatibility warning: unreadable channel data from an older Post lacks channel identity. Per-message delivery is unknown; upgrade Post.";
+    return (warning + (ordinary.length ? " " + contextFor(ordinary) : "")).slice(0, CONTEXT_MAX);
+  }
   const mail = events.filter((e) => e.event === "mail");
   const channel = events.filter((e) => e.event === "channel_message");
   const unreadable = events.filter((e) => e.event === "unreadable");

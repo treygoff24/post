@@ -147,11 +147,13 @@ function isSubagent(input) {
   );
 }
 
+const LEGACY_CHANNEL_EPISODE = "legacy-channel-episode";
+const LEGACY_WARNING = "Post compatibility warning: unreadable channel data from an older Post lacks channel identity. Per-message delivery is unknown; upgrade Post.";
+
 function eventKey(event) {
   if (event.event === "unreadable" && event.reason === "channel") {
-    // Older Post lacks channel identity: re-notify rather than persist a
-    // collision-prone key and silently hide another channel's malformed file.
-    return event.channel === undefined ? null : JSON.stringify(["unreadable", event.channel, event.id]);
+    // Presence-only episode, not a per-message acknowledgement.
+    return event.channel === undefined ? LEGACY_CHANNEL_EPISODE : JSON.stringify(["unreadable", event.channel, event.id]);
   }
   if (event.event === "channel_message") return `channel:${event.channel}:${event.id}`;
   return `${event.event}:${event.room}:${event.id}`;
@@ -193,6 +195,10 @@ function channelSummary(channel) {
 }
 
 function contextFor(events) {
+  if (events.some((event) => eventKey(event) === LEGACY_CHANNEL_EPISODE)) {
+    const ordinary = events.filter((event) => eventKey(event) !== LEGACY_CHANNEL_EPISODE);
+    return (LEGACY_WARNING + (ordinary.length ? "\n" + contextFor(ordinary) : "")).slice(0, CONTEXT_MAX);
+  }
   const mail = events.filter((e) => e.event === "mail");
   const channel = events.filter((e) => e.event === "channel_message");
   const unreadable = events.filter((e) => e.event === "unreadable");
@@ -388,7 +394,7 @@ function main() {
   // below the backlog size would drop a still-unread key each run and re-ring
   // it forever. Consumed ids leave the snapshot and prune themselves.
   const nextState = {
-    seen: events.map((event) => eventKey(event)).filter((key) => key !== null),
+    seen: [...new Set(events.map((event) => eventKey(event)))],
     failStreak: 0,
   };
   // Written after a successful emit even when nothing is new: the file's mtime

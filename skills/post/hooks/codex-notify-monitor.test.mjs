@@ -529,11 +529,38 @@ test("unreadable selected channels dedupe by channel and prune; legacy remains e
   assert.equal(calls(CMUX_CALLS).length, before + 2);
   const { channel, ...legacy } = first;
   scan([legacy]);
-  scan([legacy]);
+  assert.match(calls(CMUX_CALLS).at(-1).join(" "), /Per-message delivery is unknown/);
+  for (let i = 0; i < 5; i++) scan([legacy]);
+  assert.equal(calls(CMUX_CALLS).length, before + 3);
+  scan([legacy, first]);
   assert.equal(calls(CMUX_CALLS).length, before + 4);
+  assert.ok(!calls(CMUX_CALLS).at(-1).join(" ").includes("compatibility warning"));
+  scan([]);
+  scan([legacy]);
+  assert.equal(calls(CMUX_CALLS).length, before + 5);
   // A valid but unselected Unicode namespace is not a malformed snapshot.
   scan([{ ...first, channel: "café" }]);
-  assert.equal(calls(CMUX_CALLS).length, before + 4);
+  assert.equal(calls(CMUX_CALLS).length, before + 5);
+});
+
+test("failed legacy warning or scan does not acknowledge or clear the episode", () => {
+  const state = path.join(ROOT, "legacy-failed-warning.json");
+  const legacy = { event: "unreadable", room: "sol", id: "SECRET", reason: "channel" };
+  const postStdout = JSON.stringify(legacy) + "\n";
+  setControl({ postStdout, cmuxExit: 1 });
+  assert.notEqual(run({ state, channels: "first" }).status, 0);
+  assert.equal(fs.existsSync(state), false);
+  setControl({ postStdout });
+  assert.equal(run({ state, channels: "first" }).status, 0);
+  const accepted = fs.readFileSync(state, "utf8");
+  assert.ok(!accepted.includes("SECRET"));
+  const before = calls(CMUX_CALLS).length;
+  setControl({ postExit: 1 });
+  assert.notEqual(run({ state, channels: "first" }).status, 0);
+  assert.equal(fs.readFileSync(state, "utf8"), accepted);
+  setControl({ postStdout });
+  assert.equal(run({ state, channels: "first" }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before);
 });
 
 test("seen write refuses a planted predictable legacy temp symlink", () => {
