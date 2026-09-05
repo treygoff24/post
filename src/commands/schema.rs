@@ -233,7 +233,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         watch: fields(&[
             "mail: event, room, id, from, kind, subject, sent, reason=mail, preview? [, display_name, pfp, sender_address, sender_provenance]",
-            "unreadable: event, room, id, reason=mail|channel (no preview)",
+            "unreadable: event, room, id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
             "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]),

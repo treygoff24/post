@@ -133,6 +133,7 @@ fn watch_unreadable_message_has_no_preview() {
         room: "test-room".to_owned(),
         id: "20260831-224243-test05".to_owned(),
         reason: WatchReason::Mail,
+        channel: None,
         preview: None, // Unreadable messages have no body to preview
     };
 

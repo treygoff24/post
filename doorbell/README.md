@@ -37,8 +37,9 @@ hypothetical:
 - **Stale mail after a busy turn.** The daemon rereads current unread events
   after the agent settles, then counts only unacknowledged eligible keys. A
   consumed trigger does not produce a notice. Consumed acknowledged keys are
-  pruned after a successful cycle; a watcher-local seen set suppresses buffered
-  duplicate triggers.
+  pruned after a successful cycle. Buffered consumed triggers may request another
+  snapshot, coalesced at a minimum two-second cadence, but cannot create a stale
+  prompt. No lifetime event history accumulates in the daemon.
 - **A line that is read but not seen.** `select()` watches a file descriptor,
   so a buffered text stream that pulls a whole chunk above it hides every line
   but the first until the next write. A multi-room scan emits one line per room
@@ -65,9 +66,11 @@ hypothetical:
 Names containing Unicode, spaces, or punctuation outside the simple notice
 alphabet remain eligible but appear as `[non-simple name]`. Unreadable delivery
 IDs are opaque and never rendered. Notices remain capped at 1,500 characters.
-Current Post unreadable-channel events omit the channel name. Two such events
-with the same room and filename-derived ID are indistinguishable; unique
-delivery tracking for that case needs an upstream event field and remains open.
+New Post unreadable-channel events include the channel name, so identical
+filenames in different channels have distinct keys. Older producers omit it
+and can drop collisions before emission. Legacy events remain accepted but are
+not persistently acknowledged as unique; they may re-ring. Upgrade Post too,
+not just the daemon, to recover the producer-side identity guarantee.
 
 ## Running it
 

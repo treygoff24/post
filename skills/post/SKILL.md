@@ -324,9 +324,15 @@ Watch event variants:
 
 ```json
 {"event":"mail","room":"<room>","id":"...","from":"...","kind":"note","subject":"...","sent":"...","reason":"mail","preview":"..."}
-{"event":"unreadable","room":"<room>","id":"...","reason":"mail"|"channel"}
+{"event":"unreadable","room":"<room>","id":"...","reason":"mail"}
+{"event":"unreadable","room":"<room>","channel":"<channel>","id":"...","reason":"channel"}
 {"event":"channel_message","channel":"...","id":"...","from":"...","subject":"...","sent":"...","reason":"channel"|"mention","preview":"..."}
 ```
+
+Unreadable channel identity is (channel, opaque ID), not (room, ID). New Post
+always emits the channel field; older producers omit it and may drop same-ID
+collisions across channels. Adapters accept legacy events without claiming a
+unique acknowledgement, so those events may re-ring. Never render their IDs.
 
 Warnings such as unregistered room, unreadable entries, or corrupt channel state
 are stderr diagnostics; stdout remains event data.

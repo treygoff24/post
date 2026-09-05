@@ -415,7 +415,7 @@ fn run_watch_loop(
     context: &Context,
     targets: &mut [WatchTarget],
     owned_rooms: &BTreeSet<String>,
-    emitted_channel_ids: &mut HashSet<String>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
     interval_ms: u64,
     once: bool,
     text: bool,
@@ -516,7 +516,7 @@ fn scan_targets(
     context: &Context,
     targets: &mut [WatchTarget],
     owned_rooms: &BTreeSet<String>,
-    emitted_channel_ids: &mut HashSet<String>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
     selected: impl Fn(&WatchTarget) -> bool,
 ) -> Vec<WatchDelivery> {
     let mut batch = Vec::new();
@@ -755,7 +755,7 @@ fn scan_batch(
     inbox: &Path,
     channel_seen: &HashMap<String, BTreeSet<String>>,
     seen: &mut HashSet<PathBuf>,
-    emitted_channel_ids: &mut HashSet<String>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
 ) -> AppResult<Vec<WatchDelivery>> {
     let mut batch = Vec::new();
     for path in mail_files(inbox)? {
@@ -790,7 +790,7 @@ fn scan_batch(
                     .to_owned();
                 batch.push(WatchDelivery::mail(
                     room,
-                    WatchEvent::unreadable(room, id, WatchReason::Mail),
+                    WatchEvent::unreadable_mail(room, id),
                 ));
             }
         }
@@ -809,9 +809,12 @@ fn scan_batch(
                 continue;
             }
         }
-        let dedupe_id = message_id
-            .map(str::to_owned)
-            .unwrap_or_else(|| path.display().to_string());
+        let dedupe_id = (
+            channel.clone(),
+            message_id
+                .map(str::to_owned)
+                .unwrap_or_else(|| path.display().to_string()),
+        );
         if emitted_channel_ids.contains(&dedupe_id) {
             continue;
         }
@@ -823,7 +826,7 @@ fn scan_batch(
             Ok(parsed)
                 if parsed.message.from == room || owned_rooms.contains(&parsed.message.from) => {}
             Ok(parsed) => {
-                emitted_channel_ids.insert(parsed.message.id.clone());
+                emitted_channel_ids.insert(dedupe_id);
                 batch.push(WatchDelivery::channel(
                     room,
                     &channel,
@@ -849,7 +852,7 @@ fn scan_batch(
                 batch.push(WatchDelivery::channel(
                     room,
                     &channel,
-                    WatchEvent::unreadable(room, id, WatchReason::Channel),
+                    WatchEvent::unreadable_channel(room, &channel, id),
                 ));
             }
         }

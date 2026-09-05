@@ -64,6 +64,13 @@ function safeName(value) {
   return typeof value === "string" && value.length <= NAME_MAX && ROOM_NAME.test(value);
 }
 
+// This field is identity-only, never rendered; accept Post's path-safe Unicode
+// channel namespace rather than the narrower model-facing name alphabet.
+function safeUnreadableChannel(value) {
+  return safeUnreadableId(value) && Buffer.byteLength(value, "utf8") <= NAME_MAX &&
+    value !== "." && value !== ".." && !/[\\/\\\\\u0080-\u009f]/.test(value);
+}
+
 function safeUnreadableId(value) {
   return (
     typeof value === "string" &&
@@ -160,6 +167,7 @@ function validSnapshotEvent(event) {
       return (
         isStringFields(event, ["room", "id", "reason"]) &&
         (event.reason === "mail" || event.reason === "channel") &&
+        (event.reason !== "channel" || event.channel === undefined || safeUnreadableChannel(event.channel)) &&
         safeName(event.room) &&
         safeUnreadableId(event.id)
       );

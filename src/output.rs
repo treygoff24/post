@@ -406,6 +406,9 @@ pub enum WatchEvent {
         room: String,
         id: String,
         reason: WatchReason,
+        /// Channel identity is absent only for direct mail or legacy producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         /// Unreadable messages have no body to preview.
         #[serde(skip)]
         preview: Option<String>,
@@ -471,12 +474,23 @@ impl WatchEvent {
             preview,
         }
     }
-    pub(crate) fn unreadable(room: &str, id: String, reason: WatchReason) -> Self {
+    pub(crate) fn unreadable_mail(room: &str, id: String) -> Self {
         Self::Unreadable {
             room: room.to_owned(),
             id,
-            reason,
+            reason: WatchReason::Mail,
+            channel: None,
             preview: None, // Unreadable messages have no body to preview
+        }
+    }
+
+    pub(crate) fn unreadable_channel(room: &str, channel: &str, id: String) -> Self {
+        Self::Unreadable {
+            room: room.to_owned(),
+            id,
+            reason: WatchReason::Channel,
+            channel: Some(channel.to_owned()),
+            preview: None,
         }
     }
 

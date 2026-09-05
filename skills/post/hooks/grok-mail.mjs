@@ -136,12 +136,24 @@ function postBinary() {
 }
 
 function eventKey(event) {
+  if (event.event === "unreadable" && event.reason === "channel") {
+    // Older Post lacks channel identity: re-notify rather than persist a
+    // collision-prone key and silently hide another channel's malformed file.
+    return event.channel === undefined ? null : JSON.stringify(["unreadable", event.channel, event.id]);
+  }
   if (event.event === "channel_message") return `channel:${event.channel}:${event.id}`;
   return `${event.event}:${event.room}:${event.id}`;
 }
 
 function safeName(value) {
   return typeof value === "string" && value.length <= NAME_MAX && ROOM_NAME.test(value);
+}
+
+// This field is identity-only, never rendered; accept Post's path-safe Unicode
+// channel namespace rather than the narrower model-facing name alphabet.
+function safeUnreadableChannel(value) {
+  return safeUnreadableId(value) && Buffer.byteLength(value, "utf8") <= NAME_MAX &&
+    value !== "." && value !== ".." && !/[\\/\\\\\u0080-\u009f]/.test(value);
 }
 
 function safeUnreadableId(value) {
@@ -241,6 +253,7 @@ function validSnapshotEvent(event) {
       return (
         isStringFields(event, ["room", "id", "reason"]) &&
         (event.reason === "mail" || event.reason === "channel") &&
+        (event.reason !== "channel" || event.channel === undefined || safeUnreadableChannel(event.channel)) &&
         safeName(event.room) &&
         safeUnreadableId(event.id)
       );
@@ -370,7 +383,7 @@ function main() {
   const seen = new Set(state.seen);
   const fresh = events.filter((event) => !seen.has(eventKey(event)));
   const nextState = {
-    seen: events.map((event) => eventKey(event)),
+    seen: events.map((event) => eventKey(event)).filter((key) => key !== null),
     failStreak: 0,
     cardShown: state.cardShown || card !== null,
   };

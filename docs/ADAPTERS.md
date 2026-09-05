@@ -129,7 +129,21 @@ object per line:
 {"event":"mail","room":"myroom","id":"20260722-010101-ab12cd","from":"peer","kind":"note","subject":"…","sent":"…","reason":"mail"}
 {"event":"channel_message","channel":"ops","id":"20260722-010101-000001-ab12cd","from":"peer","subject":"…","sent":"…","reason":"channel"}
 {"event":"unreadable","room":"myroom","id":"<filename-stem>","reason":"mail"}
+{"event":"unreadable","room":"myroom","channel":"ops","id":"<filename-stem>","reason":"channel"}
 ```
+
+New producers always include `channel` on unreadable channel events and dedupe
+by (channel, filename-derived ID), including across multiple watched rooms.
+Direct unreadable mail omits `channel`, preserving its wire shape. Stateful
+adapters key new unreadable channel events by channel and opaque ID, never by
+room and ID alone; unreadable IDs remain count-only in notices.
+
+Older producers omit channel identity and may already have dropped collisions
+between channels. Consumers accept these legacy events conservatively but do
+not persist them as uniquely acknowledged; they can re-ring until consumed.
+Upgrading consumers alone cannot recover events an old producer omitted.
+The notify monitor includes unreadable direct mail and selected-channel
+deliveries; legacy channel unreadables are eligible when any channel is selected.
 
 Empty scan → no output. It never moves mail and never mutates channel
 seen-state. On a legacy (unfenced) store a snapshot may still run first-use

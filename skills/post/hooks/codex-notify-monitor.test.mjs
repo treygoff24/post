@@ -489,7 +489,7 @@ test("invalid or missing reason on known events fails without notifying", () => 
   assert.equal(calls(CMUX_CALLS).length, before);
 });
 
-test("valid unreadable events are ignored without notifying or deduping", () => {
+test("valid unreadable mail notifies once without exposing filename content", () => {
   const state = path.join(ROOT, "ignore-unreadable.json");
   setControl({
     postStdout: `${JSON.stringify({
@@ -502,8 +502,38 @@ test("valid unreadable events are ignored without notifying or deduping", () => 
   const before = calls(CMUX_CALLS).length;
   const result = run({ state });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(calls(CMUX_CALLS).length, before);
-  assert.equal(fs.existsSync(state), false);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+  assert.ok(!calls(CMUX_CALLS).at(-1).join(" ").includes("corrupt-stem"));
+  assert.equal(run({ state }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+});
+
+test("unreadable selected channels dedupe by channel and prune; legacy remains eligible", () => {
+  const state = path.join(ROOT, "unreadable-channels.json");
+  const first = { event: "unreadable", room: "sol", id: "same.bad", reason: "channel", channel: "first" };
+  const second = { ...first, channel: "second" };
+  const scan = (events) => {
+    setControl({ postStdout: events.map(JSON.stringify).join("\n") + "\n" });
+    const result = run({ state, channels: "first,second" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const before = calls(CMUX_CALLS).length;
+  scan([first, second]);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+  assert.match(calls(CMUX_CALLS).at(-1).join(" "), /2 selected channel messages/);
+  assert.ok(!calls(CMUX_CALLS).at(-1).join(" ").includes("same.bad"));
+  scan([first, second]);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+  scan([second]);
+  scan([first, second]);
+  assert.equal(calls(CMUX_CALLS).length, before + 2);
+  const { channel, ...legacy } = first;
+  scan([legacy]);
+  scan([legacy]);
+  assert.equal(calls(CMUX_CALLS).length, before + 4);
+  // A valid but unselected Unicode namespace is not a malformed snapshot.
+  scan([{ ...first, channel: "café" }]);
+  assert.equal(calls(CMUX_CALLS).length, before + 4);
 });
 
 test("seen write refuses a planted predictable legacy temp symlink", () => {

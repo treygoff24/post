@@ -112,6 +112,35 @@ const MAIL_A = {
   sent: "2026-07-22 01:01:01 -0500",
   reason: "mail",
 };
+
+test("unreadable channels use distinct current keys; legacy identity is not acknowledged", () => {
+  const stateDir = freshStateDir();
+  const input = { cwd: CWD, hook_event_name: "UserPromptSubmit", hookEventName: "UserPromptSubmit", session_id: "channel-collision" };
+  const first = { event: "unreadable", room: "room", reason: "channel", channel: "first", id: "same.bad" };
+  const second = { ...first, channel: "second" };
+  setStub({ events: [first, second] });
+  assert.match(JSON.stringify(run(input, { stateDir })), /Unreadable mail: 2/);
+  assert.deepEqual(run(input, { stateDir }), {});
+  setStub({ events: [second] });
+  assert.deepEqual(run(input, { stateDir }), {});
+  setStub({ events: [first, second] });
+  const returned = JSON.stringify(run(input, { stateDir }));
+  assert.match(returned, /Unreadable mail: 1/);
+  assert.ok(!returned.includes("same.bad"));
+  const { channel, ...legacy } = first;
+  setStub({ events: [legacy] });
+  for (let i = 0; i < 2; i++) assert.match(JSON.stringify(run(input, { stateDir })), /Unreadable mail: 1/);
+  setStub({ events: [{ ...first, channel: "../UNSAFE" }] });
+  const invalid = JSON.stringify(run(input, { stateDir }));
+  assert.ok(!invalid.includes("UNSAFE"));
+  assert.ok(!invalid.includes("Unreadable mail: 1"));
+  for (const name of ["x".repeat(255), "team ops", "café"]) {
+    setStub({ events: [{ ...first, channel: name }] });
+    const notice = JSON.stringify(run(input, { stateDir }));
+    assert.match(notice, /Unreadable mail: 1/);
+    assert.ok(!notice.includes(name));
+  }
+});
 const CHAN_B = {
   event: "channel_message",
   channel: "ops",

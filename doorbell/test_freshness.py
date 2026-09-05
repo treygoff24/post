@@ -34,7 +34,7 @@ class Freshness(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 1, "", "failed")
             return subprocess.CompletedProcess(argv, 0, "\n".join(map(json.dumps, snapshot)), "")
 
-        argv = ["post-doorbell", "--agent", "fake", "--quiet-ms", "0"]
+        argv = ["post-doorbell", "--agent", "fake", "--quiet-ms", "0", "--wake-on", "all"]
         if not prime:
             argv.append("--ring-backlog")
         with patch.object(doorbell.sys, "argv", argv), \
@@ -51,10 +51,10 @@ class Freshness(unittest.TestCase):
         return notices, saved, calls
 
     def test_consumed_during_wait_and_buffered_repeat_do_not_prompt(self):
-        notices, marks, calls = self.run_loop([[]])
+        notices, marks, calls = self.run_loop([[], []])
         self.assertEqual(notices, [])
-        self.assertEqual(marks, [set()])
-        self.assertEqual(sum("--snapshot" in c for c in calls), 1)
+        self.assertEqual(marks, [set(), set()])
+        self.assertEqual(sum("--snapshot" in c for c in calls), 2)
 
     def test_arrivals_during_wait_are_in_fresh_notice(self):
         notices, marks, _ = self.run_loop([[mail(), mail("second"), mail("third")]])
@@ -152,6 +152,30 @@ class Freshness(unittest.TestCase):
 
     def test_legacy_mixed_filter_cannot_become_silent(self):
         self.assertEqual(doorbell.parse_wake_on("mixed"), {"all"})
+
+    def test_unreadable_channels_with_same_id_have_distinct_keys_and_prune(self):
+        first = {"event": "unreadable", "room": "r", "id": "same.bad",
+                 "reason": "channel", "channel": "first"}
+        second = first | {"channel": "second"}
+        notices, marks, _ = self.run_loop([[first, second], [second]], events=[first, mail()])
+        self.assertEqual(len(notices), 1)
+        self.assertIn("#first (1)", notices[0])
+        self.assertIn("#second (1)", notices[0])
+        self.assertNotIn("same.bad", notices[0])
+        self.assertEqual(len(marks[0]), 2)
+        self.assertEqual(marks[-1], {("channel:second", "second", "same.bad")})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(doorbell, "state_path", return_value=str(Path(tmp) / "keys.json")):
+            doorbell.save_marks("fake", marks[0])
+            self.assertEqual(doorbell.load_marks("fake"), marks[0])
+
+    def test_legacy_channel_unreadables_remain_eligible_without_unique_ack(self):
+        event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
+        notices, marks, _ = self.run_loop([[event], [event]], events=[event, event])
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(marks, [set(), set()])
+        self.assertTrue(all("same.bad" not in notice for notice in notices))
+        with self.assertRaises(ValueError):
+            doorbell.event_metadata(event | {"channel": "../unsafe"})
 
 
 if __name__ == "__main__":

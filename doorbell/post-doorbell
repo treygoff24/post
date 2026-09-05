@@ -121,7 +121,13 @@ def event_metadata(event):
             or not isinstance(ident, str) or not 0 < len(ident.encode("utf-8")) <= 1024
             or reason not in {"mail", "channel", "mention"}):
         raise ValueError("invalid event metadata")
-    if kind == "channel_message":
+    if ((kind == "mail" and reason != "mail")
+            or (kind == "unreadable" and reason == "mention")
+            or (kind == "channel_message" and reason == "mail")
+            or (kind != "channel_message" and not component(event.get("room")))):
+        raise ValueError("invalid event reason or room")
+    if kind == "channel_message" or (kind == "unreadable" and reason == "channel"
+                                     and "channel" in event):
         namespace = event.get("channel")
         source = "channel:" + namespace if isinstance(namespace, str) else None
     else:
@@ -353,9 +359,6 @@ def main():
     # Verified: two lines in one write, select then times out holding line 2.
     watch = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE)
     buffered = b""
-    # Like Post's watch seen-set, this lives only for this watcher. Buffered
-    # repeats are not new triggers even after consumed persisted keys are pruned.
-    observed = set()
     deadline = time.monotonic() if prime_failed else None
     watch_died = False
     try:
@@ -391,10 +394,12 @@ def main():
                     key, source, reason = event_metadata(event)
                 except (ValueError, TypeError):
                     continue
-                fresh = key not in marks and key not in observed
-                observed.add(key)
+                fresh = key not in marks
                 if fresh and ("all" in wake_on or reason in wake_on) and deadline is None:
-                    deadline = time.monotonic() + args.quiet_ms / 1000.0
+                    # Buffered consumed triggers may request another scan, never
+                    # another stale prompt. Bound their cadence without retaining
+                    # an unbounded history of every event this watcher ever saw.
+                    deadline = time.monotonic() + max(args.quiet_ms, POLL_SETTLE_MS) / 1000.0
             if deadline is not None and time.monotonic() >= deadline:
                 refreshed = (snapshot_events(command, cwd, wake_on)
                              if settle(args.agent, args.settle_timeout_ms) else None)
@@ -411,9 +416,12 @@ def main():
                     continue
                 if pending:
                     log(f"doorbell: woke {args.agent} for {sum(pending.values())} unread")
-                # All current eligible keys are now acknowledged; prune consumed
+                # Current identifiable keys are now acknowledged; prune consumed
                 # keys only after the scan and sink succeeded.
-                marks = set(refreshed)
+                # A legacy unreadable-channel event lacks channel identity.
+                # Never pretend that its room/ID fallback uniquely acknowledges
+                # a delivery; older producers can therefore re-ring this case.
+                marks = {key for key in refreshed if key[0] != "unreadable-channel"}
                 save_marks(args.agent, marks)
                 deadline = None
     except KeyboardInterrupt:

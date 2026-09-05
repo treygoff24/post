@@ -151,6 +151,23 @@ test("hostile subject and from never reach stdout even on a valid event", () => 
   assert.ok(!result.stdout.includes(JSON.stringify(MAIL_A)));
 });
 
+test("unreadable channel identity is validated but never rendered; legacy is accepted", () => {
+  const event = { event: "unreadable", room: "room", id: "same.bad", reason: "channel", channel: "first" };
+  for (const candidate of [event, { ...event, channel: undefined },
+                           { ...event, channel: "café" }, { ...event, channel: "x".repeat(255) }]) {
+    setStub({ events: [candidate] });
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Unreadable mail: 1/);
+    assert.ok(!result.stdout.includes("same.bad"));
+    assert.ok(!result.stdout.includes("first"));
+  }
+  setStub({ events: [{ ...event, channel: "../UNSAFE" }] });
+  const invalid = run();
+  assert.equal(invalid.stdout, UNKNOWN + "\n");
+  assert.ok(!invalid.stdout.includes("UNSAFE"));
+});
+
 test("malformed or unknown nonempty snapshot output fails closed without echoing fields", () => {
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [

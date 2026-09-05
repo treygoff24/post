@@ -175,7 +175,7 @@ fn help_and_schema_keep_command_contract_visible() {
         schema.output_shapes.watch,
         vec![
             "mail: event, room, id, from, kind, subject, sent, reason=mail, preview? [, display_name, pfp, sender_address, sender_provenance]",
-            "unreadable: event, room, id, reason=mail|channel (no preview)",
+            "unreadable: event, room, id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
             "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]
@@ -4180,6 +4180,63 @@ fn watch_snapshot_for_an_unregistered_room_creates_nothing_and_exits_zero() {
 }
 
 #[test]
+fn watch_unreadable_channel_identity_survives_same_basename_and_multi_room() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    for channel in ["first", "second"] {
+        join_channel(&sandbox, channel, &alpha);
+        join_channel(&sandbox, channel, &beta);
+        fs::write(
+            sandbox
+                .mail_root
+                .join("channels")
+                .join(channel)
+                .join("messages/same.bad.msg"),
+            "UNTRUSTED-BROKEN-CONTENT",
+        )
+        .expect("write malformed channel file");
+    }
+    for rooms in [vec!["beta"], vec!["alpha", "beta"]] {
+        let mut args = vec!["watch", "--snapshot"];
+        for room in rooms {
+            args.extend(["--room", room]);
+        }
+        let output = sandbox.run(&args);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let events = watch_events(&output.stdout);
+        let mut channels = events
+            .iter()
+            .filter_map(|event| match event {
+                WatchEvent::Unreadable {
+                    id,
+                    channel,
+                    reason: WatchReason::Channel,
+                    ..
+                } if id == "same.bad" => channel.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        channels.sort();
+        assert_eq!(channels, ["first", "second"]);
+        assert!(!stdout(&output).contains("UNTRUSTED"));
+        args.push("--digest");
+        let digest = sandbox.run(&args);
+        assert!(digest.status.success(), "{}", stderr(&digest));
+        let sources = stdout(&digest)
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("digest")["source"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(sources.contains(&"channel:first".to_owned()));
+        assert!(sources.contains(&"channel:second".to_owned()));
+    }
+}
+
+#[test]
 fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
@@ -4443,10 +4500,13 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
             id,
             reason,
             preview: _,
+            channel,
         } => {
             assert_eq!(room, "claude-space");
             assert_eq!(id, "20260721-010101-abcdef");
             assert_eq!(*reason, WatchReason::Mail);
+            assert!(channel.is_none());
+            assert!(!stdout(&output).contains("\"channel\""));
         }
         WatchEvent::Mail { item, .. } => panic!("malformed mail parsed as {}", item.id),
         WatchEvent::ChannelMessage { id, .. } => panic!("unexpected channel event for {id}"),

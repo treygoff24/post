@@ -95,6 +95,13 @@ function safeName(value) {
   return typeof value === "string" && value.length <= NAME_MAX && ROOM_NAME.test(value);
 }
 
+// This field is identity-only, never rendered; accept Post's path-safe Unicode
+// channel namespace rather than the narrower model-facing name alphabet.
+function safeUnreadableChannel(value) {
+  return safeUnreadableId(value) && Buffer.byteLength(value, "utf8") <= NAME_MAX &&
+    value !== "." && value !== ".." && !/[\\/\\\\\u0080-\u009f]/.test(value);
+}
+
 function safeUnreadableId(value) {
   return (
     typeof value === "string" &&
@@ -165,6 +172,7 @@ function validUnreadable(event, allowedRooms) {
     event?.event === "unreadable" &&
     isStringFields(event, ["room", "id", "reason"]) &&
     (event.reason === "mail" || event.reason === "channel") &&
+    (event.reason !== "channel" || event.channel === undefined || safeUnreadableChannel(event.channel)) &&
     safeName(event.room) &&
     allowedRooms.has(event.room) &&
     safeUnreadableId(event.id)
@@ -172,11 +180,18 @@ function validUnreadable(event, allowedRooms) {
 }
 
 function eventKey(event) {
+  if (event.event === "unreadable") {
+    if (event.reason === "channel") {
+      return event.channel === undefined ? null : JSON.stringify(["unreadable", event.channel, event.id]);
+    }
+    return JSON.stringify(["unreadable-mail", event.room, event.id]);
+  }
   if (event.event === "channel_message") return `channel:${event.channel}:${event.id}`;
   return `${event.room}:${event.id}`;
 }
 
 function eventRef(event) {
+  if (event.event === "unreadable") return "unreadable delivery";
   if (event.event === "channel_message") return `#${event.channel}:${event.id}`;
   return `${event.room}:${event.id}`;
 }
@@ -203,8 +218,8 @@ function verbFor(count) {
 }
 
 function herdrPrompt(fresh) {
-  const directCount = fresh.filter((e) => e.event === "mail").length;
-  const channelCount = fresh.filter((e) => e.event === "channel_message").length;
+  const directCount = fresh.filter((e) => e.reason === "mail").length;
+  const channelCount = fresh.length - directCount;
   const total = fresh.length;
   const listed = fresh.slice(0, DOORBELL_REF_CAP);
   const refs = listed.map(eventRef).join(", ");
@@ -219,8 +234,8 @@ function herdrPrompt(fresh) {
 }
 
 function cmuxBody(fresh) {
-  const directCount = fresh.filter((e) => e.event === "mail").length;
-  const channelCount = fresh.filter((e) => e.event === "channel_message").length;
+  const directCount = fresh.filter((e) => e.reason === "mail").length;
+  const channelCount = fresh.length - directCount;
   const summary = waitingSummary(directCount, channelCount);
   return `${summary} ${verbFor(directCount + channelCount)} waiting.`;
 }
@@ -280,9 +295,9 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
           if (!validChannelMessage(event)) malformed = true;
           else if (selectedChannels.has(event.channel)) eligible.push(event);
         } else if (event?.event === "unreadable") {
-          // Valid unreadable events are ignored (never notify/dedupe); invalid
-          // ones poison the snapshot.
           if (!validUnreadable(event, allowedRooms)) malformed = true;
+          else if (event.reason === "mail" || selectedChannels.has(event.channel) ||
+                   (event.channel === undefined && selectedChannels.size > 0)) eligible.push(event);
         } else {
           malformed = true;
         }
@@ -299,13 +314,13 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
       for (const event of eligible) {
         const key = eventKey(event);
         if (!seen.has(key)) fresh.push(event);
-        seen.add(key);
+        if (key !== null) seen.add(key);
       }
       // On delivery, persist the exact current eligible snapshot keys, not
       // prior∪fresh sliced: a cap below the backlog size would forget a
       // different still-unread key each run and re-ring it forever. Consumed
-      // ids leave the snapshot and prune themselves on the next delivery.
-      const eligibleKeys = eligible.map((event) => eventKey(event));
+      // ids leave the snapshot and prune after a successful scan/delivery.
+      const eligibleKeys = eligible.map((event) => eventKey(event)).filter((key) => key !== null);
       if (fresh.length > 0) {
         let delivered = false;
         if (herdrAgent) {
@@ -379,6 +394,14 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
           } catch {
             fail("could not save dedupe state; mail may ring again");
           }
+        }
+      } else if (fs.existsSync(stateFile)) {
+        // No new notice needs a sink, but successful scans still prune consumed
+        // keys. Failed scans and failed deliveries never reach this branch.
+        try {
+          writeSeen(stateFile, eligibleKeys);
+        } catch {
+          fail("could not save dedupe state; mail may ring again");
         }
       }
     }
