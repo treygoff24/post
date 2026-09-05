@@ -11,7 +11,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/usr/local/bin/post-doorbell --agent %i
+ExecStart=/usr/bin/env post-doorbell --agent %i
 Restart=always
 RestartSec=10s
 # No ProtectHome/ProtectSystem: `post watch` writes a per-room watch.heartbeat

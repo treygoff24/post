@@ -59,14 +59,15 @@ hypothetical:
 
 ## Running it
 
-Prerequisites: an administrator must first install this checkout's
-`post-doorbell` executable at `/usr/local/bin/post-doorbell`. The template uses
-that exact path; the commands below install only the user unit, not the binary.
-Python 3, `post`, and `herdr` must also be available.
+Prerequisites: Python 3, `post`, and `herdr` must be available. The user unit
+loads `post-doorbell` from PATH, preferring `~/.local/bin`; an existing
+`/usr/local/bin/post-doorbell` remains a fallback. No administrator install is
+required.
 
-From this checkout, after the binary prerequisite is satisfied:
+From this checkout:
 
-    test -x /usr/local/bin/post-doorbell
+    install -d "$HOME/.local/bin"
+    install -m 755 post-doorbell "$HOME/.local/bin/post-doorbell"
     install -d -m 700 "$HOME/.config/systemd/user"
     install -m 644 post-doorbell@.service "$HOME/.config/systemd/user/post-doorbell@.service"
     systemctl --user daemon-reload
@@ -75,6 +76,9 @@ From this checkout, after the binary prerequisite is satisfied:
 
 Replace `<agent-name>` with the named target before running the last command.
 Do not enable this service alongside another doorbell for the same agent.
+For an existing instance, repeat the install and daemon-reload commands, then
+run `systemctl --user restart post-doorbell@<agent-name>` for only your target.
+Other running instances keep their loaded copy until their owners restart them.
 
 `Restart=always` with a 10s backoff and no start-rate limit: systemd's default
 gives up after five restarts and leaves the unit dead, which for a doorbell
