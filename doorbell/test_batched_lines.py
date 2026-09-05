@@ -34,10 +34,18 @@ case "$1" in
   rooms) echo '{"ok":true,"rooms":[{"name":"alpha"},{"name":"beta"}]}' ;;
   watch)
     case "$2" in --help) exit 0 ;; esac
-    for a in "$@"; do [ "$a" = "--snapshot" ] && exit 0; done
+    snapshot=false
+    for a in "$@"; do
+      if [ "$a" = "--snapshot" ]; then
+        [ -f "$FAKE_CWD/started" ] || exit 0
+        snapshot=true
+      fi
+    done
+    touch "$FAKE_CWD/started"
     printf '%s\\n%s\\n' \\
       '{"event":"digest","source":"channel:alpha","count":1,"last_id":"20260825-180000-aaaaaa","reason":"mail"}' \\
       '{"event":"digest","source":"channel:beta","count":1,"last_id":"20260825-180000-bbbbbb","reason":"mail"}'
+    [ "$snapshot" = true ] && exit 0
     exec sleep 30 ;;
 esac
 """

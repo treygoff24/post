@@ -28,7 +28,14 @@ FAKE_POST = """#!/bin/sh
 # snapshot: nothing unread at startup, so the watermark primes empty.
 # watch: re-offer the same unread digest forever, which is what real `post watch`
 # does while a message stays unread.
-for a in "$@"; do [ "$a" = "--snapshot" ] && exit 0; done
+for a in "$@"; do
+  if [ "$a" = "--snapshot" ]; then
+    [ -f "$FAKE_CWD/started" ] || exit 0
+    echo '{"event":"digest","source":"mail","count":1,"last_id":"20260825-170000-aaaaaa","reason":"mail"}'
+    exit 0
+  fi
+done
+touch "$FAKE_CWD/started"
 while true; do
   echo '{"event":"digest","room":"r","source":"mail","count":1,"first_id":"20260825-170000-aaaaaa","last_id":"20260825-170000-aaaaaa","reason":"mail"}'
   sleep 1

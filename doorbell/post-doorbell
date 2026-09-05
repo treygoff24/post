@@ -51,18 +51,22 @@ def find_agent(name):
     return None
 
 
-def deliver(target, notice, settle_timeout_ms):
-    """Submit the notice, waiting for a working agent to settle first.
+def settle(target, settle_timeout_ms):
+    """Wait for a working agent to settle before checking its unread mail.
 
     `herdr agent prompt` rejects a blocked agent outright and would queue behind
     a working one, so the wait is ours to do: an agent mid-turn gets its notice
     when the turn ends, not spliced into the middle of it.
     """
-    subprocess.run(
+    proc = subprocess.run(
         ["herdr", "agent", "wait", target, "--until", "idle", "--until", "done",
          "--timeout", str(settle_timeout_ms)],
         capture_output=True, text=True, check=False,
     )
+    return proc.returncode == 0
+
+
+def deliver(target, notice):
     proc = subprocess.run(
         ["herdr", "agent", "prompt", target, notice],
         capture_output=True, text=True, check=False,
@@ -78,6 +82,8 @@ def render(pending):
     parts = []
     for source in sorted(pending):
         count = pending[source]
+        if not safe_source(source) or type(count) is not int or not 1 <= count <= 1000000000:
+            continue
         label = source.split("channel:", 1)[-1] if source.startswith("channel:") else source
         kind = "#" + label if source.startswith("channel:") else label
         parts.append(f"{kind} ({count})")
@@ -90,6 +96,26 @@ def render(pending):
 
 KNOWN_REASONS = {"mail", "channel", "mention", "mixed", "all"}
 DEFAULT_WAKE_ON = "mail,mention"
+
+
+def safe_source(source):
+    return (isinstance(source, str) and 1 <= len(source) <= 256
+            and source.isascii()
+            and all(c.isalnum() or c in "_:-." for c in source))
+
+
+def digest_metadata(event):
+    if not isinstance(event, dict) or event.get("event") != "digest":
+        raise ValueError("invalid digest")
+    source = event.get("source") or event.get("room") or "mail"
+    last, count, reason = event.get("last_id"), event.get("count"), event.get("reason")
+    if (not safe_source(source) or not isinstance(last, str)
+            or not 1 <= len(last) <= 128 or not last.isascii()
+            or not all(c.isalnum() or c in "_-" for c in last)
+            or type(count) is not int or not 1 <= count <= 1000000000
+            or reason not in KNOWN_REASONS):
+        raise ValueError("invalid digest metadata")
+    return source, last, count, reason
 
 
 def parse_wake_on(spec):
@@ -217,6 +243,33 @@ def snapshot_marks(command_base, cwd):
     return marks
 
 
+def refresh_pending(command, cwd, wake_on, marks, triggered):
+    """Read current unread metadata. None means unknown, never empty."""
+    try:
+        proc = subprocess.run(command + ["--snapshot"], cwd=cwd,
+                              capture_output=True, text=True, check=False)
+        if proc.returncode != 0 or proc.stderr.strip():
+            raise ValueError("snapshot failed")
+        pending, fresh = {}, {}
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            source, last, count, reason = digest_metadata(event)
+            wanted = "all" in wake_on or reason in wake_on or reason == "mixed"
+            # The newest trigger may have been consumed while older arrivals
+            # remain unread. Do not filter those away with its timestamp.
+            if wanted and (source in triggered or last > marks.get(source, "")):
+                pending[source] = pending.get(source, 0) + count
+                if pending[source] > 1000000000:
+                    raise ValueError("snapshot count exceeds bound")
+                fresh[source] = max(last, fresh.get(source, ""))
+        return pending, fresh
+    except (OSError, ValueError, TypeError):
+        log("doorbell: current snapshot unavailable; wake stays pending")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Wake a herdr-paned agent when post mail arrives.")
     parser.add_argument("--agent", required=True, help="herdr agent name to wake")
@@ -336,12 +389,10 @@ def main():
                     continue
                 try:
                     event = json.loads(raw.decode("utf-8", "replace"))
-                except ValueError:
+                    source, last, count, reason = digest_metadata(event)
+                except (ValueError, TypeError):
                     continue
                 if event.get("event") == "digest":
-                    reason = event.get("reason", "")
-                    source = event.get("source") or event.get("room") or "mail"
-                    last = event.get("last_id") or ""
                     # `post watch` never consumes, so the same unread message is
                     # re-reported every scan. Without this the doorbell rings on a
                     # loop until someone reads the mail -- it rang twice for one
@@ -354,20 +405,32 @@ def main():
                     # missed mention is the whole failure this replaces.
                     wanted = "all" in wake_on or reason in wake_on or reason == "mixed"
                     if fresh and wanted:
-                        pending[source] = int(event.get("count") or 1)
-                        fresh_marks[source] = last
+                        pending[source] = count
+                        fresh_marks[source] = max(last, fresh_marks.get(source, ""))
                         if deadline is None:
                             deadline = time.monotonic() + args.quiet_ms / 1000.0
             if deadline is not None and time.monotonic() >= deadline:
-                if pending and deliver(args.agent, render(pending), args.settle_timeout_ms):
+                refreshed = (refresh_pending(command, cwd, wake_on, marks, fresh_marks)
+                             if settle(args.agent, args.settle_timeout_ms) else None)
+                if refreshed is None:
+                    deadline = time.monotonic() + max(args.quiet_ms, POLL_SETTLE_MS) / 1000.0
+                    continue
+                current, current_marks = refreshed
+                if current and not deliver(args.agent, render(current)):
+                    log(f"doorbell: wake not delivered; {sum(current.values())} unread stays pending")
+                    deadline = time.monotonic() + max(args.quiet_ms, POLL_SETTLE_MS) / 1000.0
+                    continue
+                if current:
+                    pending = current
                     log(f"doorbell: woke {args.agent} for {sum(pending.values())} unread")
                     # Commit the watermark only on a delivered wake. Advancing it
                     # when the prompt was rejected would retire a message nobody
                     # was ever told about.
-                    marks.update(fresh_marks)
-                    save_marks(args.agent, marks)
-                elif pending:
-                    log(f"doorbell: wake not delivered; {sum(pending.values())} unread stays pending")
+                # Retire only IDs actually observed, after a successful scan and
+                # sink (or confirmed consumption). Buffered repeats cannot ring.
+                for source, last in (fresh_marks | current_marks).items():
+                    marks[source] = max(last, fresh_marks.get(source, ""), marks.get(source, ""))
+                save_marks(args.agent, marks)
                 fresh_marks = {}
                 pending, deadline = {}, None
     except KeyboardInterrupt:
