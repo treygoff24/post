@@ -59,10 +59,22 @@ hypothetical:
 
 ## Running it
 
-Nothing is installed. The template unit expects the script at
-`/usr/local/bin/post-doorbell`:
+Prerequisites: an administrator must first install this checkout's
+`post-doorbell` executable at `/usr/local/bin/post-doorbell`. The template uses
+that exact path; the commands below install only the user unit, not the binary.
+Python 3, `post`, and `herdr` must also be available.
+
+From this checkout, after the binary prerequisite is satisfied:
+
+    test -x /usr/local/bin/post-doorbell
+    install -d -m 700 "$HOME/.config/systemd/user"
+    install -m 644 post-doorbell@.service "$HOME/.config/systemd/user/post-doorbell@.service"
+    systemctl --user daemon-reload
 
     systemctl --user enable --now post-doorbell@<agent-name>
+
+Replace `<agent-name>` with the named target before running the last command.
+Do not enable this service alongside another doorbell for the same agent.
 
 `Restart=always` with a 10s backoff and no start-rate limit: systemd's default
 gives up after five restarts and leaves the unit dead, which for a doorbell
@@ -80,6 +92,11 @@ the edge one. The refusal names the fix and lists the agents that do have names:
 
 ## Tests
 
+The systemd user template sets PATH to `%h/.local/bin:/usr/local/bin:/usr/bin:/bin`;
+it does not inherit your interactive shell setup. Install `post` and `herdr` in
+one of those directories, or override PATH with a user-unit drop-in. Startup
+refuses with an actionable error if either executable is missing.
+
     python -m unittest discover -p 'test_*.py'
 
-Seventeen tests. Each was watched red before being kept.
+The suite covers watch delivery, failure handling, and startup dependencies.

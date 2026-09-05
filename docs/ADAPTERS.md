@@ -330,8 +330,9 @@ It creates a private `~/.local/state/post-codex-doorbell` log/state directory
 before enabling the per-agent user timer; timer accuracy is 1 s. Uninstall with
 the same script's `--uninstall --agent <herdr-agent>`.
 
-The separate `post-doorbell` repository provides a continuous-watch Linux
-service (`post-doorbell@.service`); see its README for behavior. Its service PATH
+The embedded `doorbell/` tree (also maintained in the `post-doorbell` repository)
+provides a continuous-watch Linux service (`post-doorbell@.service`); see
+`doorbell/README.md` for setup and behavior. Its service PATH
 includes `%h/.local/bin` for `post` and `herdr`. Choose one wake mechanism per
 agent rather than running both. The launchd instructions below are macOS-only.
 

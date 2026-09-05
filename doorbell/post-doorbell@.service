@@ -10,6 +10,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/usr/local/bin/post-doorbell --agent %i
 Restart=always
 RestartSec=10s

@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import time
@@ -232,6 +233,12 @@ def main():
     parser.add_argument("--settle-timeout-ms", type=int, default=900000,
                         help="how long to wait for a working agent to settle before giving up on this wake")
     args = parser.parse_args()
+
+    for executable in ("herdr", "post"):
+        if shutil.which(executable) is None:
+            log(f"doorbell: required executable {executable!r} not found on PATH; "
+                "install it and include ~/.local/bin in the service PATH before restarting")
+            return 2
 
     try:
         wake_on = parse_wake_on(args.wake_on)
