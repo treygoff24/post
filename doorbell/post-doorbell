@@ -360,9 +360,9 @@ def main():
             if LEGACY_CHANNEL_EPISODE in initial:
                 if warned:
                     marks.add(LEGACY_CHANNEL_EPISODE)
-                initial_check = True  # check/warn, then poll until the episode clears
+                else:
+                    initial_check = True  # deliver this episode's one warning
             save_marks(args.agent, marks)
-    initial_check = initial_check or LEGACY_CHANNEL_EPISODE in marks
 
     # Binary pipe, read with os.read: a buffered text stream would pull a
     # whole chunk into Python's own buffer, and select() -- which watches the
@@ -436,8 +436,7 @@ def main():
                 # Neither failed snapshots nor failed warnings change this state.
                 marks = set(refreshed)
                 save_marks(args.agent, marks)
-                deadline = (time.monotonic() + max(args.interval_ms, POLL_SETTLE_MS) / 1000.0
-                            if LEGACY_CHANNEL_EPISODE in marks else None)
+                deadline = None
     except KeyboardInterrupt:
         pass
     finally:

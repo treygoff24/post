@@ -175,7 +175,7 @@ class Freshness(unittest.TestCase):
         notices, marks, _ = self.run_loop([[event]] * 5, events=[event] * 5)
         self.assertEqual(len(notices), 1)
         self.assertIn("Per-message delivery is unknown", notices[0])
-        self.assertEqual(marks, [{doorbell.LEGACY_CHANNEL_EPISODE}] * 5)
+        self.assertEqual(marks, [{doorbell.LEGACY_CHANNEL_EPISODE}])
         self.assertTrue(all("same.bad" not in notice for notice in notices))
         with self.assertRaises(ValueError):
             doorbell.event_metadata(event | {"channel": "../unsafe"})
@@ -193,7 +193,7 @@ class Freshness(unittest.TestCase):
     def test_legacy_episode_clear_reappear_and_new_mail(self):
         event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
         notices, marks, _ = self.run_loop([[event], [event, mail()], [], [event]],
-                                          events=[event, mail(), event, event])
+                                          events=[event, mail(), mail("third"), event])
         self.assertEqual(len(notices), 3)
         self.assertIn("compatibility warning", notices[0])
         self.assertIn("mail (1)", notices[1])
@@ -204,7 +204,8 @@ class Freshness(unittest.TestCase):
     def test_failed_warning_and_failed_scan_do_not_ack_or_clear_episode(self):
         event = {"event": "unreadable", "room": "r", "id": "same.bad", "reason": "channel"}
         notices, marks, _ = self.run_loop([[event], [event], None, [event]],
-                                          events=[event] * 4, fail_prompt=[True, False])
+                                          events=[event, event, mail(), event],
+                                          fail_prompt=[True, False])
         self.assertEqual(len(notices), 2)
         self.assertEqual(marks, [{doorbell.LEGACY_CHANNEL_EPISODE}] * 2)
 
@@ -215,12 +216,6 @@ class Freshness(unittest.TestCase):
         self.assertIn("compatibility warning", notices[0])
         self.assertIn("mail (1)", notices[0])
         self.assertEqual(marks[-1], {doorbell.LEGACY_CHANNEL_EPISODE, ("mail", "r", "new")})
-
-    def test_restored_episode_checks_for_clear_even_with_ring_backlog(self):
-        notices, marks, _ = self.run_loop([[]], events=[{}],
-                                          prior={doorbell.LEGACY_CHANNEL_EPISODE})
-        self.assertEqual(notices, [])
-        self.assertEqual(marks, [set()])
 
 
 if __name__ == "__main__":
