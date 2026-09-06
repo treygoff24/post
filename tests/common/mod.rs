@@ -124,11 +124,47 @@ impl Sandbox {
             .current_dir(cwd)
             .env("HOME", &self.home)
             .env("POST_MAIL_ROOT", &self.mail_root)
+            .env_remove("POST_FROM")
+            .env_remove("POST_FRAMING")
+            .env_remove("POST_SENDER_ADDRESS")
+            .env_remove("POST_ARX_GENERATION")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .output()
             .expect("run post with stdout discarded")
+    }
+
+    /// Run with fd1 inherited from a read-only regular file. Rust's standard
+    /// stdout wrapper masks EBADF for this descriptor shape, so this fixture
+    /// binds Post's strict output boundary rather than only an injected writer.
+    #[cfg(unix)]
+    pub fn run_in_broken_stdout(&self, args: &[&str], cwd: &Path) -> Output {
+        let target = self.read_only_stdout_path();
+        fs::write(&target, Self::READ_ONLY_STDOUT_SENTINEL).expect("seed stdout sentinel");
+        let read_only = File::open(&target).expect("open stdout fixture read-only");
+        post_command()
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("POST_MAIL_ROOT", &self.mail_root)
+            .env_remove("POST_FROM")
+            .env_remove("POST_FRAMING")
+            .env_remove("POST_SENDER_ADDRESS")
+            .env_remove("POST_ARX_GENERATION")
+            .stdout(Stdio::from(read_only))
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run post with failing stdout")
+    }
+
+    #[cfg(unix)]
+    pub const READ_ONLY_STDOUT_SENTINEL: &'static [u8] = b"stdout sentinel\n";
+
+    #[cfg(unix)]
+    pub fn read_only_stdout_path(&self) -> PathBuf {
+        self.path.join("stdout-read-only.fixture")
     }
 
     pub fn run_in(&self, args: &[&str], input: Option<&str>, cwd: &Path) -> Output {

@@ -1,7 +1,8 @@
 mod common;
 
 use common::{
-    assert_success, from_stdout, register_alpha_beta, write_bad_channel, write_custom_mail, Sandbox,
+    assert_success, from_stdout, register_alpha_beta, write_bad_channel, write_channel_message,
+    write_custom_mail, Sandbox,
 };
 use post::output::{DoctorOutput, DoctorSeverity, SchemaOutput};
 use serde_json::Value;
@@ -59,6 +60,19 @@ fn option_names(text: &str) -> BTreeSet<String> {
                 })
                 .next()?;
             (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+fn declared_option_names(help_options: &str) -> BTreeSet<String> {
+    help_options
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            line.starts_with("--")
+                .then(|| line.split_whitespace().next())
+                .flatten()
+                .map(|token| token.trim_end_matches(',').to_owned())
         })
         .collect()
 }
@@ -304,6 +318,201 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let inbox_json = json_object(&inbox_output);
     assert_keys_in_shape(&schema.output_shapes.inbox, &["unread_count"]);
     assert!(keys(&inbox_json).contains("unread_count"));
+}
+
+#[test]
+fn schema_matches_budget_slice_and_exact_ack_surfaces() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    write_bad_channel(
+        &sandbox,
+        "bounded",
+        Some(r#"{"beta":"joined"}"#),
+        true,
+        r#"{"name":"bounded","created":"2026-09-06 12:00:00 +0000","created_by":"beta"}"#,
+    );
+    let channel_id = "20990906-121000-000001-666666";
+    write_channel_message(
+        &sandbox,
+        "bounded",
+        channel_id,
+        "alpha",
+        "schema budget",
+        &"x".repeat(4_000),
+    );
+    let inbox = sandbox.mail_root.join("beta/inbox");
+    fs::create_dir_all(&inbox).expect("inbox");
+    let mail_id = "20990906-121000-666667";
+    write_custom_mail(
+        &inbox,
+        mail_id,
+        &serde_json::json!({
+            "id": mail_id,
+            "from": "alpha",
+            "to": "beta",
+            "kind": "note",
+            "subject": "schema budget",
+            "sent": "2026-09-06 12:10:00 +0000"
+        }),
+        &"y".repeat(4_000),
+    );
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    for (command, tokens) in [
+        (
+            "chat",
+            vec!["--max-bytes", "--message", "--offset", "--length", "--ack"],
+        ),
+        ("read", vec!["--max-bytes", "--offset", "--length", "--ack"]),
+        ("catchup", vec!["--max-bytes"]),
+    ] {
+        let usage = &schema
+            .commands
+            .iter()
+            .find(|item| item.name == command)
+            .expect("command in schema")
+            .usage;
+        for token in tokens {
+            assert!(usage.contains(token), "{command} schema omitted {token}");
+        }
+    }
+    for command in ["chat", "read"] {
+        let usage = &schema
+            .commands
+            .iter()
+            .find(|item| item.name == command)
+            .expect("command in schema")
+            .usage;
+        let help = sandbox.run(&[command, "--help"]);
+        assert_success(&help);
+        let help_text = common::stdout(&help);
+        let options = help_text
+            .split_once("Options:")
+            .map(|(_, options)| options)
+            .expect("clap options section");
+        let mut help_options = declared_option_names(options);
+        for global in ["--json", "--pretty", "--help"] {
+            help_options.remove(global);
+        }
+        assert_eq!(
+            help_options,
+            option_names(usage),
+            "{command} schema usage and clap help disagree"
+        );
+    }
+
+    let chat_budget = sandbox.run_in(
+        &["chat", "bounded", "--peek", "--max-bytes", "1400", "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&chat_budget);
+    let chat_budget = json_object(&chat_budget);
+    assert_keys_are_documented(&keys(&chat_budget), &schema.output_shapes.chat_read);
+    assert_keys_in_shape(
+        &schema.output_shapes.chat_read,
+        &["selected_count", "byte_limit", "omitted"],
+    );
+
+    let chat_slice = sandbox.run_in(
+        &[
+            "chat",
+            "bounded",
+            "--message",
+            channel_id,
+            "--offset",
+            "0",
+            "--max-bytes",
+            "1400",
+            "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&chat_slice);
+    assert_keys_are_documented(
+        &keys(&json_object(&chat_slice)),
+        &schema.output_shapes.chat_slice,
+    );
+
+    let read_budget = sandbox.run_in(
+        &[
+            "read",
+            mail_id,
+            "--room",
+            "beta",
+            "--peek",
+            "--max-bytes",
+            "1200",
+            "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&read_budget);
+    assert_keys_are_documented(
+        &keys(&json_object(&read_budget)),
+        &schema.output_shapes.read_budget,
+    );
+
+    let read_slice = sandbox.run_in(
+        &[
+            "read",
+            mail_id,
+            "--room",
+            "beta",
+            "--offset",
+            "0",
+            "--max-bytes",
+            "1200",
+            "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&read_slice);
+    assert_keys_are_documented(
+        &keys(&json_object(&read_slice)),
+        &schema.output_shapes.read_slice,
+    );
+
+    let catchup = sandbox.run_in(
+        &["catchup", "--all", "--max-bytes", "1400", "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&catchup);
+    let catchup = json_object(&catchup);
+    assert_keys_are_documented(&keys(&catchup), &schema.output_shapes.catchup);
+    assert_keys_in_shape(
+        &schema.output_shapes.catchup,
+        &["targets[].selected_count", "targets[].has_more"],
+    );
+    for target in catchup["targets"].as_array().expect("catchup targets") {
+        let target_keys = keys(target);
+        assert!(target_keys.contains("selected_count"));
+        assert!(target_keys.contains("has_more"));
+    }
+
+    let chat_ack = sandbox.run_in(
+        &["chat", "bounded", "--ack", channel_id, "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&chat_ack);
+    assert_keys_are_documented(
+        &keys(&json_object(&chat_ack)),
+        &schema.output_shapes.chat_ack,
+    );
+    let read_ack = sandbox.run_in(
+        &["read", mail_id, "--room", "beta", "--ack", "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&read_ack);
+    assert_keys_are_documented(
+        &keys(&json_object(&read_ack)),
+        &schema.output_shapes.read_ack,
+    );
 }
 
 #[test]

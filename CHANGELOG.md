@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Opt-in `--max-bytes N` on full-body `post chat`, `post read`, and `post
+  catchup`. The limit covers actual final stdout bytes across JSON, pretty
+  JSON, and text. Budgeted results emit and consume only a contiguous prefix
+  of complete messages, expose bounded remainder metadata, preserve chat
+  mention rescue, and share one budget across catchup targets.
+- Cursorless UTF-8 body slices for channel messages (`chat --message ...
+  --offset/--length`) and direct mail (`read --offset/--length`). Slice output
+  uses `body_slice` plus byte ranges and continuation offsets, never a partial
+  complete-body field; channel signature status is verified against the full
+  stored message.
+- Narrow exact-id acknowledgements with `post chat <channel> --ack <id>` and
+  `post read <id> --ack`. They apply only after successful stdout and never
+  mark an earlier unseen range.
+
+### Fixed
+- Unix result output now writes fd1 through a strict unbuffered syscall seam.
+  An invalid or read-only inherited stdout can no longer be misreported as a
+  successful emit by Rust's EBADF-tolerant standard stdout wrapper, so no
+  after-stdout read, catchup, or acknowledgement delta is applied.
+- Budgeted JSON prefix admission pre-serializes each message once and reuses
+  exact compact/pretty array-layout sizes and suffix omission counts. Near-full
+  `--limit 0` pages now scale linearly instead of reserializing every earlier
+  body for every candidate prefix. Catchup message arrays use indentation
+  relative to their target fragment before the outer target indent is applied,
+  avoiding false omission of pretty-JSON messages that actually fit.
+- Null-sink chat refusal again happens before text rendering, so it cannot
+  spend the room's daily full-banner stamp. Budgeted auto text reads inspect
+  banner-day without mutating during measurement: first-day output keeps the
+  full wall, same-day output stays compact, fenced read-only mode keeps its
+  historical always-full wall, and a consuming stamp is deferred until
+  successful stdout. Banner storage now always uses the raw validated room id;
+  presentation sanitization cannot redirect the stamp to another room.
+- Omission continuation caps are measured against the first omitted message's
+  real slice scaffold at the widest later offsets and its costliest encoded
+  UTF-8 scalar, including decimal-width changes throughout the chain;
+  large valid subjects and mention lists no longer produce a continuation that
+  immediately fails.
+
 ## 0.9.0 — 2026-09-01
 
 ### Added

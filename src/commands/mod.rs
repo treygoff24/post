@@ -1,3 +1,4 @@
+mod byte_budget;
 mod catchup;
 mod channels;
 mod chat;

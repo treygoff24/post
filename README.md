@@ -134,14 +134,18 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
 ```text
 post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] [--allow-self] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
-post read <id-or-prefix> [--room <room>] [--peek] [--framing auto|full|compact]
-post catchup [<channel> | --mail | --all] [--framing auto|full|compact]
+post read <id-or-prefix> [--room <room>] [--peek] [--max-bytes N] [--framing auto|full|compact]
+post read <id-or-prefix> [--room <room>] [--offset B] [--length B] --max-bytes N
+post read <id-or-prefix> [--room <room>] --ack
+post catchup [<channel> | --mail | --all] [--max-bytes N] [--framing auto|full|compact]
 post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000] [--framing auto|full|compact]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join [--description TEXT]
 post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
-post chat <channel> [--peek | --limit N] [--framing auto|full|compact]
+post chat <channel> [--peek | --limit N] [--max-bytes N] [--framing auto|full|compact]
+post chat <channel> --message <msg-id> [--offset B] [--length B] --max-bytes N
+post chat <channel> --ack <msg-id>
 post chat <channel> --discard
 post chat <channel> --discard-through <msg-id>
 post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
@@ -193,12 +197,65 @@ A channel message id, the kind the doorbell hands out, is recognized too:
 --history <n>` that renders it. A channel read
 whose stdout is `/dev/null` is refused rather than silently consuming the
 batch; use `--peek` to look without consuming or `--discard` to skip on
-purpose. `--discard-through <msg-id>` is the targeted ack: it marks every
+purpose. `--discard-through <msg-id>` is the targeted range ack: it marks every
 currently-existing unseen id at or below one message as seen and nothing
 beyond it, which is what a remote reader wants after rendering up to a known
 id. It refuses to leap over a message that cannot be parsed, and retrying it
 is safe: a target whose whole range is already seen succeeds with
 `advanced: false` and changes nothing.
+
+### Byte-bounded full reads and slices
+
+`--max-bytes N` is opt-in on full-body `read`, `chat`, and `catchup` forms.
+Without it, behavior and JSON/text shapes stay unchanged. With it, Post caps
+actual final stdout bytes, including UTF-8, JSON escaping, `--pretty`
+whitespace, framing, omission metadata, and the trailing newline. Results
+contain only complete message bodies. Admission stops at the first message
+that does not fit; later small messages are not packed around it. A consuming
+read marks only complete emitted ids after stdout flushes. If the required
+metadata scaffold cannot fit, Post returns `invalid_argument` on stderr with
+the measured minimum, emits no stdout, and changes no read state.
+On Unix, Post writes result bytes directly to inherited fd1 so an invalid or
+read-only stdout cannot count as a successful emit before any after-stdout
+read, catchup, or acknowledgement delta. Budgeted JSON serializes each message
+once and reuses exact compact/pretty prefix sizes.
+Budgeted chat `auto` framing reads banner-day without changing it during
+measurement: first-day output uses the full wall, same-day output stays
+compact, fenced read-only output stays full, and only a successfully emitted
+consuming page stamps afterward. Banner files use the raw validated room id;
+sanitization remains presentation-only and never selects a filesystem path.
+Null-sink refusal, cursorless reads, zero admission, and failed output do not
+stamp. Continuation commands use a measured stable cap covering the omitted
+message's widest later offsets and costliest encoded UTF-8 scalar, so the
+unchanged-message chain keeps running through decimal and scalar-cost
+boundaries. This cap may exceed, but does not alter, the original `byte_limit`.
+
+Budgeted chat keeps count-window `skipped` separate from byte `omitted`,
+preserves the existing mention-rescue order, and reports how many rescued
+mentions were byte-omitted. Budgeted catchup applies one shared budget in its
+existing mail-then-channel target order; top-level and per-target counts make
+partial targets explicit. A whale first returns bounded identity and a safe
+continuation command rather than a false empty inbox.
+
+Use explicit UTF-8 body slices for an omitted message:
+
+```bash
+post chat ops --message 20260906-... --offset 0 --length 8192 --max-bytes 16384 --json
+post read 20260906-... --room codex --offset 0 --length 8192 --max-bytes 16384 --json
+```
+
+Offsets and lengths address parsed body bytes. JSON uses `body_slice`,
+`range`, `total_body_bytes`, `body_complete`, and `next_offset`; a partial body
+never appears as `body`. Non-code-point starts and overflow fail, ends retreat
+to a code-point boundary, and every successful non-EOF partial result makes
+progress. Full and final slices remain unread. Channel signature status is
+verified against the complete stored body and reports
+`verification_scope: stored_full_body`; the slice is not independently signed.
+After reviewing slices, acknowledge only the named id with `post chat ops --ack
+<id>` or `post read <id> --room codex --ack`. Exact ack runs after successful
+stdout and never marks unrelated older or newer unread messages. Do not use
+`--discard-through` for one isolated slice; it intentionally marks the whole
+earlier unseen range.
 
 ## Direct mail
 
@@ -353,19 +410,25 @@ the messages it emitted. Explicit `--limit N` emits the oldest N unread;
 not advance the cursor. A bounded JSON read keeps `skipped` as the number of
 un-emitted messages and adds `has_more`.
 
+With `--max-bytes`, byte admission runs after that selection. JSON adds
+`selected_count`, `byte_limit`, and bounded `omitted` metadata only in the
+opt-in mode. `count` remains the number of complete message entries actually
+returned, and `has_more` covers either a count-window or byte remainder.
+
 In text output, chat and catchup render every message body line behind a
 fixed `  | ` gutter, so body content can never start at column 0 and imitate
 a message header, section marker, or `[🔏 VERIFIED …]` trust line. Direct
 `post read` is the deliberately unguttered single-message surface; its trust
 boundary is the framing banner (see CONTRACT.md).
 
-Full catch-up and search (v0.8): `post catchup` is the complete consuming
-slice, while `post search` is a cursorless discovery view.
+Full catch-up and search (v0.8): without `--max-bytes`, `post catchup` is the
+complete consuming slice; `post search` is a cursorless discovery view.
 
 ```bash
 post catchup                         # direct mail and every joined channel
 post catchup ops                     # one joined channel
 post catchup --mail --json            # direct mail, machine-readable
+post catchup --all --max-bytes 16384 --json  # one shared stdout budget
 post search "handoff" --json         # party-visible mail and joined channels
 post search "fence" --channel ops --limit 25
 ```

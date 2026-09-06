@@ -74,7 +74,7 @@ The public language is model-neutral; the default root remains
   are reserved room names; the actual `.post-arx.json` temporary name is
   `..post-arx.json.<pid>.<nonce>.tmp`, and no lock temporary namespace is
   produced or reserved.
-- Under an enrolled/fenced store, read-only forms stay available and never write: `read --peek`, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `search`, `watch --snapshot`, `schema`, `doctor` (without `--fix`), `profile` (show), `owner` (show), and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads (`read`, a plain `chat`, `catchup`), long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Admitted read-only forms create
+- Under an enrolled/fenced store, read-only forms stay available and never write: `read --peek`, direct-mail and channel body slices, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `search`, `watch --snapshot`, `schema`, `doctor` (without `--fix`), `profile` (show), `owner` (show), and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads, exact `--ack` forms, `catchup`, long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Admitted read-only forms create
   no root/room directory, banner-day, heartbeat, or cursor writes. A long
   non-snapshot watch re-admits before every heartbeat and exits nonzero if the
   fence or generation changes. Snapshot remains read-only only under the
@@ -176,6 +176,13 @@ inbox/read/watch/who only. A leading global `--json` refuses the same
 human-only forms as a trailing one: doctor `--brief`, and `--text` on
 channels/who/inbox/watch. No prompts ever; no color; stdout = results, stderr =
 diagnostics/errors.
+On Unix, result stdout is written directly to inherited fd1 through an
+unbuffered strict writer rather than Rust's EBADF-tolerant `StdoutRaw` wrapper.
+An invalid or read-only descriptor cannot count as a successful emit, and no
+`after_stdout` mail move, catchup delta, or exact acknowledgement runs.
+Committed-delivery failures remain non-retryable
+`delivered_output_failure`; committed room-registration output failures retain
+their existing success semantics.
 
 - `post send --to <room> [--from <name>] [--kind letter|note|signal (default
   note)] [--subject <s>] [--oversize] [--allow-self] (--body <text> |
@@ -207,7 +214,7 @@ diagnostics/errors.
   mail is also warned and increments `skipped_unreadable`; good mail is still
   listed and the command exits 0. Empty inbox = exit 0, count 0. Resolved room
   always in output.
-- `post read <id-or-prefix> [--room <name>] [--peek] [--framing auto|full|compact]`
+- `post read <id-or-prefix> [--room <name>] [--peek] [--max-bytes <n>] [--framing auto|full|compact]`
   — prints framing banner
   + envelope + body (text default; `--json` gives `{ok, framing, envelope,
   body}`); after stdout succeeds, moves to read/ unless `--peek`. Text-mode
@@ -228,7 +235,39 @@ diagnostics/errors.
   entirely on a fresh read, so existing consumers are unaffected). Only when
   no store holds the prefix is it not found, with `exact_fix: post inbox
   --room <X>` and a message naming every store searched.
-- `post catchup [<channel> | --mail | --all] [--framing auto|full|compact]` —
+  `--max-bytes <n>` is opt-in and caps actual final stdout bytes, including
+  UTF-8, JSON escaping, pretty whitespace, framing, omission metadata, and the
+  trailing newline. A complete body is returned and consumed normally only if
+  the full result fits. Otherwise `body` is absent, `count: 0`,
+  `selected_count: 1`, `has_more: true`, and bounded `omitted` metadata names
+  the id, body byte count, and a safe slice command; the mail remains unread.
+  If that required scaffold does not fit, the command returns
+  `invalid_argument` on stderr with the measured minimum, emits zero stdout,
+  and changes no read state. Omitting the flag preserves existing behavior and
+  output shape.
+  Omission continuation commands carry a separately measured slice budget
+  sufficient for that exact stored envelope at the body's widest possible
+  continuation offsets plus its costliest encoded UTF-8 scalar (or EOF
+  scaffold). The fixed-point calculation remeasures after decimal budget width
+  changes, so every emitted continuation remains runnable across 9/10,
+  99/100, and later scalar-cost boundaries. It does not change the original
+  invocation's `byte_limit`.
+  `post read <id> [--room <name>] [--offset <b>] [--length <b>] --max-bytes
+  <n>` is a cursorless UTF-8 body slice. Offsets and lengths address parsed
+  body bytes, not envelope or framing bytes. Starts inside a code point and
+  arithmetic overflow are rejected; ends retreat to a code-point boundary.
+  JSON uses `body_slice`, `range: {start, end_exclusive}`,
+  `total_body_bytes`, `body_complete`, and `next_offset`, never a partial
+  `body`. Every successful non-EOF partial slice advances; a budget too small
+  for the next scalar plus scaffold fails with a measured minimum. Empty or
+  EOF slices may terminate with no next offset. Slices never consume,
+  including a full or final slice. Direct mail has no signed-message status;
+  `verification_scope: stored_full_body` states that Post parsed the complete
+  stored message before slicing.
+  `post read <id> [--room <name>] --ack` acknowledges exactly the resolved mail
+  id after its receipt reaches stdout. It prints no body and cannot mark any
+  other unread mail; malformed targets fail before stdout or state change.
+- `post catchup [<channel> | --mail | --all] [--max-bytes <n>] [--framing auto|full|compact]` —
   the complete consuming unread slice for direct mail, one joined channel, or
   all targets. No selector is an alias for `--all`; there is no `--room`,
   `--peek`, `--since`, `--history`, or `--limit`. A positional channel requires
@@ -262,6 +301,18 @@ diagnostics/errors.
   escaping. Chat now shares the guttered body construction; `read` remains a
   deliberately unguttered single-source surface whose trust boundary is the
   framing banner plus control-character stripping documented above.
+  With opt-in `--max-bytes`, one final-stdout budget is shared across targets
+  in the existing mail-then-channel order. Admission stops at the first whole
+  message that does not fit; later messages are not packed around it. Only
+  complete admitted mail moves and channel ids enter the after-stdout delta,
+  including within a partially admitted target. Top-level and per-target
+  `selected_count`/`count`/`has_more`, plus bounded `omitted` metadata, identify
+  the first remaining source, channel when applicable, id, body size, omitted
+  mention count, remaining-target count, and safe continuation. It never
+  claims the whole unread slice was returned when bounded.
+  Compact and pretty JSON admission serializes each candidate message once;
+  later prefix probes reuse exact array-layout sizes and precomputed omission
+  suffix counts rather than re-reading earlier bodies.
 - `post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000]
   [--framing auto|full|compact]` — a read-only, cursorless, literal
   case-insensitive Unicode substring search. Default scope is party-visible
@@ -349,6 +400,14 @@ diagnostics/errors.
   mutates BEFORE emitting its receipt, because the receipt's whole job is to
   report the state that is now stored; nothing is skipped unreported, since a
   retry replays as a no-op.
+  `--ack <id>` is the narrower exact-id acknowledgement used after isolated
+  slices. It resolves membership and a full or unique-prefix target normally,
+  parses that exact stored record, prints no body, and adds only that id to the
+  seen-set after stdout succeeds. It does not acknowledge an earlier range,
+  auto-join, or bypass route or malformed-record checks. Explicit
+  acknowledgement is operator intent, not proof that every slice was fetched.
+  `--discard-through` retains its range semantics and is not the
+  acknowledgement for an isolated sliced message.
   A plain consuming read defaults to displaying the oldest 25 unread when the
   backlog is larger. It consumes only what it emits; `skipped` reports how many
   newer messages remain unread and text says `N newer message(s) remain unread
@@ -370,7 +429,7 @@ diagnostics/errors.
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
   is `delivered_output_failure` and must not be blindly retried.
-- `post chat <channel> [--peek] [--framing auto|full|compact]` — reads new channel
+- `post chat <channel> [--peek] [--max-bytes <n>] [--framing auto|full|compact]` — reads new channel
   messages as the registered room containing cwd. Requires membership; otherwise `not_a_member`. Text
   output includes the channel framing banner plus messages (reply markers
   render as `↳ re <short-id> (<sender>: preview…)`). JSON output is
@@ -389,6 +448,34 @@ diagnostics/errors.
   `--send`/`--join`/`--discard`/`--discard-through`/`--seen-by`, which return
   no bodies. `--history <n> [--grep <regex>]` and `--since <id>`
   are cursorless; `--grep` is a case-insensitive Rust regex over body/subject/from/id.
+  Opt-in `--max-bytes` runs after existing count/history/mention-rescue
+  selection and admits a contiguous prefix of complete messages. `count` is
+  the complete emitted count; `selected_count` is the pre-byte selection;
+  count-window `skipped` remains distinct from `omitted.count`; `has_more`
+  covers either remainder. The first byte omission reports bounded identity,
+  raw body byte size, and how many omitted selected messages mention the
+  acting room, so rescued mentions are never silently lost. A whale first
+  yields metadata plus a usable slice command and no cursor movement, not a
+  false empty inbox. Seen ids are built only after byte admission.
+  Budgeted auto text rendering inspects the existing banner-day stamp without
+  writing during admission. A first-day result keeps the full wall; an already
+  stamped day keeps the compact reminder except under read-only enrolled/fenced
+  execution, which preserves the existing always-full wall. Cursorless,
+  zero-admission, failed scaffold, and failed-output paths never stamp. A
+  successful consuming budgeted read stamps best-effort only in its
+  post-stdout callback. The no-budget `/dev/null` refusal occurs before
+  rendering and cannot stamp. Banner state is addressed by the raw validated
+  acting-room id; sanitized room text is presentation only. This last rule
+  intentionally corrects the pre-existing no-flag edge case where a currently
+  valid format character could redirect the stamp to another room's path.
+  `post chat <channel> --message <id> [--offset <b>] [--length <b>]
+  --max-bytes <n>` is the channel analogue of the direct-mail slice and is
+  always cursorless. It resolves the id within the named joined channel,
+  parses the full stored record, and verifies any owner signature against the
+  complete stored body before emitting `signed_verified`. Slice JSON states
+  `verification_scope: stored_full_body`; the slice itself is not independently
+  signed. `body_slice`, byte-range, progress, EOF, and minimum-scaffold rules
+  match direct mail.
 - `post channels [--text]` — read-only listing of channels, members, creation metadata,
   descriptions, and message counts: `{ok, channels, count}`. Each JSON channel
   item keeps `name`, `created`, `created_by`, `description?`, `members`, and

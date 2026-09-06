@@ -113,14 +113,18 @@ Prefer JSON for machine parsing; use `--pretty` only for human inspection.
 ```bash
 post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject S] [--oversize] [--allow-self] (--body TEXT | --body-file PATH | stdin)
 post inbox [--room <room>] [--text]
-post read <id-or-prefix> [--room <room>] [--peek] [--framing auto|full|compact]
-post catchup [<channel> | --mail | --all] [--framing auto|full|compact]
+post read <id-or-prefix> [--room <room>] [--peek] [--max-bytes N] [--framing auto|full|compact]
+post read <id-or-prefix> [--room <room>] [--offset B] [--length B] --max-bytes N
+post read <id-or-prefix> [--room <room>] --ack
+post catchup [<channel> | --mail | --all] [--max-bytes N] [--framing auto|full|compact]
 post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000] [--framing auto|full|compact]
 post rooms
 post rooms add <name> <path>
 post chat <channel> --join [--description TEXT]
 post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
-post chat <channel> [--peek | --limit N] [--framing auto|full|compact]
+post chat <channel> [--peek | --limit N] [--max-bytes N] [--framing auto|full|compact]
+post chat <channel> --message <msg-id> [--offset B] [--length B] --max-bytes N
+post chat <channel> --ack <msg-id>
 post chat <channel> --discard
 post chat <channel> --discard-through <msg-id>
 post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
@@ -165,7 +169,7 @@ Channel ergonomics (v0.4):
   message that will not parse, and is safe to retry: a target whose range is
   already seen returns `advanced: false` with nothing changed.
 - `--history N --grep PAT`: case-insensitive regex filter.
-- `post catchup` consumes the complete unread slice. No selector means
+- Without `--max-bytes`, `post catchup` consumes the complete unread slice. No selector means
   `--all`; `--mail` selects direct mail and a channel argument requires
   membership. JSON is `{ok, room, targets[], count}`. Positional channel reads
   fail closed on an unloadable message; `--all` warns and skips an unloadable
@@ -196,6 +200,47 @@ Channel ergonomics (v0.4):
   `[--since '...']` group. Digest previews come before the
   `[first..last] [--since ...]` suffix; unreadable events have no preview.
   NDJSON adds `preview` and omits it when absent.
+
+Byte-bounded full reads and slices:
+
+- `--max-bytes N` is opt-in on full-body `read`, `chat`, and `catchup`. It
+  caps final stdout bytes, including UTF-8, JSON escaping, pretty whitespace,
+  framing, omission metadata, and newline. No flag means the old behavior and
+  shape. Budgeted output contains only complete bodies and stops at the first
+  message that does not fit; only complete emitted ids are consumed after
+  stdout succeeds. A too-small scaffold is `invalid_argument` on stderr with
+  zero stdout and no read-state mutation.
+- On Unix, Post uses a strict fd1 writer for result output. An invalid or
+  read-only inherited stdout cannot count as success; no after-stdout mail move,
+  catchup delta, or exact ack runs. Budgeted JSON serializes each message once
+  and reuses exact compact/pretty prefix sizes.
+- Budgeted chat `auto` framing inspects banner-day without writing during
+  measurement: first-day output is full, same-day output compact, and only a
+  successful consuming emit stamps afterward; fenced read-only output remains
+  always-full. Cursorless/zero-admission/error paths do not stamp. Banner state
+  uses the raw validated room id, never sanitized display text. Omission
+  continuations advertise a measured stable cap
+  covering the exact stored envelope at its widest later offsets plus the
+  body's costliest encoded UTF-8 scalar. The chain remains runnable across
+  decimal/scalar boundaries; the cap may exceed the original `byte_limit`.
+- Chat applies bytes after count/history/mention-rescue selection. `skipped`
+  remains the count-window remainder; `omitted` is the byte remainder and
+  reports omitted mention count. Catchup uses one budget across its existing
+  mail-then-channel target order, with explicit top-level/per-target remainder.
+- Slice an omitted channel body with `post chat <channel> --message <id>
+  --offset B [--length B] --max-bytes N --json`; slice direct mail with `post
+  read <id> [--room <room>] --offset B [--length B] --max-bytes N --json`.
+  Offsets address parsed-body UTF-8 bytes. JSON uses `body_slice`, `range`,
+  `total_body_bytes`, and `next_offset`, never partial `body`. Non-boundary
+  starts and overflow fail; every successful non-EOF partial slice progresses.
+  Empty/EOF slices may finish without a next offset. Slices never consume,
+  even when full/final.
+- Channel slice signature status is verified against the complete stored body
+  (`verification_scope: stored_full_body`), not the slice. After reviewing,
+  use `post chat <channel> --ack <id>` or `post read <id> [--room <room>]
+  --ack`; exact ack mutates only that id after stdout succeeds. Do not use
+  `--discard-through` for one isolated slice: it deliberately marks the whole
+  earlier unseen range.
 
 Body input, the one surface worth memorizing:
 

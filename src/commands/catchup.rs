@@ -6,6 +6,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{self, Context};
 use crate::model::ChannelMessage;
 use crate::output::{self, CatchupMailItem, CatchupOutput, CatchupTarget, ChatMessageItem};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,8 @@ pub(super) fn run(
                     count: messages.len(),
                     framing: mail_framing(framing),
                     messages,
+                    selected_count: None,
+                    has_more: None,
                 });
             }
             Selector::Channel(channel_name) => {
@@ -58,6 +61,8 @@ pub(super) fn run(
                     count: messages.len(),
                     framing: channel_framing(framing),
                     messages,
+                    selected_count: None,
+                    has_more: None,
                 });
             }
             Selector::All => {
@@ -73,6 +78,8 @@ pub(super) fn run(
                     count: messages.len(),
                     framing: mail_framing(framing),
                     messages,
+                    selected_count: None,
+                    has_more: None,
                 });
                 for (channel_name, paths) in joined {
                     let (messages, ids) = match collect_channel(
@@ -99,28 +106,102 @@ pub(super) fn run(
                         count: messages.len(),
                         framing: channel_framing(framing),
                         messages,
+                        selected_count: None,
+                        has_more: None,
                     });
                 }
             }
         }
 
-        let count = targets.iter().map(CatchupTarget::count).sum();
-        if count > 0 && output::stdout_is_null_device() {
-            return Err(null_stdout_refusal(&selector_for_refusal, count));
-        }
-
-        let rendered = if json_output {
-            output::json(
-                &CatchupOutput {
-                    ok: true,
-                    room: room.clone(),
-                    targets,
-                    count,
-                },
-                pretty,
-            )?
-        } else {
-            render_text(&room, &targets, count, framing)
+        let selected_count = targets.iter().map(CatchupTarget::count).sum();
+        let rendered = match args.max_bytes {
+            Some(max_bytes) => {
+                let remainders = CatchupRemainderIndex::new(&targets, &room, max_bytes)?;
+                let admission = if json_output {
+                    let json_sizes = CatchupJsonSizes::new(&targets, framing, pretty)?;
+                    super::byte_budget::admit_prefix_measured(
+                        selected_count,
+                        max_bytes,
+                        |count| {
+                            measure_budgeted_catchup_json(
+                                &room,
+                                &targets,
+                                count,
+                                max_bytes,
+                                pretty,
+                                &json_sizes,
+                                &remainders,
+                            )
+                        },
+                        |count| {
+                            render_budgeted_catchup_json(
+                                &room,
+                                &targets,
+                                count,
+                                framing,
+                                max_bytes,
+                                pretty,
+                                &remainders,
+                            )
+                        },
+                    )?
+                } else {
+                    let text_sizes = CatchupTextSizes::new(&targets);
+                    super::byte_budget::admit_prefix_measured(
+                        selected_count,
+                        max_bytes,
+                        |count| {
+                            Ok(measure_budgeted_catchup_text(
+                                &room,
+                                &targets,
+                                count,
+                                framing,
+                                max_bytes,
+                                &text_sizes,
+                                &remainders,
+                            ))
+                        },
+                        |count| {
+                            Ok(render_budgeted_catchup_text(
+                                &room,
+                                &targets,
+                                count,
+                                framing,
+                                max_bytes,
+                                &remainders,
+                            ))
+                        },
+                    )?
+                };
+                if admission.count > 0 && output::stdout_is_null_device() {
+                    return Err(null_stdout_refusal(&selector_for_refusal, admission.count));
+                }
+                let admitted = prefix_counts(&targets, admission.count);
+                restrict_delta(&targets, &admitted, &mut delta);
+                admission.rendered
+            }
+            None => {
+                if selected_count > 0 && output::stdout_is_null_device() {
+                    return Err(null_stdout_refusal(&selector_for_refusal, selected_count));
+                }
+                if json_output {
+                    output::json(
+                        &CatchupOutput {
+                            ok: true,
+                            room: room.clone(),
+                            targets,
+                            count: selected_count,
+                            selected_count: None,
+                            has_more: None,
+                            byte_limit: None,
+                            omitted: None,
+                        },
+                        pretty,
+                    )?
+                } else {
+                    render_text(&room, &targets, selected_count, framing)
+                }
+            }
         };
         (rendered, delta)
     };
@@ -143,6 +224,553 @@ enum Selector {
     Mail,
     Channel(String),
     All,
+}
+
+#[derive(Serialize)]
+struct CatchupBudgetView<'a> {
+    ok: bool,
+    room: &'a str,
+    targets: Vec<CatchupTargetBudgetView<'a>>,
+    count: usize,
+    selected_count: usize,
+    has_more: bool,
+    byte_limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted: Option<output::ByteOmission>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+enum CatchupTargetBudgetView<'a> {
+    Mail {
+        framing: output::Framing,
+        messages: &'a [CatchupMailItem],
+        count: usize,
+        selected_count: usize,
+        has_more: bool,
+    },
+    Channel {
+        channel: &'a str,
+        framing: output::ChannelFraming,
+        messages: &'a [ChatMessageItem],
+        count: usize,
+        selected_count: usize,
+        has_more: bool,
+    },
+}
+
+struct CatchupJsonSizes {
+    target_array_extra: Vec<usize>,
+}
+
+impl CatchupJsonSizes {
+    fn new(targets: &[CatchupTarget], framing: FramingMode, pretty: bool) -> AppResult<Self> {
+        let candidates = targets
+            .iter()
+            .map(|target| {
+                let messages = match target {
+                    CatchupTarget::Mail { messages, .. } => {
+                        super::byte_budget::JsonArrayPrefix::new(messages, pretty, 4)
+                    }
+                    CatchupTarget::Channel { messages, .. } => {
+                        super::byte_budget::JsonArrayPrefix::new(messages, pretty, 4)
+                    }
+                }?;
+                (0..=target.count())
+                    .map(|count| {
+                        super::byte_budget::JsonFragment::new(
+                            &catchup_target_budget_view(target, count, framing, false),
+                            pretty,
+                        )
+                        .map(|fragment| fragment.with_array_prefix(&messages, count))
+                    })
+                    .collect::<AppResult<Vec<_>>>()
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+
+        let target_count = targets.len();
+        let array_layout = if target_count == 0 {
+            0
+        } else if pretty {
+            2usize.saturating_mul(target_count - 1).saturating_add(4)
+        } else {
+            target_count - 1
+        };
+        let embedded =
+            |fragment: &super::byte_budget::JsonFragment| fragment.embedded_bytes(pretty, 4);
+        let mut current = candidates
+            .iter()
+            .map(|target| embedded(&target[0]))
+            .fold(0usize, usize::saturating_add);
+        let selected_count: usize = targets.iter().map(CatchupTarget::count).sum();
+        let mut target_array_extra = Vec::with_capacity(selected_count + 1);
+        target_array_extra.push(current.saturating_add(array_layout));
+        for target in &candidates {
+            for count in 1..target.len() {
+                current = current
+                    .saturating_sub(embedded(&target[count - 1]))
+                    .saturating_add(embedded(&target[count]));
+                target_array_extra.push(current.saturating_add(array_layout));
+            }
+        }
+        Ok(Self { target_array_extra })
+    }
+
+    fn extra_bytes(&self, admitted_count: usize) -> usize {
+        self.target_array_extra[admitted_count]
+    }
+}
+
+fn catchup_target_budget_view<'a>(
+    target: &'a CatchupTarget,
+    count: usize,
+    framing: FramingMode,
+    include_messages: bool,
+) -> CatchupTargetBudgetView<'a> {
+    match target {
+        CatchupTarget::Mail { messages, .. } => CatchupTargetBudgetView::Mail {
+            framing: mail_framing(framing),
+            messages: if include_messages {
+                &messages[..count]
+            } else {
+                &messages[..0]
+            },
+            count,
+            selected_count: messages.len(),
+            has_more: count < messages.len(),
+        },
+        CatchupTarget::Channel {
+            channel, messages, ..
+        } => CatchupTargetBudgetView::Channel {
+            channel,
+            framing: channel_framing(framing),
+            messages: if include_messages {
+                &messages[..count]
+            } else {
+                &messages[..0]
+            },
+            count,
+            selected_count: messages.len(),
+            has_more: count < messages.len(),
+        },
+    }
+}
+
+fn render_budgeted_catchup_json(
+    room: &str,
+    targets: &[CatchupTarget],
+    admitted_count: usize,
+    framing: FramingMode,
+    max_bytes: usize,
+    pretty: bool,
+    remainders: &CatchupRemainderIndex,
+) -> AppResult<String> {
+    output::json(
+        &catchup_budget_view(
+            room,
+            targets,
+            admitted_count,
+            framing,
+            max_bytes,
+            remainders,
+        ),
+        pretty,
+    )
+}
+
+fn measure_budgeted_catchup_json(
+    room: &str,
+    targets: &[CatchupTarget],
+    admitted_count: usize,
+    max_bytes: usize,
+    pretty: bool,
+    sizes: &CatchupJsonSizes,
+    remainders: &CatchupRemainderIndex,
+) -> AppResult<usize> {
+    let selected_count = targets.iter().map(CatchupTarget::count).sum();
+    let omitted = remainders.omission(admitted_count);
+    output::json_len(
+        &CatchupBudgetView {
+            ok: true,
+            room,
+            targets: Vec::new(),
+            count: admitted_count,
+            selected_count,
+            has_more: admitted_count < selected_count,
+            byte_limit: max_bytes,
+            omitted,
+        },
+        pretty,
+    )
+    .map(|scaffold| scaffold.saturating_add(sizes.extra_bytes(admitted_count)))
+}
+
+fn catchup_budget_view<'a>(
+    room: &'a str,
+    targets: &'a [CatchupTarget],
+    admitted_count: usize,
+    framing: FramingMode,
+    max_bytes: usize,
+    remainders: &CatchupRemainderIndex,
+) -> CatchupBudgetView<'a> {
+    let admitted = prefix_counts(targets, admitted_count);
+    let views = targets
+        .iter()
+        .zip(&admitted)
+        .map(|(target, &count)| catchup_target_budget_view(target, count, framing, true))
+        .collect();
+    let selected_count = targets.iter().map(CatchupTarget::count).sum();
+    let omitted = remainders.omission(admitted_count);
+    CatchupBudgetView {
+        ok: true,
+        room,
+        targets: views,
+        count: admitted_count,
+        selected_count,
+        has_more: admitted_count < selected_count,
+        byte_limit: max_bytes,
+        omitted,
+    }
+}
+
+fn render_budgeted_catchup_text(
+    room: &str,
+    targets: &[CatchupTarget],
+    admitted_count: usize,
+    framing: FramingMode,
+    max_bytes: usize,
+    remainders: &CatchupRemainderIndex,
+) -> String {
+    let selected_count: usize = targets.iter().map(CatchupTarget::count).sum();
+    if selected_count == 0 {
+        return format!("post: caught up (0 unread; byte_limit={max_bytes})\n");
+    }
+    let admitted = prefix_counts(targets, admitted_count);
+    let omission = remainders.omission(admitted_count);
+    let mut rendered = omission.as_ref().map_or_else(String::new, |omitted| {
+        catchup_omission_notice(omitted, admitted_count, max_bytes)
+    });
+    if admitted_count > 0 {
+        let has_channel = targets
+            .iter()
+            .zip(&admitted)
+            .any(|(target, count)| *count > 0 && matches!(target, CatchupTarget::Channel { .. }));
+        render_framing(&mut rendered, framing, has_channel);
+        for (target, &count) in targets.iter().zip(&admitted) {
+            match target {
+                CatchupTarget::Mail { messages, .. } if count > 0 => {
+                    rendered.push_str(&catchup_mail_header(count, messages.len()));
+                    for item in &messages[..count] {
+                        render_mail_item(&mut rendered, item);
+                    }
+                }
+                CatchupTarget::Channel {
+                    channel, messages, ..
+                } if count > 0 => {
+                    rendered.push_str(&catchup_channel_header(
+                        room,
+                        channel,
+                        count,
+                        messages.len(),
+                    ));
+                    for item in &messages[..count] {
+                        render_channel_item(&mut rendered, item);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    rendered.push_str(&catchup_budget_footer(
+        admitted_count,
+        selected_count,
+        max_bytes,
+    ));
+    rendered
+}
+
+fn catchup_omission_notice(
+    omitted: &output::ByteOmission,
+    admitted_count: usize,
+    max_bytes: usize,
+) -> String {
+    format!(
+        "post: catchup shown {admitted_count} complete; {} omitted by shared byte limit {max_bytes}\n\
+post: first remainder is {}{} message {} ({} body bytes); {} omitted mention(s)\n\
+post: continue with {}\n",
+        omitted.count,
+        omitted.source,
+        omitted
+            .channel
+            .as_deref()
+            .map(|channel| format!(" #{}", output::sanitize_text_header(channel)))
+            .unwrap_or_default(),
+        output::sanitize_text_header(&omitted.first_id),
+        omitted.first_body_bytes,
+        omitted.mention_count,
+        omitted.continuation,
+    )
+}
+
+fn catchup_mail_header(count: usize, selected_count: usize) -> String {
+    format!("=== mail ({count} complete of {selected_count}) ===\n")
+}
+
+fn catchup_channel_header(
+    room: &str,
+    channel: &str,
+    count: usize,
+    selected_count: usize,
+) -> String {
+    format!(
+        "=== #{} ({count} complete of {selected_count}; reading as {}) ===\n",
+        output::sanitize_text_header(channel),
+        output::sanitize_text_header(room)
+    )
+}
+
+fn catchup_budget_footer(admitted_count: usize, selected_count: usize, max_bytes: usize) -> String {
+    if admitted_count < selected_count {
+        format!(
+            "post: catchup partial ({admitted_count} complete; {} remain unread)\n",
+            selected_count - admitted_count
+        )
+    } else {
+        format!(
+            "post: caught up ({admitted_count} unread; complete within byte_limit={max_bytes})\n"
+        )
+    }
+}
+
+struct CatchupTextSizes {
+    prefixes: Vec<Vec<usize>>,
+}
+
+impl CatchupTextSizes {
+    fn new(targets: &[CatchupTarget]) -> Self {
+        let prefixes = targets
+            .iter()
+            .map(|target| {
+                let mut sizes = vec![0usize];
+                match target {
+                    CatchupTarget::Mail { messages, .. } => {
+                        for item in messages {
+                            let mut rendered = String::new();
+                            render_mail_item(&mut rendered, item);
+                            sizes.push(
+                                sizes
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0)
+                                    .saturating_add(rendered.len()),
+                            );
+                        }
+                    }
+                    CatchupTarget::Channel { messages, .. } => {
+                        for item in messages {
+                            let mut rendered = String::new();
+                            render_channel_item(&mut rendered, item);
+                            sizes.push(
+                                sizes
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0)
+                                    .saturating_add(rendered.len()),
+                            );
+                        }
+                    }
+                }
+                sizes
+            })
+            .collect();
+        Self { prefixes }
+    }
+}
+
+fn measure_budgeted_catchup_text(
+    room: &str,
+    targets: &[CatchupTarget],
+    admitted_count: usize,
+    framing: FramingMode,
+    max_bytes: usize,
+    sizes: &CatchupTextSizes,
+    remainders: &CatchupRemainderIndex,
+) -> usize {
+    let selected_count: usize = targets.iter().map(CatchupTarget::count).sum();
+    if selected_count == 0 {
+        return format!("post: caught up (0 unread; byte_limit={max_bytes})\n").len();
+    }
+    let admitted = prefix_counts(targets, admitted_count);
+    let omission = remainders.omission(admitted_count);
+    let mut bytes = omission.as_ref().map_or(0, |omitted| {
+        catchup_omission_notice(omitted, admitted_count, max_bytes).len()
+    });
+    if admitted_count > 0 {
+        let has_channel = targets
+            .iter()
+            .zip(&admitted)
+            .any(|(target, count)| *count > 0 && matches!(target, CatchupTarget::Channel { .. }));
+        let mut banner = String::new();
+        render_framing(&mut banner, framing, has_channel);
+        bytes += banner.len();
+        for (index, (target, &count)) in targets.iter().zip(&admitted).enumerate() {
+            if count == 0 {
+                continue;
+            }
+            bytes += match target {
+                CatchupTarget::Mail { messages, .. } => {
+                    catchup_mail_header(count, messages.len()).len()
+                }
+                CatchupTarget::Channel {
+                    channel, messages, ..
+                } => catchup_channel_header(room, channel, count, messages.len()).len(),
+            };
+            bytes += sizes.prefixes[index][count];
+        }
+    }
+    bytes + catchup_budget_footer(admitted_count, selected_count, max_bytes).len()
+}
+
+fn prefix_counts(targets: &[CatchupTarget], mut admitted: usize) -> Vec<usize> {
+    targets
+        .iter()
+        .map(|target| {
+            let count = admitted.min(target.count());
+            admitted -= count;
+            count
+        })
+        .collect()
+}
+
+fn restrict_delta(targets: &[CatchupTarget], admitted: &[usize], delta: &mut Delta) {
+    let mail_count: usize = targets
+        .iter()
+        .zip(admitted)
+        .filter_map(|(target, count)| {
+            matches!(target, CatchupTarget::Mail { .. }).then_some(*count)
+        })
+        .sum();
+    delta.mail_moves.truncate(mail_count);
+    for (channel, ids) in &mut delta.channel_seen {
+        let count = targets
+            .iter()
+            .zip(admitted)
+            .find_map(|(target, count)| match target {
+                CatchupTarget::Channel {
+                    channel: target_channel,
+                    ..
+                } if target_channel == channel => Some(*count),
+                _ => None,
+            })
+            .unwrap_or(0);
+        ids.truncate(count);
+    }
+    delta.channel_seen.retain(|(_, ids)| !ids.is_empty());
+}
+
+enum CatchupRemainderSource {
+    Mail,
+    Channel(String),
+}
+
+struct CatchupRemainderItem {
+    source: CatchupRemainderSource,
+    id: String,
+    body_bytes: usize,
+    mentioned: bool,
+    remaining_targets: usize,
+    continuation: String,
+}
+
+struct CatchupRemainderIndex {
+    items: Vec<CatchupRemainderItem>,
+    mention_suffix: Vec<usize>,
+}
+
+impl CatchupRemainderIndex {
+    fn new(targets: &[CatchupTarget], room: &str, max_bytes: usize) -> AppResult<Self> {
+        let mut remaining_by_target = vec![0usize; targets.len()];
+        let mut remaining_targets = 0usize;
+        for (index, target) in targets.iter().enumerate().rev() {
+            if target.count() > 0 {
+                remaining_targets += 1;
+            }
+            remaining_by_target[index] = remaining_targets;
+        }
+        let mut items = Vec::new();
+        for (index, target) in targets.iter().enumerate() {
+            match target {
+                CatchupTarget::Mail { messages, .. } => {
+                    for item in messages {
+                        items.push(CatchupRemainderItem {
+                            source: CatchupRemainderSource::Mail,
+                            id: item.envelope.id.clone(),
+                            body_bytes: item.body.len(),
+                            mentioned: false,
+                            remaining_targets: remaining_by_target[index],
+                            continuation: super::read::measured_omission_continuation(
+                                room,
+                                &item.envelope,
+                                &item.body,
+                                false,
+                                max_bytes,
+                            )?,
+                        });
+                    }
+                }
+                CatchupTarget::Channel {
+                    channel, messages, ..
+                } => {
+                    for item in messages {
+                        items.push(CatchupRemainderItem {
+                            source: CatchupRemainderSource::Channel(channel.clone()),
+                            id: item.message.id.clone(),
+                            body_bytes: item.body.len(),
+                            mentioned: item.message.mentions.iter().any(|mention| mention == room),
+                            remaining_targets: remaining_by_target[index],
+                            continuation: super::chat::measured_omission_continuation(
+                                channel,
+                                room,
+                                &item.message,
+                                &item.body,
+                                item.signed_verified,
+                                max_bytes,
+                            )?,
+                        });
+                    }
+                }
+            }
+        }
+        let mut mention_suffix = vec![0usize; items.len() + 1];
+        let mut mentions = 0usize;
+        for (index, item) in items.iter().enumerate().rev() {
+            mentions += usize::from(item.mentioned);
+            mention_suffix[index] = mentions;
+        }
+        Ok(Self {
+            items,
+            mention_suffix,
+        })
+    }
+
+    fn omission(&self, admitted_count: usize) -> Option<output::ByteOmission> {
+        let first = self.items.get(admitted_count)?;
+        let (source, channel) = match &first.source {
+            CatchupRemainderSource::Mail => ("mail", None),
+            CatchupRemainderSource::Channel(channel) => ("channel", Some(channel.clone())),
+        };
+        Some(output::ByteOmission {
+            reason: "byte_limit".to_owned(),
+            count: self.items.len() - admitted_count,
+            source: source.to_owned(),
+            channel,
+            first_id: first.id.clone(),
+            first_body_bytes: first.body_bytes,
+            mention_count: self.mention_suffix[admitted_count],
+            remaining_targets: Some(first.remaining_targets),
+            continuation: first.continuation.clone(),
+        })
+    }
 }
 
 fn mail_framing(mode: FramingMode) -> output::Framing {
@@ -547,6 +1175,8 @@ mod tests {
             framing: output::Framing::default(),
             messages: Vec::new(),
             count: 0,
+            selected_count: None,
+            has_more: None,
         }];
         assert_eq!(
             render_text("alpha", &targets, 0, FramingMode::Auto),
@@ -560,6 +1190,8 @@ mod tests {
             framing: output::Framing::default(),
             messages: Vec::new(),
             count: 1,
+            selected_count: None,
+            has_more: None,
         }];
         let rendered = render_text("alpha", &targets, 1, FramingMode::Auto);
         assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 1);

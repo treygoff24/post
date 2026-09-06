@@ -38,7 +38,7 @@ where
     };
     let pretty = cli.pretty;
     match commands::execute(cli) {
-        Ok(result) => match finish_command_result(result, &mut std::io::stdout().lock()) {
+        Ok(result) => match finish_process_stdout(result) {
             Ok(exit_code) => exit_code,
             Err(error) => {
                 output::write_error(&error, pretty);
@@ -49,6 +49,50 @@ where
             output::write_error(&error, pretty);
             error.exit_code
         }
+    }
+}
+
+fn finish_process_stdout(result: CommandResult) -> AppResult<i32> {
+    #[cfg(unix)]
+    {
+        finish_command_result(result, &mut StrictStdout)
+    }
+    #[cfg(not(unix))]
+    {
+        finish_command_result(result, &mut std::io::stdout().lock())
+    }
+}
+
+/// Rust's Unix `StdoutRaw` deliberately converts EBADF into a successful
+/// write. Post cannot use that behavior at a state-commit boundary: a child
+/// inheriting fd1 from a read-only regular file would otherwise consume mail
+/// after emitting zero bytes. Direct libc writes retain the real descriptor
+/// error while keeping `finish_command_result`'s delivery/registration rules.
+#[cfg(unix)]
+struct StrictStdout;
+
+#[cfg(unix)]
+impl Write for StrictStdout {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        loop {
+            // SAFETY: bytes supplies a valid pointer and byte count for the
+            // duration of this synchronous call; fd1 is borrowed, not closed.
+            let written =
+                unsafe { libc::write(libc::STDOUT_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+            if written >= 0 {
+                return Ok(written as usize);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Writes are unbuffered at this layer. fsync would be wrong for pipes
+        // and terminals, where it returns EINVAL despite successful output.
+        Ok(())
     }
 }
 

@@ -37,6 +37,22 @@ pub(crate) fn render_gutter_body(rendered: &mut String, body: &str) {
     }
 }
 
+/// Seek-safe slice gutter: unlike the complete-body renderer, every newline
+/// opens another gutter and a final newline leaves an empty guttered line.
+/// That makes each scalar's rendered byte cost additive for exact budgeting.
+pub(crate) fn render_slice_gutter_body(rendered: &mut String, body: &str) {
+    rendered.push_str(BODY_GUTTER);
+    for scalar in body.chars() {
+        if scalar == '\n' {
+            rendered.push('\n');
+            rendered.push_str(BODY_GUTTER);
+        } else if !scalar.is_control() || scalar == '\t' {
+            rendered.push(scalar);
+        }
+    }
+    rendered.push('\n');
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendOutput {
     pub ok: bool,
@@ -89,6 +105,15 @@ pub struct ChatDiscardThroughOutput {
     /// Messages skipped by this call: strictly after `prior_cursor`, at or
     /// before `target`. Zero on a replay.
     pub discarded: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatAckOutput {
+    pub ok: bool,
+    pub channel: String,
+    pub room: String,
+    pub id: String,
+    pub acknowledged: bool,
 }
 
 /// True when stdout is the null device. A channel read advances the reader's
@@ -193,6 +218,52 @@ pub struct ChatMessageItem {
     pub signed_verified: Option<bool>,
 }
 
+/// Bounded identity for the first complete message withheld by an opt-in
+/// stdout byte limit. The list is deliberately not expanded to every omitted
+/// id: omission metadata must remain bounded too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ByteOmission {
+    pub reason: String,
+    pub count: usize,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub first_id: String,
+    pub first_body_bytes: usize,
+    pub mention_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_targets: Option<usize>,
+    pub continuation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyByteRange {
+    pub start: usize,
+    pub end_exclusive: usize,
+}
+
+/// Cursorless body range for one channel message. `body_slice` is always
+/// distinct from the complete-message `body` field.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatMessageSliceOutput {
+    pub ok: bool,
+    pub framing: ChannelFraming,
+    pub channel: String,
+    pub room: String,
+    pub message: crate::model::ChannelMessage,
+    pub body_slice: String,
+    pub range: BodyByteRange,
+    pub total_body_bytes: usize,
+    pub body_complete: bool,
+    pub next_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_verified: Option<bool>,
+    pub verification_scope: String,
+    pub byte_limit: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatReadOutput {
     pub ok: bool,
@@ -209,6 +280,16 @@ pub struct ChatReadOutput {
     /// Whether this bounded read left any messages un-emitted.
     #[serde(default)]
     pub has_more: bool,
+    /// Present only when --max-bytes was requested. This is the count after
+    /// the ordinary count/history/mention selection and before byte admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_count: Option<usize>,
+    /// The requested cap on final stdout bytes, including the trailing newline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_limit: Option<usize>,
+    /// Bounded continuation metadata for complete messages excluded by bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<ByteOmission>,
 }
 
 /// A direct-mail item in a `post catchup` target. The envelope and body stay
@@ -229,12 +310,20 @@ pub enum CatchupTarget {
         framing: Framing,
         messages: Vec<CatchupMailItem>,
         count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_count: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_more: Option<bool>,
     },
     Channel {
         channel: String,
         framing: ChannelFraming,
         messages: Vec<ChatMessageItem>,
         count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_count: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_more: Option<bool>,
     },
 }
 
@@ -244,6 +333,14 @@ pub struct CatchupOutput {
     pub room: String,
     pub targets: Vec<CatchupTarget>,
     pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<ByteOmission>,
 }
 
 /// One bounded, preview-only result from `post search`.
@@ -660,6 +757,50 @@ pub struct ReadOutput {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ReadBudgetOutput {
+    pub ok: bool,
+    pub framing: Framing,
+    pub envelope: Envelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_read: bool,
+    pub count: usize,
+    pub selected_count: usize,
+    pub has_more: bool,
+    pub byte_limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<ByteOmission>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MailBodySliceOutput {
+    pub ok: bool,
+    pub framing: Framing,
+    pub envelope: Envelope,
+    pub body_slice: String,
+    pub range: BodyByteRange,
+    pub total_body_bytes: usize,
+    pub body_complete: bool,
+    pub next_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_read: bool,
+    pub verification_scope: String,
+    pub byte_limit: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadAckOutput {
+    pub ok: bool,
+    pub room: String,
+    pub id: String,
+    pub already_read: bool,
+    pub acknowledged: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RoomOutput {
     pub name: String,
     pub path: String,
@@ -699,12 +840,17 @@ pub struct OutputShapes {
     pub doctor: Vec<String>,
     pub inbox: Vec<String>,
     pub read_json: Vec<String>,
+    pub read_budget: Vec<String>,
+    pub read_slice: Vec<String>,
+    pub read_ack: Vec<String>,
     pub rooms: Vec<String>,
     pub schema: Vec<String>,
     pub send_json: Vec<String>,
     pub chat_join: Vec<String>,
     pub chat_send: Vec<String>,
     pub chat_read: Vec<String>,
+    pub chat_slice: Vec<String>,
+    pub chat_ack: Vec<String>,
     pub chat_discard: Vec<String>,
     pub chat_discard_through: Vec<String>,
     pub catchup: Vec<String>,
@@ -838,6 +984,37 @@ pub(crate) fn json<T: Serialize>(value: &T, pretty: bool) -> Result<String, AppE
     })?;
     rendered.push('\n');
     Ok(rendered)
+}
+
+pub(crate) fn json_len<T: Serialize>(value: &T, pretty: bool) -> Result<usize, AppError> {
+    struct ByteCounter(usize);
+
+    impl Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    let result = if pretty {
+        serde_json::to_writer_pretty(&mut counter, value)
+    } else {
+        serde_json::to_writer(&mut counter, value)
+    };
+    result
+        .map(|()| counter.0.saturating_add(1))
+        .map_err(|error| {
+            AppError::new(
+                crate::error::ErrorCode::IoError,
+                format!("failed to measure command output: {error}"),
+                "Retry the command; if this repeats, report the command and `post --version`.",
+            )
+        })
 }
 
 /// Render a sender for text surfaces: `"🧊 Name (room)"` when a profile was

@@ -38,6 +38,14 @@ fn search_limit(value: &str) -> Result<usize, String> {
     }
 }
 
+fn positive_bytes(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "byte count must be a positive integer".to_owned())
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "post",
@@ -63,6 +71,9 @@ pub(crate) struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+// Parsed once per short-lived CLI process; boxing only ChatArgs would spread
+// indirection through every command classifier for no runtime leverage.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
     /// Send mail from --body, FILE, or stdin.
     Send(SendArgs),
@@ -74,7 +85,7 @@ pub(crate) enum Command {
     Inbox(InboxArgs),
     /// Read one unread message by full id or unique prefix.
     Read(ReadArgs),
-    /// Consume and print the complete unread slice for mail, a channel, or all targets.
+    /// Consume unread mail/channel targets; --max-bytes admits a complete prefix.
     Catchup(CatchupArgs),
     /// Search party-visible mail and joined channels by literal substring.
     Search(SearchArgs),
@@ -96,7 +107,7 @@ pub(crate) enum Command {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post catchup [<CHANNEL> | --mail | --all] [--framing auto|full|compact]"
+    override_usage = "post catchup [<CHANNEL> | --mail | --all] [--max-bytes N] [--framing auto|full|compact]"
 )]
 pub(crate) struct CatchupArgs {
     /// Channel name; catches up exactly this joined channel.
@@ -115,6 +126,11 @@ pub(crate) struct CatchupArgs {
     /// banner per non-empty invocation; JSON carries the structured framing.
     #[arg(long, value_enum)]
     pub framing: Option<FramingMode>,
+
+    /// Apply one shared cap to final stdout across targets in their existing
+    /// mail-then-channel order.
+    #[arg(long = "max-bytes", value_name = "N", value_parser = positive_bytes)]
+    pub max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -232,6 +248,8 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --limit <N> [--framing MODE] (oldest N unread; --limit 0 = all)\n       \
      post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
      post chat <CHANNEL> --since <ID> [--framing MODE] (messages after ID, cursor untouched)\n       \
+     post chat <CHANNEL> --message <ID> [--offset B] [--length B] --max-bytes N (cursorless UTF-8 body slice)\n       \
+     post chat <CHANNEL> --ack <ID>                    (mark exactly one message seen)\n       \
      post chat <CHANNEL> --discard                   (mark all unread seen without printing)\n       \
      post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
@@ -355,6 +373,55 @@ pub(crate) struct ChatArgs {
     /// auto. An explicit value always wins over the environment.
     #[arg(long, value_enum, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file"])]
     pub framing: Option<FramingMode>,
+
+    /// Read one channel message body by UTF-8 byte range without consuming it.
+    /// Requires --max-bytes; full ids and channel-unique prefixes are accepted.
+    #[arg(
+        long,
+        value_name = "ID",
+        value_parser = nonempty_without_controls,
+        requires = "max_bytes",
+        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "file", "history", "since", "limit", "grep", "anyway", "re", "subject", "oversize", "description", "signature_ref"]
+    )]
+    pub message: Option<String>,
+
+    /// Acknowledge exactly one resolved channel message id without printing
+    /// its body or marking any earlier/later message seen.
+    #[arg(
+        long,
+        value_name = "ID",
+        value_parser = nonempty_without_controls,
+        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "file", "history", "since", "limit", "grep", "anyway", "re", "subject", "oversize", "description", "signature_ref", "message", "offset", "length", "max_bytes", "framing"]
+    )]
+    pub ack: Option<String>,
+
+    /// Start a --message body slice at this UTF-8 byte offset (default 0).
+    #[arg(
+        long,
+        value_name = "B",
+        requires_all = ["message", "max_bytes"]
+    )]
+    pub offset: Option<usize>,
+
+    /// Cap source body bytes considered for a --message slice. The final
+    /// stdout cap remains --max-bytes.
+    #[arg(
+        long,
+        value_name = "B",
+        value_parser = positive_bytes,
+        requires_all = ["message", "max_bytes"]
+    )]
+    pub length: Option<usize>,
+
+    /// Cap final stdout bytes for a body-returning read. The cap includes
+    /// UTF-8, escaping, framing, omission metadata, and the trailing newline.
+    #[arg(
+        long = "max-bytes",
+        value_name = "N",
+        value_parser = positive_bytes,
+        conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file", "subject", "oversize", "description", "anyway", "re", "signature_ref"]
+    )]
+    pub max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -534,6 +601,40 @@ pub(crate) struct ReadArgs {
     /// auto. An explicit value always wins over the environment.
     #[arg(long, value_enum)]
     pub framing: Option<FramingMode>,
+
+    /// Cap final stdout bytes for a full-body read, including framing,
+    /// escaping, omission metadata, and the trailing newline.
+    #[arg(
+        long = "max-bytes",
+        value_name = "N",
+        value_parser = positive_bytes,
+        conflicts_with = "ack"
+    )]
+    pub max_bytes: Option<usize>,
+
+    /// Start a cursorless body slice at this UTF-8 byte offset. The slice is
+    /// explicit even at offset zero and never marks the mail read.
+    #[arg(
+        long,
+        value_name = "B",
+        requires = "max_bytes",
+        conflicts_with_all = ["peek", "ack"]
+    )]
+    pub offset: Option<usize>,
+
+    /// Cap source body bytes considered for a cursorless slice.
+    #[arg(
+        long,
+        value_name = "B",
+        value_parser = positive_bytes,
+        requires = "max_bytes",
+        conflicts_with_all = ["peek", "ack"]
+    )]
+    pub length: Option<usize>,
+
+    /// Acknowledge exactly this resolved mail id without printing its body.
+    #[arg(long, conflicts_with_all = ["peek", "framing", "max_bytes", "offset", "length"])]
+    pub ack: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

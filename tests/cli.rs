@@ -3380,6 +3380,10 @@ fn channel_read_into_dev_null_is_refused_and_discard_is_the_deliberate_form() {
         error.error.details.exact_fix.as_deref(),
         Some("post chat 'tax' --discard")
     );
+    assert!(
+        !sandbox.mail_root.join("beta/banner-day").exists(),
+        "a refused null-sink read must not spend the day's full framing"
+    );
 
     let still: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
@@ -4791,6 +4795,32 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     let schema: SchemaOutput = from_stdout(&schema_output);
     let chat = fenced.run_in(&["chat", "tax", "--peek"], None, &fenced.home.join("dest"));
     assert_success(&chat);
+    let slice = fenced.run_in(
+        &[
+            "chat",
+            "tax",
+            "--message",
+            "20260820-120000-000001-aaaaaa",
+            "--max-bytes",
+            "4096",
+            "--json",
+        ],
+        None,
+        &fenced.home.join("dest"),
+    );
+    assert_success(&slice);
+    let refused_ack = fenced.run_in(
+        &[
+            "chat",
+            "tax",
+            "--ack",
+            "20260820-120000-000001-aaaaaa",
+            "--json",
+        ],
+        None,
+        &fenced.home.join("dest"),
+    );
+    assert_migration_refused(&refused_ack);
 
     // Search is added by the parallel B5 lane. Keep this matrix compiling on
     // the B7 base while making the assertion live as soon as that command is
@@ -7925,6 +7955,29 @@ fn v2_multiline_real_sign_verifies_and_in_body_decoys_are_inert() {
         text.contains("Quoting a v1 wire"),
         "the raw body must render as content"
     );
+    let slice = sandbox.run_in(
+        &[
+            "chat",
+            "signedv2",
+            "--message",
+            &id,
+            "--offset",
+            "0",
+            "--length",
+            "24",
+            "--max-bytes",
+            "2200",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&slice);
+    let slice: serde_json::Value = from_stdout(&slice);
+    assert_eq!(slice["signed_verified"], true);
+    assert_eq!(slice["verification_scope"], "stored_full_body");
+    assert!(slice.get("body").is_none());
+    assert_ne!(slice["body_slice"], body);
 }
 
 /// Fixture: v2 is the producer for one-liners too, and v1 messages signed

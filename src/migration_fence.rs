@@ -472,7 +472,9 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         })
         | Command::Catchup(_) => true,
         Command::Search(_) => false,
-        Command::Read(args) => !args.peek,
+        Command::Read(args) => {
+            args.ack || (!args.peek && args.offset.is_none() && args.length.is_none())
+        }
         Command::Chat(args) => {
             args.join
                 || args.send
@@ -481,9 +483,11 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
                 || args.file.is_some()
                 || args.discard
                 || args.discard_through.is_some()
+                || args.ack.is_some()
                 || (!args.peek
                     && args.history.is_none()
                     && args.since.is_none()
+                    && args.message.is_none()
                     && args.seen_by.is_none())
         }
         Command::Watch(args) => !args.snapshot,
@@ -521,10 +525,12 @@ mod tests {
             &["post", "doctor", "--fix"] as &[&str],
             &["post", "send", "--to", "beta", "--body", "x"],
             &["post", "read", "id"],
+            &["post", "read", "id", "--ack"],
             &["post", "chat", "tax", "--join"],
             &["post", "chat", "tax", "--send", "--body", "x"],
             &["post", "chat", "tax", "--discard"],
             &["post", "chat", "tax", "--discard-through", "id"],
+            &["post", "chat", "tax", "--ack", "id"],
             &["post", "catchup"],
             &["post", "catchup", "--mail"],
             &["post", "rooms", "add", "alpha", "/tmp"],
@@ -541,9 +547,19 @@ mod tests {
             &["post", "channels"],
             &["post", "inbox"],
             &["post", "read", "id", "--peek"],
+            &["post", "read", "id", "--offset", "0", "--max-bytes", "1024"],
             &["post", "chat", "tax", "--peek"],
             &["post", "chat", "tax", "--history", "1"],
             &["post", "chat", "tax", "--since", "id"],
+            &[
+                "post",
+                "chat",
+                "tax",
+                "--message",
+                "id",
+                "--max-bytes",
+                "1024",
+            ],
             &["post", "chat", "tax", "--seen-by", "id"],
             &["post", "rooms"],
             &["post", "profile", "show"],
