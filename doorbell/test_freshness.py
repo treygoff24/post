@@ -31,6 +31,15 @@ class Freshness(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, int(failed), "", "rejected")
             self.assertIn("--snapshot", argv)
             self.assertNotIn("--digest", argv)
+            # Order is the point: the unread snapshot must be read AFTER the
+            # agent settles. A scan taken while the agent is still mid-turn
+            # counts mail that turn is about to consume, which is exactly the
+            # stale notice this loop exists to prevent. Only the startup
+            # priming scan runs before any settle, by design.
+            if not (prime and len(calls) == 1):
+                self.assertEqual(calls[-2][:3] if len(calls) > 1 else [],
+                                 ["herdr", "agent", "wait"],
+                                 "unread snapshot taken before the agent settled")
             snapshot = next(scans)
             if snapshot is None:
                 return subprocess.CompletedProcess(argv, 1, "", "failed")
