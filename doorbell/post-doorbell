@@ -230,7 +230,7 @@ def load_marks(agent):
         if not isinstance(keys, list) or any(not isinstance(k, list) or len(k) != 3
                 or any(not isinstance(v, str) for v in k) for k in keys):
             return set()
-        return {tuple(key) for key in keys if key[0] != "unreadable-channel"}
+        return {tuple(key) for key in keys}
     except (OSError, ValueError):
         return set()
 
