@@ -12,7 +12,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+import { stableNodePath } from "./stable-node-path.mjs";
+
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+// The installers pin a package-manager-stable alias for the running Node
+// rather than the version-pinned process.execPath, so the expected command
+// must be built the same way (see stable-node-path.mjs).
+const NODE_BIN = stableNodePath();
 const INSTALLER = path.join(DIR, "install-codex-hooks.mjs");
 const SOURCE = path.join(DIR, "codex-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-install-test-"));
@@ -92,7 +98,7 @@ test("creates a fresh hooks file with all three events and copies the adapter", 
   const target = freshTarget();
   const result = run(target);
   assert.equal(result.status, 0, result.stderr);
-  const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+  const expectedCommand = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
   const config = JSON.parse(fs.readFileSync(target, "utf8"));
   for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse"]) {
     const groups = config.hooks[event];
@@ -120,7 +126,7 @@ test("copies the adapter privately and writes through hook-config symlinks", () 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.lstatSync(symlinkHooks).isSymbolicLink(), true, "profile symlink must survive");
 
-  const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+  const expectedCommand = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
   const config = JSON.parse(fs.readFileSync(realHooks, "utf8"));
   assert.deepEqual(config.hooks.Stop, [{ hooks: [] }], "unrelated hooks are preserved");
   for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse"]) {
@@ -143,7 +149,7 @@ test("copies the adapter privately and writes through hook-config symlinks", () 
 test("normalizes and deduplicates only its own hooks", () => {
   const target = freshTarget();
   const unrelated = { type: "command", command: "echo keep", timeout: 9 };
-  const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+  const expectedCommand = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
   fs.writeFileSync(
     target,
     JSON.stringify({
@@ -241,7 +247,7 @@ test("root array or null config normalizes to an object hooks map", () => {
     assert.ok(Array.isArray(config.hooks.SessionStart), label);
     assert.equal(
       config.hooks.SessionStart[0].hooks[0].command,
-      `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`
+      `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`
     );
   }
 });
@@ -323,4 +329,36 @@ test("a failed helper copy leaves the prior adapter bytes untouched (upgrade can
     timeout: 5000,
   });
   assert.equal(rerun.status, 0, "the prior adapter must still execute");
+});
+
+test("the emitted node path is upgrade-durable, not version-pinned", () => {
+  // Regression guard for 2026-09-15. The installer used to bake process.execPath,
+  // which on Homebrew is /opt/homebrew/Cellar/node/<version>/bin/node; a routine
+  // `brew upgrade node` deleted that directory and every installed hook started
+  // exiting 127 (command not found) at once, across Codex, Cursor and Grok.
+  //
+  // Asserting `emitted === stableNodePath()` would be circular — it would still
+  // pass if the helper regressed to returning execPath. So assert the PROPERTY:
+  // the emitted path must be a FIXED POINT of stableNodePath (i.e. no more
+  // durable alias exists for that same binary), and must still resolve to the
+  // interpreter actually running this test.
+  const target = freshTarget();
+  const result = run(target);
+  assert.equal(result.status, 0, result.stderr);
+
+  const config = JSON.parse(fs.readFileSync(target, "utf8"));
+  const command = config.hooks.UserPromptSubmit[0].hooks[0].command;
+  const emitted = JSON.parse(command.match(/^"(?:\\.|[^"\\])*"/)[0]);
+
+  assert.equal(path.isAbsolute(emitted), true, "hook commands must pin an absolute node");
+  assert.equal(
+    stableNodePath(emitted),
+    emitted,
+    `installer emitted ${emitted}, but a more upgrade-durable alias exists for the same binary`
+  );
+  assert.equal(
+    fs.realpathSync(emitted),
+    fs.realpathSync(process.execPath),
+    "the pinned path must be the same binary that is running these tests"
+  );
 });

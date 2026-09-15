@@ -18,6 +18,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { stableNodePath } from "./stable-node-path.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.join(DIR, "grok-mail.mjs");
@@ -30,7 +31,11 @@ const INSTALL_DIR =
   process.env.POST_GROK_HOOK_INSTALL_DIR || path.join(os.homedir(), ".grok", "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-grok-mail.mjs");
 const NOTICE = path.join(INSTALL_DIR, "post-watch-notice.mjs");
-const COMMAND = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+// Pin an absolute Node that survives package-manager upgrades: process.execPath
+// is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
+// at the next `brew upgrade node` (see stable-node-path.mjs). Shell-quote both args.
+const NODE_BIN = stableNodePath();
+const COMMAND = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
 const EVENTS = ["UserPromptSubmit"];
 const INTEGRATION_NAMES = new Set(["grok-mail.mjs", "post-grok-mail.mjs"]);
 

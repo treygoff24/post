@@ -12,7 +12,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+import { stableNodePath } from "./stable-node-path.mjs";
+
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+// The installers pin a package-manager-stable alias for the running Node
+// rather than the version-pinned process.execPath, so the expected command
+// must be built the same way (see stable-node-path.mjs).
+const NODE_BIN = stableNodePath();
 const INSTALLER = path.join(DIR, "install-grok-hooks.mjs");
 const SOURCE = path.join(DIR, "grok-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-grok-install-test-"));
@@ -93,7 +99,7 @@ test("creates a fresh hooks file with UserPromptSubmit and copies the adapter", 
   const target = freshTarget();
   const result = run(target);
   assert.equal(result.status, 0, result.stderr);
-  const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+  const expectedCommand = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
   const config = JSON.parse(fs.readFileSync(target, "utf8"));
   assert.equal(Object.keys(config.hooks).join(","), "UserPromptSubmit");
   assert.deepEqual(config.hooks.UserPromptSubmit[0].hooks, [
@@ -121,7 +127,7 @@ test("copies the adapter privately and writes through hook-config symlinks", () 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.lstatSync(symlinkHooks).isSymbolicLink(), true, "profile symlink must survive");
 
-  const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+  const expectedCommand = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
   const config = JSON.parse(fs.readFileSync(realHooks, "utf8"));
   assert.deepEqual(config.hooks.Stop, [{ hooks: [] }], "unrelated hooks are preserved");
   assert.equal(config.hooks.UserPromptSubmit[0].hooks[0].command, expectedCommand);
@@ -144,7 +150,7 @@ test("copies the adapter privately and writes through hook-config symlinks", () 
 test("normalizes and deduplicates only its own hooks", () => {
   const target = freshTarget();
   const unrelated = { type: "command", command: "echo keep", timeout: 9 };
-  const expectedCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+  const expectedCommand = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
   fs.writeFileSync(
     target,
     JSON.stringify({
@@ -242,7 +248,7 @@ test("root array or null config normalizes to an object hooks map", () => {
     assert.ok(Array.isArray(config.hooks.UserPromptSubmit), label);
     assert.equal(
       config.hooks.UserPromptSubmit[0].hooks[0].command,
-      `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`
+      `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`
     );
   }
 });

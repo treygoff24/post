@@ -17,6 +17,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { stableNodePath } from "./stable-node-path.mjs";
 
 // Source from this installer's own directory so the reviewed adapter follows
 // the installed skill rather than a guessed location (~/.codex/skills).
@@ -34,8 +35,11 @@ const ADAPTER = path.join(
   process.env.POST_CODEX_HOOK_INSTALL_DIR || path.join(os.homedir(), ".codex", "hooks"),
   "post-codex-mail.mjs"
 );
-// Pin the absolute Node that is running this installer; shell-quote both args.
-const COMMAND = `${JSON.stringify(process.execPath)} ${JSON.stringify(ADAPTER)}`;
+// Pin an absolute Node that survives package-manager upgrades: process.execPath
+// is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
+// at the next `brew upgrade node` (see stable-node-path.mjs). Shell-quote both args.
+const NODE_BIN = stableNodePath();
+const COMMAND = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 const INTEGRATION_NAMES = new Set(["codex-mail.mjs", "post-codex-mail.mjs"]);
 

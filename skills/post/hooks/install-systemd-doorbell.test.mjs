@@ -13,7 +13,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+import { stableNodePath } from "./stable-node-path.mjs";
+
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+// The installers pin a package-manager-stable alias for the running Node
+// rather than the version-pinned process.execPath, so the expected command
+// must be built the same way (see stable-node-path.mjs).
+const NODE_BIN = stableNodePath();
 const INSTALLER = path.join(DIR, "install-systemd-doorbell.mjs");
 const MONITOR_SOURCE = path.join(DIR, "codex-notify-monitor.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-systemd-doorbell-test-"));
@@ -360,7 +366,7 @@ test("successful install writes executable monitor and 0644 service and timer", 
   // the first trigger. Losing it is a doorbell that installs clean and is deaf.
   assert.match(timerText, /^OnActiveSec=\d+s$/m);
   assert.match(timerText, /^OnUnitActiveSec=\d+s$/m);
-  assert.match(serviceText, new RegExp(`^ExecStart=${escapeRegExp(process.execPath)} `, "m"));
+  assert.match(serviceText, new RegExp(`^ExecStart=${escapeRegExp(NODE_BIN)} `, "m"));
   assert.match(serviceText, new RegExp(`^Environment=HOME=${escapeRegExp(home)}$`, "m"));
   assert.match(serviceText, new RegExp(`^Environment=POST_CODEX_NOTIFY_POST_BIN=${escapeRegExp(POST)}$`, "m"));
   assert.match(serviceText, new RegExp(`^Environment=POST_CODEX_NOTIFY_HERDR_BIN=${escapeRegExp(HERDR)}$`, "m"));

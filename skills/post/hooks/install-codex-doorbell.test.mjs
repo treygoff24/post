@@ -12,7 +12,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+import { stableNodePath } from "./stable-node-path.mjs";
+
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+// The installers pin a package-manager-stable alias for the running Node
+// rather than the version-pinned process.execPath, so the expected command
+// must be built the same way (see stable-node-path.mjs).
+const NODE_BIN = stableNodePath();
 const INSTALLER = path.join(DIR, "install-codex-doorbell.mjs");
 const MONITOR_SOURCE = path.join(DIR, "codex-notify-monitor.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-doorbell-test-"));
@@ -296,7 +302,7 @@ test("installs a machine-independent launch agent with the exact per-agent state
 
   // Launchd shape.
   assert.ok(plist.includes(`<string>${escapeXml(`dev.post.codex-doorbell.${AGENT}`)}</string>`), "label");
-  assert.ok(plist.includes(`<string>${escapeXml(process.execPath)}</string>`), "absolute node");
+  assert.ok(plist.includes(`<string>${escapeXml(NODE_BIN)}</string>`), "absolute node");
   assert.ok(plist.includes(`<string>${escapeXml(monitor)}</string>`), "installed monitor");
   assert.ok(plist.includes("<string>ops</string>"), "room");
   assert.ok(plist.includes("<integer>5</integer>"), "StartInterval");
@@ -306,7 +312,7 @@ test("installs a machine-independent launch agent with the exact per-agent state
   assert.ok(plist.includes(`<string>${escapeXml(errorLog)}</string>`));
 
   // No Trey- or machine-specific literals beyond the ambient node binary.
-  const stripped = plist.replaceAll(escapeXml(process.execPath), "");
+  const stripped = plist.replaceAll(escapeXml(NODE_BIN), "");
   for (const literal of ["trey", "treygoff", "sol", "cmux", "/Users/"]) {
     assert.ok(!stripped.includes(literal), `plist must not contain ${literal}`);
   }

@@ -19,9 +19,11 @@
 // timer, state file, and logs; the shared monitor copy is left in place.
 //
 // Everything is resolved and preflighted before anything is written: node is
-// process.execPath; post, herdr, and systemctl come from the overrides below,
-// else ~/.local/bin/post and ~/.local/bin/herdr, else PATH, and systemctl
-// defaults to PATH. A missing binary, a `post rooms` listing that
+// the running interpreter, resolved to an upgrade-durable alias for the same
+// binary when one exists (see stable-node-path.mjs); post, herdr, and
+// systemctl come from the overrides below, else ~/.local/bin/post and
+// ~/.local/bin/herdr, else PATH, and systemctl defaults to PATH.
+// A missing binary, a `post rooms` listing that
 // lacks the exact requested room (or returns ok!==true / malformed members),
 // a selected channel that is missing or does not include the room, a failed
 // `post watch --room <room> --snapshot` probe, or a `herdr agent get <agent>`
@@ -46,6 +48,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { stableNodePath } from "./stable-node-path.mjs";
 
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
 const AGENT_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -564,7 +567,7 @@ function disableTimer(bin, timer) {
 }
 
 function install(opts) {
-  const nodeBin = process.execPath;
+  const nodeBin = stableNodePath();
   // Any PRESENT value counts as set, including empty: the real Post binary
   // treats an explicitly empty POST_MAIL_ROOT as a relative path (rc 78), so
   // empty must refuse here rather than silently pass as unset.
