@@ -87,7 +87,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         ));
     }
     let mut result = match cli.command {
-        Command::Participant(args) => participant::run(&context, args, pretty),
+        Command::Participant(args) => participant::run(&context, args, json, pretty),
         Command::Identity(_) => Err(AppError::not_yet("P.3")),
         Command::Doctor(args) => doctor::run(&context, args, pretty),
         Command::Send(args) => send::run(&context, args, json, pretty),

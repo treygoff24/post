@@ -200,6 +200,7 @@ impl Sandbox {
             .env_remove("POST_PARTICIPANT")
             .env_remove("POST_HARNESS")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_PID")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_SESSION_ID");
         let has_explicit_participant = envs.iter().any(|(key, _)| {
@@ -211,7 +212,11 @@ impl Sandbox {
                     | "CODEX_SESSION_ID"
             )
         });
-        if !has_explicit_participant {
+        let bootstrap_bind = args.starts_with(&["participant", "bind"])
+            && (args.contains(&"--key") || args.contains(&"--new"));
+        let launcher_bind = args.starts_with(&["participant", "bind"])
+            && envs.iter().any(|(key, _)| *key == "POST_SENDER_ADDRESS");
+        if !has_explicit_participant && !bootstrap_bind && !launcher_bind {
             if self.mail_root.join(".post-arx.json").exists() {
                 command.env("POST_PARTICIPANT", "test-default");
             } else if self.mail_root.exists() && invocation_needs_test_participant(args) {
@@ -366,6 +371,9 @@ impl Sandbox {
         let dir = self.mail_root.join("participants").join(&id);
         fs::create_dir_all(&dir).expect("create test participant directory");
         let path = dir.join("participant.json");
+        if fixed_id.is_none() && path.is_file() {
+            return id;
+        }
         let record = serde_json::json!({
             "version": 1,
             "id": id,
@@ -621,6 +629,7 @@ pub fn post_command() -> Command {
         .env_remove("POST_ARX_GENERATION")
         .env_remove("POST_HARNESS")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDE_PID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_SESSION_ID")
         .env("POST_PARTICIPANT", "test-default");

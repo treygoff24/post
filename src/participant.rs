@@ -7,6 +7,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub(crate) const PARTICIPANTS_DIR: &str = "participants";
 pub(crate) const PARTICIPANTS_LOCK_FILE: &str = ".participants.lock";
@@ -174,12 +175,38 @@ pub(crate) fn bind(
     context: &Context,
     cwd: &Path,
     workspace_override: Option<&str>,
+    bootstrap: Option<(&str, &str)>,
 ) -> AppResult<Participant> {
-    if let Some(explicit) = env_utf8("POST_PARTICIPANT")? {
-        validate_participant_id(&explicit)?;
-        return load(context, &explicit)?.ok_or_else(|| AppError::no_participant(FIX_LINE));
+    let explicit = env_utf8("POST_PARTICIPANT")?;
+    if bootstrap.is_some() && explicit.is_some() {
+        return Err(AppError::invalid_argument(
+            "--key/--new cannot be combined with POST_PARTICIPANT; unset it to mint a different participant",
+        ));
     }
-    let binding = conversation_binding()?.ok_or_else(|| AppError::no_participant(FIX_LINE))?;
+    if let Some(explicit) = explicit {
+        validate_participant_id(&explicit)?;
+        if workspace_override.is_none() && declared_env_pin()?.is_none() {
+            return load(context, &explicit)?.ok_or_else(|| AppError::no_participant(FIX_LINE));
+        }
+        let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
+        let _lock = lock(context)?;
+        let mut participant =
+            load(context, &explicit)?.ok_or_else(|| AppError::no_participant(FIX_LINE))?;
+        participant.workspace = workspace;
+        participant.workspace_path = workspace_path;
+        write_record(&participant)?;
+        return Ok(participant);
+    }
+    let binding = match bootstrap {
+        Some((harness, key)) => ConversationBinding {
+            harness: harness_slug(harness)?,
+            key: key.to_owned(),
+            // Bind output names the explicit result directly; subsequent
+            // invocations resolve through POST_PARTICIPANT.
+            provenance: Provenance::ExplicitEnv,
+        },
+        None => conversation_binding()?.ok_or_else(|| AppError::no_participant(FIX_LINE))?,
+    };
     let digest = digest(&binding.key);
     let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
 
@@ -213,6 +240,35 @@ pub(crate) fn bind(
     let participant = participant.expect("selected participant record exists");
     write_index(context, &binding.harness, &digest, &participant.id)?;
     Ok(participant)
+}
+
+pub(crate) fn fresh_uuid_key() -> AppResult<String> {
+    let path = Path::new("/dev/urandom");
+    let mut bytes = [0_u8; 16];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|error| AppError::io("read randomness for participant UUID", path, error))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
 }
 
 pub(crate) fn lock(context: &Context) -> AppResult<File> {
@@ -398,30 +454,32 @@ fn read_bounded_optional(path: &Path, maximum: u64) -> AppResult<Option<Vec<u8>>
 }
 
 fn conversation_binding() -> AppResult<Option<ConversationBinding>> {
-    let harness_override = env_utf8("POST_HARNESS")?;
-    if let Some(key) = env_utf8("CLAUDE_CODE_SESSION_ID")? {
-        return Ok(Some(ConversationBinding {
-            harness: harness_slug(harness_override.as_deref().unwrap_or("claude"))?,
-            key,
-            provenance: Provenance::HarnessClaude,
-        }));
-    }
+    let claude = env_utf8("CLAUDE_CODE_SESSION_ID")?;
     let thread = env_utf8("CODEX_THREAD_ID")?;
     let session = env_utf8("CODEX_SESSION_ID")?;
-    if let (Some(thread), Some(session)) = (&thread, &session) {
-        if thread != session {
-            return Err(AppError::invalid_argument(
-                "CODEX_THREAD_ID and CODEX_SESSION_ID are both set but differ; refusing to guess the conversation key",
-            )
-            .reason("conflicting Codex conversation keys"));
+    let codex_present = thread.is_some() || session.is_some();
+    match (claude, codex_present) {
+        (Some(claude_key), true) => match nearest_native_harness() {
+            Some(NativeHarness::Claude) => {
+                return Ok(Some(native_binding(NativeHarness::Claude, claude_key)))
+            }
+            Some(NativeHarness::Codex) => {
+                let key = codex_key(thread, session)?;
+                return Ok(Some(native_binding(NativeHarness::Codex, key)));
+            }
+            None => {
+                return Err(AppError::invalid_argument(
+                    "both Claude and Codex conversation keys are set, but the nearest harness ancestor could not be determined; set POST_PARTICIPANT explicitly",
+                )
+                .reason("ambiguous nested harness ancestry"));
+            }
+        },
+        (Some(key), false) => return Ok(Some(native_binding(NativeHarness::Claude, key))),
+        (None, true) => {
+            let key = codex_key(thread, session)?;
+            return Ok(Some(native_binding(NativeHarness::Codex, key)));
         }
-    }
-    if let Some(key) = thread.or(session) {
-        return Ok(Some(ConversationBinding {
-            harness: harness_slug(harness_override.as_deref().unwrap_or("codex"))?,
-            key,
-            provenance: Provenance::HarnessCodex,
-        }));
+        (None, false) => {}
     }
     let Some(address) = declared_sender_address()? else {
         return Ok(None);
@@ -439,11 +497,111 @@ fn conversation_binding() -> AppResult<Option<ConversationBinding>> {
     if pieces.next().is_some() || harness.is_empty() || key.is_empty() {
         return Err(invalid_launcher_address(&address));
     }
+    let harness = env_utf8("POST_HARNESS")?.unwrap_or_else(|| harness.to_owned());
     Ok(Some(ConversationBinding {
-        harness: harness_slug(harness)?,
+        harness: harness_slug(&harness)?,
         key: key.to_owned(),
         provenance: Provenance::LauncherAddress,
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeHarness {
+    Claude,
+    Codex,
+}
+
+fn native_binding(harness: NativeHarness, key: String) -> ConversationBinding {
+    match harness {
+        NativeHarness::Claude => ConversationBinding {
+            harness: "claude".to_owned(),
+            key,
+            provenance: Provenance::HarnessClaude,
+        },
+        NativeHarness::Codex => ConversationBinding {
+            harness: "codex".to_owned(),
+            key,
+            provenance: Provenance::HarnessCodex,
+        },
+    }
+}
+
+fn codex_key(thread: Option<String>, session: Option<String>) -> AppResult<String> {
+    if let (Some(thread), Some(session)) = (&thread, &session) {
+        if thread != session {
+            return Err(AppError::invalid_argument(
+                "CODEX_THREAD_ID and CODEX_SESSION_ID are both set but differ; refusing to guess the conversation key",
+            )
+            .reason("conflicting Codex conversation keys"));
+        }
+    }
+    Ok(thread
+        .or(session)
+        .expect("at least one Codex key is present"))
+}
+
+fn nearest_native_harness() -> Option<NativeHarness> {
+    let ancestors = process_ancestors()?;
+    let claude_pid = std::env::var("CLAUDE_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    nearest_native_harness_in(
+        ancestors
+            .iter()
+            .map(|(pid, command)| (*pid, command.as_str())),
+        claude_pid,
+    )
+}
+
+fn nearest_native_harness_in<'a>(
+    ancestors: impl IntoIterator<Item = (u32, &'a str)>,
+    claude_pid: Option<u32>,
+) -> Option<NativeHarness> {
+    for (pid, command) in ancestors {
+        if claude_pid == Some(pid) {
+            return Some(NativeHarness::Claude);
+        }
+        let basename = Path::new(command)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(command)
+            .trim_start_matches('-');
+        match basename {
+            "claude" => return Some(NativeHarness::Claude),
+            "codex" => return Some(NativeHarness::Codex),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn process_ancestors() -> Option<Vec<(u32, String)>> {
+    let (mut pid, _) = process_info(std::process::id())?;
+    let mut ancestors = Vec::new();
+    for _ in 0..16 {
+        if pid == 0 {
+            break;
+        }
+        let (parent, command) = process_info(pid)?;
+        ancestors.push((pid, command));
+        pid = parent;
+    }
+    Some(ancestors)
+}
+
+fn process_info(pid: u32) -> Option<(u32, String)> {
+    let output = Command::new("ps")
+        .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = std::str::from_utf8(&output.stdout).ok()?.trim();
+    let split = line.find(char::is_whitespace)?;
+    let parent = line[..split].trim().parse::<u32>().ok()?;
+    let command = line[split..].trim();
+    (!command.is_empty()).then(|| (parent, command.to_owned()))
 }
 
 fn invalid_launcher_address(address: &str) -> AppError {
@@ -552,4 +710,33 @@ fn participant_id(harness: &str, digest: &str, width: usize) -> String {
 
 fn digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{nearest_native_harness_in, NativeHarness};
+
+    #[test]
+    fn nearest_harness_ancestor_selects_nested_codex_child() {
+        let ancestors = [(40, "node"), (30, "/usr/local/bin/codex"), (20, "claude")];
+        assert_eq!(
+            nearest_native_harness_in(ancestors, None),
+            Some(NativeHarness::Codex)
+        );
+    }
+
+    #[test]
+    fn claude_pid_marks_nearest_claude_ancestor_even_under_a_wrapper() {
+        let ancestors = [(40, "node"), (30, "python"), (20, "codex")];
+        assert_eq!(
+            nearest_native_harness_in(ancestors, Some(30)),
+            Some(NativeHarness::Claude)
+        );
+    }
+
+    #[test]
+    fn ambiguous_ancestor_list_never_guesses() {
+        let ancestors = [(40, "node"), (30, "python"), (20, "bash")];
+        assert_eq!(nearest_native_harness_in(ancestors, None), None);
+    }
 }

@@ -46,7 +46,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "participant",
-            "post participant show | post participant bind [--workspace <room>] | post participant list",
+            "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant list",
             "JSON",
             "show/list are read-only; bind is the only participant minting path and commits participant.json before its by-session index under .participants.lock",
         ),
@@ -149,7 +149,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
-            "show/bind: ok, status=bound|unbound, participant?, provenance?, fix?",
+            "show/bind: ok, status=bound|unbound, id?, participant?, provenance?, fix?",
             "list: ok, participants, count",
         ]),
         identity: fields(&["declared surface; P.3 bodies currently return not_yet"]),
@@ -390,6 +390,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "delivered_output_failure is non-retryable after a committed direct send or channel mutation; committed room registration stdout failure is reported as success with best-effort diagnostics.",
             "Mail kinds are exactly letter, note, and signal.",
             "Only post participant bind mints a participant; read-only commands never mint or initialize mailbox state.",
+            "A shell without a harness key bootstraps with participant bind --harness <slug> --key <conversation-key> or participant bind --new [--harness <slug>]; text prints one export POST_PARTICIPANT line.",
             "A participant binding, never cwd, determines the sender. Workspace context supplies the shared reply address; otherwise the participant id is the reply address.",
             "Bare send targets resolve registered workspace, then lineage, then participant; typed workspace:, lineage:, and participant: targets remove ambiguity without changing --kind.",
             "Channel messages are not mail: they carry no kind, so a signal structurally cannot occur in a channel; anything gate-grade stays 1:1 room mail.",
@@ -428,7 +429,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "POST_PARTICIPANT: explicit acting participant id; highest resolution precedence and never mints a missing record",
             "CLAUDE_CODE_SESSION_ID: Claude conversation key used by post participant bind",
             "CODEX_THREAD_ID / CODEX_SESSION_ID: Codex conversation key (both present and different is an error, never a guess)",
-            "POST_HARNESS: optional harness slug override for a harness conversation key",
+            "CLAUDE_PID: marks a Claude ancestor when nested Claude/Codex harness keys are both inherited; nearest harness ancestor wins and unresolved ancestry fails naming POST_PARTICIPANT",
+            "POST_HARNESS: optional harness label for POST_SENDER_ADDRESS and participant bind --new only; native Claude/Codex labels are canonical",
             "POST_ARX_GENERATION: positive migration generation for writers only; reads never parse or reject it. Missing/zero/stale/malformed declarations refuse enrolled writers before mutation; absent state plus an unset declaration preserves legacy writes. Enrolled reads are non-mutating. The enrollment-owned .post-arx.json state, existing solitary .post-arx.lock flock anchor, and actual ..post-arx.json.<pid>.<nonce>.tmp atomic temp namespace are reserved room names; no lock temp namespace is produced; the lock inode is never unlinked or recreated. Cursor state is a fence boundary: catchup requires writer admission, while search and listings remain read-only; valid legacy channel-state.json imports in memory on read and materializes only on the first admitted cursor write, remaining untouched as rollback evidence.",
         ]),
     };

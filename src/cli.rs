@@ -132,6 +132,24 @@ pub(crate) struct ParticipantBindArgs {
     /// Pin workspace context to a registered room instead of inferring it from cwd.
     #[arg(long, value_name = "ROOM", value_parser = nonempty_without_controls)]
     pub workspace: Option<String>,
+
+    /// Harness slug for --key, or an optional label for --new (default: shell).
+    #[arg(long, value_name = "SLUG", value_parser = nonempty_without_controls)]
+    pub harness: Option<String>,
+
+    /// Deterministic conversation key for a shell without harness-provided identity.
+    #[arg(
+        long,
+        value_name = "CONVERSATION_KEY",
+        value_parser = nonempty_without_controls,
+        requires = "harness",
+        conflicts_with = "fresh"
+    )]
+    pub key: Option<String>,
+
+    /// Mint from a fresh UUID conversation key (default harness: shell).
+    #[arg(long = "new", conflicts_with = "key")]
+    pub fresh: bool,
 }
 
 #[derive(Debug, Args)]

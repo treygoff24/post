@@ -55,7 +55,18 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
     let sandbox = Sandbox::new();
     let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
     for (name, required) in [
-        ("participant", vec!["show", "bind", "--workspace", "list"]),
+        (
+            "participant",
+            vec![
+                "show",
+                "bind",
+                "--workspace",
+                "--harness",
+                "--key",
+                "--new",
+                "list",
+            ],
+        ),
         (
             "identity",
             vec![

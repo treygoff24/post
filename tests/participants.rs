@@ -19,6 +19,14 @@ fn participant_id(output: &Value) -> &str {
         .expect("participant id")
 }
 
+fn exported_participant(output: &std::process::Output) -> String {
+    let line = common::stdout(output);
+    line.strip_prefix("export POST_PARTICIPANT=")
+        .and_then(|value| value.strip_suffix('\n'))
+        .unwrap_or_else(|| panic!("unexpected bootstrap output: {line:?}"))
+        .to_owned()
+}
+
 fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, at: &Path, found: &mut BTreeMap<PathBuf, Vec<u8>>) {
         let entries = match fs::read_dir(at) {
@@ -56,6 +64,114 @@ fn participant_two_keys_mint_distinct_ids_and_rebind_is_idempotent() {
         sandbox.read_participant(participant_id(&first))["conversation_key_digest"],
         digest("conversation-one")
     );
+}
+
+#[test]
+fn participant_bind_key_bootstrap_is_idempotent_and_prints_export() {
+    let sandbox = Sandbox::new();
+    let args = [
+        "participant",
+        "bind",
+        "--harness",
+        "native",
+        "--key",
+        "stable-native-key",
+    ];
+    let first = sandbox.run(&args);
+    assert_success(&first);
+    let first_id = exported_participant(&first);
+    assert!(first_id.starts_with("native-"));
+    let second = sandbox.run(&args);
+    assert_success(&second);
+    assert_eq!(exported_participant(&second), first_id);
+
+    let json = sandbox.run(&[
+        "participant",
+        "bind",
+        "--harness",
+        "native",
+        "--key",
+        "stable-native-key",
+        "--json",
+    ]);
+    assert_success(&json);
+    let json: Value = from_stdout(&json);
+    assert_eq!(json["id"], first_id);
+    assert_eq!(participant_id(&json), first_id);
+}
+
+#[test]
+fn participant_bind_new_uses_fresh_uuid_and_default_shell_harness() {
+    let sandbox = Sandbox::new();
+    let first = sandbox.run(&["participant", "bind", "--new"]);
+    let second = sandbox.run(&["participant", "bind", "--new"]);
+    assert_success(&first);
+    assert_success(&second);
+    let first = exported_participant(&first);
+    let second = exported_participant(&second);
+    assert!(first.starts_with("shell-"));
+    assert!(second.starts_with("shell-"));
+    assert_ne!(first, second, "--new must use a fresh UUID key");
+}
+
+#[test]
+fn participant_explicit_bind_workspace_rebinds_existing_record() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("explicit-rebind", &alpha, Some("alpha"));
+    let id = participant_id(&bound).to_owned();
+    let rebound = sandbox.run_as_participant(
+        &["participant", "bind", "--workspace", "beta", "--json"],
+        &id,
+        &sandbox.path,
+    );
+    assert_success(&rebound);
+    let rebound: Value = from_stdout(&rebound);
+    assert_eq!(rebound["participant"]["id"], id);
+    assert_eq!(rebound["participant"]["workspace"], "beta");
+    assert_eq!(sandbox.read_participant(&id)["workspace"], "beta");
+}
+
+#[test]
+fn participant_native_harness_labels_ignore_post_harness_override() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run_in_env(
+        &["participant", "bind", "--json"],
+        None,
+        &sandbox.path,
+        &[
+            ("CLAUDE_CODE_SESSION_ID", "canonical-claude-key"),
+            ("POST_HARNESS", "not-claude"),
+        ],
+    );
+    assert_success(&output);
+    let output: Value = from_stdout(&output);
+    assert!(participant_id(&output).starts_with("claude-"));
+    assert_eq!(output["participant"]["harness"], "claude");
+
+    let launcher = sandbox.run_in_env(
+        &["participant", "bind", "--json"],
+        None,
+        &sandbox.path,
+        &[
+            ("POST_SENDER_ADDRESS", "address-label.repo-key.launch-key"),
+            ("POST_HARNESS", "launcher-label"),
+        ],
+    );
+    assert_success(&launcher);
+    let launcher: Value = from_stdout(&launcher);
+    assert!(participant_id(&launcher).starts_with("launcher-label-"));
+    assert_eq!(launcher["participant"]["harness"], "launcher-label");
+
+    let fresh = sandbox.run_in_env(
+        &["participant", "bind", "--new", "--json"],
+        None,
+        &sandbox.path,
+        &[("POST_HARNESS", "fresh-label")],
+    );
+    assert_success(&fresh);
+    let fresh: Value = from_stdout(&fresh);
+    assert!(participant_id(&fresh).starts_with("fresh-label-"));
 }
 
 #[test]
