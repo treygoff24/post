@@ -114,6 +114,8 @@ pub(super) fn run(
                 pretty,
             )
         }
+        ParticipantCommand::Touch => lifecycle(context, false, pretty),
+        ParticipantCommand::End => lifecycle(context, true, pretty),
         ParticipantCommand::List => {
             let participants = participant::list(context)?;
             let count = participants.len();
@@ -127,6 +129,28 @@ pub(super) fn run(
             )
         }
     }
+}
+
+fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandResult> {
+    let (current, provenance) = participant::require(context)?;
+    let participant = if end {
+        participant::end(context, &current.id)?
+    } else {
+        participant::touch(context, &current.id)?
+    };
+    let id = participant.id.clone();
+    CommandResult::json(
+        &ParticipantOutput {
+            ok: true,
+            status: if end { "ended" } else { "bound" },
+            id: Some(id),
+            participant: Some(participant),
+            provenance: Some(provenance.as_str()),
+            fix: None,
+            participant_error: None,
+        },
+        pretty,
+    )
 }
 
 fn show(context: &Context, pretty: bool) -> AppResult<CommandResult> {

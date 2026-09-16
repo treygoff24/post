@@ -116,6 +116,7 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     let rooms = detect_rooms(context, &rooms_path, &mut checks);
     detect_rules(&rules_path, rooms.as_ref(), &mut checks);
     detect_dir(&context.root.join("archive"), "dir.archive", &mut checks);
+    detect_participant_lifecycle(context, &mut checks);
 
     // owner.json is the trust anchor: a broken one makes every
     // badge-computing chat read fail closed (A0a Decision 3), so doctor
@@ -252,6 +253,40 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_channels(context, &mut checks);
     checks.sort_by(|left, right| left.id.cmp(&right.id).then(left.path.cmp(&right.path)));
     checks
+}
+
+fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let now = std::time::SystemTime::now();
+    let participants = match crate::participant::list(context) {
+        Ok(participants) => participants,
+        Err(error) => {
+            checks.push(check(
+                "participants.invalid",
+                DoctorSeverity::Error,
+                &context.root.join(crate::participant::PARTICIPANTS_DIR),
+                &error.message,
+                false,
+                "Repair the named participant record by hand, then rerun `post doctor`.",
+            ));
+            return;
+        }
+    };
+    for participant in participants {
+        if participant.state(now) != crate::participant::ParticipantState::Stale {
+            continue;
+        }
+        checks.push(check(
+            &format!("participant.{}.stale", participant.id),
+            DoctorSeverity::Info,
+            &participant.dir.join("participant.json"),
+            &format!(
+                "participant '{}' is stale; mail already frozen to it is not reassigned when its lease expires",
+                participant.id
+            ),
+            false,
+            "Use `post participant touch` only from that live session, or `post participant end` when ending it explicitly.",
+        ));
+    }
 }
 
 /// Validate the channel store: each channel's channel.json and members.json

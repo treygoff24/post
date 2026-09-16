@@ -8,12 +8,15 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const PARTICIPANTS_DIR: &str = "participants";
 pub(crate) const PARTICIPANTS_LOCK_FILE: &str = ".participants.lock";
 const RECORD_FILE: &str = "participant.json";
 const RECORD_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
+const DEFAULT_LEASE_HOURS: u64 = 24;
+const LEASE_ENV: &str = "POST_PARTICIPANT_LEASE_HOURS";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Participant {
@@ -22,6 +25,12 @@ pub(crate) struct Participant {
     pub harness: String,
     pub conversation_key_digest: String,
     pub created: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+    #[serde(default = "default_lease_hours")]
+    pub lease_hours: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,6 +43,52 @@ pub(crate) struct Participant {
     pub display_name: Option<String>,
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParticipantState {
+    Active,
+    Stale,
+    Ended,
+}
+
+impl ParticipantState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Stale => "stale",
+            Self::Ended => "ended",
+        }
+    }
+}
+
+impl Participant {
+    pub(crate) fn is_active(&self, now: SystemTime) -> bool {
+        self.state(now) == ParticipantState::Active
+    }
+
+    pub(crate) fn state(&self, now: SystemTime) -> ParticipantState {
+        if self.ended_at.is_some() {
+            return ParticipantState::Ended;
+        }
+        let Some(last_seen) = self.last_seen.as_deref() else {
+            return ParticipantState::Active;
+        };
+        let Some(last_seen) = parse_rfc3339(last_seen) else {
+            return ParticipantState::Stale;
+        };
+        match now.duration_since(last_seen) {
+            Ok(age) if age <= Duration::from_secs(self.lease_hours.saturating_mul(3600)) => {
+                ParticipantState::Active
+            }
+            Err(_) => ParticipantState::Active,
+            _ => ParticipantState::Stale,
+        }
+    }
+}
+
+const fn default_lease_hours() -> u64 {
+    DEFAULT_LEASE_HOURS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -298,6 +353,30 @@ pub(crate) fn sender(context: &Context) -> AppResult<Sender> {
     })
 }
 
+pub(crate) fn touch(context: &Context, id: &str) -> AppResult<Participant> {
+    let (last_seen, lease_hours) = activity_from_env()?;
+    let _lock = lock(context)?;
+    let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
+    participant.last_seen = Some(last_seen);
+    participant.lease_hours = lease_hours;
+    write_record(&participant)?;
+    Ok(participant)
+}
+
+pub(crate) fn end(context: &Context, id: &str) -> AppResult<Participant> {
+    let _lock = lock(context)?;
+    let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
+    if participant.ended_at.is_some() {
+        return Ok(participant);
+    }
+    let (ended_at, lease_hours) = activity_from_env()?;
+    participant.last_seen = Some(ended_at.clone());
+    participant.lease_hours = lease_hours;
+    participant.ended_at = Some(ended_at);
+    write_record(&participant)?;
+    Ok(participant)
+}
+
 /// The only participant-minting path. The record is committed before its
 /// by-session cache entry while the one participant lock is held.
 pub(crate) fn bind(
@@ -306,6 +385,7 @@ pub(crate) fn bind(
     workspace_override: Option<&str>,
     bootstrap: Option<(&str, &str)>,
 ) -> AppResult<Participant> {
+    let (last_seen, lease_hours) = activity_from_env()?;
     // An explicit bootstrap deliberately starts an independent participant.
     // It must not inspect or reuse an inherited parent binding.
     let explicit = if bootstrap.is_some() {
@@ -315,15 +395,20 @@ pub(crate) fn bind(
     };
     if let Some(explicit) = explicit {
         validate_participant_id(&explicit)?;
-        if workspace_override.is_none() && declared_env_pin()?.is_none() {
-            return load(context, &explicit)?.ok_or_else(|| AppError::no_participant(false));
-        }
-        let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
+        let update_workspace = workspace_override.is_some() || declared_env_pin()?.is_some();
+        let workspace = update_workspace
+            .then(|| workspace_context(context, cwd, workspace_override))
+            .transpose()?;
         let _lock = lock(context)?;
         let mut participant =
             load(context, &explicit)?.ok_or_else(|| AppError::no_participant(false))?;
-        participant.workspace = workspace;
-        participant.workspace_path = workspace_path;
+        if let Some((workspace, workspace_path)) = workspace {
+            participant.workspace = workspace;
+            participant.workspace_path = workspace_path;
+        }
+        participant.last_seen = Some(last_seen);
+        participant.lease_hours = lease_hours;
+        participant.ended_at = None;
         write_record(&participant)?;
         return Ok(participant);
     }
@@ -346,8 +431,11 @@ pub(crate) fn bind(
             let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
             existing.workspace = workspace;
             existing.workspace_path = workspace_path;
-            write_record(existing)?;
         }
+        existing.last_seen = Some(last_seen);
+        existing.lease_hours = lease_hours;
+        existing.ended_at = None;
+        write_record(existing)?;
     } else {
         let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
         let (_, created) = crate::mailbox::local_timestamp()?;
@@ -360,6 +448,9 @@ pub(crate) fn bind(
             harness: binding.harness.clone(),
             conversation_key_digest: digest.clone(),
             created,
+            last_seen: Some(last_seen),
+            lease_hours,
+            ended_at: None,
             workspace,
             workspace_path,
             lineage: None,
@@ -457,6 +548,15 @@ pub(crate) fn list(context: &Context) -> AppResult<Vec<Participant>> {
     Ok(participants)
 }
 
+#[allow(dead_code)] // routing seam consumed by P.2
+pub(crate) fn list_active(context: &Context) -> AppResult<Vec<Participant>> {
+    let now = SystemTime::now();
+    Ok(list(context)?
+        .into_iter()
+        .filter(|participant| participant.is_active(now))
+        .collect())
+}
+
 pub(crate) fn load(context: &Context, id: &str) -> AppResult<Option<Participant>> {
     validate_participant_id(id)?;
     let dir = context.root.join(PARTICIPANTS_DIR).join(id);
@@ -480,6 +580,23 @@ pub(crate) fn load(context: &Context, id: &str) -> AppResult<Option<Participant>
                 participant.id
             ),
         ));
+    }
+    if participant.lease_hours == 0 {
+        return Err(AppError::config(
+            &path,
+            "lease_hours must be a positive integer",
+        ));
+    }
+    for (field, value) in [
+        ("last_seen", participant.last_seen.as_deref()),
+        ("ended_at", participant.ended_at.as_deref()),
+    ] {
+        if value.is_some_and(|value| parse_rfc3339(value).is_none()) {
+            return Err(AppError::config(
+                &path,
+                format!("{field} must be an RFC3339 timestamp"),
+            ));
+        }
     }
     validate_harness(&participant.harness)?;
     if participant.conversation_key_digest.len() != 64
@@ -802,6 +919,149 @@ fn realpath_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn activity_from_env() -> AppResult<(String, u64)> {
+    let lease_hours = match env_utf8(LEASE_ENV)? {
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                AppError::invalid_argument(format!(
+                    "{LEASE_ENV} must be a positive integer number of hours"
+                ))
+                .input(value)
+                .reason("participant lease must be positive")
+            })?,
+        None => DEFAULT_LEASE_HOURS,
+    };
+    Ok((format_rfc3339(SystemTime::now())?, lease_hours))
+}
+
+fn format_rfc3339(now: SystemTime) -> AppResult<String> {
+    let seconds = now.duration_since(UNIX_EPOCH).map_err(|error| {
+        AppError::new(
+            ErrorCode::IoError,
+            format!("system clock is before the Unix epoch: {error}"),
+            "Correct the system clock and retry the participant command.",
+        )
+    })?;
+    let seconds = libc::time_t::try_from(seconds.as_secs()).map_err(|_| {
+        AppError::new(
+            ErrorCode::IoError,
+            "system time cannot be represented as RFC3339",
+            "Correct the system clock and retry the participant command.",
+        )
+    })?;
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut utc) }.is_null() {
+        return Err(AppError::new(
+            ErrorCode::IoError,
+            "UTC time conversion failed",
+            "Correct the system clock and retry the participant command.",
+        ));
+    }
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec
+    ))
+}
+
+fn parse_rfc3339(value: &str) -> Option<SystemTime> {
+    let bytes = value.as_bytes();
+    let (datetime_end, offset_seconds) = if bytes.last() == Some(&b'Z') {
+        (bytes.len().checked_sub(1)?, 0_i64)
+    } else {
+        let offset_start = bytes.len().checked_sub(6)?;
+        if bytes.get(offset_start + 3) != Some(&b':') {
+            return None;
+        }
+        let sign = match bytes[offset_start] {
+            b'+' => 1_i64,
+            b'-' => -1_i64,
+            _ => return None,
+        };
+        let hours = parse_digits(bytes, offset_start + 1, 2)?;
+        let minutes = parse_digits(bytes, offset_start + 4, 2)?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        (offset_start, sign * (hours * 3600 + minutes * 60))
+    };
+    if datetime_end < 19
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    if datetime_end > 19
+        && (datetime_end == 20
+            || bytes.get(19) != Some(&b'.')
+            || bytes[20..datetime_end]
+                .iter()
+                .any(|byte| !byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let year = parse_digits(bytes, 0, 4)?;
+    let month = parse_digits(bytes, 5, 2)?;
+    let day = parse_digits(bytes, 8, 2)?;
+    let hour = parse_digits(bytes, 11, 2)?;
+    let minute = parse_digits(bytes, 14, 2)?;
+    let second = parse_digits(bytes, 17, 2)?;
+    if year < 1970
+        || !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let local_seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add(hour * 3600 + minute * 60 + second)?;
+    let utc_seconds = local_seconds.checked_sub(offset_seconds)?;
+    let utc_seconds = u64::try_from(utc_seconds).ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(utc_seconds))
+}
+
+fn parse_digits(bytes: &[u8], start: usize, length: usize) -> Option<i64> {
+    let digits = bytes.get(start..start.checked_add(length)?)?;
+    digits.iter().try_fold(0_i64, |value, byte| {
+        byte.is_ascii_digit()
+            .then_some(value * 10 + i64::from(byte - b'0'))
+    })
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 fn env_utf8(name: &str) -> AppResult<Option<String>> {
     let Some(raw) = std::env::var_os(name) else {
         return Ok(None);
@@ -883,6 +1143,9 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
             harness: "test".to_owned(),
             conversation_key_digest: digest,
             created: "2026-09-16 00:00:00 -0500".to_owned(),
+            last_seen: None,
+            lease_hours: DEFAULT_LEASE_HOURS,
+            ended_at: None,
             workspace: Some(workspace.to_owned()),
             workspace_path: None,
             lineage: None,
@@ -903,8 +1166,12 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
 #[cfg(test)]
 mod tests {
     use super::{
-        nearest_native_harness_from, nearest_native_harness_in, NativeHarness, Participant,
+        list_active, nearest_native_harness_from, nearest_native_harness_in, NativeHarness,
+        Participant,
     };
+    use crate::mailbox::Context;
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -999,5 +1266,58 @@ mod tests {
         let long = lifecycle_participant(Some("2023-11-14T20:13:20Z"), 3, None);
         assert!(!short.is_active(now));
         assert!(long.is_active(now));
+    }
+
+    #[test]
+    fn list_active_filters_stale_and_ended_without_dropping_legacy() {
+        let root = test_root("participant-list-active");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        for (id, lifecycle) in [
+            ("test-legacy", serde_json::json!({})),
+            (
+                "test-stale",
+                serde_json::json!({
+                    "last_seen": "2020-01-01T00:00:00Z",
+                    "lease_hours": 1
+                }),
+            ),
+            (
+                "test-ended",
+                serde_json::json!({
+                    "last_seen": "2099-01-01T00:00:00Z",
+                    "lease_hours": 24,
+                    "ended_at": "2026-09-16T00:00:00Z"
+                }),
+            ),
+        ] {
+            let dir = root.join("participants").join(id);
+            fs::create_dir_all(&dir).expect("participant dir");
+            let mut record = serde_json::json!({
+                "version": 1,
+                "id": id,
+                "harness": "test",
+                "conversation_key_digest": "0".repeat(64),
+                "created": "2026-09-16 00:00:00 +0000"
+            });
+            record
+                .as_object_mut()
+                .expect("record object")
+                .extend(lifecycle.as_object().expect("lifecycle object").clone());
+            fs::write(
+                dir.join("participant.json"),
+                serde_json::to_vec_pretty(&record).expect("participant JSON"),
+            )
+            .expect("participant record");
+        }
+        let ids = list_active(&context)
+            .expect("active participants")
+            .into_iter()
+            .map(|participant| participant.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["test-legacy"]);
+        trash_test_root(&root);
     }
 }

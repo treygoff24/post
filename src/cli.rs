@@ -123,6 +123,10 @@ pub(crate) enum ParticipantCommand {
     Show,
     /// Bind this harness conversation, minting its deterministic participant only when absent.
     Bind(ParticipantBindArgs),
+    /// Refresh the acting participant's activity lease.
+    Touch,
+    /// Explicitly end the acting participant session.
+    End,
     /// List every participant record in this local store.
     List,
 }

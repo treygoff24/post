@@ -65,6 +65,11 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;
     }
+    if writes && !participant_command_manages_activity(&cli.command) {
+        if let Some(participant) = resolved_participant.participant() {
+            crate::participant::touch(&context, &participant.id)?;
+        }
+    }
     // Startup admission only proves that the watch may enter its setup phase;
     // heartbeat admissions must be able to take the lock independently.
     if long_watch {
@@ -148,9 +153,16 @@ fn plain_participant_bind(command: &Command) -> bool {
     )
 }
 
+fn participant_command_manages_activity(command: &Command) -> bool {
+    matches!(command, Command::Participant(_))
+}
+
 fn participant_required(command: &Command) -> bool {
     use crate::cli::{IdentityCommand, ProfileCommand};
     match command {
+        Command::Participant(crate::cli::ParticipantArgs {
+            command: crate::cli::ParticipantCommand::Touch | crate::cli::ParticipantCommand::End,
+        }) => true,
         Command::Send(_) | Command::Catchup(_) => true,
         Command::Read(args) => {
             args.ack || (!args.peek && args.offset.is_none() && args.length.is_none())

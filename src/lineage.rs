@@ -26,6 +26,8 @@ pub(crate) struct Member {
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(default)]
+    pub active: bool,
 }
 
 impl Lineage {
@@ -34,14 +36,17 @@ impl Lineage {
     #[allow(dead_code)] // public seam consumed by P.3
     pub(crate) fn members(&self, context: &Context) -> AppResult<BTreeMap<String, Member>> {
         let mut members = BTreeMap::new();
+        let now = std::time::SystemTime::now();
         for participant in participant::list(context)? {
             if participant.lineage.as_deref() == Some(self.name.as_str()) {
+                let active = participant.is_active(now);
                 members.insert(
                     participant.id.clone(),
                     Member {
                         id: participant.id,
                         harness: participant.harness,
                         workspace: participant.workspace,
+                        active,
                     },
                 );
             }

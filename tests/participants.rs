@@ -1154,7 +1154,10 @@ fn participant_lifecycle_touch_end_and_bind_reactivation() {
     let bound = sandbox.bind_claude("lifecycle-session", &alpha, Some("alpha"));
     let id = participant_id(&bound).to_owned();
     let initial = sandbox.read_participant(&id);
-    assert!(initial["last_seen"].as_str().is_some());
+    let initial_seen = initial["last_seen"].as_str().expect("last_seen");
+    assert_eq!(initial_seen.len(), 20);
+    assert_eq!(&initial_seen[10..11], "T");
+    assert!(initial_seen.ends_with('Z'));
     assert_eq!(initial["lease_hours"], 24);
     assert!(initial["ended_at"].is_null());
 
@@ -1346,6 +1349,21 @@ fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
 
 #[test]
 fn participant_lifecycle_rejects_invalid_lease_without_touching_record() {
+    let unbound = Sandbox::new_unseeded();
+    for command in ["touch", "end"] {
+        let output = unbound.run_as_claude(
+            &["participant", command, "--json"],
+            "bindable-lifecycle-key",
+            &unbound.path,
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "no_participant");
+        assert_eq!(
+            error.error.details.exact_fix.as_deref(),
+            Some("post participant bind")
+        );
+    }
+
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
     let bound = sandbox.bind_claude("invalid-lease", &alpha, Some("alpha"));
