@@ -535,6 +535,8 @@ mod tests {
             &["post", "doctor", "--fix"] as &[&str],
             &["post", "send", "--to", "beta", "--body", "x"],
             &["post", "participant", "bind"],
+            &["post", "participant", "touch"],
+            &["post", "participant", "end"],
             &["post", "identity", "new", "ember"],
             &["post", "identity", "continue", "ember"],
             &["post", "identity", "leave"],

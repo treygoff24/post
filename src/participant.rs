@@ -902,7 +902,34 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
 
 #[cfg(test)]
 mod tests {
-    use super::{nearest_native_harness_from, nearest_native_harness_in, NativeHarness};
+    use super::{
+        nearest_native_harness_from, nearest_native_harness_in, NativeHarness, Participant,
+    };
+    use std::path::PathBuf;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn lifecycle_participant(
+        last_seen: Option<&str>,
+        lease_hours: u64,
+        ended_at: Option<&str>,
+    ) -> Participant {
+        Participant {
+            version: 1,
+            id: "test-lifecycle".to_owned(),
+            harness: "test".to_owned(),
+            conversation_key_digest: "0".repeat(64),
+            created: "2026-09-16 00:00:00 +0000".to_owned(),
+            workspace: None,
+            workspace_path: None,
+            lineage: None,
+            lineage_since: None,
+            display_name: None,
+            last_seen: last_seen.map(str::to_owned),
+            lease_hours,
+            ended_at: ended_at.map(str::to_owned),
+            dir: PathBuf::new(),
+        }
+    }
 
     #[test]
     fn nearest_harness_ancestor_selects_nested_codex_child() {
@@ -946,5 +973,31 @@ mod tests {
             assert_eq!(resolved, Some(expected));
             assert_eq!(calls, vec![100, 90]);
         }
+    }
+
+    #[test]
+    fn lifecycle_lease_boundary_legacy_and_end_are_explicit() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let inside = lifecycle_participant(Some("2023-11-13T22:13:21Z"), 24, None);
+        let outside = lifecycle_participant(Some("2023-11-13T22:13:19Z"), 24, None);
+        let legacy = lifecycle_participant(None, 24, None);
+        let ended = lifecycle_participant(
+            Some("2023-11-14T22:13:20Z"),
+            24,
+            Some("2023-11-14T22:13:20Z"),
+        );
+        assert!(inside.is_active(now));
+        assert!(!outside.is_active(now));
+        assert!(legacy.is_active(now), "legacy records remain active");
+        assert!(!ended.is_active(now));
+    }
+
+    #[test]
+    fn lifecycle_uses_each_records_own_lease() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let short = lifecycle_participant(Some("2023-11-14T20:13:20Z"), 1, None);
+        let long = lifecycle_participant(Some("2023-11-14T20:13:20Z"), 3, None);
+        assert!(!short.is_active(now));
+        assert!(long.is_active(now));
     }
 }

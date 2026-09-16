@@ -52,6 +52,31 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
+fn edit_participant(
+    sandbox: &Sandbox,
+    id: &str,
+    edit: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Value {
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(id)
+        .join("participant.json");
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(&path).expect("read participant record"))
+            .expect("participant JSON");
+    edit(value.as_object_mut().expect("participant object"));
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("serialize participant")
+        ),
+    )
+    .expect("write participant record");
+    value
+}
+
 #[test]
 fn participant_two_keys_mint_distinct_ids_and_rebind_is_idempotent() {
     let sandbox = Sandbox::new();
@@ -1120,4 +1145,231 @@ fn participant_round2_unbound_annotation_keeps_ok_first() {
     );
     let value: Value = serde_json::from_str(&raw).expect("annotated rooms JSON");
     assert_eq!(value["participant"], "unbound");
+}
+
+#[test]
+fn participant_lifecycle_touch_end_and_bind_reactivation() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("lifecycle-session", &alpha, Some("alpha"));
+    let id = participant_id(&bound).to_owned();
+    let initial = sandbox.read_participant(&id);
+    assert!(initial["last_seen"].as_str().is_some());
+    assert_eq!(initial["lease_hours"], 24);
+    assert!(initial["ended_at"].is_null());
+
+    edit_participant(&sandbox, &id, |record| {
+        record.insert(
+            "last_seen".to_owned(),
+            Value::String("2020-01-01T00:00:00Z".to_owned()),
+        );
+        record.insert("lease_hours".to_owned(), Value::from(24));
+        record.insert("lineage".to_owned(), Value::String("ember".to_owned()));
+        record.insert(
+            "lineage_since".to_owned(),
+            Value::String("2026-09-16T00:00:00Z".to_owned()),
+        );
+    });
+    let touched = sandbox.run_in_env(
+        &["participant", "touch", "--json"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", &id),
+            ("POST_PARTICIPANT_LEASE_HOURS", "7"),
+        ],
+    );
+    assert_success(&touched);
+    let touched: Value = from_stdout(&touched);
+    assert_ne!(touched["participant"]["last_seen"], "2020-01-01T00:00:00Z");
+    assert_eq!(touched["participant"]["lease_hours"], 7);
+
+    let ended = sandbox.run_as_participant(&["participant", "end", "--json"], &id, &alpha);
+    assert_success(&ended);
+    let ended: Value = from_stdout(&ended);
+    assert!(ended["participant"]["ended_at"].as_str().is_some());
+    let record = sandbox
+        .mail_root
+        .join("participants")
+        .join(&id)
+        .join("participant.json");
+    let ended_bytes = fs::read(&record).expect("ended participant bytes");
+    let ended_again = sandbox.run_as_participant(&["participant", "end", "--json"], &id, &alpha);
+    assert_success(&ended_again);
+    assert_eq!(
+        fs::read(&record).expect("idempotent end bytes"),
+        ended_bytes,
+        "end must preserve its first ended_at"
+    );
+
+    let ended_who = sandbox.run_as_participant(&["who"], &id, &alpha);
+    assert_success(&ended_who);
+    let ended_who: Value = from_stdout(&ended_who);
+    assert_eq!(ended_who["participant"]["state"], "ended");
+
+    let rebound = sandbox.run_in_env(
+        &["participant", "bind", "--json"],
+        None,
+        &beta,
+        &[
+            ("CLAUDE_CODE_SESSION_ID", "lifecycle-session"),
+            ("POST_PARTICIPANT_LEASE_HOURS", "5"),
+        ],
+    );
+    assert_success(&rebound);
+    let rebound: Value = from_stdout(&rebound);
+    assert_eq!(participant_id(&rebound), id);
+    assert!(rebound["participant"]["ended_at"].is_null());
+    assert_eq!(rebound["participant"]["lease_hours"], 5);
+    assert_eq!(rebound["participant"]["lineage"], "ember");
+    assert_eq!(rebound["participant"]["workspace"], "alpha");
+    assert_ne!(rebound["participant"]["last_seen"], "2020-01-01T00:00:00Z");
+}
+
+#[test]
+fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("central-lifecycle", &alpha, Some("alpha"));
+    let id = participant_id(&bound).to_owned();
+
+    edit_participant(&sandbox, &id, |record| {
+        record.insert(
+            "last_seen".to_owned(),
+            Value::String("2020-01-01T00:00:00Z".to_owned()),
+        );
+    });
+    let send = sandbox.run_in_env(
+        &["send", "--to", "beta", "--body", "refresh", "--json"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", &id),
+            ("POST_PARTICIPANT_LEASE_HOURS", "3"),
+        ],
+    );
+    assert_success(&send);
+    let refreshed = sandbox.read_participant(&id);
+    assert_ne!(refreshed["last_seen"], "2020-01-01T00:00:00Z");
+    assert_eq!(refreshed["lease_hours"], 3);
+
+    edit_participant(&sandbox, &id, |record| {
+        record.insert(
+            "last_seen".to_owned(),
+            Value::String("2020-01-01T00:00:00Z".to_owned()),
+        );
+    });
+    for args in [
+        vec!["participant", "show"],
+        vec!["participant", "list"],
+        vec!["who"],
+        vec!["rooms"],
+        vec!["channels"],
+        vec!["inbox", "--room", "alpha"],
+        vec!["doctor"],
+        vec!["schema"],
+        vec!["version", "--json"],
+        vec!["read", "missing", "--room", "alpha", "--peek"],
+        vec!["chat", "missing", "--peek"],
+        vec!["watch", "--snapshot", "--room", "alpha"],
+        vec!["profile", "show", "alpha"],
+        vec!["owner", "show"],
+        vec!["search", "needle", "--mail", "--json"],
+    ] {
+        let before = tree(&sandbox.mail_root);
+        let _ = sandbox.run_as_participant(&args, &id, &alpha);
+        assert_eq!(tree(&sandbox.mail_root), before, "read mutated: {args:?}");
+    }
+    assert_eq!(
+        sandbox.read_participant(&id)["last_seen"],
+        "2020-01-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let active = sandbox.bind_claude("who-active", &alpha, Some("alpha"));
+    let stale = sandbox.bind_claude("who-stale", &alpha, Some("alpha"));
+    let ended = sandbox.bind_claude("who-ended", &alpha, Some("alpha"));
+    let active_id = participant_id(&active).to_owned();
+    let stale_id = participant_id(&stale).to_owned();
+    let ended_id = participant_id(&ended).to_owned();
+    let legacy_id = sandbox.test_participant("alpha");
+    edit_participant(&sandbox, &stale_id, |record| {
+        record.insert(
+            "last_seen".to_owned(),
+            Value::String("2020-01-01T00:00:00Z".to_owned()),
+        );
+        record.insert("lease_hours".to_owned(), Value::from(1));
+    });
+    edit_participant(&sandbox, &ended_id, |record| {
+        record.insert(
+            "ended_at".to_owned(),
+            Value::String("2026-09-16T00:00:00Z".to_owned()),
+        );
+    });
+
+    let output = sandbox.run_as_participant(&["who"], &active_id, &alpha);
+    assert_success(&output);
+    let who: Value = from_stdout(&output);
+    assert_eq!(who["participant"]["state"], "active");
+    assert!(who["participant"]["last_seen"].as_str().is_some());
+    let rows = who["participants"]
+        .as_array()
+        .expect("participant rows")
+        .iter()
+        .map(|row| (row["id"].as_str().expect("row id"), row))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(rows[active_id.as_str()]["state"], "active");
+    assert_eq!(rows[stale_id.as_str()]["state"], "stale");
+    assert_eq!(rows[ended_id.as_str()]["state"], "ended");
+    assert_eq!(rows[legacy_id.as_str()]["state"], "active");
+    assert!(rows[legacy_id.as_str()]["last_seen"].is_null());
+    assert!(who["activity_note"]
+        .as_str()
+        .is_some_and(|note| note.contains("not reassigned")));
+
+    let doctor = sandbox.run_as_participant(&["doctor"], &active_id, &alpha);
+    let doctor: Value = from_stdout(&doctor);
+    let messages = doctor["checks"]
+        .as_array()
+        .expect("doctor checks")
+        .iter()
+        .filter_map(|check| check["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains(&stale_id), "{messages}");
+    assert!(messages.contains("not reassigned"), "{messages}");
+}
+
+#[test]
+fn participant_lifecycle_rejects_invalid_lease_without_touching_record() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("invalid-lease", &alpha, Some("alpha"));
+    let id = participant_id(&bound).to_owned();
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(&id)
+        .join("participant.json");
+    let before = fs::read(&path).expect("participant before invalid touch");
+    let output = sandbox.run_in_env(
+        &["participant", "touch", "--json"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", &id),
+            ("POST_PARTICIPANT_LEASE_HOURS", "0"),
+        ],
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("positive integer"));
+    assert_eq!(
+        fs::read(path).expect("participant after invalid touch"),
+        before
+    );
 }

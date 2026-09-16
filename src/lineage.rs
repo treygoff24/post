@@ -94,3 +94,71 @@ pub(crate) fn validate_name(context: &Context, name: &str) -> AppResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Lineage;
+    use crate::mailbox::Context;
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+
+    #[test]
+    fn members_preserve_historical_affiliation_and_report_activity() {
+        let root = test_root("lineage-active-members");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        for (id, lifecycle) in [
+            ("test-active", serde_json::json!({})),
+            (
+                "test-stale",
+                serde_json::json!({
+                    "last_seen": "2020-01-01T00:00:00Z",
+                    "lease_hours": 1
+                }),
+            ),
+            (
+                "test-ended",
+                serde_json::json!({
+                    "last_seen": "2099-01-01T00:00:00Z",
+                    "lease_hours": 24,
+                    "ended_at": "2026-09-16T00:00:00Z"
+                }),
+            ),
+        ] {
+            let dir = root.join("participants").join(id);
+            fs::create_dir_all(&dir).expect("participant dir");
+            let mut record = serde_json::json!({
+                "version": 1,
+                "id": id,
+                "harness": "test",
+                "conversation_key_digest": "0".repeat(64),
+                "created": "2026-09-16 00:00:00 +0000",
+                "lineage": "ember"
+            });
+            record
+                .as_object_mut()
+                .expect("record object")
+                .extend(lifecycle.as_object().expect("lifecycle object").clone());
+            fs::write(
+                dir.join("participant.json"),
+                serde_json::to_vec_pretty(&record).expect("participant JSON"),
+            )
+            .expect("participant record");
+        }
+        let lineage = Lineage {
+            name: "ember".to_owned(),
+            founder: "test-active".to_owned(),
+            created: "2026-09-16T00:00:00Z".to_owned(),
+            host: "test".to_owned(),
+            dir: root.join("lineages/ember"),
+        };
+        let members = lineage.members(&context).expect("lineage members");
+        assert!(members["test-active"].active);
+        assert!(!members["test-stale"].active);
+        assert!(!members["test-ended"].active);
+        assert_eq!(members.len(), 3, "inactive affiliation remains historical");
+        trash_test_root(&root);
+    }
+}
