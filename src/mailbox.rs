@@ -61,9 +61,13 @@ pub(crate) const POST_FRAMING_ENV: &str = "POST_FRAMING";
 /// Bound on a declared sender address. `harness.repo.uuid` is well under
 /// this; the cap keeps a hostile environment from bloating every envelope.
 const SENDER_ADDRESS_MAX_BYTES: usize = 256;
-const RESERVED_ROOM_NAMES: [&str; 9] = [
+const RESERVED_ROOM_NAMES: [&str; 13] = [
     "*",
     "archive",
+    "participants",
+    "lineages",
+    "routing",
+    ".participants.lock",
     "rooms.json",
     "rules.json",
     "profiles.json",
@@ -144,6 +148,13 @@ impl Context {
         self.write_default_if_missing("rules.json", DEFAULT_RULES_JSON)?;
         self.write_default_if_missing("rooms.json", DEFAULT_ROOMS_JSON)?;
         Ok(())
+    }
+
+    /// Resolve the acting participant. Workspace context determines the
+    /// shared reply address, never cwd at send time.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn sender(&self) -> AppResult<crate::participant::Sender> {
+        crate::participant::sender(self)
     }
 
     pub(crate) fn write_default_if_missing(&self, name: &str, contents: &str) -> AppResult<bool> {
@@ -381,6 +392,7 @@ impl Context {
         Ok((basename.to_owned(), SenderProvenance::InferredBasename))
     }
 
+    #[allow(dead_code)] // retained for legacy validation tests and rollback compatibility
     pub(crate) fn ensure_sender_allowed(&self, sender: &str, rooms: &RoomMap) -> AppResult<()> {
         let Some(room_path) = rooms.get(sender) else {
             return Ok(());
@@ -543,6 +555,9 @@ pub(crate) fn shell_quote(value: &str) -> String {
 
 pub(crate) fn validate_room_name(value: &str) -> Result<(), String> {
     validate_component(value)?;
+    if value.contains(':') {
+        return Err("name must not contain ':' (reserved for typed addresses)".to_owned());
+    }
     let folded = value.to_ascii_lowercase();
     if RESERVED_ROOM_NAMES.contains(&folded.as_str())
         || (folded.starts_with(".rooms.json.") && folded.ends_with(".tmp"))

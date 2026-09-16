@@ -461,6 +461,18 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
     match command {
         Command::Doctor(DoctorArgs { fix: true, .. })
         | Command::Send(_)
+        | Command::Participant(crate::cli::ParticipantArgs {
+            command: crate::cli::ParticipantCommand::Bind(_),
+        })
+        | Command::Identity(crate::cli::IdentityArgs {
+            command:
+                crate::cli::IdentityCommand::New(_)
+                | crate::cli::IdentityCommand::Continue(_)
+                | crate::cli::IdentityCommand::Leave
+                | crate::cli::IdentityCommand::Voice(_)
+                | crate::cli::IdentityCommand::Terms(_),
+        })
+        | Command::Inbox(crate::cli::InboxArgs { adopt: true, .. })
         | Command::Rooms(crate::cli::RoomsArgs {
             command: Some(crate::cli::RoomsCommand::Add(_)),
         })
@@ -524,6 +536,28 @@ mod tests {
         for args in [
             &["post", "doctor", "--fix"] as &[&str],
             &["post", "send", "--to", "beta", "--body", "x"],
+            &["post", "participant", "bind"],
+            &["post", "identity", "new", "ember"],
+            &["post", "identity", "continue", "ember"],
+            &["post", "identity", "leave"],
+            &[
+                "post",
+                "identity",
+                "voice",
+                "add",
+                "--body-file",
+                "/tmp/voice",
+            ],
+            &["post", "identity", "voice", "withdraw"],
+            &[
+                "post",
+                "identity",
+                "terms",
+                "set",
+                "--body-file",
+                "/tmp/terms",
+            ],
+            &["post", "inbox", "--adopt"],
             &["post", "read", "id"],
             &["post", "read", "id", "--ack"],
             &["post", "chat", "tax", "--join"],
@@ -544,6 +578,11 @@ mod tests {
         for args in [
             &["post", "doctor"] as &[&str],
             &["post", "schema"],
+            &["post", "version"],
+            &["post", "participant", "show"],
+            &["post", "participant", "list"],
+            &["post", "identity", "list"],
+            &["post", "identity", "show", "ember"],
             &["post", "channels"],
             &["post", "inbox"],
             &["post", "read", "id", "--peek"],

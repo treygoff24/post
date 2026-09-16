@@ -90,7 +90,8 @@ where
     // Built before `sender` is consumed, so a body-input fix can echo the
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
-    let (sender, provenance) = match args.sender {
+    #[cfg(test)]
+    let (sender, provenance) = match args.sender.clone() {
         Some(sender) => {
             // Pin vs flag DISAGREEMENT is a hard error (M4): a prepared
             // command carrying --from inside a pinned session is exactly the
@@ -111,7 +112,7 @@ where
             }
             (sender, SenderProvenance::DeclaredFlag)
         }
-        None => match identity.pin {
+        None => match identity.pin.clone() {
             Some(pinned) => {
                 // M4 made a disagreeing --from a hard error, so the old
                 // "pass --from to send as someone else" advice would name a
@@ -139,15 +140,95 @@ where
     // outside the room's tree (specimen 21). It is still only a declaration —
     // recorded as `declared-env` and rendered as evidence at read time, never
     // as a credential. Flag and inference keep the location guard unchanged.
+    #[cfg(test)]
     if provenance != SenderProvenance::DeclaredEnv {
         context.ensure_sender_allowed(&sender, &rooms)?;
     }
+    #[cfg(not(test))]
+    let actor = context.sender()?;
+    #[cfg(not(test))]
+    let (sender, provenance) = {
+        if let Some(declared) = args.sender.as_deref() {
+            if let Some(pinned) = identity.pin.as_deref() {
+                if pinned != declared {
+                    return Err(AppError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "--from '{declared}' conflicts with the POST_FROM pin '{pinned}' set by this session's launcher"
+                        ),
+                        "Drop --from to send as the pinned workspace, or re-bind the participant deliberately.",
+                    )
+                    .input(declared)
+                    .reason("explicit sender disagrees with the environment pin"));
+                }
+            }
+            if declared != actor.from {
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "--from '{declared}' conflicts with bound participant '{}' reply address '{}'",
+                        actor.participant.id, actor.from
+                    ),
+                    "Drop --from; participant binding determines the sender reply address.",
+                )
+                .input(declared)
+                .reason("explicit sender disagrees with bound participant"));
+            }
+            // `--from` is now only an assertion about the bound reply
+            // address, but retains its legacy anti-impersonation location
+            // guard. Omitting it is the normal participant-native path.
+            context.ensure_sender_allowed(declared, &rooms)?;
+        }
+        if let Some(pinned) = identity.pin.as_deref() {
+            if pinned != actor.from {
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "POST_FROM workspace pin '{pinned}' conflicts with bound participant '{}' reply address '{}'",
+                        actor.participant.id, actor.from
+                    ),
+                    "Run `post participant bind --workspace <room>` to change workspace context deliberately.",
+                )
+                .input(pinned)
+                .reason("workspace pin disagrees with bound participant"));
+            }
+        }
+        let provenance = if args.sender.is_some() {
+            SenderProvenance::DeclaredFlag
+        } else if identity.pin.is_some() {
+            SenderProvenance::DeclaredEnv
+        } else {
+            // Kept as legacy transport evidence only. This result never
+            // selects `from`; the participant binding above already did.
+            context
+                .infer_from_cwd(&rooms)
+                .map(|(_, provenance)| provenance)
+                .unwrap_or(SenderProvenance::InferredBasename)
+        };
+        if identity.pin.is_some() {
+            eprintln!(
+                "post: sending as '{}' (POST_FROM pin; bound participant {})",
+                actor.from, actor.participant.id
+            );
+        } else {
+            eprintln!(
+                "post: sending as '{}' (bound participant {})",
+                actor.from, actor.participant.id
+            );
+        }
+        (actor.from.clone(), provenance)
+    };
     let sender_address = identity.address;
+    let resolved_target = resolve_target(context, &rooms, &args.to)?;
 
     // Self-mail refusal (M4): instances of one room coordinate via channels;
     // routable instances are a recorded non-goal. --allow-self is the
     // deliberate exception for doorbell probes and smoke tests.
-    if sender == args.to && !args.allow_self {
+    if resolved_target
+        .as_ref()
+        .is_some_and(|target| sender == target.name)
+        && !args.allow_self
+    {
         // Reproduce the caller's own invocation with the one change that makes
         // it succeed, INCLUDING the body when the body is knowable from argv or
         // a file. The old fix said `--body '<text>'`; the test that ran it
@@ -170,7 +251,7 @@ where
         .reason("from == to without --allow-self"));
     }
 
-    if !rooms.contains_key(&args.to) {
+    if resolved_target.is_none() {
         // Rooms and channels are disjoint namespaces, so a channel name reaching
         // --to used to produce a flat "room is unknown" that never mentioned the
         // destination exists under a different verb. Three papercuts are that
@@ -249,6 +330,7 @@ where
         }
         return Err(error);
     }
+    let target = resolved_target.expect("known target was checked above");
 
     validate_subject(&args.subject)?;
     let inline = args.body.take();
@@ -289,10 +371,16 @@ where
         let envelope = Envelope {
             id: id.clone(),
             from: sender.clone(),
-            to: args.to.clone(),
+            to: target.name.clone(),
             kind: args.kind,
             subject: args.subject.clone(),
             sent: sent.clone(),
+            #[cfg(not(test))]
+            from_participant: Some(actor.participant.id.clone()),
+            #[cfg(not(test))]
+            from_lineage: actor.lineage.clone(),
+            #[cfg(not(test))]
+            address_kind: Some(target.kind.as_str().to_owned()),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
             sender_address: sender_address.clone(),
@@ -301,15 +389,15 @@ where
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;
         if inbox.is_none() {
-            ensure_route_allowed(context, &rooms, &sender, &args.to)?;
+            ensure_route_allowed(context, &rooms, &sender, &target.name)?;
             fs::create_dir_all(&archive)
                 .map_err(|error| AppError::io("create archive directory", &archive, error))?;
-            inbox = Some(context.mailbox_dirs(&args.to)?.0);
+            inbox = Some(target.inbox(context)?);
         }
         let inbox = inbox.as_ref().expect("mailbox was initialized");
         let archive_path = archive.join(format!("{id}.mail"));
         let inbox_path = inbox.join(format!("{id}.mail"));
-        ensure_route_allowed(context, &rooms, &sender, &args.to)?;
+        ensure_route_allowed(context, &rooms, &sender, &target.name)?;
         match exclusive_atomic_write(&inbox_path, &payload) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -376,6 +464,132 @@ where
         )
     };
     Ok(CommandResult::committed(rendered))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetKind {
+    Workspace,
+    Lineage,
+    Participant,
+}
+
+impl TargetKind {
+    #[cfg_attr(test, allow(dead_code))]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Lineage => "lineage",
+            Self::Participant => "participant",
+        }
+    }
+}
+
+struct ResolvedTarget {
+    kind: TargetKind,
+    name: String,
+    participant_dir: Option<std::path::PathBuf>,
+}
+
+impl ResolvedTarget {
+    fn inbox(&self, context: &Context) -> AppResult<std::path::PathBuf> {
+        let inbox = match self.kind {
+            TargetKind::Workspace => context.mailbox_dirs(&self.name)?.0,
+            TargetKind::Lineage => context
+                .root
+                .join(crate::lineage::LINEAGES_DIR)
+                .join(&self.name)
+                .join("inbox"),
+            TargetKind::Participant => self
+                .participant_dir
+                .as_ref()
+                .expect("participant target carries its directory")
+                .join("inbox"),
+        };
+        fs::create_dir_all(&inbox)
+            .map_err(|error| AppError::io("create canonical target inbox", &inbox, error))?;
+        Ok(inbox)
+    }
+}
+
+fn resolve_target(
+    context: &Context,
+    rooms: &RoomMap,
+    requested: &str,
+) -> AppResult<Option<ResolvedTarget>> {
+    if let Some((kind, name)) = requested.split_once(':') {
+        if name.is_empty() || name.contains(':') {
+            return Err(AppError::invalid_argument(format!(
+                "typed target '{requested}' must contain exactly one non-empty name after ':'"
+            )));
+        }
+        return match kind {
+            "workspace" => {
+                if rooms.contains_key(name) {
+                    Ok(Some(ResolvedTarget {
+                        kind: TargetKind::Workspace,
+                        name: name.to_owned(),
+                        participant_dir: None,
+                    }))
+                } else {
+                    Err(unknown_typed_target(kind, name))
+                }
+            }
+            "lineage" => match crate::lineage::load(context, name)? {
+                Some(_) => Ok(Some(ResolvedTarget {
+                    kind: TargetKind::Lineage,
+                    name: name.to_owned(),
+                    participant_dir: None,
+                })),
+                None => Err(unknown_typed_target(kind, name)),
+            },
+            "participant" => match crate::participant::load(context, name)? {
+                Some(participant) => Ok(Some(ResolvedTarget {
+                    kind: TargetKind::Participant,
+                    name: name.to_owned(),
+                    participant_dir: Some(participant.dir),
+                })),
+                None => Err(unknown_typed_target(kind, name)),
+            },
+            _ => Err(AppError::invalid_argument(format!(
+                "typed target prefix '{kind}' is unknown; expected workspace, lineage, or participant"
+            ))
+            .input(requested)
+            .reason("unknown typed target prefix")),
+        };
+    }
+
+    if rooms.contains_key(requested) {
+        return Ok(Some(ResolvedTarget {
+            kind: TargetKind::Workspace,
+            name: requested.to_owned(),
+            participant_dir: None,
+        }));
+    }
+    if crate::lineage::load(context, requested)?.is_some() {
+        return Ok(Some(ResolvedTarget {
+            kind: TargetKind::Lineage,
+            name: requested.to_owned(),
+            participant_dir: None,
+        }));
+    }
+    if let Some(participant) = crate::participant::load(context, requested)? {
+        return Ok(Some(ResolvedTarget {
+            kind: TargetKind::Participant,
+            name: requested.to_owned(),
+            participant_dir: Some(participant.dir),
+        }));
+    }
+    Ok(None)
+}
+
+fn unknown_typed_target(kind: &str, name: &str) -> AppError {
+    AppError::new(
+        ErrorCode::NotFound,
+        format!("{kind} target '{name}' does not exist in this local store"),
+        "Run `post rooms`, `post identity list`, or `post participant list`, then retry with an existing target.",
+    )
+    .input(format!("{kind}:{name}"))
+    .reason("typed target is absent")
 }
 
 fn ensure_route_allowed(

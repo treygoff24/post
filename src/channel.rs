@@ -158,6 +158,20 @@ pub(crate) fn acting_room(
     context: &Context,
     rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
+    #[cfg(not(test))]
+    let (room, provenance) = {
+        let actor = context.sender()?;
+        let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
+            SenderProvenance::DeclaredEnv
+        } else {
+            context
+                .infer_from_cwd(rooms)
+                .map(|(_, provenance)| provenance)
+                .unwrap_or(SenderProvenance::InferredBasename)
+        };
+        (actor.from, provenance)
+    };
+    #[cfg(test)]
     let (room, provenance) = match crate::mailbox::declared_env_pin()? {
         Some(pinned) => (pinned, SenderProvenance::DeclaredEnv),
         None => context.infer_from_cwd(rooms)?,
@@ -1020,6 +1034,19 @@ fn write_message(
     let rooms = context.load_rooms()?;
     let profile = crate::profile::stamp_for(context, opts.room, &rooms);
     let sender_address = crate::mailbox::declared_sender_address()?;
+    #[cfg(not(test))]
+    let actor = context.sender()?;
+    #[cfg(not(test))]
+    if actor.from != opts.room {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "channel sender '{}' disagrees with bound participant '{}' reply address '{}'",
+                opts.room, actor.participant.id, actor.from
+            ),
+            "Re-bind with the intended workspace before writing to a channel.",
+        ));
+    }
     for attempt in 0..256 {
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
@@ -1029,6 +1056,12 @@ fn write_message(
             channel: opts.channel.to_owned(),
             subject: opts.subject.to_owned(),
             sent,
+            #[cfg(not(test))]
+            from_participant: Some(actor.participant.id.clone()),
+            #[cfg(not(test))]
+            from_lineage: actor.lineage.clone(),
+            #[cfg(not(test))]
+            address_kind: Some("channel".to_owned()),
             event: opts.event.map(str::to_owned),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),

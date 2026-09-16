@@ -417,9 +417,41 @@ pub struct WhoRoom {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WhoActingParticipant {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WhoParticipant {
+    pub id: String,
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    pub live_watch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WhoOutput {
     pub ok: bool,
-    pub rooms: Vec<WhoRoom>,
+    pub participant: WhoActingParticipant,
+    pub participants: Vec<WhoParticipant>,
+    pub legacy_rooms: Vec<WhoRoom>,
     pub count: usize,
 }
 
@@ -468,6 +500,7 @@ impl From<Envelope> for InboxItem {
             pfp,
             sender_address,
             sender_provenance,
+            ..
         } = envelope;
         Self {
             id,
@@ -615,6 +648,7 @@ impl WatchEvent {
             signature_ref: _,
             sender_address,
             sender_provenance,
+            ..
         } = message;
         Self::ChannelMessage {
             channel,
@@ -837,6 +871,9 @@ pub struct ExitSchema {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OutputShapes {
+    pub participant: Vec<String>,
+    pub identity: Vec<String>,
+    pub version: Vec<String>,
     pub doctor: Vec<String>,
     pub inbox: Vec<String>,
     pub read_json: Vec<String>,
@@ -895,6 +932,8 @@ pub struct SchemaOutput {
     pub ok: bool,
     pub name: String,
     pub contract_version: String,
+    pub store_version: u64,
+    pub capabilities: Vec<String>,
     pub global_flags: Vec<String>,
     pub commands: Vec<CommandSchema>,
     pub output_shapes: OutputShapes,

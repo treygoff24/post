@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use post::output::{ErrorEnvelope, SendOutput};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
@@ -59,6 +60,7 @@ impl Sandbox {
             )
             .expect("restrict seeded config perms");
         }
+        sandbox.seed_test_participant(None, Some("test-default"));
         sandbox
     }
 
@@ -109,6 +111,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env("POST_PARTICIPANT", self.test_participant_for_cwd(cwd))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -128,6 +131,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env("POST_PARTICIPANT", self.test_participant_for_cwd(cwd))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -152,6 +156,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env("POST_PARTICIPANT", self.test_participant_for_cwd(cwd))
             .stdout(Stdio::from(read_only))
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -191,7 +196,38 @@ impl Sandbox {
             .env_remove("POST_FROM")
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
-            .env_remove("POST_ARX_GENERATION");
+            .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT")
+            .env_remove("POST_HARNESS")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID");
+        let has_explicit_participant = envs.iter().any(|(key, _)| {
+            matches!(
+                *key,
+                "POST_PARTICIPANT"
+                    | "CLAUDE_CODE_SESSION_ID"
+                    | "CODEX_THREAD_ID"
+                    | "CODEX_SESSION_ID"
+            )
+        });
+        if !has_explicit_participant {
+            if self.mail_root.join(".post-arx.json").exists() {
+                command.env("POST_PARTICIPANT", "test-default");
+            } else if self.mail_root.exists() && invocation_needs_test_participant(args) {
+                let workspace = envs
+                    .iter()
+                    .find_map(|(key, value)| (*key == "POST_FROM").then_some(*value))
+                    .map(str::to_owned)
+                    .or_else(|| argument_value(args, "--from").map(str::to_owned))
+                    .or_else(|| argument_value(args, "--room").map(str::to_owned))
+                    .or_else(|| self.workspace_for_cwd(cwd));
+                let id = self.seed_test_participant(workspace.as_deref(), None);
+                command.env("POST_PARTICIPANT", id);
+            } else {
+                command.env("POST_PARTICIPANT", "test-default");
+            }
+        }
         for (key, value) in envs {
             command.env(key, value);
         }
@@ -224,6 +260,132 @@ impl Sandbox {
             }
         }
         child.wait_with_output().expect("wait for post binary")
+    }
+
+    pub fn run_unbound(&self, args: &[&str], cwd: &Path) -> Output {
+        self.run_in_env(
+            args,
+            None,
+            cwd,
+            &[("POST_PARTICIPANT", "missing-test-participant")],
+        )
+    }
+
+    pub fn run_as_participant(&self, args: &[&str], participant: &str, cwd: &Path) -> Output {
+        self.run_in_env(args, None, cwd, &[("POST_PARTICIPANT", participant)])
+    }
+
+    pub fn run_as_claude(&self, args: &[&str], conversation_key: &str, cwd: &Path) -> Output {
+        self.run_in_env(
+            args,
+            None,
+            cwd,
+            &[("CLAUDE_CODE_SESSION_ID", conversation_key)],
+        )
+    }
+
+    pub fn run_as_codex(&self, args: &[&str], conversation_key: &str, cwd: &Path) -> Output {
+        self.run_in_env(args, None, cwd, &[("CODEX_THREAD_ID", conversation_key)])
+    }
+
+    pub fn bind_claude(
+        &self,
+        conversation_key: &str,
+        cwd: &Path,
+        workspace: Option<&str>,
+    ) -> serde_json::Value {
+        let mut args = vec!["participant", "bind"];
+        if let Some(workspace) = workspace {
+            args.extend(["--workspace", workspace]);
+        }
+        let output = self.run_as_claude(&args, conversation_key, cwd);
+        assert_success(&output);
+        from_stdout(&output)
+    }
+
+    pub fn bind_codex(
+        &self,
+        conversation_key: &str,
+        cwd: &Path,
+        workspace: Option<&str>,
+    ) -> serde_json::Value {
+        let mut args = vec!["participant", "bind"];
+        if let Some(workspace) = workspace {
+            args.extend(["--workspace", workspace]);
+        }
+        let output = self.run_as_codex(&args, conversation_key, cwd);
+        assert_success(&output);
+        from_stdout(&output)
+    }
+
+    pub fn read_participant(&self, id: &str) -> serde_json::Value {
+        let path = self
+            .mail_root
+            .join("participants")
+            .join(id)
+            .join("participant.json");
+        serde_json::from_slice(&fs::read(&path).expect("read participant.json"))
+            .expect("parse participant.json")
+    }
+
+    pub fn test_participant(&self, workspace: &str) -> String {
+        self.seed_test_participant(Some(workspace), None)
+    }
+
+    fn test_participant_for_cwd(&self, cwd: &Path) -> String {
+        let workspace = self.workspace_for_cwd(cwd);
+        self.seed_test_participant(workspace.as_deref(), None)
+    }
+
+    fn workspace_for_cwd(&self, cwd: &Path) -> Option<String> {
+        let bytes = fs::read(self.mail_root.join("rooms.json")).ok()?;
+        let rooms: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&bytes).ok()?;
+        let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        rooms
+            .into_iter()
+            .filter_map(|(name, stored)| {
+                let stored = stored
+                    .strip_prefix("~/")
+                    .map_or_else(|| PathBuf::from(&stored), |rest| self.home.join(rest));
+                let stored = stored.canonicalize().unwrap_or(stored);
+                cwd.starts_with(&stored)
+                    .then_some((stored.components().count(), name))
+            })
+            .max()
+            .map(|(_, name)| name)
+            .or_else(|| cwd.file_name()?.to_str().map(str::to_owned))
+    }
+
+    fn seed_test_participant(&self, workspace: Option<&str>, fixed_id: Option<&str>) -> String {
+        let key = format!("test:{}", workspace.unwrap_or("unbound-workspace"));
+        let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+        let id = fixed_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("test-{}", &digest[..8]));
+        let dir = self.mail_root.join("participants").join(&id);
+        fs::create_dir_all(&dir).expect("create test participant directory");
+        let path = dir.join("participant.json");
+        let record = serde_json::json!({
+            "version": 1,
+            "id": id,
+            "harness": "test",
+            "conversation_key_digest": digest,
+            "created": "2026-09-16 00:00:00 +0000",
+            "workspace": workspace,
+            "workspace_path": serde_json::Value::Null,
+            "lineage": serde_json::Value::Null,
+            "lineage_since": serde_json::Value::Null
+        });
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&record).expect("serialize fixture")
+            ),
+        )
+        .expect("write test participant record");
+        id
     }
 
     pub fn send_json(&self, sender: &str, body: &str) -> SendOutput {
@@ -274,6 +436,7 @@ pub fn seed_fence_store(sandbox: &Sandbox, state: &str) {
     .expect("fence rules");
     fs::write(sandbox.mail_root.join(".post-arx.json"), state).expect("fence state");
     fs::write(sandbox.mail_root.join(".post-arx.lock"), b"").expect("fence lock");
+    sandbox.seed_test_participant(Some("dest"), Some("test-default"));
 }
 
 pub fn seed_channel_fixture(sandbox: &Sandbox) {
@@ -390,6 +553,7 @@ pub fn create_default_room_paths(sandbox: &Sandbox) {
 pub fn register_room(sandbox: &Sandbox, name: &str, path: &Path) {
     let output = sandbox.run(&["rooms", "add", name, path.to_string_lossy().as_ref()]);
     assert_success(&output);
+    sandbox.seed_test_participant(Some(name), None);
 }
 
 pub fn join_channel(sandbox: &Sandbox, channel: &str, cwd: &Path) {
@@ -454,7 +618,12 @@ pub fn post_command() -> Command {
     command
         .env_remove("POST_FROM")
         .env_remove("POST_SENDER_ADDRESS")
-        .env_remove("POST_ARX_GENERATION");
+        .env_remove("POST_ARX_GENERATION")
+        .env_remove("POST_HARNESS")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env("POST_PARTICIPANT", "test-default");
     command
 }
 
@@ -497,7 +666,32 @@ pub fn assert_migration_refused(output: &Output) {
 /// consuming commands name the room they resolved to before they act. Every
 /// other line on a successful run is still a test failure.
 pub fn is_identity_notice(line: &str) -> bool {
-    line.contains("(identity inferred from cwd)") || line.contains("(POST_FROM pin")
+    line.contains("(identity inferred from cwd)")
+        || line.contains("(POST_FROM pin")
+        || line.contains("(bound participant ")
+}
+
+fn argument_value<'a>(args: &'a [&str], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find_map(|pair| (pair[0] == flag).then_some(pair[1]))
+}
+
+fn invocation_needs_test_participant(args: &[&str]) -> bool {
+    match args.first().copied() {
+        Some("send" | "catchup") => true,
+        Some("read") => {
+            !args.contains(&"--peek") && !args.contains(&"--offset") && !args.contains(&"--length")
+        }
+        Some("chat" | "watch" | "channels" | "search") => true,
+        Some("profile") => args
+            .get(1)
+            .is_some_and(|value| matches!(*value, "set" | "clear")),
+        Some("inbox") => args.contains(&"--adopt"),
+        Some("identity") => !args
+            .get(1)
+            .is_some_and(|value| matches!(*value, "list" | "show")),
+        _ => false,
+    }
 }
 
 pub fn from_stdout<T: serde::de::DeserializeOwned>(output: &Output) -> T {

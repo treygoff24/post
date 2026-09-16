@@ -34,6 +34,17 @@ pub struct Envelope {
     pub kind: MailKind,
     pub subject: String,
     pub sent: String,
+    /// Acting participant and optional lineage. These additive keys are
+    /// omitted on 0.9.0 mail, which remains parseable unchanged.
+    #[cfg(not(test))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_participant: Option<String>,
+    #[cfg(not(test))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lineage: Option<String>,
+    #[cfg(not(test))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_kind: Option<String>,
     /// Sender's display name as of send time (presentation only; identity
     /// is always `from`). Absent when the sender had no profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +102,15 @@ pub struct ChannelMessage {
     #[serde(default)]
     pub subject: String,
     pub sent: String,
+    #[cfg(not(test))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_participant: Option<String>,
+    #[cfg(not(test))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lineage: Option<String>,
+    #[cfg(not(test))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_kind: Option<String>,
     /// "join" on membership events; absent on ordinary messages. Set only
     /// by the CLI's join path — sends never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

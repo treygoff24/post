@@ -5,12 +5,14 @@ mod chat;
 mod doctor;
 mod inbox;
 mod owner;
+mod participant;
 mod profile;
 mod read;
 mod rooms;
 mod schema;
 mod search;
 mod send;
+mod version;
 pub mod watch;
 mod who;
 
@@ -23,6 +25,7 @@ use crate::migration_fence;
 
 pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     let context = Context::from_env()?;
+    let resolved_participant = crate::participant::resolve(&context)?;
     let writes = migration_fence::classify_write(&cli.command);
     let long_watch = matches!(&cli.command, Command::Watch(args) if !args.snapshot);
     let mut admission = if writes {
@@ -30,13 +33,20 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     } else {
         None
     };
+    if participant_required(&cli.command) && resolved_participant.participant().is_none() {
+        return Err(AppError::no_participant("run: post participant bind"));
+    }
     let enrolled_watch = long_watch
         && admission
             .as_ref()
             .is_some_and(migration_fence::WriteAdmission::is_enrolled);
+    // An unbound discovery command must not bootstrap the root. Existing
+    // bound legacy behavior remains until P.2 replaces room cursors/banner
+    // state; enrolled stores retain CONTRACT.md's strict read-only guard.
     let fenced_read = enrolled_watch
         || (!writes
-            && (migration_fence::read_only_must_not_mutate(&context)
+            && (resolved_participant.participant().is_none()
+                || migration_fence::read_only_must_not_mutate(&context)
                 || matches!(&cli.command, Command::Search(_))));
     let _read_only = crate::mailbox::enter_read_only_command(fenced_read);
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
@@ -49,6 +59,15 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     }
     let pretty = cli.pretty;
     let json = cli.json;
+    let report_unbound = resolved_participant.participant().is_none()
+        && matches!(
+            &cli.command,
+            Command::Inbox(_)
+                | Command::Channels(_)
+                | Command::Doctor(_)
+                | Command::Schema
+                | Command::Rooms(_)
+        );
     // clap enforces `conflicts_with = "json"` only when the global flag
     // FOLLOWS the subcommand; `post --json <cmd> --text` parses fine. Every
     // human-only flag is therefore re-checked here, ordering-independent.
@@ -68,10 +87,13 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         ));
     }
     let mut result = match cli.command {
+        Command::Participant(args) => participant::run(&context, args, pretty),
+        Command::Identity(_) => Err(AppError::not_yet("P.3")),
         Command::Doctor(args) => doctor::run(&context, args, pretty),
         Command::Send(args) => send::run(&context, args, json, pretty),
         Command::Chat(args) => chat::run(&context, args, json, pretty),
         Command::Channels(args) => channels::run(&context, args, pretty),
+        Command::Inbox(args) if args.adopt => Err(AppError::not_yet("P.2")),
         Command::Inbox(args) => inbox::run(&context, args, pretty),
         Command::Read(args) => read::run(&context, args, json, pretty),
         Command::Catchup(args) => catchup::run(&context, args, json, pretty),
@@ -82,7 +104,11 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Schema => schema::run(&context, pretty),
         Command::Watch(args) => watch::run(&context, args),
         Command::Who(args) => who::run(&context, args, pretty),
+        Command::Version => version::run(json, pretty),
     }?;
+    if report_unbound {
+        annotate_unbound(&mut result, pretty)?;
+    }
     if !long_watch && writes {
         let admission = admission.expect("writer admission exists");
         let action = result.after_stdout.take();
@@ -92,4 +118,48 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         }));
     }
     Ok(result)
+}
+
+fn participant_required(command: &Command) -> bool {
+    use crate::cli::{IdentityCommand, ProfileCommand};
+    match command {
+        Command::Send(_) | Command::Catchup(_) => true,
+        Command::Read(args) => {
+            args.ack || (!args.peek && args.offset.is_none() && args.length.is_none())
+        }
+        Command::Chat(_) => migration_fence::classify_write(command),
+        Command::Watch(args) => !args.snapshot,
+        Command::Inbox(args) => args.adopt,
+        Command::Identity(args) => !matches!(
+            &args.command,
+            IdentityCommand::List | IdentityCommand::Show(_)
+        ),
+        Command::Profile(args) => matches!(
+            &args.command,
+            Some(ProfileCommand::Set(_) | ProfileCommand::Clear)
+        ),
+        _ => false,
+    }
+}
+
+fn annotate_unbound(result: &mut CommandResult, pretty: bool) -> AppResult<()> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result.stdout) else {
+        result
+            .stdout
+            .insert_str(0, "participant: unbound (run: post participant bind)\n");
+        return Ok(());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    object.insert(
+        "participant".to_owned(),
+        serde_json::Value::String("unbound".to_owned()),
+    );
+    object.insert(
+        "participant_fix".to_owned(),
+        serde_json::Value::String("run: post participant bind".to_owned()),
+    );
+    result.stdout = crate::output::json(&value, pretty)?;
+    Ok(())
 }

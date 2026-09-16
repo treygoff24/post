@@ -86,7 +86,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 14);
+    assert_eq!(schema.commands.len(), 17);
     assert!(schema
         .error_codes
         .iter()
@@ -140,8 +140,23 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
-        "send", "chat", "channels", "inbox", "read", "catchup", "search", "rooms", "profile",
-        "owner", "schema", "doctor", "watch", "who",
+        "participant",
+        "identity",
+        "send",
+        "chat",
+        "channels",
+        "inbox",
+        "read",
+        "catchup",
+        "search",
+        "rooms",
+        "profile",
+        "owner",
+        "schema",
+        "doctor",
+        "watch",
+        "who",
+        "version",
     ];
     let command_names: Vec<&str> = schema
         .commands
@@ -1254,8 +1269,10 @@ fn sent_mail_ascii_escapes_non_ascii_envelopes_like_python_json_dumps() {
     assert_success(&output);
     let sent: SendOutput = from_stdout(&output);
     let expected = format!(
-        "{{\n  \"id\": \"{}\",\n  \"from\": \"python-compatible\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"caf\\u00e9 \\u2615 \\ud83d\\ude00\",\n  \"sent\": \"{}\",\n  \"sender_provenance\": \"declared-flag\"\n}}\n---\nbody",
-        sent.envelope.id, sent.envelope.sent
+        "{{\n  \"id\": \"{}\",\n  \"from\": \"python-compatible\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"caf\\u00e9 \\u2615 \\ud83d\\ude00\",\n  \"sent\": \"{}\",\n  \"from_participant\": \"{}\",\n  \"address_kind\": \"workspace\",\n  \"sender_provenance\": \"declared-flag\"\n}}\n---\nbody",
+        sent.envelope.id,
+        sent.envelope.sent,
+        sent.envelope.from_participant.as_deref().expect("participant stamp")
     );
 
     assert_eq!(
@@ -3631,11 +3648,13 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
         .iter()
         .zip(&targets)
         .map(|(channel, target)| {
+            let participant = sandbox.test_participant("beta");
             post_command()
                 .args(["chat", channel, "--discard-through", target, "--json"])
                 .current_dir(&beta)
                 .env("HOME", &sandbox.home)
                 .env("POST_MAIL_ROOT", &sandbox.mail_root)
+                .env("POST_PARTICIPANT", participant)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::null())
@@ -4740,13 +4759,14 @@ fn watch_survives_the_mailbox_disappearing_and_rings_after_it_returns() {
 
 #[test]
 fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
-    // A fresh legacy read still performs the original first-run setup, so a
-    // later ordinary send sees the normal defaults and never creates a fence
-    // lock.
+    // Participant spec §4 + CONTRACT.md: a fresh read-only listing never
+    // bootstraps the store. Seed the legacy defaults explicitly before the
+    // later writer portion of this migration-fence test.
     let fresh = Sandbox::new_unseeded();
     assert_success(&fresh.run(&["inbox", "--room", "dest"]));
-    assert!(fresh.mail_root.join("rooms.json").is_file());
-    assert!(fresh.mail_root.join("rules.json").is_file());
+    assert!(!fresh.mail_root.exists());
+    fs::create_dir_all(&fresh.mail_root).expect("fresh legacy root");
+    fs::write(fresh.mail_root.join("rules.json"), r#"{"blocked":[]}"#).expect("fresh rules");
     fs::create_dir_all(fresh.home.join("dest")).expect("fresh room path");
     fs::write(
         fresh.mail_root.join("rooms.json"),
@@ -4920,8 +4940,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             "send",
             "--to",
             "dest",
-            "--from",
-            "sender",
+            "--allow-self",
             "--body",
             "active exact",
         ],
@@ -5103,8 +5122,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             "send",
             "--to",
             "dest",
-            "--from",
-            "sender",
+            "--allow-self",
             "--body",
             "concurrent admitted send",
         ],
@@ -5916,8 +5934,8 @@ fn who_reports_live_watch_without_pids() {
     // Ensure room dirs exist so heartbeats can land.
     assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
     let before: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
-    assert_eq!(before.rooms.len(), 1);
-    assert!(!before.rooms[0].live_watch);
+    assert_eq!(before.legacy_rooms.len(), 1);
+    assert!(!before.legacy_rooms[0].live_watch);
     let mut child = post_command()
         .args(["watch", "--room", "alpha", "--interval-ms", "100"])
         .current_dir(&alpha)
@@ -5930,8 +5948,8 @@ fn who_reports_live_watch_without_pids() {
         .expect("spawn watch");
     std::thread::sleep(std::time::Duration::from_millis(250));
     let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
-    assert!(during.rooms[0].live_watch);
-    assert!(during.rooms[0].last_seen.is_some());
+    assert!(during.legacy_rooms[0].live_watch);
+    assert!(during.legacy_rooms[0].last_seen.is_some());
     let raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
     assert!(raw.contains("live-watch=yes"));
     assert!(!raw.to_ascii_lowercase().contains("pid"));
@@ -6198,7 +6216,7 @@ fn snapshot_does_not_leave_a_live_heartbeat() {
     assert_success(&sandbox.run(&["watch", "--room", "alpha", "--snapshot"]));
     let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
     assert!(
-        !who.rooms[0].live_watch,
+        !who.legacy_rooms[0].live_watch,
         "snapshot must not mint a live presence heartbeat"
     );
     let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
@@ -6224,7 +6242,7 @@ fn who_reports_live_for_ten_second_interval_watch() {
     std::thread::sleep(std::time::Duration::from_millis(600));
     let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
     assert!(
-        during.rooms[0].live_watch,
+        during.legacy_rooms[0].live_watch,
         "10s-interval watch must read live shortly after first poll"
     );
     child.kill().expect("stop watch");
@@ -6234,7 +6252,7 @@ fn who_reports_live_for_ten_second_interval_watch() {
     fs::write(&hb, "1 10000\n").expect("stale stamp");
     let after: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
     assert!(
-        !after.rooms[0].live_watch,
+        !after.legacy_rooms[0].live_watch,
         "post-exit stale stamp is not live"
     );
 }

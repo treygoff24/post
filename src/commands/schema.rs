@@ -1,3 +1,4 @@
+use super::version;
 use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
 use crate::mailbox::{load_owner, Context, OwnerResolution};
@@ -44,8 +45,20 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     };
     let commands = vec![
         command(
+            "participant",
+            "post participant show | post participant bind [--workspace <room>] | post participant list",
+            "JSON",
+            "show/list are read-only; bind is the only participant minting path and commits participant.json before its by-session index under .participants.lock",
+        ),
+        command(
+            "identity",
+            "post identity list | post identity show <name> [--voices] | post identity new <name> | post identity continue <name> [--acknowledge] | post identity leave | post identity voice add --body-file <path> | post identity voice withdraw | post identity terms set --body-file <path>",
+            "JSON",
+            "CLI surface is complete; command bodies are implemented by P.3. list/show are read-only and voice bodies load only with --voices",
+        ),
+        command(
             "send",
-            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] [--allow-self] (--body <text> | --body-file <path> | --body-file - | stdin)",
+            "post send --to <workspace:<room>|lineage:<name>|participant:<id>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] [--allow-self] (--body <text> | --body-file <path> | --body-file - | stdin)",
             "text; JSON with --json",
             "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; subjects over 1 KiB fail, the three body forms are mutually exclusive alternatives, omitting all of them reads stdin, bodies over 32 KiB require --oversize, from==to requires --allow-self (instances of one room coordinate via channels), and --from that disagrees with a POST_FROM pin is a hard conflict error",
         ),
@@ -63,7 +76,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "inbox",
-            "post inbox [--room <name>] [--text]",
+            "post inbox [--room <name>] [--text] [--adopt]",
             "JSON; text with --text",
             "creates missing mailbox inbox/read directories; does not alter mail; JSON adds unread_count while unread/count retain their physical-inbox meanings",
         ),
@@ -125,10 +138,28 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "who",
             "post who [--room <name>]... [--text]",
             "JSON; text with --text",
-            "read-only presence: for each registered room, whether a watch heartbeat is live and the last-seen stamp; never reports PIDs or process info. A live heartbeat means SOME local process is watching that room, not that the room's own agent is alive: any caller may watch any room, so this answers 'is anyone watching' and cannot answer 'is that agent up'",
+            "read-only participant directory: acting participant/provenance first, then all participants with lineage/workspace/watch presence, then legacy room heartbeat rows under legacy_rooms; provenance never claims to detect subagency and no PID is reported",
+        ),
+        command(
+            "version",
+            "post version [--json]",
+            "one text line; JSON with --json",
+            "read-only build/store/capability receipt",
         ),
     ];
     let output_shapes = OutputShapes {
+        participant: fields(&[
+            "show/bind: ok, status=bound|unbound, participant?, provenance?, fix?",
+            "list: ok, participants, count",
+        ]),
+        identity: fields(&["declared surface; P.3 bodies currently return not_yet"]),
+        version: fields(&[
+            "ok",
+            "version",
+            "build_sha",
+            "store_version=2",
+            "capabilities",
+        ]),
         doctor: fields(&[
             "ok",
             "status",
@@ -185,6 +216,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "ok",
             "name",
             "contract_version",
+            "store_version",
+            "capabilities",
+            "participant=unbound and participant_fix (when no participant is bound)",
             "global_flags",
             "commands",
             "output_shapes",
@@ -290,7 +324,13 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
             "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]),
-        who: fields(&["ok", "rooms (room, live_watch, last_seen?)", "count"]),
+        who: fields(&[
+            "ok",
+            "participant (status, id?, harness?, provenance?, workspace?, lineage?, fix?)",
+            "participants (id, harness, lineage?, workspace?, live_watch, last_seen?)",
+            "legacy_rooms (room, live_watch, last_seen?)",
+            "count",
+        ]),
     };
     let errors = ErrorCode::ALL
         .iter()
@@ -304,6 +344,11 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ok: true,
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
+        store_version: 2,
+        capabilities: version::CAPABILITIES
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
         global_flags: fields(&[
             "--json: switch send/read/chat/catchup/search from text to JSON; inbox/rooms/channels/profile/schema/doctor/who are already JSON",
             "--pretty: pretty-print JSON",
@@ -326,6 +371,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             exit(2, "usage or argument error"),
             exit(65, "validation error"),
             exit(66, "message not found"),
+            exit(69, "declared surface whose body belongs to a later task"),
             exit(70, "non-retryable post-commit or internal failure"),
             exit(75, "retryable I/O failure"),
             exit(77, "blocked route"),
@@ -343,6 +389,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Every successful send has an immutable archive copy.",
             "delivered_output_failure is non-retryable after a committed direct send or channel mutation; committed room registration stdout failure is reported as success with best-effort diagnostics.",
             "Mail kinds are exactly letter, note, and signal.",
+            "Only post participant bind mints a participant; read-only commands never mint or initialize mailbox state.",
+            "A participant binding, never cwd, determines the sender. Workspace context supplies the shared reply address; otherwise the participant id is the reply address.",
+            "Bare send targets resolve registered workspace, then lineage, then participant; typed workspace:, lineage:, and participant: targets remove ambiguity without changing --kind.",
             "Channel messages are not mail: they carry no kind, so a signal structurally cannot occur in a channel; anything gate-grade stays 1:1 room mail.",
             "Blocked routes bar shared channel membership at join time; channels never carry what a route may not.",
             "Channel history is append-only and is its own immutable archive; nothing in messages/ is ever moved or deleted.",
@@ -376,6 +425,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "POST_FROM: stable room pin set by the launch helper; beats cwd inference for sender/acting-room resolution (an explicit --room still wins; an explicit --from must agree with the pin or the send is refused), recorded as sender_provenance=declared-env; set-but-invalid is a loud error, never a silent fallback",
             "POST_FRAMING: presentation preference (auto|full|compact) consulted ONLY by body-returning reads (post read, post chat reads) when --framing is absent — send/join/discard/discard-through/seen-by never consult it; an explicit --framing always wins; set-but-invalid or non-UTF-8 warns on stderr and falls back to auto (presentation never breaks a read; deliberately weaker than the POST_FROM identity pin)",
             "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
+            "POST_PARTICIPANT: explicit acting participant id; highest resolution precedence and never mints a missing record",
+            "CLAUDE_CODE_SESSION_ID: Claude conversation key used by post participant bind",
+            "CODEX_THREAD_ID / CODEX_SESSION_ID: Codex conversation key (both present and different is an error, never a guess)",
+            "POST_HARNESS: optional harness slug override for a harness conversation key",
             "POST_ARX_GENERATION: positive migration generation for writers only; reads never parse or reject it. Missing/zero/stale/malformed declarations refuse enrolled writers before mutation; absent state plus an unset declaration preserves legacy writes. Enrolled reads are non-mutating. The enrollment-owned .post-arx.json state, existing solitary .post-arx.lock flock anchor, and actual ..post-arx.json.<pid>.<nonce>.tmp atomic temp namespace are reserved room names; no lock temp namespace is produced; the lock inode is never unlinked or recreated. Cursor state is a fence boundary: catchup requires writer admission, while search and listings remain read-only; valid legacy channel-state.json imports in memory on read and materializes only on the first admitted cursor write, remaining untouched as rollback evidence.",
         ]),
     };
