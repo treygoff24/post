@@ -155,6 +155,13 @@ pub(crate) fn effective_channels(
             Ok(paths) if paths.exists() => paths,
             _ => continue,
         };
+        if let Err(error) = paths.load_info() {
+            eprintln!(
+                "post: warning: skipped channel {:?} with invalid channel info: {:?}",
+                name, error.message
+            );
+            continue;
+        }
         if state.explicitly_left(&name) {
             names.remove(&name);
             continue;

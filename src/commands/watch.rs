@@ -280,6 +280,14 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             }
         }
         for address in addresses {
+            if address.kind == AddressKind::Workspace {
+                crate::mailbox::validate_room_name(&address.name).map_err(|reason| {
+                    AppError::invalid_argument(format!(
+                        "room '{}' is invalid: {reason}",
+                        address.name
+                    ))
+                })?;
+            }
             let room = super::inbox::address_label(&address);
             let inbox = crate::cursor_state::routing::inbox_path(context, &address);
             if !snapshot
@@ -898,7 +906,13 @@ fn scan_watch_target(
                 )?;
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                eprintln!(
+                    "post: warning: skipped channel {:?} during watch scan: {:?}",
+                    channel, error.message
+                );
+                continue;
+            }
         };
         for item in eligible {
             if !target.seen.insert(item.path.clone()) {
@@ -948,6 +962,10 @@ fn scan_unreadable_participant_channel(
             continue;
         }
         if parse_channel_message(&path).is_err() {
+            eprintln!(
+                "post: warning: unreadable channel message {:?}",
+                path.display().to_string()
+            );
             emitted_channel_ids.insert(dedupe);
             batch.push(WatchDelivery::channel(
                 room,
