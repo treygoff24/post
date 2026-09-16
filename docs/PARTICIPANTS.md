@@ -43,7 +43,7 @@ lineages/
   <name>/history.jsonl         # append-only journal (continue/leave/voice/withdraw/terms); tolerant reader; never a decision input
   <name>/voices/<participant-id>.md          # current voice, ≤4096 bytes, same content rules as identity cards
   <name>/voices/<participant-id>.history/<n>.md
-  <name>/voices/<participant-id>.gap         # {"withdrawn_at": "<ts>"}; content and history deleted
+  <name>/voices/<participant-id>.gap         # {"version":1,"withdrawals":<n>,"cleanup_pending":<bool>}; no author, no timestamp in any view; written (pending) BEFORE content and history are deleted, rewritten (not pending) after; reads treat pending as withdrawn; kept on re-add, withdrawals only ever increases
   <name>/terms.md              # optional
   <name>/inbox/<msg-id>.mail   # canonical store for lineage-addressed mail
   <name>/routing/<msg-id>.json
