@@ -889,7 +889,7 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
 
 #[cfg(test)]
 mod tests {
-    use super::{nearest_native_harness_in, NativeHarness};
+    use super::{nearest_native_harness_from, nearest_native_harness_in, NativeHarness};
 
     #[test]
     fn nearest_harness_ancestor_selects_nested_codex_child() {
@@ -913,5 +913,25 @@ mod tests {
     fn ambiguous_ancestor_list_never_guesses() {
         let ancestors = [(40, "node"), (30, "python"), (20, "bash")];
         assert_eq!(nearest_native_harness_in(ancestors, None), None);
+    }
+
+    #[test]
+    fn recognized_nearest_harness_survives_unavailable_higher_ancestor() {
+        for (command, expected) in [
+            ("/usr/local/bin/codex", NativeHarness::Codex),
+            ("/usr/local/bin/claude", NativeHarness::Claude),
+        ] {
+            let mut calls = Vec::new();
+            let resolved = nearest_native_harness_from(100, None, |pid| {
+                calls.push(pid);
+                match pid {
+                    100 => Some((90, "test-runner".to_owned())),
+                    90 => Some((80, command.to_owned())),
+                    _ => panic!("higher ancestor must not be read after recognizing {command}"),
+                }
+            });
+            assert_eq!(resolved, Some(expected));
+            assert_eq!(calls, vec![100, 90]);
+        }
     }
 }

@@ -470,15 +470,11 @@ fn participant_version_json_advertises_store_and_capabilities() {
     let output = sandbox.run_unbound(&["version", "--json"], &sandbox.path);
     assert_success(&output);
     let version: Value = from_stdout(&output);
-    assert_eq!(version["store_version"], 2);
+    assert_eq!(version["store_version"], 1);
     assert!(version["build_sha"]
         .as_str()
         .is_some_and(|sha| !sha.is_empty()));
-    assert!(version["capabilities"]
-        .as_array()
-        .expect("capabilities")
-        .iter()
-        .any(|value| value == "participants"));
+    assert_eq!(version["capabilities"], serde_json::json!(["participants"]));
     assert!(tree(&sandbox.mail_root).is_empty());
 }
 
@@ -577,7 +573,7 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     );
     assert_success(&output);
     let value: Value = from_stdout(&output);
-    assert_eq!(value["store_version"], 2);
+    assert_eq!(value["store_version"], 1);
     assert_eq!(tree(&broken.mail_root), before);
 
     let ambiguous = Sandbox::new_unseeded();
@@ -594,11 +590,7 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     );
     assert_success(&output);
     let value: Value = from_stdout(&output);
-    assert!(value["capabilities"]
-        .as_array()
-        .expect("capabilities")
-        .iter()
-        .any(|value| value == "participants"));
+    assert_eq!(value["capabilities"], serde_json::json!(["participants"]));
     assert_eq!(tree(&ambiguous.mail_root), before);
 }
 
@@ -629,7 +621,7 @@ fn participant_review_no_key_diagnostic_names_real_bootstrap_sequence() {
 }
 
 #[test]
-fn participant_review_existing_colon_room_loads_but_typed_namespace_collision_fails() {
+fn participant_review_existing_colon_and_reserved_rooms_load_but_doctor_reports_them() {
     let sandbox = Sandbox::new();
     let workspace = sandbox.home.join("legacy-colon");
     fs::create_dir_all(&workspace).expect("legacy workspace");
@@ -646,18 +638,29 @@ fn participant_review_existing_colon_room_loads_but_typed_namespace_collision_fa
 
     fs::write(
         sandbox.mail_root.join("rooms.json"),
-        format!(r#"{{"participant:foo":"{}"}}"#, workspace.display()),
+        format!(
+            r#"{{"participant:foo":"{0}","participants":"{0}"}}"#,
+            workspace.display()
+        ),
     )
     .expect("colliding rooms");
     let output = sandbox.run(&["rooms"]);
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "config_invalid");
-    assert!(error
-        .error
-        .details
-        .reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("typed address namespace")));
+    assert_success(&output);
+    let rooms: Value = from_stdout(&output);
+    assert_eq!(rooms["count"], 2);
+
+    let doctor = sandbox.run(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1));
+    let doctor: Value = from_stdout(&doctor);
+    let messages = doctor["checks"]
+        .as_array()
+        .expect("doctor checks")
+        .iter()
+        .filter_map(|check| check["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("typed address"), "{messages}");
+    assert!(messages.contains("reserved"), "{messages}");
 }
 
 #[test]
@@ -722,4 +725,373 @@ fn participant_review_rooms_add_rejects_existing_lineage_name() {
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "invalid_argument");
     assert!(error.error.message.contains("lineage"));
+}
+
+#[test]
+fn participant_round2_explicit_bootstrap_ignores_inherited_identity_and_ambiguity() {
+    let sandbox = Sandbox::new();
+
+    let fresh = sandbox.run_in_env(
+        &["participant", "bind", "--new"],
+        None,
+        &sandbox.path,
+        &[("POST_PARTICIPANT", "test-default")],
+    );
+    assert_success(&fresh);
+    let fresh_id = exported_participant(&fresh);
+    assert_ne!(fresh_id, "test-default");
+
+    let keyed = sandbox.run_in_env(
+        &[
+            "participant",
+            "bind",
+            "--harness",
+            "child",
+            "--key",
+            "independent-child",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_PARTICIPANT", "test-default")],
+    );
+    assert_success(&keyed);
+    let keyed: Value = from_stdout(&keyed);
+    assert_ne!(participant_id(&keyed), "test-default");
+    assert_eq!(keyed["provenance"], "explicit-bootstrap");
+
+    let ambiguous = sandbox.run_in_env(
+        &[
+            "participant",
+            "bind",
+            "--harness",
+            "child",
+            "--key",
+            "ambiguous-parent-child",
+            "--json",
+        ],
+        None,
+        &sandbox.path,
+        &[
+            ("CODEX_THREAD_ID", "inherited-thread"),
+            ("CODEX_SESSION_ID", "different-inherited-session"),
+        ],
+    );
+    assert_success(&ambiguous);
+    let ambiguous: Value = from_stdout(&ambiguous);
+    assert!(participant_id(&ambiguous).starts_with("child-"));
+    assert_eq!(ambiguous["provenance"], "explicit-bootstrap");
+}
+
+#[test]
+fn participant_round2_resolution_errors_are_advisory_on_read_only_surfaces() {
+    let sandbox = Sandbox::new();
+    let before = tree(&sandbox.mail_root);
+    for args in [
+        vec!["schema"],
+        vec!["doctor"],
+        vec!["who"],
+        vec!["participant", "show"],
+        vec!["participant", "list"],
+    ] {
+        let output = sandbox.run_in_env(
+            &args,
+            None,
+            &sandbox.path,
+            &[("POST_PARTICIPANT", "bad:id")],
+        );
+        assert_success(&output);
+        let value: Value = from_stdout(&output);
+        assert_eq!(value["ok"], true, "{args:?}: {}", common::stdout(&output));
+        assert!(
+            value["participant_error"]
+                .as_str()
+                .is_some_and(|message| message.contains("must not contain ':'")),
+            "{args:?}: {}",
+            common::stdout(&output)
+        );
+        assert_eq!(tree(&sandbox.mail_root), before, "{args:?} mutated state");
+    }
+
+    let plain_bind = sandbox.run_in_env(
+        &["participant", "bind", "--json"],
+        None,
+        &sandbox.path,
+        &[("POST_PARTICIPANT", "bad:id")],
+    );
+    assert_eq!(plain_bind.status.code(), Some(2));
+}
+
+#[test]
+fn participant_round2_plain_rebind_preserves_existing_workspace() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let first = sandbox.bind_claude("stable-workspace-key", &beta, Some("beta"));
+    let id = participant_id(&first).to_owned();
+
+    let rebound = sandbox.run_as_claude(
+        &["participant", "bind", "--json"],
+        "stable-workspace-key",
+        &alpha,
+    );
+    assert_success(&rebound);
+    let rebound: Value = from_stdout(&rebound);
+    assert_eq!(participant_id(&rebound), id);
+    assert_eq!(rebound["participant"]["workspace"], "beta");
+    assert_eq!(sandbox.read_participant(&id)["workspace"], "beta");
+}
+
+#[test]
+fn participant_round2_binding_provenance_wins_when_cwd_differs() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("binding-provenance", &beta, Some("beta"));
+    let actor = participant_id(&bound).to_owned();
+
+    let direct = sandbox.run_as_participant(
+        &["send", "--to", "alpha", "--body", "direct", "--json"],
+        &actor,
+        &alpha,
+    );
+    assert_success(&direct);
+    let direct: Value = from_stdout(&direct);
+    assert_eq!(direct["envelope"]["from"], "beta");
+    assert_eq!(
+        direct["envelope"]["sender_provenance"],
+        "participant-binding"
+    );
+
+    let joined = sandbox.run_as_participant(
+        &["chat", "round2-provenance", "--join", "--json"],
+        &actor,
+        &beta,
+    );
+    assert_success(&joined);
+    let channel = sandbox.run_as_participant(
+        &[
+            "chat",
+            "round2-provenance",
+            "--send",
+            "--anyway",
+            "--body",
+            "channel",
+            "--json",
+        ],
+        &actor,
+        &alpha,
+    );
+    assert_success(&channel);
+    let channel: Value = from_stdout(&channel);
+    assert_eq!(channel["message"]["from"], "beta");
+    assert_eq!(
+        channel["message"]["sender_provenance"],
+        "participant-binding"
+    );
+}
+
+#[test]
+fn participant_round2_collision_race_preserves_both_keys() {
+    const FIRST: &str = "collision-key-25835";
+    const SECOND: &str = "collision-key-54347";
+    assert_eq!(&digest(FIRST)[..8], &digest(SECOND)[..8]);
+
+    let sandbox = Sandbox::new();
+    let mut children = Vec::new();
+    for key in [FIRST, SECOND].into_iter().cycle().take(24) {
+        let child = common::post_command()
+            .args([
+                "participant",
+                "bind",
+                "--harness",
+                "native",
+                "--key",
+                key,
+                "--json",
+            ])
+            .current_dir(&sandbox.path)
+            .env_clear()
+            .env("HOME", &sandbox.home)
+            .env("POST_MAIL_ROOT", &sandbox.mail_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn colliding bind");
+        children.push((key, child));
+    }
+
+    let mut ids_by_key: BTreeMap<&str, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for (key, child) in children {
+        let output = child.wait_with_output().expect("wait colliding bind");
+        assert_success(&output);
+        let output: Value = from_stdout(&output);
+        ids_by_key
+            .entry(key)
+            .or_default()
+            .insert(participant_id(&output).to_owned());
+    }
+    assert_eq!(ids_by_key[FIRST].len(), 1, "{ids_by_key:?}");
+    assert_eq!(ids_by_key[SECOND].len(), 1, "{ids_by_key:?}");
+    let first_id = ids_by_key[FIRST].first().expect("first id");
+    let second_id = ids_by_key[SECOND].first().expect("second id");
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        sandbox.read_participant(first_id)["conversation_key_digest"],
+        digest(FIRST)
+    );
+    assert_eq!(
+        sandbox.read_participant(second_id)["conversation_key_digest"],
+        digest(SECOND)
+    );
+}
+
+#[test]
+fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    assert_success(&sandbox.run_in(&["chat", "round2-read", "--join", "--json"], None, &alpha));
+    assert_success(&sandbox.run_in(&["chat", "round2-read", "--join", "--json"], None, &beta));
+    let sent_channel = sandbox.run_in(
+        &[
+            "chat",
+            "round2-read",
+            "--send",
+            "--anyway",
+            "--body",
+            "needle channel body",
+            "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&sent_channel);
+    let sent_channel: Value = from_stdout(&sent_channel);
+    let channel_id = sent_channel["message"]["id"]
+        .as_str()
+        .expect("channel id")
+        .to_owned();
+    let sent_mail: SendOutput = from_stdout(&sandbox.run_in(
+        &["send", "--to", "alpha", "--body", "needle direct", "--json"],
+        None,
+        &beta,
+    ));
+
+    let commands = vec![
+        vec!["rooms".to_owned()],
+        vec!["version".to_owned(), "--json".to_owned()],
+        vec![
+            "watch".to_owned(),
+            "--snapshot".to_owned(),
+            "--room".to_owned(),
+            "alpha".to_owned(),
+        ],
+        vec![
+            "read".to_owned(),
+            sent_mail.envelope.id,
+            "--room".to_owned(),
+            "alpha".to_owned(),
+            "--peek".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec!["profile".to_owned(), "show".to_owned()],
+        vec![
+            "search".to_owned(),
+            "needle".to_owned(),
+            "--channel".to_owned(),
+            "round2-read".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "chat".to_owned(),
+            "round2-read".to_owned(),
+            "--peek".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "chat".to_owned(),
+            "round2-read".to_owned(),
+            "--history".to_owned(),
+            "1".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "chat".to_owned(),
+            "round2-read".to_owned(),
+            "--since".to_owned(),
+            channel_id.clone(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "chat".to_owned(),
+            "round2-read".to_owned(),
+            "--seen-by".to_owned(),
+            channel_id.clone(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "chat".to_owned(),
+            "round2-read".to_owned(),
+            "--message".to_owned(),
+            channel_id,
+            "--max-bytes".to_owned(),
+            "4096".to_owned(),
+            "--json".to_owned(),
+        ],
+    ];
+    for command in commands {
+        let args = command.iter().map(String::as_str).collect::<Vec<_>>();
+        let before = tree(&sandbox.mail_root);
+        let output = sandbox.run_without_identity(&args, &alpha);
+        assert_success(&output);
+        assert_eq!(
+            tree(&sandbox.mail_root),
+            before,
+            "fully unbound read mutated state: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn participant_round2_workspace_less_actor_gets_rebind_fix_not_room_shadowing() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.run(&[
+        "participant",
+        "bind",
+        "--harness",
+        "shell",
+        "--key",
+        "workspace-less",
+        "--json",
+    ]);
+    assert_success(&bound);
+    let bound: Value = from_stdout(&bound);
+    let actor = participant_id(&bound).to_owned();
+    assert!(bound["participant"]["workspace"].is_null());
+    let before = tree(&sandbox.mail_root);
+
+    let output =
+        sandbox.run_as_participant(&["chat", "any-channel", "--peek", "--json"], &actor, &alpha);
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "unknown_room");
+    assert!(error.error.message.contains("has no workspace"));
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post participant bind --workspace 'alpha'")
+    );
+    assert!(!error.error.suggested_fix.contains("post rooms add"));
+    assert_eq!(tree(&sandbox.mail_root), before);
+}
+
+#[test]
+fn participant_round2_unbound_annotation_keeps_ok_first() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run_without_identity(&["rooms"], &sandbox.path);
+    assert_success(&output);
+    let raw = common::stdout(&output);
+    assert!(
+        raw.starts_with("{\"ok\":true"),
+        "unexpected key order: {raw}"
+    );
+    let value: Value = serde_json::from_str(&raw).expect("annotated rooms JSON");
+    assert_eq!(value["participant"], "unbound");
 }

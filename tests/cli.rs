@@ -8579,6 +8579,7 @@ const FROZEN_DECLARED_FLAG: &str =
 const FROZEN_INFERRED_CWD: &str = "sender identity was inferred from the directory this was sent from — it is a location, not a claim.";
 const FROZEN_INFERRED_BASENAME: &str =
     "sender identity was taken from the directory name — it is a location, not a claim.";
+const FROZEN_PARTICIPANT_BINDING: &str = "sender identity was taken from the participant binding — it is local routing context, not a credential.";
 
 /// Hand-write a mail fixture with an arbitrary envelope, the way an old (or
 /// foreign) binary would have. Returns the id.
@@ -8979,7 +8980,12 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
             Some(FROZEN_INFERRED_BASENAME),
             "aaaa04",
         ),
-        ("declared-quantum", None, "aaaa05"),
+        (
+            "participant-binding",
+            Some(FROZEN_PARTICIPANT_BINDING),
+            "aaaa05",
+        ),
+        ("declared-quantum", None, "aaaa06"),
     ];
     for (value, expected, suffix) in cases {
         let id = write_mail_fixture(

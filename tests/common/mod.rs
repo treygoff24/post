@@ -276,6 +276,31 @@ impl Sandbox {
         )
     }
 
+    /// Run with every participant/harness identity variable absent. Unlike
+    /// `run_in`, this never seeds or exports a fixture participant.
+    pub fn run_without_identity(&self, args: &[&str], cwd: &Path) -> Output {
+        post_command()
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("POST_MAIL_ROOT", &self.mail_root)
+            .env_remove("POST_FROM")
+            .env_remove("POST_FRAMING")
+            .env_remove("POST_SENDER_ADDRESS")
+            .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT")
+            .env_remove("POST_HARNESS")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_PID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run post without participant identity")
+    }
+
     pub fn run_as_participant(&self, args: &[&str], participant: &str, cwd: &Path) -> Output {
         self.run_in_env(args, None, cwd, &[("POST_PARTICIPANT", participant)])
     }

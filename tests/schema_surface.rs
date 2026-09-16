@@ -103,11 +103,8 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
         .find(|command| command.name == "inbox")
         .expect("inbox schema command");
     assert!(inbox.usage.contains("--adopt"));
-    assert_eq!(schema.store_version, 2);
-    assert!(schema
-        .capabilities
-        .iter()
-        .any(|value| value == "participants"));
+    assert_eq!(schema.store_version, 1);
+    assert_eq!(schema.capabilities, vec!["participants"]);
 
     for args in [
         &["participant", "--help"] as &[&str],
