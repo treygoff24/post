@@ -335,7 +335,7 @@ function versionFailure(result) {
   if (result?.error || result?.status !== 0) return VERSION_PROBE_FAILED;
   try {
     const value = JSON.parse(String(result.stdout ?? ""));
-    if (value?.ok !== true || !Array.isArray(value.capabilities)) return VERSION_PROBE_FAILED;
+    if (!Array.isArray(value.capabilities)) return VERSION_PROBE_FAILED;
     return value.capabilities.includes("participants") ? null : PARTICIPANTS_MISSING;
   } catch {
     return VERSION_PROBE_FAILED;
