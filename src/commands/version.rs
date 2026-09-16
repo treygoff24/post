@@ -25,9 +25,10 @@ pub(super) fn run(json: bool, pretty: bool) -> AppResult<CommandResult> {
         CommandResult::json(&output, pretty)
     } else {
         Ok(CommandResult::success(format!(
-            "post {} (build {}, store v2; {})\n",
+            "post {} (build {}, store v{}; {})\n",
             output.version,
             output.build_sha,
+            output.store_version,
             CAPABILITIES.join(",")
         )))
     }
