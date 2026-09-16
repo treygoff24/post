@@ -104,9 +104,9 @@ host, room, id, hash, status, reason, and timestamp; they have no envelope
 Therefore a participant id used as `from` behaves as a free-form/unhomed
 sender if it passes the room grammar and does not collide with a local or
 foreign placeholder: it is logged, delivered, and has no effect on outbox
-layout or receipt keying.  An invalid/reserved id is quarantined by envelope
-validation; a colliding registered-room/foreign-placeholder name is
-`forged_from`.
+layout or receipt keying.  An id that fails sweep's path-safe/reserved-room
+validation is quarantined by envelope validation; a colliding
+registered-room/foreign-placeholder name is `forged_from`.
 
 ## Discovered
 
@@ -118,7 +118,4 @@ validation; a colliding registered-room/foreign-placeholder name is
 
 ## Decision
 
-§10 NEEDS CORRECTION: `sweep.py` bridges direct-mail outboxes and delivery
-receipts only; it does **not** publish/import channels.  Replace “room
-outboxes and channels only” with “direct-mail outboxes plus delivery receipts;
-channels are not bridged.”
+§10 NEEDS CORRECTION: `sweep.py` bridges direct-mail outboxes and delivery receipts only; it does **not** publish/import channels. Replace “room outboxes and channels only” with “direct-mail outboxes plus delivery receipts; channels are not bridged.”
