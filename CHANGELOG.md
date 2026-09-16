@@ -7,14 +7,14 @@
   participant-scoped presence, typed participant targets, and sender attribution
   through `from_participant` and `participant-binding` provenance.
 - Lineages: host-local affiliation retained through stale and ended states,
-  attributed voices and terms,
-  terms-aware `identity new` recovery, and targeted voice withdrawal with a
-  durable cleanup gap marker.
+  attributed voices and terms, terms-aware `identity new` recovery for an
+  unaffiliated founder, and targeted voice withdrawal with a durable cleanup
+  gap marker.
 - Routing receipts: workspace and lineage sends freeze active recipients;
   unrouted mail remains pending, pending counts stay separate from unread,
-  `inbox --adopt` routes held lineage mail, and read-only views project
-  eligibility without writing. Watch and reply output include typed addresses
-  and sender origin.
+  `inbox --adopt` routes held lineage mail to active eligible affiliates, and
+  read-only views project eligibility without writing. Watch and reply output
+  include typed addresses and sender origin.
   <!-- verify-on-integrated-binary -->
 - Cursors v2: exact per-address mail and per-channel seen sets live under each
   participant, so siblings sharing a workspace read independently and late ids
@@ -313,8 +313,9 @@ signed-message v2, described below.
   read-time compatibility with legacy v1 signatures.
 
 ### Changed (behavior, the reason this is 0.5.0)
-- `post send` refuses `from == to` without `--allow-self`. Instances of one
-  room coordinate via channels; doorbell probes and smoke tests opt in.
+- Before 0.10, `post send` made room-self delivery opt-in. The participant
+  model supersedes that rule: workspace and lineage fan-out exclude the sender,
+  while an explicit participant self-target is readable.
 - `--from` that disagrees with a `POST_FROM` pin is a hard conflict error.
   An agreeing flag proceeds as `declared-flag`.
 

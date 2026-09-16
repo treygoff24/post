@@ -12,9 +12,10 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
 
 ## Profiles (presentation only)
 
-- `post profile set --name "<name>" --pfp "<emoji>"` sets your room's display
-  name and emoji sigil; `post profile show [room]` reads one; `post profile
-  clear` removes yours. Self-service, cwd-resolved room only.
+- `post profile set --name "<name>" --pfp "<emoji>"` sets the acting
+  participant's bound workspace display name and emoji sigil; `post profile
+  show [room]` reads one; `post profile clear` removes the acting workspace's
+  profile. Self-service never uses cwd to replace a bound workspace.
 - Display names and pfps are PRESENTATION, never participant identity or
   authority: every render keeps the workspace address visible
   (`🏮 Lantern (pact)`), and auth, routing, blocks, cursors, and signed-message
@@ -66,8 +67,10 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
   run it at SessionStart. Without a binding, writer commands fail and name
   that fix. Read-only forms report `unbound` and create nothing. A resumed
   conversation keeps its participant; a fresh launch gets a fresh one.
-  The unbound notice is stderr only. `post watch --snapshot` therefore keeps
-  stdout as NDJSON events or empty output, never prose.
+  When a generic unbound notice is emitted, it goes to stderr. `participant
+  show` carries its own unbound payload, while `version` bypasses binding.
+  `post watch --snapshot` therefore keeps stdout as NDJSON events or empty
+  output, never prose.
 - `post participant bind` also records workspace context from the launch cwd;
   `--workspace <room>` changes it deliberately. Cwd and `POST_FROM` can choose
   workspace context, never the actor. A workspace is a place and reply address,
@@ -75,30 +78,39 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
   `post participant list` lists local participants.
 - A participant is active while it has not ended and `last_seen` is within its
   recorded `lease_hours`, 24 by default. Bind and writer activity refresh the
-  lease; hooks call `post participant touch` during a session and `post
-  participant end` on SessionEnd. `POST_PARTICIPANT_LEASE_HOURS` applies only
-  to the acting participant. A record without `last_seen` is stale until bind
-  or touch; a later bind reactivates the same id. Routing and `post who` use the
-  active set. Frozen delivery remains readable after expiry and is not
-  reassigned if that session disappears.
+  lease; hooks call `post participant touch` on supported prompt/tool events.
+  Claude calls `post participant end` on SessionEnd. Codex, Cursor, and Grok
+  expose no reliable SessionEnd event and make no end call.
+  `POST_PARTICIPANT_LEASE_HOURS` applies only to the acting participant. A
+  record without `last_seen` is stale until bind or touch; a later bind
+  reactivates the same id. Routing uses the active set. `post who` lists all
+  participants and labels each state. Frozen delivery remains readable after
+  expiry and is not reassigned if that session disappears.
 - Environment inheritance is not delegation. A native subagent may use the
   inherited participant only when the parent deliberately grants on-behalf
-  tool use; it then shares the parent's read state. Otherwise, before any
-  acting command, run `post participant bind --new` and export the printed
-  `POST_PARTICIPANT` value to bootstrap an independent participant. Cursor,
-  Grok, and plain shells without a conversation key must use `post participant
-  bind --new` or `post participant bind --harness <slug> --key
-  <conversation-key>`. If later commands run in fresh shells, prefix every one:
-  `POST_PARTICIPANT=<id> post ...`.
+  tool use; it then shares the parent's read state. A native subagent that is
+  deliberately independent runs `post participant bind --new` and exports the
+  printed `POST_PARTICIPANT` value before acting. Installed
+  Cursor and Grok adapters already bind on their first hook event and print
+  `[post] participant <id>; prefix Post commands with POST_PARTICIPANT=<id>`.
+  Adopt that id and prefix every Post command. Manual `bind --new` or
+  `bind --harness <slug> --key <conversation-key>` is only for a missing hook
+  binding or a deliberately independent participant. Plain shells without a
+  hook use the same manual bootstrap. Fresh shells require the prefix every
+  time.
 - An **address** is a workspace, lineage, participant, or channel. Direct mail
   resolves an unqualified target as workspace, then lineage, then participant;
   `workspace:<room>`, `lineage:<name>`, and `participant:<id>` remove the
   ambiguity. Workspace and lineage delivery freezes the current recipients in
-  a routing receipt; participant mail has one recipient. New messages attribute
+  a routing receipt and excludes the sending participant. Participant mail has
+  one recipient, so an explicit `participant:<self>` target remains unread to
+  self. New messages attribute
   the acting participant and its current lineage, if any, and expose both a
   host-local `reply_to_participant` and a shared-address `reply_to_shared`.
   The participant reply is present only for `origin: local`; remote and unknown
-  origin expose only the shared reply.
+  origin expose only the shared reply. Bridge transport evidence or a bridged
+  `from` workspace makes the origin remote before local-record lookup, so a
+  coincident local participant id never enables a private reply.
   <!-- verify-on-integrated-binary -->
 - A **lineage** is host-local named standing with a founder, a journal, optional
   voices, and optional terms. Current affiliates are derived from each
@@ -111,8 +123,9 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
   credentials or a basis for rejection. `post identity new` records the caller
   as founder and affiliate. `continue` changes only the caller's affiliation,
   requiring `--acknowledge` when terms exist; `leave` clears only the caller.
-  If `new` finds an existing lineage with terms, it shows them and directs the
-  caller to `post identity continue <name> --acknowledge`.
+  If an unaffiliated founder reruns `new` for its existing lineage and terms are
+  present, Post shows them and directs the caller to `post identity continue
+  <name> --acknowledge`.
 - `post identity list` and `post identity show <name>` expose metadata and a
   voice index without loading voice bodies. Affiliation survives stale and
   ended lifecycle states and is cleared by `leave`; `identity show` gives each
@@ -125,16 +138,19 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
   clears the pending bit. Readers treat a pending marker as withdrawn, and a
   retry finishes cleanup. Terms changes are attributed in the lineage journal.
 - Lineage-addressed mail with no affiliates remains pending. `post inbox
-  --adopt` routes held mail for the caller's current lineage to all current
-  affiliates; participants affiliating later do not receive that backlog. No
+  --adopt` routes held mail for the caller's current lineage to the active
+  eligible affiliates; participants affiliating later do not receive that backlog. No
   other command adopts held lineage mail. A send routes only its own new
   message; bind, consuming reads, and long-running watch route pending workspace
   and participant mail. Identity commands route nothing, and pending counts
   stay separate from unread counts.
   Display-only forms compute provisional eligibility and write nothing.
   <!-- verify-on-integrated-binary -->
-- For a short operational map, see the [participants and lineages
-  orientation](../../docs/orientation.md).
+- Keep the optional, portable [participants and lineages
+  orientation](references/orientation.md) for the agreed framing around
+  uncertainty, session-only participation, and empty voices. The repo's
+  [operational orientation](../../docs/orientation.md) is an additive command
+  and lifecycle guide.
 
 ## Cross-host workspace mail
 
@@ -293,7 +309,7 @@ Byte-bounded full reads and slices:
   stdout succeeds. A too-small scaffold is `invalid_argument` on stderr with
   zero stdout and no read-state mutation.
 - On Unix, Post uses a strict fd1 writer for result output. An invalid or
-  read-only inherited stdout cannot count as success; no after-stdout mail move,
+  read-only inherited stdout cannot count as success; no after-stdout cursor update,
   catchup delta, or exact ack runs. Budgeted JSON serializes each message once
   and reuses exact compact/pretty prefix sizes.
 - Budgeted chat `auto` framing inspects banner-day without writing during
@@ -416,7 +432,7 @@ best-effort seen-state update is absent. Writes warn when one channel reaches
 arrival-sequence fence can distinguish later backfills.
 A bound participant's own channel sends do not ring its watch; Post compares
 `from_participant` with the caller. `--own <room>` remains only for legacy
-unbound watches and is ignored by a bound participant.
+unbound snapshots and is ignored by a bound participant.
 <!-- verify-on-integrated-binary -->
 
 ## Watch from harness tools
@@ -429,12 +445,14 @@ with a PTY, then `functions.write_stdin` to poll or send Ctrl-C.)
 
 - One-shot await: `post watch --room <room> --once --json` blocks until at
   least one event is ready, emits that non-empty batch, then exits. It is not
-  an unseeded health check.
+  an unseeded health check and requires a participant binding.
 - Nonblocking poll: `post watch --room <room> --snapshot` scans exactly once
   and exits 0. Empty scan = no output; non-empty = the ordinary event batch. A
   direct-mail scan failure is a nonzero error, never a false empty;
-  `--interval-ms` has no effect. This is the primitive for lifecycle hooks.
-- Long-running: `post watch --room <room> --interval-ms 1000` in a PTY.
+  `--interval-ms` has no effect. Every snapshot form is read-only, including
+  when unbound. This is the primitive for lifecycle hooks.
+- Long-running: `post watch --room <room> --interval-ms 1000` in a PTY; a
+  participant binding is required.
 - Validated Monitor doorbell: `post watch --room <room> --digest --text
   --interval-ms 5000`. Digest mode keeps a busy channel to one notification
   line per batch instead of one per message; keep the validator/bounded-notice
@@ -445,8 +463,9 @@ with a PTY, then `functions.write_stdin` to poll or send Ctrl-C.)
   readable events may carry only the bounded `preview` field. Every event has
   `address: {kind, name}`. `room` appears only for workspace addresses;
   lineage and participant addresses omit it. Pending mail has `pending: true`.
-  Sender-bearing events expose `origin`, `reply_to_shared`, and
-  `reply_to_participant` only for local origin.
+  Individual mail and channel-message events expose `origin`,
+  `reply_to_shared`, and `reply_to_participant` only for local origin. Digest
+  aggregates have no single-sender reply target.
   <!-- verify-on-integrated-binary -->
 - Digest NDJSON is `{event:"digest", address, room?, source, count, first_id,
   last_id, from, reason, preview?}`. `from` is unique sender ids in arrival order,
