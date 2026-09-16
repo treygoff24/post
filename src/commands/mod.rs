@@ -3,6 +3,7 @@ mod catchup;
 mod channels;
 mod chat;
 mod doctor;
+mod identity;
 mod inbox;
 mod owner;
 mod participant;
@@ -104,7 +105,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     }
     let mut result = match cli.command {
         Command::Participant(args) => participant::run(&context, args, json, pretty),
-        Command::Identity(_) => Err(AppError::not_yet("P.3")),
+        Command::Identity(args) => identity::run(&context, args, json, pretty),
         Command::Doctor(args) => doctor::run(&context, args, pretty),
         Command::Send(args) => send::run(&context, args, json, pretty),
         Command::Chat(args) => chat::run(&context, args, json, pretty),

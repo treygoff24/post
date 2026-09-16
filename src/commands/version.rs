@@ -2,7 +2,7 @@ use crate::command_result::CommandResult;
 use crate::error::AppResult;
 use serde::Serialize;
 
-pub(crate) const CAPABILITIES: [&str; 1] = ["participants"];
+pub(crate) const CAPABILITIES: [&str; 2] = ["participants", "lineages"];
 
 #[derive(Serialize)]
 struct VersionOutput {
@@ -18,14 +18,14 @@ pub(super) fn run(json: bool, pretty: bool) -> AppResult<CommandResult> {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         build_sha: option_env!("POST_BUILD_SHA").unwrap_or("unknown"),
-        store_version: 1,
+        store_version: 2,
         capabilities: &CAPABILITIES,
     };
     if json {
         CommandResult::json(&output, pretty)
     } else {
         Ok(CommandResult::success(format!(
-            "post {} (build {}, store v1; {})\n",
+            "post {} (build {}, store v2; {})\n",
             output.version,
             output.build_sha,
             CAPABILITIES.join(",")
