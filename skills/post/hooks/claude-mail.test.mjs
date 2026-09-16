@@ -23,18 +23,18 @@ fs.writeFileSync(
   [
     "#!/usr/bin/env node",
     'import fs from "node:fs";',
-    'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + "\\n");',
+    'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), participant: process.env.POST_PARTICIPANT || null }) + "\\n");',
     'const control = JSON.parse(fs.readFileSync(process.env.STUB_CONTROL, "utf8"));',
     'const args = process.argv.slice(2);',
     'let output = control.stdout ?? "";',
     'if (args[0] === "version") output = JSON.stringify(control.version ?? { ok: true, capabilities: ["participants"] }) + "\\n";',
     'else if (args[0] === "participant" && args[1] === "show") output = JSON.stringify(control.show ?? { ok: true, status: "unbound" }) + "\\n";',
-    'else if (args[0] === "participant" && args[1] === "bind") output = control.bind_stdout ?? "";',
+    'else if (args[0] === "participant" && args[1] === "bind") output = control.bind_stdout ?? JSON.stringify({ ok: true, status: "bound", id: process.env.POST_PARTICIPANT || "test-participant", participant: { id: process.env.POST_PARTICIPANT || "test-participant", lineage: null } }) + "\\n";',
     'if (output) process.stdout.write(output);',
     // Natural exit when the control exit is 0: process.exit() would drop
     // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
     // 64 KiB pipe buffer), truncating the snapshot mid-line.
-    "const exit = control.exit ?? 0;",
+    "const exit = args[0] === \"participant\" && args[1] === \"bind\" ? (control.bind_exit ?? 0) : args[0] === \"watch\" ? (control.exit ?? 0) : 0;",
     "if (exit) process.exit(exit);",
     "",
   ].join("\n")
@@ -54,10 +54,10 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit }));
 }
 
 function allStubCalls() {
@@ -673,7 +673,7 @@ test("SessionStart with an old binary emits only the repair line", () => {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
       additionalContext:
-        "[post] installed post lacks the participants capability; repair: cargo build --release && install -m 0755 target/release/post ~/.local/bin/post",
+        "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post",
     },
   });
   const calls = allStubCalls();
@@ -688,7 +688,7 @@ test("SessionStart binds before snapshot with the session cwd", () => {
   const calls = allStubCalls().slice(before);
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
-    ["participant", "bind"],
+    ["participant", "bind", "--harness", "claude", "--key", "bind-order", "--json"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],
   ]);
@@ -705,5 +705,51 @@ test("affiliated participant gets exactly one identity line", () => {
   const stateDir = freshStateDir();
   setStub({ events: [], show: { ok: true, status: "bound", id: "claude-abc12345", participant: { id: "claude-abc12345", lineage: "ember" } } });
   const out = run({ ...BASE, hook_event_name: "SessionStart", session_id: "affiliated" }, { stateDir });
-  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant claude-abc12345, continuing lineage ember; voices on request: post identity show ember --voices");
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant claude-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices");
+});
+
+test("payload session key mints and reuses one participant across lifecycle events", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [] });
+  run({ ...BASE, hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { CLAUDE_CODE_SESSION_ID: "outer-key", CODEX_THREAD_ID: "other-key" } });
+  const first = allStubCalls();
+  const participant = first.find((call) => call.args[0] === "participant" && call.args[1] === "bind");
+  assert.deepEqual(participant.args.slice(0, 2), ["participant", "bind"]);
+  assert.deepEqual(participant.args.slice(2), ["--harness", "claude", "--key", "payload-key", "--json"]);
+  const id = first.find((call) => call.args[0] === "watch").participant;
+  assert.equal(id, "test-participant");
+  setStub({ events: [] });
+  run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: "payload-key" }, { stateDir, env: { CLAUDE_CODE_SESSION_ID: "different-native-key" } });
+  const later = allStubCalls().at(-1);
+  assert.equal(later.args[0], "watch");
+  assert.equal(later.participant, id);
+});
+
+test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [] });
+  run({ ...BASE, hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "explicit-id" } });
+  const calls = allStubCalls();
+  assert.deepEqual(calls[1].args, ["participant", "bind", "--json"]);
+  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "explicit-id");
+});
+
+test("bind failure emits one setup diagnostic and leaves state retryable", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
+  const failed = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
+  assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
+  assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
+  setStub({ events: [] });
+  const recovered = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
+  assert.deepEqual(recovered, {});
+});
+
+test("lineage names are shell-quoted in the voice command", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], show: { ok: true, status: "bound", id: "claude-abc12345", participant: { id: "claude-abc12345", lineage: "Ember Grove!" } } });
+  const out = run({ ...BASE, hook_event_name: "SessionStart", session_id: "quoted-lineage" }, { stateDir });
+  assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
 });

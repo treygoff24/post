@@ -42,8 +42,13 @@ const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-const REPAIR_LINE =
-  "[post] installed post lacks the participants capability; repair: cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
+const HARNESS = "grok";
+const VERSION_PROBE_FAILED =
+  "[post] could not verify installed post capabilities (version query failed or timed out); repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
+const PARTICIPANTS_MISSING =
+  "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
+const PARTICIPANT_SETUP_FAILED =
+  "[post] participant setup failed; inbox state is UNKNOWN (not empty). Retry setup or run: post participant bind";
 
 function writeAllSync(fd, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -79,9 +84,10 @@ function readState(file) {
       seen: Array.isArray(parsed.seen) ? parsed.seen.filter((k) => typeof k === "string") : [],
       failStreak: Number.isInteger(parsed.failStreak) ? parsed.failStreak : 0,
       initialized: parsed.initialized === true,
+      participantId: typeof parsed.participantId === "string" ? parsed.participantId : null,
     };
   } catch {
-    return { seen: [], failStreak: 0, initialized: false };
+    return { seen: [], failStreak: 0, initialized: false, participantId: null };
   }
 }
 
@@ -288,22 +294,46 @@ function failDiagnostic() {
   };
 }
 
-function runPost(args, cwd) {
+function runPost(args, cwd, { participantId = null, clearParticipant = false, clearConversationKeys = false } = {}) {
+  const env = { ...process.env };
+  if (participantId) env.POST_PARTICIPANT = participantId;
+  else if (clearParticipant) delete env.POST_PARTICIPANT;
+  if (clearConversationKeys) {
+    delete env.CLAUDE_CODE_SESSION_ID;
+    delete env.CODEX_THREAD_ID;
+    delete env.CODEX_SESSION_ID;
+    delete env.POST_SENDER_ADDRESS;
+  }
   return spawnSync(postBinary(), args, {
     cwd,
     encoding: "utf8",
     timeout: 4000,
+    env,
     stdio: ["ignore", "pipe", "ignore"],
   });
 }
 
-function hasParticipantsCapability(result) {
-  if (result?.error || result?.status !== 0) return false;
+function versionFailure(result) {
+  if (result?.error || result?.status !== 0) return VERSION_PROBE_FAILED;
   try {
     const value = JSON.parse(String(result.stdout ?? ""));
-    return Array.isArray(value.capabilities) && value.capabilities.includes("participants");
+    if (value?.ok !== true || !Array.isArray(value.capabilities)) return VERSION_PROBE_FAILED;
+    return value.capabilities.includes("participants") ? null : PARTICIPANTS_MISSING;
   } catch {
-    return false;
+    return VERSION_PROBE_FAILED;
+  }
+}
+
+function boundParticipantId(result) {
+  if (result?.error || result?.status !== 0) return null;
+  try {
+    const value = JSON.parse(String(result.stdout ?? ""));
+    if (value?.ok !== true || value?.status !== "bound") return null;
+    const participant = value?.participant;
+    const id = participant?.id ?? value?.id;
+    return safeIdentityPart(id) ? id : null;
+  } catch {
+    return null;
   }
 }
 
@@ -311,15 +341,19 @@ function identityLine(result) {
   if (result?.error || result?.status !== 0) return null;
   try {
     const value = JSON.parse(String(result.stdout ?? ""));
-    if (value?.status !== "bound") return null;
+    if (value?.ok !== true || value?.status !== "bound") return null;
     const participant = value?.participant;
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
-    return `[post] participant ${id}, continuing lineage ${lineage}; voices on request: post identity show ${lineage} --voices`;
+    return `[post] participant ${id}, continuing lineage ${lineage}; voices on request: post identity show ${shellQuote(lineage)} --voices; bootstrap: export POST_PARTICIPANT=${id}`;
   } catch {
     return null;
   }
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function safeIdentityPart(value) {
@@ -328,6 +362,7 @@ function safeIdentityPart(value) {
     value.length > 0 &&
     Buffer.byteLength(value, "utf8") <= NAME_MAX &&
     !CONTROL_CHARS.test(value) &&
+    !/[\u2028\u2029\r\n]/.test(value) &&
     value !== "." &&
     value !== ".." &&
     !/[\\/]/.test(value)
@@ -340,13 +375,21 @@ function appendIdentity(context, line) {
   return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
-function repairPayload() {
+function setupPayload(context) {
   return {
     hookSpecificOutput: {
       hookEventName: CANONICAL_EVENT,
-      additionalContext: REPAIR_LINE,
+      additionalContext: context,
     },
   };
+}
+
+function setupParticipant(cwd, sessionId) {
+  const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
+  const args = explicit
+    ? ["participant", "bind", "--json"]
+    : ["participant", "bind", "--harness", HARNESS, "--key", sessionId, "--json"];
+  return boundParticipantId(runPost(args, cwd, { clearParticipant: !explicit, clearConversationKeys: true }));
 }
 
 function deliverThenCommit(stateFile, payload, nextState) {
@@ -405,19 +448,28 @@ function main() {
   // Grok exposes only UserPromptSubmit; treat the first prompt as SessionStart
   // for participant setup and capability gating.
   const firstPrompt = !state.initialized;
-  if (firstPrompt) {
-    if (!hasParticipantsCapability(runPost(["version", "--json"], cwd))) {
-      tryEmit(repairPayload());
+  const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
+  const needsSetup = firstPrompt || !state.participantId || (explicit && explicit !== state.participantId);
+  let participantId = state.participantId;
+  if (needsSetup) {
+    const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true }));
+    if (versionError) {
+      tryEmit(setupPayload(versionError));
       return;
     }
-    runPost(["participant", "bind"], cwd);
+    participantId = setupParticipant(cwd, sessionRaw);
+    if (!participantId) {
+      tryEmit(setupPayload(PARTICIPANT_SETUP_FAILED));
+      return;
+    }
   }
 
-  const result = runPost(["watch", "--snapshot"], cwd);
+  const result = runPost(["watch", "--snapshot"], cwd, { participantId, clearConversationKeys: true });
 
   if (result.error || result.status !== 0) {
     const nextState = {
       ...state,
+      participantId,
       failStreak: state.failStreak + 1,
       initialized: true,
     };
@@ -441,6 +493,7 @@ function main() {
   if (malformed) {
     const nextState = {
       ...state,
+      participantId,
       failStreak: state.failStreak + 1,
       initialized: true,
     };
@@ -455,9 +508,10 @@ function main() {
     seen: [...new Set(events.map((event) => eventKey(event)))],
     failStreak: 0,
     initialized: true,
+    participantId,
   };
   const identity = firstPrompt
-    ? identityLine(runPost(["participant", "show", "--json"], cwd))
+    ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true }))
     : null;
   const context = appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity);
   const payload = context

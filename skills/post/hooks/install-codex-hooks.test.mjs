@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import { stableNodePath } from "./stable-node-path.mjs";
 
@@ -272,6 +272,55 @@ test("installer and installed adapter no longer reference identity-card.mjs", ()
   assert.equal(fs.existsSync(path.join(INSTALL_DIR, "identity-card.mjs")), false);
   assert.ok(!fs.readFileSync(path.join(INSTALL_DIR, path.basename(ADAPTER)), "utf8").includes("identity-card.mjs"));
   assert.ok(!fs.readFileSync(INSTALLER, "utf8").includes("identity-card.mjs"));
+});
+
+test("installed adapter copy runs end-to-end with the release CLI", () => {
+  const releaseBin = execFileSync(
+    process.execPath,
+    [path.join(DIR, "../../../scripts/cargo-release-bin.mjs")],
+    { encoding: "utf8" }
+  ).trim();
+  assert.ok(fs.existsSync(releaseBin), `release binary missing: ${releaseBin}`);
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-installed-proof-"));
+  try {
+    const runtimeHome = path.join(runtimeRoot, "home");
+    const runtimeInstallDir = path.join(runtimeHome, ".codex", "hooks");
+    const target = path.join(runtimeRoot, "hooks.json");
+    const installed = spawnSync(process.execPath, [INSTALLER, target], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        POST_CODEX_HOOK_INSTALL_DIR: runtimeInstallDir,
+        POST_CODEX_HOOK_BIN: releaseBin,
+      },
+    });
+    assert.equal(installed.status, 0, installed.stderr);
+    const installedAdapter = path.join(runtimeInstallDir, "post-codex-mail.mjs");
+    assert.ok(fs.existsSync(installedAdapter));
+    assert.ok(!fs.readFileSync(installedAdapter, "utf8").includes("identity-card.mjs"));
+    const cwd = path.join(runtimeRoot, "workspace");
+    const mailRoot = path.join(runtimeRoot, "mail");
+    const stateDir = path.join(runtimeRoot, "state");
+    fs.mkdirSync(cwd, { recursive: true });
+    const result = spawnSync(process.execPath, [installedAdapter], {
+      input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "installed-proof", cwd }),
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        HOME: runtimeHome,
+        POST_CODEX_HOOK_BIN: releaseBin,
+        POST_CODEX_HOOK_STATE_DIR: stateDir,
+        POST_MAIL_ROOT: mailRoot,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {});
+    const participantDirs = fs.readdirSync(path.join(mailRoot, "participants"))
+      .filter((entry) => entry.startsWith("codex-"));
+    assert.equal(participantDirs.length, 1);
+  } finally {
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  }
 });
 
 test("the emitted node path is upgrade-durable, not version-pinned", () => {
