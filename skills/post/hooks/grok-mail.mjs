@@ -479,7 +479,7 @@ function main() {
   // Grok exposes only UserPromptSubmit; treat the first prompt as SessionStart
   // for participant setup and capability gating.
   const firstPrompt = !state.initialized || !state.participantId;
-  const deadline = firstPrompt ? Date.now() + SESSION_DEADLINE_MS : null;
+  const deadline = Date.now() + SESSION_DEADLINE_MS;
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
   if (participantConflict(sessionRaw, explicit)) {
     tryEmit(setupPayload("[post] POST_PARTICIPANT conflicts with this hook session key; unset it to bind from the payload or use the matching participant id"));

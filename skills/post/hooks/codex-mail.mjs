@@ -468,7 +468,7 @@ function main() {
   const stateFile = path.join(stateDir(), `session-${sessionId}.json`);
 
   const state = eventName === "SessionStart" ? { seen: [], failStreak: 0, participantId: null, lifecycleWarned: false } : readState(stateFile);
-  const deadline = eventName === "SessionStart" ? Date.now() + SESSION_DEADLINE_MS : null;
+  const deadline = Date.now() + SESSION_DEADLINE_MS;
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
   if (participantConflict(input.session_id, explicit)) {
     tryEmit(setupPayload(eventName, "[post] POST_PARTICIPANT conflicts with this hook session key; unset it to bind from the payload or use the matching participant id"));
