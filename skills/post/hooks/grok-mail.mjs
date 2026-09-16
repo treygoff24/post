@@ -31,18 +31,19 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-import { identityCardContext, withCard } from "./identity-card.mjs";
-
 const CANONICAL_EVENT = "UserPromptSubmit";
 const EVENTS = new Set(["UserPromptSubmit", "user_prompt_submit"]);
 const LIST_CAP = 20;
 const CONTEXT_MAX = 4096;
+const MERGED_CONTEXT_MAX = CONTEXT_MAX + 256;
 const NAME_MAX = 255;
 const UNREADABLE_ID_MAX = 255;
 const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const REPAIR_LINE =
+  "[post] installed post lacks the participants capability; repair: cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 
 function writeAllSync(fd, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -77,10 +78,10 @@ function readState(file) {
     return {
       seen: Array.isArray(parsed.seen) ? parsed.seen.filter((k) => typeof k === "string") : [],
       failStreak: Number.isInteger(parsed.failStreak) ? parsed.failStreak : 0,
-      cardShown: parsed.cardShown === true,
+      initialized: parsed.initialized === true,
     };
   } catch {
-    return { seen: [], failStreak: 0, cardShown: false };
+    return { seen: [], failStreak: 0, initialized: false };
   }
 }
 
@@ -287,6 +288,66 @@ function failDiagnostic() {
   };
 }
 
+function runPost(args, cwd) {
+  return spawnSync(postBinary(), args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 4000,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
+function hasParticipantsCapability(result) {
+  if (result?.error || result?.status !== 0) return false;
+  try {
+    const value = JSON.parse(String(result.stdout ?? ""));
+    return Array.isArray(value.capabilities) && value.capabilities.includes("participants");
+  } catch {
+    return false;
+  }
+}
+
+function identityLine(result) {
+  if (result?.error || result?.status !== 0) return null;
+  try {
+    const value = JSON.parse(String(result.stdout ?? ""));
+    const participant = value?.participant;
+    const id = participant?.id ?? value?.id;
+    const lineage = participant?.lineage ?? value?.lineage;
+    if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
+    return `[post] participant ${id}, continuing lineage ${lineage}; voices on request: post identity show ${lineage} --voices`;
+  } catch {
+    return null;
+  }
+}
+
+function safeIdentityPart(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= NAME_MAX &&
+    !CONTROL_CHARS.test(value) &&
+    value !== "." &&
+    value !== ".." &&
+    !/[\\/]/.test(value)
+  );
+}
+
+function appendIdentity(context, line) {
+  if (!line || Buffer.byteLength(line, "utf8") > 256) return context;
+  const merged = context ? `${context}\n${line}` : line;
+  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
+}
+
+function repairPayload() {
+  return {
+    hookSpecificOutput: {
+      hookEventName: CANONICAL_EVENT,
+      additionalContext: REPAIR_LINE,
+    },
+  };
+}
+
 function deliverThenCommit(stateFile, payload, nextState) {
   if (!tryEmit(payload)) return;
   writeState(stateFile, nextState);
@@ -340,26 +401,27 @@ function main() {
   const stateFile = path.join(stateDir(), `session-${sessionId}.json`);
   const state = readState(stateFile);
 
-  // Identity card (M5): Grok has no SessionStart hook, so the card rides the
-  // FIRST prompt of the session; state.cardShown commits only after a
-  // successful emit, matching the dedupe discipline.
-  const card = state.cardShown ? null : identityCardContext();
+  // Grok exposes only UserPromptSubmit; treat the first prompt as SessionStart
+  // for participant setup and capability gating.
+  const firstPrompt = !state.initialized;
+  if (firstPrompt) {
+    if (!hasParticipantsCapability(runPost(["version", "--json"], cwd))) {
+      tryEmit(repairPayload());
+      return;
+    }
+    runPost(["participant", "bind"], cwd);
+  }
 
-  const result = spawnSync(postBinary(), ["watch", "--snapshot"], {
-    cwd,
-    encoding: "utf8",
-    timeout: 4000,
-    stdio: ["ignore", "pipe", "ignore"],
-  });
+  const result = runPost(["watch", "--snapshot"], cwd);
 
   if (result.error || result.status !== 0) {
     const nextState = {
       ...state,
       failStreak: state.failStreak + 1,
-      cardShown: state.cardShown || card !== null,
+      initialized: true,
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
-    deliverThenCommit(stateFile, withCard(payload, card, CANONICAL_EVENT), nextState);
+    deliverThenCommit(stateFile, payload, nextState);
     return;
   }
 
@@ -379,10 +441,10 @@ function main() {
     const nextState = {
       ...state,
       failStreak: state.failStreak + 1,
-      cardShown: state.cardShown || card !== null,
+      initialized: true,
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
-    deliverThenCommit(stateFile, withCard(payload, card, CANONICAL_EVENT), nextState);
+    deliverThenCommit(stateFile, payload, nextState);
     return;
   }
 
@@ -391,18 +453,16 @@ function main() {
   const nextState = {
     seen: [...new Set(events.map((event) => eventKey(event)))],
     failStreak: 0,
-    cardShown: state.cardShown || card !== null,
+    initialized: true,
   };
-  const payload =
-    fresh.length === 0
-      ? {}
-      : {
-          hookSpecificOutput: {
-            hookEventName: CANONICAL_EVENT,
-            additionalContext: contextFor(fresh),
-          },
-        };
-  deliverThenCommit(stateFile, withCard(payload, card, CANONICAL_EVENT), nextState);
+  const identity = firstPrompt
+    ? identityLine(runPost(["participant", "show", "--json"], cwd))
+    : null;
+  const context = appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity);
+  const payload = context
+    ? { hookSpecificOutput: { hookEventName: CANONICAL_EVENT, additionalContext: context } }
+    : {};
+  deliverThenCommit(stateFile, payload, nextState);
 }
 
 try {

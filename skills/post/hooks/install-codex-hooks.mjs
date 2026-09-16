@@ -24,13 +24,6 @@ import { stableNodePath } from "./stable-node-path.mjs";
 // POST_CODEX_HOOK_INSTALL_DIR is a test override; live installs use the
 // default.
 const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
-// The adapter statically imports ./identity-card.mjs (M5); the private
-// install must carry it alongside or every installed hook fire crashes
-// with ERR_MODULE_NOT_FOUND.
-const HELPER_SOURCE = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "identity-card.mjs"
-);
 const ADAPTER = path.join(
   process.env.POST_CODEX_HOOK_INSTALL_DIR || path.join(os.homedir(), ".codex", "hooks"),
   "post-codex-mail.mjs"
@@ -195,21 +188,6 @@ if (fs.existsSync(target)) {
 }
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
-// Dependency-ordered: the helper the adapter imports lands first, the
-// adapter that imports it last. A failed helper copy leaves the OLD
-// runnable adapter in place; a helper-only partial is harmless.
-const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
-const helperSource = fs.readFileSync(HELPER_SOURCE);
-let helperChanged = true;
-try {
-  helperChanged = !helperSource.equals(fs.readFileSync(HELPER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
-}
-if (helperChanged) {
-  writeFileAtomic(HELPER, helperSource, 0o644);
-}
-
 const source = fs.readFileSync(SOURCE);
 let adapterChanged = true;
 try {
@@ -287,11 +265,10 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || adapterModeChanged || helperChanged
+  configChanged || adapterChanged || adapterModeChanged
     ? [
         configChanged && "hooks updated",
         (adapterChanged || adapterModeChanged) && "adapter updated",
-        helperChanged && "identity-card helper updated",
       ]
         .filter(Boolean)
         .join("\n")

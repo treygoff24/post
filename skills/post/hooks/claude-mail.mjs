@@ -39,18 +39,19 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-import { identityCardContext, withCard } from "./identity-card.mjs";
-
 const THROTTLE_MS = Number(process.env.POST_CLAUDE_HOOK_THROTTLE_MS ?? 30_000);
 const EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse"]);
 const LIST_CAP = 20;
 const CONTEXT_MAX = 4096;
+const MERGED_CONTEXT_MAX = CONTEXT_MAX + 256;
 const NAME_MAX = 255;
 const UNREADABLE_ID_MAX = 255; // filename-derived stem bound
 const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const REPAIR_LINE =
+  "[post] installed post lacks the participants capability; repair: cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 
 function writeAllSync(fd, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -302,6 +303,66 @@ function failDiagnostic(eventName) {
   };
 }
 
+function runPost(args, cwd) {
+  return spawnSync(postBinary(), args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 4000,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
+function hasParticipantsCapability(result) {
+  if (result?.error || result?.status !== 0) return false;
+  try {
+    const value = JSON.parse(String(result.stdout ?? ""));
+    return Array.isArray(value.capabilities) && value.capabilities.includes("participants");
+  } catch {
+    return false;
+  }
+}
+
+function identityLine(result) {
+  if (result?.error || result?.status !== 0) return null;
+  try {
+    const value = JSON.parse(String(result.stdout ?? ""));
+    const participant = value?.participant;
+    const id = participant?.id ?? value?.id;
+    const lineage = participant?.lineage ?? value?.lineage;
+    if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
+    return `[post] participant ${id}, continuing lineage ${lineage}; voices on request: post identity show ${lineage} --voices`;
+  } catch {
+    return null;
+  }
+}
+
+function safeIdentityPart(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= NAME_MAX &&
+    !CONTROL_CHARS.test(value) &&
+    value !== "." &&
+    value !== ".." &&
+    !/[\\/]/.test(value)
+  );
+}
+
+function appendIdentity(context, line) {
+  if (!line || Buffer.byteLength(line, "utf8") > 256) return context;
+  const merged = context ? `${context}\n${line}` : line;
+  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
+}
+
+function repairPayload(eventName) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: eventName,
+      additionalContext: REPAIR_LINE,
+    },
+  };
+}
+
 function deliverThenCommit(stateFile, payload, nextState) {
   if (!tryEmit(payload)) return;
   writeState(stateFile, nextState);
@@ -327,9 +388,15 @@ function main() {
   const sessionId = input.session_id.replace(/[^A-Za-z0-9._-]/g, "_");
   const stateFile = path.join(stateDir(), `session-${sessionId}.json`);
 
-  // Identity card (M5): injected once, at SessionStart, alongside whatever
-  // the mail check produces — the card rides every payload branch below.
-  const card = eventName === "SessionStart" ? identityCardContext() : null;
+  if (eventName === "SessionStart") {
+    if (!hasParticipantsCapability(runPost(["version", "--json"], input.cwd))) {
+      tryEmit(repairPayload(eventName));
+      return;
+    }
+    // Binding is deliberately a separate command: only post participant bind
+    // may mint the record, and it must run from the session cwd.
+    runPost(["participant", "bind"], input.cwd);
+  }
 
   if (eventName === "PostToolUse") {
     try {
@@ -341,17 +408,12 @@ function main() {
 
   const state = eventName === "SessionStart" ? { seen: [], failStreak: 0 } : readState(stateFile);
 
-  const result = spawnSync(postBinary(), ["watch", "--snapshot"], {
-    cwd: input.cwd,
-    encoding: "utf8",
-    timeout: 4000,
-    stdio: ["ignore", "pipe", "ignore"],
-  });
+  const result = runPost(["watch", "--snapshot"], input.cwd);
 
   if (result.error || result.status !== 0) {
     const nextState = { ...state, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
-    deliverThenCommit(stateFile, withCard(payload, card, eventName), nextState);
+    deliverThenCommit(stateFile, payload, nextState);
     return;
   }
 
@@ -370,7 +432,7 @@ function main() {
   if (malformed) {
     const nextState = { ...state, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
-    deliverThenCommit(stateFile, withCard(payload, card, eventName), nextState);
+    deliverThenCommit(stateFile, payload, nextState);
     return;
   }
 
@@ -385,16 +447,15 @@ function main() {
   };
   // Written after a successful emit even when nothing is new: the file's mtime
   // is the PostToolUse throttle clock.
-  const payload =
-    fresh.length === 0
-      ? {}
-      : {
-          hookSpecificOutput: {
-            hookEventName: eventName,
-            additionalContext: contextFor(fresh),
-          },
-        };
-  deliverThenCommit(stateFile, withCard(payload, card, eventName), nextState);
+  let identity = null;
+  if (eventName === "SessionStart") {
+    identity = identityLine(runPost(["participant", "show", "--json"], input.cwd));
+  }
+  const context = appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity);
+  const payload = context
+    ? { hookSpecificOutput: { hookEventName: eventName, additionalContext: context } }
+    : {};
+  deliverThenCommit(stateFile, payload, nextState);
 }
 
 try {
