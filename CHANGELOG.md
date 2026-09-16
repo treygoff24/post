@@ -3,13 +3,26 @@
 ## Unreleased
 
 ### Added
-- Per-conversation participants with independent delivery, read, channel, and
-  presence state; typed workspace, lineage, and participant addresses with
-  frozen routing receipts; optional lineages with attributed voices and terms;
-  participant and identity command groups; and machine-readable build/store
-  capabilities through `post version --json`. An optional orientation separates
-  the recorded mechanism from claims Post does not make about continuity,
-  experience, or welfare.
+- Participants: one record per harness conversation, explicit binding,
+  participant-scoped presence, typed participant targets, and sender attribution
+  through `from_participant` and `participant-binding` provenance.
+- Lineages: host-local affiliation retained through stale and ended states,
+  attributed voices and terms,
+  terms-aware `identity new` recovery, and targeted voice withdrawal with a
+  durable cleanup gap marker.
+- Routing receipts: workspace and lineage sends freeze active recipients;
+  unrouted mail remains pending, pending counts stay separate from unread,
+  `inbox --adopt` routes held lineage mail, and read-only views project
+  eligibility without writing. Watch and reply output include typed addresses
+  and sender origin.
+  <!-- verify-on-integrated-binary -->
+- Cursors v2: exact per-address mail and per-channel seen sets live under each
+  participant, so siblings sharing a workspace read independently and late ids
+  remain unread until that participant consumes them.
+  <!-- verify-on-integrated-binary -->
+- Lifecycle: `last_seen`, per-participant leases, touch/end commands, active-set
+  routing, lifecycle state in `who`, reactivation on bind, and durable frozen
+  delivery without reassignment after expiry.
 - Opt-in `--max-bytes N` on full-body `post chat`, `post read`, and `post
   catchup`. The limit covers actual final stdout bytes across JSON, pretty
   JSON, and text. Budgeted results emit and consume only a contiguous prefix

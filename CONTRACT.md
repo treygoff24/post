@@ -74,8 +74,20 @@ The public language is model-neutral; the default root remains
   are reserved room names; the actual `.post-arx.json` temporary name is
   `..post-arx.json.<pid>.<nonce>.tmp`, and no lock temporary namespace is
   produced or reserved.
-- Under an enrolled/fenced store, read-only forms stay available and never write: `read --peek`, direct-mail and channel body slices, `chat --peek`, `chat --history`, `chat --since`, `chat --seen-by`, `search`, `watch --snapshot`, `schema`, `doctor` (without `--fix`), `profile` (show), `owner` (show), and the listings (`inbox`, `rooms`, `channels`, `who`). Consuming reads, exact `--ack` forms, `catchup`, long-running `watch`, and every send or state change are admitted as writers and are refused without a matching generation. Admitted read-only forms create
-  no root/room directory, banner-day, heartbeat, or cursor writes. A long
+- Under an enrolled/fenced store, read-only forms stay available and never
+  write: `read --peek`, direct-mail and channel body slices, `chat --peek`,
+  `chat --history`, `chat --since`, `chat --seen-by`, `search`, `watch
+  --snapshot`, `schema`, `version`, `doctor` (without `--fix`), `profile`
+  (show), `owner` (show), `participant show`, `participant list`, `identity
+  list`, `identity show`, and the listings (`inbox`, `rooms`, `channels`,
+  `who`).
+- The same read-only forms remain available without a participant binding and
+  emit the unbound notice on stderr. They never mint or initialize participant
+  state. `watch --snapshot` stdout remains NDJSON or empty, never prose.
+- Consuming reads, exact `--ack` forms, `catchup`, long-running `watch`, and
+  every send or state change are admitted as writers and are refused without a
+  matching generation. Admitted read-only forms create no root/room directory,
+  banner-day, heartbeat, or cursor writes. A long
   non-snapshot watch re-admits before every heartbeat and exits nonzero if the
   fence or generation changes. Snapshot remains read-only only under the
   enrolled/fence guard; legacy snapshot behavior is unchanged except that it
@@ -203,17 +215,15 @@ their existing success semantics.
   before each inbox publication attempt. If inbox commits but archive
   publication fails, `delivered_unarchived` is non-retryable and the message
   must not be resent.
-- `post inbox [--room <name>] [--text]` — unread list, oldest first. JSON default:
-  `{ok, room, unread: [{id, from, kind, subject, sent}], count,
-  skipped_unreadable, unread_count}`. `count` and `unread` retain their
-  physical-inbox meaning; `unread_count` counts parseable inbox mail whose id
-  is absent from this room's `mail.seen` set. In a healthy store all three
-  agree, but an inbox/read duplicate left by a failed unlink can make
-  `unread_count` lower while `count` still exposes the physical file. Text with
-  `--text`. Malformed mail is skipped with one stderr warning. I/O-unreadable
-  mail is also warned and increments `skipped_unreadable`; good mail is still
-  listed and the command exits 0. Empty inbox = exit 0, count 0. Resolved room
-  always in output.
+- `post inbox [--room <name>] [--text] [--adopt]`: read-only listing, oldest
+  first. Bound JSON is `{ok, participant, room, unread, count,
+  skipped_unreadable, unread_count, pending, pending_by_address}`. `pending` is
+  separate from `unread_count` and is never added to it. An unbound listing
+  returns no unread items, reports provisional pending workspace mail, writes
+  nothing, and puts its notice on stderr. `--adopt` is the writer form: it
+  routes held mail for the caller's current lineage to the affiliates eligible
+  then, without giving later affiliates that backlog.
+  <!-- verify-on-integrated-binary -->
 - `post read <id-or-prefix> [--room <name>] [--peek] [--max-bytes <n>] [--framing auto|full|compact]`
   — prints framing banner
   + envelope + body (text default; `--json` gives `{ok, framing, envelope,
@@ -483,12 +493,15 @@ their existing success semantics.
   `unread` (the exact unseen eligible count for a member channel, or `null`
   for a non-member or missing acting room). `messages` remains the raw
   message-file count. Listing is read-only and never creates cursor state.
-- `post who [--room <name>]... [--text]` — read-only presence: for each selected
-  (or all registered) room, whether a watch heartbeat is live and the last-seen
-  unix-seconds stamp. Heartbeats live at `<room>/watch.heartbeat`, touched each
-  long-running watch poll (not `--snapshot`) when the room directory already
-  exists. Format: `<unix-secs> <interval-ms>`; liveness is age ≤ interval×2 +
-  slack, and future stamps are never live. Never reports PIDs or process info.
+- `post who [--room <name>]... [--text]`: read-only participant directory.
+  JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count}`.
+  The caller is first and carries binding provenance. Every participant row
+  reports `id`, `harness`, lifecycle `state`, `last_seen` when present,
+  optional lineage/workspace, watch state, and separate `unread` and `pending`
+  address maps. A legacy row without `last_seen` reports `state: "no lease
+  record"` and is stale for recipient selection. `legacy_rooms` retains old
+  room heartbeat rows. It never reports PIDs or process information.
+  <!-- verify-on-integrated-binary -->
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix] [--brief]` — validates root exists, rooms.json/rules.json parse
@@ -542,24 +555,21 @@ their existing success semantics.
   `--from` preserves the backlog-replay behavior above. Emits envelope metadata
   and, for readable messages, one sanitized body preview; it never emits a full
   body or consumes state. Consumption and its framing banner stay exclusively
-  with `post read`, `post chat`, or `post catchup`. Default output NDJSON, one
-  object per line: direct mail `{"event":"mail", room, id, from, kind,
-  subject, sent, reason, preview?}`;
-  unreadable direct mail or channel messages `{"event":"unreadable", room,
-  id, reason}` where `reason` is `mail` or `channel` (filename-derived id,
-  nothing quoted from the file; mention is unknowable without a body);
-  channel messages
-  `{"event":"channel_message", channel, id, from, subject, sent, reason,
-  preview?}` where `reason` is `channel` or `mention` (the watching room is
-  @mentioned). A room's
-  own channel messages are never news to it and never ring its own watch. A
-  watcher wearing several identities declares them with `--own <room>`
-  (repeatable); selecting a room with `--room` never implies owning it, so a
-  monitor still receives the rooms it merely watches.
-  With `--digest`, each batch instead emits one object per `(room, source)`
+  with `post read`, `post chat`, or `post catchup`. Default output is one NDJSON
+  object per line. Every event carries `address: {kind, name}`; `room` appears
+  only when `address.kind == workspace`. Mail events add `id`, `from`, `origin`,
+  optional `reply_to_participant`, `reply_to_shared`, optional `pending: true`,
+  `kind`, `subject`, `sent`, `reason: mail`, and optional `preview`. Unreadable
+  events add `id`, `reason: mail|channel`, and `channel` when the failure is a
+  channel message. Channel events add `channel`, `id`, `from`, `origin`, the
+  reply targets, `subject`, `sent`, `reason: channel|mention`, and optional
+  `preview`. A bound participant suppresses only channel messages whose
+  `from_participant` is itself; `--own` remains a legacy unbound-watch control.
+  With `--digest`, each batch instead emits one object per `(address, source)`
   group, ordered by the first underlying event:
-  `{"event":"digest", room, source, count, first_id, last_id, from, reason,
-  preview?}`.
+  `{"event":"digest", address, room?, source, count, first_id, last_id, from,
+  reason, preview?}`.
+  <!-- verify-on-integrated-binary -->
   `source` is `mail` or `channel:<name>`; `from` de-duplicates senders in
   arrival order and caps them at five followed by `"+N more"`; `reason` is the
   shared per-event reason or `mixed`. Readable ring lines carry a trailing
@@ -577,9 +587,10 @@ their existing success semantics.
   greater than its bound; thus the copyable suffix includes the whole digest at
   emission time. Sender counts are omitted when all are one and the
   parenthesized list is omitted when no sender parsed.
-  Each long-running poll touches `<room>/watch.heartbeat` (`<unix-secs>
-  <interval-ms>`) when the room directory already exists, so `post who` can
-  report live watches without PIDs. Snapshot mode never writes heartbeats.
+  Each bound long-running poll touches
+  `participants/<id>/watch.heartbeat`; an unbound legacy watch retains
+  `<room>/watch.heartbeat`. `post who` reports both without PIDs. Snapshot mode
+  never writes heartbeats or refreshes `last_seen`.
   A watch is live when the stamp is not in the future and age is at most
   `interval*2 + slack` (legacy single-number stamps assume a 1000ms interval).
   `--text` mirrors inbox/channel line formats with the full message id, subject,
@@ -605,8 +616,9 @@ their existing success semantics.
   its startup seen-set snapshot in memory (read-only), so a channel read
   during the same watch does not erase a later notification. `--snapshot` (conflicts with `--once`;
   `--interval-ms` has no effect) is the nonblocking poll for bounded lifecycle
-  hooks: it performs exactly one scan of unread direct mail plus
-  joined-channel messages outside the room's seen-set, then exits 0. An empty scan
+  hooks: it performs exactly one scan of unread or provisionally eligible mail
+  plus joined-channel messages outside the participant's seen-set, then exits
+  0. An empty scan
   emits nothing; a non-empty scan emits the ordinary NDJSON/text batch. A
   direct-mail scan failure is a nonzero error envelope — never a false empty —
   while per-channel failures keep the watch posture (stderr warning, healthy
@@ -619,22 +631,26 @@ their existing success semantics.
   Optional digest grouping happens after that limit. The flag affects emission
   only — omitted events remain unread — and omitting it preserves the unbounded
   snapshot behavior.
+  <!-- verify-on-integrated-binary -->
 
 ## Read-layer notes (amendment, 2026-09-01)
 
 - `catchup` is the complete-slice writer; `search`, `inbox`, `channels`,
-  `schema`, `doctor` without `--fix`, and `watch --snapshot` are read-only.
-  Listings and search may take an existing `.cursors.lock` shared guard while
-  loading a snapshot, but an absent cursor, lock, room, or banner-day file is
-  never created by those commands. Watch captures its channel floor at startup
-  and never reads or writes cursor state after startup.
-- Channel unread counts reuse the one message-directory enumeration already
-  needed for raw totals. For a member channel, count files whose ids are not in
-  that room/channel seen-set and whose parsed sender is not the room; an
-  unreadable unseen file counts as one unhandled item. Parse only unseen
-  candidates. Inbox `unread_count` counts parseable inbox mail whose ids are
-  absent from `mail.seen`; malformed or unreadable files remain excluded and
-  are reported through existing warnings.
+  `schema`, `version`, `doctor` without `--fix`, participant and identity
+  listings, and `watch --snapshot` are read-only. Display-only forms compute
+  provisional eligibility for unrouted mail and label or count it as pending;
+  they publish no routing receipt and change no cursor, lease, or affiliation.
+  An absent cursor, lock, room, participant, or banner-day file is never created
+  by those commands. Watch captures its participant channel floor at startup
+  and never writes cursor state.
+  <!-- verify-on-integrated-binary -->
+- Channel unread counts use the participant's exact seen set and effective
+  membership. Inbox `unread_count` includes only receipt-backed messages whose
+  frozen recipient set contains that participant, whose sender is not that
+  participant, and whose id is not in its address seen set. Pending is counted
+  separately. Malformed or unreadable files remain excluded and are reported
+  through existing warnings.
+  <!-- verify-on-integrated-binary -->
 - Search is a linear scan of visible history plus party-visible mail. The
   default result cap is 100 and the hard cap is 1000; matching is literal,
   case-insensitive Unicode substring over body, subject, sender id, and message
@@ -646,6 +662,29 @@ their existing success semantics.
   results; `auto` is compact, `full` is the complete wall, and `compact` is the
   condensed law. JSON carries structured framing. Existing read/chat framing
   remains unchanged, and no surface offers `none`.
+
+## Participant lifecycle and read-only projection (amendment, 2026-09-16)
+
+- A participant is active iff `ended_at` is absent and `last_seen` falls within
+  its recorded `lease_hours`. The default lease is 24 hours. A record with no
+  `last_seen` is stale until bind or touch. `POST_PARTICIPANT_LEASE_HOURS` is
+  read only for the acting participant's renewal and never reclassifies a peer.
+- `post participant bind` and writer activity refresh `last_seen`; bind and
+  `post participant touch` record the acting participant's lease. Adapters call
+  touch during supported prompt/tool events and call `post participant end` on
+  SessionEnd. End is idempotent. A later bind clears `ended_at`, reactivates the
+  same id, and preserves its historical affiliation.
+- Routing and `post who` select from the active set. Workspace fan-out uses
+  active participants bound there; lineage fan-out uses active affiliates.
+  Lineage affiliation survives stale and ended states and is cleared only by
+  explicit leave. `post identity show <name>` lists those historical affiliates
+  and gives each an `active` flag.
+  <!-- verify-on-integrated-binary -->
+- Activity affects new recipient selection only. A frozen recipient keeps read
+  access after its lease expires. Mail frozen to an abandoned session during
+  its remaining lease is not reassigned at expiry; only later sends use the new
+  active set. Participant-targeted mail remains durable regardless of state.
+  <!-- verify-on-integrated-binary -->
 
 ## Profiles (amendment, 2026-08-05)
 
@@ -750,7 +789,9 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   (`harness.repo.uuid`), recorded **verbatim** from `POST_SENDER_ADDRESS` —
   post never synthesizes one. `sender_provenance` records how `from` was
   resolved: `declared-env` | `declared-flag` | `inferred-cwd` |
-  `inferred-basename`. Both are self-declared transport metadata; neither
+  `inferred-basename` | `participant-binding`. `participant-binding` means the
+  bound participant supplied the shared reply address without a `--from` flag
+  or `POST_FROM` assertion. Both fields are transport evidence; neither
   affects routing, blocks, cursors, membership, profiles, or signed-message
   verification. Old mail and old stores keep reading; old binaries ignore the
   new fields.
