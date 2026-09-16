@@ -180,7 +180,9 @@ fn live_participant_watch_routes_bridge_arrival_and_emits_without_consuming() {
     let recipient = sandbox.test_participant("beta");
     let sender = sandbox.test_participant("alpha");
     let mut child = common::post_command()
-        .args(["watch", "--once", "--interval-ms", "100"])
+        // The slow pass is ten minutes away. This arrival must be routed by
+        // the filesystem-event scan that emits it, not by periodic recovery.
+        .args(["watch", "--once", "--interval-ms", "60000"])
         .current_dir(&beta)
         .env("HOME", &sandbox.home)
         .env("POST_MAIL_ROOT", &sandbox.mail_root)
@@ -247,6 +249,64 @@ fn live_participant_watch_routes_bridge_arrival_and_emits_without_consuming() {
         .join(recipient)
         .join("cursors.json")
         .exists());
+}
+
+#[test]
+fn live_watch_isolates_same_address_corrupt_receipt_and_rings_healthy_sibling() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let recipient = sandbox.test_participant("alpha");
+    let sender = sandbox.test_participant("beta");
+    let bad = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:alpha",
+            "--body",
+            "bad receipt",
+            "--json",
+        ],
+        &sender,
+        &beta,
+    );
+    assert_success(&bad);
+    let bad: Value = from_stdout(&bad);
+    let bad_id = bad["envelope"]["id"].as_str().expect("bad id");
+    std::fs::write(
+        sandbox
+            .mail_root
+            .join(format!("alpha/routing/{bad_id}.json")),
+        b"{corrupt",
+    )
+    .expect("corrupt receipt");
+
+    let child = start_watch(&sandbox, &recipient, &alpha);
+    let good = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:alpha",
+            "--body",
+            "healthy sibling",
+            "--json",
+        ],
+        &sender,
+        &beta,
+    );
+    assert_success(&good);
+    let good: Value = from_stdout(&good);
+    let good_id = good["envelope"]["id"].as_str().expect("good id");
+    let output = stop_watch(child);
+    let events = common::stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("watch event"))
+        .collect::<Vec<_>>();
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "unreadable" && event["id"] == bad_id));
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "mail" && event["id"] == good_id));
 }
 
 #[test]

@@ -189,6 +189,21 @@ pub(crate) fn effective_participants(
     context: &Context,
     channel: &str,
 ) -> AppResult<Vec<Participant>> {
+    participants_for_channel(context, channel, false)
+}
+
+pub(crate) fn participants_for_join_validation(
+    context: &Context,
+    channel: &str,
+) -> AppResult<Vec<Participant>> {
+    participants_for_channel(context, channel, true)
+}
+
+fn participants_for_channel(
+    context: &Context,
+    channel: &str,
+    include_unknown: bool,
+) -> AppResult<Vec<Participant>> {
     let mut participants = Vec::new();
     for participant in crate::participant::list(context)? {
         let state = match ParticipantChannels::load(&participant) {
@@ -198,6 +213,9 @@ pub(crate) fn effective_participants(
                     "post: warning: skipped invalid participant channels {:?}: {:?}",
                     participant.id, error.message
                 );
+                if include_unknown {
+                    participants.push(participant);
+                }
                 continue;
             }
             Err(error) => return Err(error),

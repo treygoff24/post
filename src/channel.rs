@@ -237,7 +237,7 @@ pub(crate) fn join(
     // blocked counterpart cannot slip in between check and write.
     let rules = context.load_rules(&rooms)?;
     let mut existing_members: Vec<(String, String)> =
-        crate::channel_state::effective_participants(context, channel)?
+        crate::channel_state::participants_for_join_validation(context, channel)?
             .into_iter()
             .map(|member| {
                 let address = member

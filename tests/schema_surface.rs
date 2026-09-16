@@ -40,6 +40,25 @@ fn assert_keys_in_shape(shape: &[String], expected: &[&str]) {
     }
 }
 
+fn shape_top_level_keys(shape: &[String]) -> BTreeSet<String> {
+    shape
+        .iter()
+        .map(|field| {
+            field
+                .split(|character: char| {
+                    character.is_whitespace() || matches!(character, '(' | '[' | '{' | '=' | '?')
+                })
+                .next()
+                .expect("shape field name")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn expected_keys(fields: &[&str]) -> BTreeSet<String> {
+    fields.iter().map(|field| (*field).to_owned()).collect()
+}
+
 fn assert_keys_are_documented(actual: &BTreeSet<String>, shape: &[String]) {
     let shape = shape.join("\n");
     for field in actual {
@@ -221,6 +240,91 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_keys_in_shape(
         &schema.output_shapes.channels,
         &["participant", "pending", "channels"],
+    );
+    assert_keys_in_shape(
+        &schema.output_shapes.doctor,
+        &[
+            "participant",
+            "pending",
+            "participant_fix",
+            "participant_error",
+        ],
+    );
+    let doctor = sandbox.run(&["doctor"]);
+    let doctor = json_object(&doctor);
+    assert_keys_are_documented(&keys(&doctor), &schema.output_shapes.doctor);
+    assert_eq!(
+        shape_top_level_keys(&schema.output_shapes.doctor),
+        expected_keys(&[
+            "ok",
+            "status",
+            "root",
+            "checks",
+            "count",
+            "fixed",
+            "exit_codes",
+            "participant",
+            "pending",
+            "participant_fix",
+            "participant_error",
+        ])
+    );
+    assert_eq!(
+        shape_top_level_keys(&schema.output_shapes.read_json),
+        expected_keys(&[
+            "ok",
+            "framing",
+            "envelope",
+            "body",
+            "own",
+            "pending",
+            "already_read",
+        ])
+    );
+    assert_eq!(
+        shape_top_level_keys(&schema.output_shapes.read_budget),
+        expected_keys(&[
+            "ok",
+            "framing",
+            "envelope",
+            "body",
+            "own",
+            "pending",
+            "already_read",
+            "count",
+            "selected_count",
+            "has_more",
+            "byte_limit",
+            "omitted",
+        ])
+    );
+    assert_eq!(
+        shape_top_level_keys(&schema.output_shapes.read_slice),
+        expected_keys(&[
+            "ok",
+            "framing",
+            "envelope",
+            "body_slice",
+            "range",
+            "total_body_bytes",
+            "body_complete",
+            "next_offset",
+            "continuation",
+            "already_read",
+            "own",
+            "pending",
+            "verification_scope",
+            "byte_limit",
+        ])
+    );
+    assert_eq!(
+        schema
+            .output_shapes
+            .read_json
+            .iter()
+            .find(|field| field.starts_with("envelope "))
+            .expect("read envelope shape"),
+        "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)"
     );
     assert!(schema
         .global_flags
@@ -690,6 +794,10 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     assert_keys_are_documented(
         &keys(&json_object(&chat_slice)),
         &schema.output_shapes.chat_slice,
+    );
+    assert_keys_in_shape(
+        &schema.output_shapes.chat_slice,
+        &["origin", "reply_to_participant", "reply_to_shared"],
     );
 
     let beta_participant = sandbox.test_participant("beta");

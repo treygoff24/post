@@ -2080,7 +2080,7 @@ fn inbox_skips_malformed_mail_and_rooms_only_show_recipient_rules() {
     assert!(stderr(&listed).contains("skipped malformed pending mail"));
     let listed: InboxOutput = from_stdout(&listed);
     assert_eq!(listed.count, 1);
-    assert_eq!(listed.skipped_unreadable, 0);
+    assert_eq!(listed.skipped_unreadable, 1);
     assert_eq!(listed.unread[0].id, sent.envelope.id);
 
     let rooms: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
@@ -2123,7 +2123,7 @@ fn inbox_reports_unreadable_mail_without_hiding_readable_messages() {
     let listed: InboxOutput = from_stdout(&output);
     assert_eq!(listed.count, 1);
     assert_eq!(listed.unread[0].id, sent.envelope.id);
-    assert_eq!(listed.skipped_unreadable, 0);
+    assert_eq!(listed.skipped_unreadable, 1);
 }
 
 #[test]
@@ -4505,7 +4505,7 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
         "watch must not echo malformed mail content"
     );
     assert!(
-        stderr(&output).contains("left unroutable mail")
+        stderr(&output).contains("skipped unreadable pending mail")
             && stderr(&output).contains("20260721-010101-abcdef.mail"),
         "expected one stderr warning naming the malformed pending file: {}",
         stderr(&output)
@@ -5153,6 +5153,111 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         1,
         "fence episode warning was not deduplicated: {}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn long_watch_scans_during_each_fence_episode_and_warns_once_per_episode() {
+    let watched = Sandbox::new_unseeded();
+    seed_fence_store(&watched, r#"{"state":"active","generation":7}"#);
+    seed_channel_fixture(&watched);
+    fs::create_dir_all(watched.mail_root.join("dest")).expect("existing enrolled room");
+    let stdout_path = watched.path.join("fenced-watch.stdout");
+    let stderr_path = watched.path.join("fenced-watch.stderr");
+    let stdout_file = fs::File::create(&stdout_path).expect("watch stdout file");
+    let stderr_file = fs::File::create(&stderr_path).expect("watch stderr file");
+    let mut child = post_command()
+        .args(["watch", "--room", "dest", "--interval-ms", "100"])
+        .current_dir(watched.home.join("dest"))
+        .env("HOME", &watched.home)
+        .env("POST_MAIL_ROOT", &watched.mail_root)
+        .env("POST_ARX_GENERATION", "7")
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn fenced watch");
+    let heartbeat = watched
+        .mail_root
+        .join("participants/test-default/watch.heartbeat");
+    for _ in 0..100 {
+        if heartbeat.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(heartbeat.exists(), "watch never became live");
+
+    let wait_for_output = |needle: &str| {
+        for _ in 0..100 {
+            let text = fs::read_to_string(&stdout_path).unwrap_or_default();
+            if text.contains(needle) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!(
+            "watch did not emit {needle:?} while fenced: {}",
+            fs::read_to_string(&stdout_path).unwrap_or_default()
+        );
+    };
+
+    let first_fence_mtime = fence_under_external_lock(&watched, 7);
+    let first = "20260820-120001-000001-bbbbbb";
+    write_channel_message(
+        &watched,
+        "tax",
+        first,
+        "other",
+        "first fenced episode",
+        "visible before recovery",
+    );
+    wait_for_output(first);
+
+    let active_tmp = watched.mail_root.join("..post-arx.json.reactivate.tmp");
+    fs::write(
+        &active_tmp,
+        r#"{"state":"active","generation":7}
+"#,
+    )
+    .expect("write active state");
+    fs::rename(&active_tmp, watched.mail_root.join(".post-arx.json")).expect("reactivate");
+    for _ in 0..100 {
+        if fs::metadata(&heartbeat)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified > first_fence_mtime)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        fs::metadata(&heartbeat)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified > first_fence_mtime),
+        "watch never recovered between fence episodes"
+    );
+
+    fence_under_external_lock(&watched, 7);
+    let second = "20260820-120002-000001-cccccc";
+    write_channel_message(
+        &watched,
+        "tax",
+        second,
+        "other",
+        "second fenced episode",
+        "visible before shutdown",
+    );
+    wait_for_output(second);
+    assert!(child.try_wait().expect("poll fenced watch").is_none());
+    child.kill().expect("stop fenced watch");
+    let _ = child.wait();
+    let stderr = fs::read_to_string(&stderr_path).expect("read watch stderr");
+    assert_eq!(
+        stderr
+            .matches("migration fence active; watch continues read-only")
+            .count(),
+        2,
+        "expected one warning per fence episode: {stderr}"
     );
 }
 

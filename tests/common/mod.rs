@@ -582,14 +582,17 @@ pub fn write_custom_mail(
     body: &str,
 ) {
     fs::create_dir_all(inbox).expect("create custom mail fixture inbox");
+    let destination = inbox.join(format!("{filename_id}.mail"));
+    let temporary = inbox.join(format!(".{filename_id}.mail.tmp"));
     fs::write(
-        inbox.join(format!("{filename_id}.mail")),
+        &temporary,
         format!(
             "{}\n---\n{body}",
             serde_json::to_string_pretty(envelope).expect("serialize custom envelope")
         ),
     )
     .expect("write custom mail fixture");
+    fs::rename(&temporary, &destination).expect("publish custom mail fixture atomically");
 }
 
 pub fn register_alpha_beta(sandbox: &Sandbox) -> (PathBuf, PathBuf) {

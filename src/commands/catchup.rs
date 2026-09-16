@@ -745,6 +745,7 @@ impl CatchupRemainderIndex {
                                     item.envelope.from_participant.as_deref()
                                         == Some(participant.id.as_str()),
                                     item.envelope.pending,
+                                    true,
                                 )
                             },
                         );
@@ -776,6 +777,7 @@ impl CatchupRemainderIndex {
                             mentioned: item.message.mentions.iter().any(|mention| mention == room),
                             remaining_targets: remaining_by_target[index],
                             continuation: super::chat::measured_omission_continuation(
+                                context,
                                 channel,
                                 room,
                                 &item.message,

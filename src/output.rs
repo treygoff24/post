@@ -432,6 +432,10 @@ pub struct ChatMessageSliceOutput {
     pub channel: String,
     pub room: String,
     pub message: crate::model::ChannelMessage,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_participant: Option<String>,
+    pub reply_to_shared: String,
     pub body_slice: String,
     pub range: BodyByteRange,
     pub total_body_bytes: usize,

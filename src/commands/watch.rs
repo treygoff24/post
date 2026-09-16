@@ -466,6 +466,11 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         }
         return Ok(CommandResult::success(String::new()));
     }
+    // Presence starts before backend registration. Registration can be slow,
+    // but a running watch must already be visible to `post who`; the mandatory
+    // first scan below closes the arrival gap after registration completes.
+    let mut warned_fenced = false;
+    let mut warned_touch_failures = HashSet::new();
     // Register every watch BEFORE the first scan (r2): nothing created in
     // the gap can be missed, because the first pass inside the loop is an
     // unconditional scan. Any registration failure falls back to polling
@@ -474,7 +479,15 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         .iter()
         .flat_map(|target| target.dirs.iter().cloned())
         .collect();
-    let (mut wake, event_mode) = match NotifyWake::register(&desired) {
+    let registration = after_live_presence(
+        context,
+        &targets,
+        interval_ms,
+        &mut warned_fenced,
+        &mut warned_touch_failures,
+        || NotifyWake::register(&desired),
+    )?;
+    let (mut wake, event_mode) = match registration {
         Ok(backend) => (Box::new(backend) as Box<dyn WakeSource>, true),
         Err(error) => {
             eprintln!(
@@ -502,7 +515,25 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
         &mut wake,
         slow_period,
+        warned_fenced,
+        warned_touch_failures,
     )
+}
+
+fn after_live_presence<T>(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    warned_fenced: &mut bool,
+    warned_touch_failures: &mut HashSet<String>,
+    register: impl FnOnce() -> T,
+) -> AppResult<T> {
+    let (presence_admission, allow_writes) = watch_admission(context, warned_fenced)?;
+    if allow_writes {
+        touch_admitted_heartbeats(context, targets, interval_ms, warned_touch_failures);
+    }
+    drop(presence_admission);
+    Ok(register())
 }
 
 /// First pass is unconditional (r2: scan once immediately after
@@ -521,11 +552,12 @@ fn run_watch_loop(
     digest: bool,
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
+    mut warned_fenced: bool,
+    mut warned_touch_failures: HashSet<String>,
 ) -> AppResult<CommandResult> {
-    let mut warned_fenced = false;
     let (initial_admission, allow_writes) = watch_admission(context, &mut warned_fenced)?;
     if allow_writes {
-        touch_admitted_heartbeats(context, targets, interval_ms);
+        touch_admitted_heartbeats(context, targets, interval_ms, &mut warned_touch_failures);
     }
     let mut batch = scan_targets(
         context,
@@ -572,14 +604,24 @@ fn run_watch_loop(
             }
             Some(Wake::TimedOut) => {
                 if allow_writes {
-                    touch_admitted_heartbeats(context, targets, interval_ms);
+                    touch_admitted_heartbeats(
+                        context,
+                        targets,
+                        interval_ms,
+                        &mut warned_touch_failures,
+                    );
                 }
                 last_beat = Instant::now();
                 Vec::new()
             }
             Some(Wake::Events(dirs)) => {
                 if allow_writes && last_beat.elapsed() >= Duration::from_millis(interval_ms) {
-                    touch_admitted_heartbeats(context, targets, interval_ms);
+                    touch_admitted_heartbeats(
+                        context,
+                        targets,
+                        interval_ms,
+                        &mut warned_touch_failures,
+                    );
                     last_beat = Instant::now();
                 }
                 // Rescan every affected target through the full existing scan
@@ -648,12 +690,21 @@ fn watch_admission(
     Ok((admission, allow_writes))
 }
 
-fn touch_admitted_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) {
+fn touch_admitted_heartbeats(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    warned_failures: &mut HashSet<String>,
+) {
     let mut participants = HashSet::new();
     for target in targets {
         if let Some(participant) = target.participant.as_ref() {
             if participants.insert(participant.id.clone()) {
-                if let Err(error) = crate::participant::touch(context, &participant.id) {
+                if let Some(error) = touch_warning_for(
+                    &participant.id,
+                    crate::participant::touch(context, &participant.id).map(|_| ()),
+                    warned_failures,
+                ) {
                     eprintln!(
                         "post: warning: participant activity refresh failed (watch continues): {}",
                         error.message
@@ -664,6 +715,21 @@ fn touch_admitted_heartbeats(context: &Context, targets: &[WatchTarget], interva
         } else {
             crate::presence::touch_heartbeat(context, &target.room, interval_ms);
         }
+    }
+}
+
+fn touch_warning_for(
+    participant: &str,
+    result: AppResult<()>,
+    warned_failures: &mut HashSet<String>,
+) -> Option<AppError> {
+    match result {
+        Ok(()) => {
+            warned_failures.remove(participant);
+            None
+        }
+        Err(error) if warned_failures.insert(participant.to_owned()) => Some(error),
+        Err(_) => None,
     }
 }
 
@@ -924,6 +990,69 @@ fn dir_id(path: &Path) -> Option<(u64, u64)> {
         .map(|meta| (meta.dev(), meta.ino()))
 }
 
+fn participant_mail_snapshot(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    allow_routing: bool,
+) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
+    participant_mail_snapshot_after_initial_route(
+        context,
+        participant,
+        address,
+        allow_routing,
+        || {},
+    )
+}
+
+fn participant_mail_snapshot_after_initial_route(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    allow_routing: bool,
+    after_initial_route: impl FnOnce(),
+) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
+    if allow_routing && crate::cursor_state::routing::has_unrouted_mail(context, address)? {
+        crate::cursor_state::routing::route_pending(context, address)?;
+    }
+    after_initial_route();
+
+    let mut mail = collect_participant_mail(context, participant, address)?;
+    if allow_routing && mail.iter().any(|item| item.pending) {
+        // A bridge write can become parseable after the first routing pass but
+        // before eligibility is projected. Route that observed arrival and
+        // rebuild the snapshot so an admitted watch never emits it as pending.
+        crate::cursor_state::routing::route_pending(context, address)?;
+        mail = collect_participant_mail(context, participant, address)?;
+    }
+    Ok(mail)
+}
+
+fn collect_participant_mail(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
+    let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
+    for id in
+        crate::cursor_state::routing::provisional_pending_for_quiet(context, participant, address)?
+    {
+        let path =
+            crate::cursor_state::routing::inbox_path(context, address).join(format!("{id}.mail"));
+        let parsed = parse_mail(&path)?;
+        mail.push(crate::cursor_state::eligibility::EligibleMail {
+            path,
+            envelope: parsed.envelope,
+            body: parsed.body,
+            recipient: false,
+            own: false,
+            pending: true,
+        });
+    }
+    mail.sort_by(|left, right| left.envelope.id.cmp(&right.envelope.id));
+    Ok(mail)
+}
+
 fn scan_watch_target(
     context: &Context,
     target: &mut WatchTarget,
@@ -943,15 +1072,12 @@ fn scan_watch_target(
             emitted_channel_ids,
         );
     };
-    if allow_writes
+    let allow_routing = allow_writes
         && target.route_pending
         && matches!(
             address.kind,
             AddressKind::Workspace | AddressKind::Participant
-        )
-    {
-        crate::cursor_state::routing::route_pending(context, address)?;
-    }
+        );
     let mut batch = Vec::new();
     let channel_address = participant.workspace.as_ref().map_or_else(
         || Address {
@@ -970,26 +1096,8 @@ fn scan_watch_target(
         super::inbox::address_label(&channel_address)
     };
 
-    let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
-    let pending =
-        crate::cursor_state::routing::provisional_pending_for_quiet(context, participant, address)?;
-    let pending_ids: HashSet<String> = pending.iter().cloned().collect();
-    for id in pending {
-        let path =
-            crate::cursor_state::routing::inbox_path(context, address).join(format!("{id}.mail"));
-        let parsed = parse_mail(&path)?;
-        mail.push(crate::cursor_state::eligibility::EligibleMail {
-            path,
-            envelope: parsed.envelope,
-            body: parsed.body,
-            recipient: false,
-            own: false,
-            pending: true,
-        });
-    }
-    mail.sort_by(|left, right| left.envelope.id.cmp(&right.envelope.id));
+    let mail = participant_mail_snapshot(context, participant, address, allow_routing)?;
     for item in mail {
-        let pending = item.pending || pending_ids.contains(&item.envelope.id);
         if !target.seen.insert(item.path) {
             continue;
         }
@@ -998,7 +1106,7 @@ fn scan_watch_target(
             &target.room,
             WatchEvent::mail(
                 &target.room,
-                InboxItem::new(context, item.envelope, pending),
+                InboxItem::new(context, item.envelope, item.pending),
                 preview,
             ),
         ));
@@ -1019,9 +1127,19 @@ fn scan_watch_target(
             else {
                 continue;
             };
-            if crate::cursor_state::routing::receipt(context, address, &id)?.is_some()
-                || parse_mail(&path).is_ok()
-            {
+            let unreadable = match crate::cursor_state::routing::receipt(context, address, &id) {
+                Ok(Some(_)) => false,
+                Ok(None) => parse_mail(&path).is_err(),
+                Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                    crate::cursor_state::routing::warn_once(
+                        crate::cursor_state::routing::receipt_path(context, address, &id),
+                        format!("corrupt routing receipt skipped: {}", error.message),
+                    );
+                    true
+                }
+                Err(error) => return Err(error),
+            };
+            if !unreadable {
                 continue;
             }
             target.seen.insert(path);
@@ -1536,12 +1654,119 @@ mod tests {
             scan_failing: false,
             route_pending: false,
         }];
-        touch_admitted_heartbeats(&context, &targets, 100);
+        touch_admitted_heartbeats(&context, &targets, 100, &mut HashSet::new());
         let refreshed = crate::participant::load(&context, &participant.id)
             .expect("load participant")
             .expect("participant exists");
         assert!(refreshed.last_seen.is_some());
         assert!(refreshed.is_active(std::time::SystemTime::now()));
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_touch_warning_is_once_per_failure_episode() {
+        let mut warned = HashSet::new();
+        let failure = || Err(AppError::invalid_argument("transient touch failure"));
+        assert!(touch_warning_for("actor", failure(), &mut warned).is_some());
+        assert!(touch_warning_for("actor", failure(), &mut warned).is_none());
+        assert!(touch_warning_for("actor", Ok(()), &mut warned).is_none());
+        assert!(touch_warning_for("actor", failure(), &mut warned).is_some());
+    }
+
+    #[test]
+    fn watch_presence_is_live_before_backend_registration() {
+        let root = crate::test_support::test_root("watch-pre-registration-presence");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let heartbeat = participant.dir.join("watch.heartbeat");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant),
+            address: Some(Address {
+                kind: AddressKind::Workspace,
+                name: "alpha".to_owned(),
+            }),
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut warned_fenced = false;
+        let mut warned_touch_failures = HashSet::new();
+        after_live_presence(
+            &context,
+            &targets,
+            10_000,
+            &mut warned_fenced,
+            &mut warned_touch_failures,
+            || assert!(heartbeat.is_file(), "registration began before presence"),
+        )
+        .expect("publish presence before registration");
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_fast_scan_retries_routing_when_mail_becomes_parseable() {
+        let root = crate::test_support::test_root("watch-route-before-emit");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({"alpha": root.join("alpha")}))
+                .expect("serialize rooms"),
+        )
+        .expect("write rooms");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        crate::participant::touch(&context, &participant.id).expect("activate participant");
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create inbox");
+        let id = "20990916-050000-beef02";
+        let path = inbox.join(format!("{id}.mail"));
+        fs::write(&path, "{partial").expect("write partial arrival");
+
+        let mail = participant_mail_snapshot_after_initial_route(
+            &context,
+            &participant,
+            &address,
+            true,
+            || {
+                let envelope = serde_json::json!({
+                    "id": id,
+                    "from": "beta",
+                    "to": "alpha",
+                    "kind": "note",
+                    "subject": "bridge",
+                    "sent": "2026-09-16 05:00:00 -0500",
+                    "from_participant": "test-sender",
+                    "address_kind": "workspace"
+                });
+                fs::write(&path, format!("{envelope}\n---\nbridge arrival"))
+                    .expect("complete arrival after first routing attempt");
+            },
+        )
+        .expect("scan mail");
+
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].envelope.id, id);
+        assert!(!mail[0].pending);
+        assert!(
+            crate::cursor_state::routing::receipt(&context, &address, id)
+                .expect("load receipt")
+                .is_some()
+        );
         crate::test_support::trash_test_root(&root);
     }
 
@@ -1555,8 +1780,35 @@ mod tests {
         let participant = crate::participant::bind_test_actor(&context, "alpha");
         let channel = "repair";
         let id = "20260916-050000-000001-acde01";
+        let before_id = "20260916-045959-000001-acde00";
+        let after_id = "20260916-050001-000001-acde02";
         let messages = root.join(CHANNELS_DIR).join(channel).join("messages");
         fs::create_dir_all(&messages).expect("create messages");
+        for (sibling_id, subject) in [(before_id, "before"), (after_id, "after")] {
+            let sibling = ChannelMessage {
+                id: sibling_id.to_owned(),
+                from: "beta".to_owned(),
+                channel: channel.to_owned(),
+                subject: subject.to_owned(),
+                sent: "2026-09-16 05:00:00 -0500".to_owned(),
+                from_participant: Some("peer-sibling".to_owned()),
+                from_lineage: None,
+                address_kind: Some("channel".to_owned()),
+                event: None,
+                display_name: None,
+                pfp: None,
+                re: None,
+                mentions: Vec::new(),
+                signature_ref: None,
+                sender_address: None,
+                sender_provenance: None,
+            };
+            fs::write(
+                messages.join(format!("{sibling_id}.msg")),
+                encode_message(&sibling, subject).expect("encode sibling"),
+            )
+            .expect("write sibling");
+        }
         let path = messages.join(format!("{id}.msg"));
         fs::write(&path, "malformed").expect("write malformed message");
         let mut seen = HashSet::new();
@@ -1580,13 +1832,13 @@ mod tests {
             &mut batch,
         )
         .expect("scan malformed message");
-        assert!(matches!(
-            batch.as_slice(),
-            [WatchDelivery {
-                event: WatchEvent::Unreadable { id: event_id, .. },
-                ..
-            }] if event_id == id
-        ));
+        assert_eq!(batch.len(), 3);
+        assert!(batch.iter().any(|delivery| delivery.id() == before_id));
+        assert!(batch.iter().any(|delivery| delivery.id() == after_id));
+        assert!(batch.iter().any(|delivery| matches!(
+            &delivery.event,
+            WatchEvent::Unreadable { id: event_id, .. } if event_id == id
+        )));
         batch.clear();
         scan_unreadable_participant_channel(
             &context,
@@ -2140,6 +2392,8 @@ body
             false,
             &mut wake,
             Duration::from_secs(3600),
+            false,
+            HashSet::new(),
         )
         .expect("loop emits and exits");
         assert!(
@@ -2227,6 +2481,8 @@ body
             false,
             &mut wake,
             Duration::from_secs(0),
+            false,
+            HashSet::new(),
         )
         .expect("deadline pass emits the starved room's mail");
         assert!(

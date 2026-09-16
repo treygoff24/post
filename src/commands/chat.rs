@@ -169,6 +169,7 @@ fn read_message_slice(
         .as_ref()
         .map(|status| matches!(status, SignedStatus::Verified { .. }));
     let continuation_budget = measured_continuation_budget(
+        context,
         &args.name,
         &room,
         &parsed.message,
@@ -194,6 +195,7 @@ fn read_message_slice(
                     return Ok(*bytes);
                 }
                 let rendered = render_chat_slice_json(
+                    context,
                     options,
                     &room,
                     &parsed.message,
@@ -239,6 +241,7 @@ fn read_message_slice(
     let body_slice = &parsed.body[request.start..end];
     let rendered = if json_output {
         render_chat_slice_json(
+            context,
             options,
             &room,
             &parsed.message,
@@ -306,6 +309,7 @@ fn slice_continuation(
 
 #[allow(clippy::too_many_arguments)]
 fn render_chat_slice_json(
+    context: &Context,
     options: ChatSliceOptions<'_>,
     room: &str,
     message: &ChannelMessage,
@@ -317,6 +321,12 @@ fn render_chat_slice_json(
     pretty: bool,
 ) -> AppResult<String> {
     let next_offset = (end < request.total).then_some(end);
+    let reply = output::reply_metadata(
+        context,
+        &message.from,
+        message.from_participant.as_deref(),
+        message.sender_provenance.as_deref(),
+    );
     output::json(
         &output::ChatMessageSliceOutput {
             ok: true,
@@ -324,6 +334,9 @@ fn render_chat_slice_json(
             channel: options.channel.to_owned(),
             room: room.to_owned(),
             message: message.clone(),
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
             body_slice: body_slice.to_owned(),
             range: output::BodyByteRange {
                 start: request.start,
@@ -342,6 +355,7 @@ fn render_chat_slice_json(
 }
 
 pub(super) fn measured_omission_continuation(
+    context: &Context,
     channel: &str,
     room: &str,
     message: &ChannelMessage,
@@ -350,6 +364,7 @@ pub(super) fn measured_omission_continuation(
     initial_budget: usize,
 ) -> AppResult<String> {
     let budget = measured_continuation_budget(
+        context,
         channel,
         room,
         message,
@@ -365,6 +380,7 @@ pub(super) fn measured_omission_continuation(
 }
 
 fn measured_continuation_budget(
+    context: &Context,
     channel: &str,
     room: &str,
     message: &ChannelMessage,
@@ -379,6 +395,7 @@ fn measured_continuation_budget(
             .iter()
             .map(|(request, end)| {
                 render_chat_slice_json(
+                    context,
                     ChatSliceOptions {
                         channel,
                         max_bytes: budget,
@@ -641,6 +658,7 @@ fn read(
                     .iter()
                     .map(|item| {
                         measured_omission_continuation(
+                            context,
                             &args.name,
                             &room,
                             &item.message,
@@ -724,6 +742,7 @@ fn read(
                     .zip(&signed_statuses)
                     .map(|((message, body), status)| {
                         measured_omission_continuation(
+                            context,
                             &args.name,
                             &room,
                             message,

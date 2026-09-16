@@ -115,17 +115,18 @@ pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<R
         match route_message_locked(context, address, id) {
             Ok(Some(receipt)) => report.routed.push((id.to_owned(), receipt.recipients)),
             Ok(None) => report.pending += 1,
-            Err(error)
-                if matches!(
-                    error.code,
-                    ErrorCode::ConfigInvalid | ErrorCode::BlockedRoute
-                ) =>
-            {
+            Err(error) if error.code == ErrorCode::BlockedRoute => {
                 warn_once(
                     path.clone(),
-                    format!("left unroutable mail held: {}", error.message),
+                    format!("left blocked mail held: {}", error.message),
                 );
                 report.held.push(id.to_owned());
+            }
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                warn_once(
+                    path.clone(),
+                    format!("skipped unreadable pending mail: {}", error.message),
+                );
             }
             Err(error) => return Err(error),
         }
@@ -182,6 +183,26 @@ pub(crate) fn pending_count(context: &Context, address: &Address) -> AppResult<u
         }
     }
     Ok(pending.saturating_sub(held_ids(context, address)?.len()))
+}
+
+pub(crate) fn has_unrouted_mail(context: &Context, address: &Address) -> AppResult<bool> {
+    for path in message_files(&inbox_path(context, address))? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        match receipt(context, address, id) {
+            Ok(None) => return Ok(true),
+            Ok(Some(_)) => {}
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                warn_once(
+                    receipt_path(context, address, id),
+                    format!("corrupt routing receipt held for doctor: {}", error.message),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn provisional_pending_for(

@@ -167,7 +167,10 @@ pub(crate) fn visible_mail_snapshot(
             // Pending malformed siblings are not visible evidence. An
             // explicit read still parses its matching path and reports the
             // corruption rather than turning it into a not-found result.
-            Err(_) if receipt.is_none() => continue,
+            Err(_) if receipt.is_none() => {
+                skipped_unreadable += 1;
+                continue;
+            }
             Err(error) => return Err(error),
         };
         let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());

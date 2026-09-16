@@ -75,8 +75,24 @@ fn finish(
 }
 
 fn project(context: &Context, checks: &mut Vec<DoctorCheck>) -> DoctorProjection {
-    let resolved =
-        crate::participant::resolve(context).unwrap_or(crate::participant::Resolved::Unbound);
+    let resolved = match crate::participant::resolve(context) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            checks.push(DoctorCheck {
+                id: "participant.binding.invalid".to_owned(),
+                severity: DoctorSeverity::Error,
+                path: context
+                    .root
+                    .join(crate::participant::PARTICIPANTS_DIR)
+                    .display()
+                    .to_string(),
+                message: error.message,
+                fixable: false,
+                suggested_fix: error.suggested_fix,
+            });
+            crate::participant::Resolved::Unbound
+        }
+    };
     match &resolved {
         crate::participant::Resolved::Bound {
             participant,
