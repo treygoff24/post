@@ -26,6 +26,7 @@ fs.writeFileSync(
     'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), participant: process.env.POST_PARTICIPANT || null }) + "\\n");',
     'const control = JSON.parse(fs.readFileSync(process.env.STUB_CONTROL, "utf8"));',
     'const args = process.argv.slice(2);',
+    'if (control.sleep_ms) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, control.sleep_ms);',
     'let output = control.stdout ?? "";',
     'if (args[0] === "version") output = JSON.stringify(control.version ?? { ok: true, capabilities: ["participants"] }) + "\\n";',
     'else if (args[0] === "participant" && args[1] === "show") output = JSON.stringify(control.show ?? { ok: true, status: "unbound" }) + "\\n";',
@@ -54,10 +55,10 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit, sleep_ms } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit, sleep_ms }));
 }
 
 function allStubCalls() {
@@ -883,4 +884,16 @@ test("unsupported participant touch emits one bounded warning", () => {
   assert.match(first.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
   const second = run({ hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
   assert.deepEqual(second, {});
+});
+
+test("normal events share one absolute deadline across touch and snapshot", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id: "deadline-session" }, { stateDir });
+  setStub({ events: [], sleep_ms: 3000 });
+  const started = Date.now();
+  const out = run({ hook_event_name: "UserPromptSubmit", session_id: "deadline-session" }, { stateDir });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 5500, `event exceeded aggregate deadline: ${elapsed}ms`);
+  assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
 });
