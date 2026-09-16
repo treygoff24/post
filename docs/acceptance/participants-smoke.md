@@ -64,7 +64,7 @@ No durable watcher-notification store is required or tested.
 
 `LIFECYCLE-touch` seeds lease 7 twice. With `POST_PARTICIPANT_LEASE_HOURS` unset, touch must preserve 7. With the env set to 3, touch must reapply 3. `LIFECYCLE-frozen` seeds `last_seen` and `ended_at` to a fixed past instant, performs a consuming read after `participant end`, proves the exact id enters the ended actor's workspace cursor and leaves its unread inbox, then proves `ended_at` is unchanged and `who` still reports `ended`. The row permits the consuming read to refresh `last_seen`.
 
-Every spawned watch and every snapshot is bounded, including the conflicting `LEGACY-04` invocation. Background subshells `exec` the binary, timeout cleanup walks descendants with `pgrep -P` before TERM and KILL, and the closed-pipe row takes the writer exit status from `wait_for_pid`. The closed-pipe proof still requires at least one stdout byte, the specific `io_error` for `write stdout` with an EPIPE reason, an unchanged cursor, and a successful regular-file retry that consumes the same id. INT, TERM, and EXIT run the same section cleanup, and a section exit of 130 or 143 stops the top-level script before the other section starts. Cleanup accepts any exact root returned by this run's `mktemp`, including roots below `~/.delegate/run-scratch`, and reports the root as removed.
+Every spawned watch and every snapshot is bounded, including the conflicting `LEGACY-04` invocation. Background subshells `exec` the binary. Timeout cleanup freezes each parent before recording and stopping its descendants, so a wrapper cannot spawn a replacement child during teardown. The closed-pipe row takes the writer exit status from `wait_for_pid`; it still requires at least one stdout byte, the specific `io_error` for `write stdout` with an EPIPE reason, an unchanged cursor, and a successful regular-file retry that consumes the same id. The top-level script runs each section as a tracked child. Its INT and TERM traps stop and reap that section tree before exiting 130 or 143; the section-level INT, TERM, and EXIT traps still perform section cleanup, and a signaled section stops the top-level script before the other section starts. Each section saves its original stdout and stderr for cleanup receipts, so an interrupted command's redirections cannot swallow the removed/retained line. Cleanup accepts any exact root returned by this run's `mktemp`, including roots below `~/.delegate/run-scratch`, and reports the root as removed.
 
 Named `FAIL SETUP` checks reject a missing binary, jq, Python, mktemp, or pgrep before either scenario runs. Each scenario also checks `mktemp` and writability before deriving `POST_MAIL_ROOT`; a failed temp allocation exits nonzero without using an empty path.
 
@@ -140,7 +140,7 @@ FAIL LEGACY-12: legacy scenario setup failed: alpha participant bind failed: {"o
 
 ## Timeout red proof
 
-Two proxies delegated every command to `87df4ca` except `watch --once`, which slept for 300 seconds. The exec proxy replaced itself with the sleeper; the child proxy waited on the sleeper as a child. Both bounded smokes reported the expected failed rows, exited 1, and left no tagged sleeper process:
+Two proxies delegated every command to `87df4ca` except `watch --once`, which slept for 300 seconds. The exec proxy replaced itself with the sleeper; the child proxy waited on the sleeper as a child. Both bounded smokes reported the expected failed rows, exited 1, and left no tagged sleeper process. The exec block shows every timeout row; the child block is the participants-section excerpt (its full run also failed `LEGACY-02` and `LEGACY-03`):
 
 ```text
 exec stub:
@@ -150,15 +150,33 @@ FAIL LEGACY-02: default watch --once failed or timed out:
 FAIL LEGACY-03: watch --from now --once failed or timed out:
 exec-sleeper-pids-after-fail=
 
-child stub:
+child stub (participants-section excerpt):
 FAIL P13-09-durable-read-suppression: A watch --once failed or timed out
 FAIL P13-09-unread-restart-rering: unread watcher invocation 1 failed or timed out
 child-sleeper-pids-after-fail=
+
+sequential-two-sleeps stub:
+FAIL LEGACY-02: default watch --once failed or timed out:
+FAIL LEGACY-03: watch --from now --once failed or timed out:
+sequential-sleeper-pids-after-fail=
+```
+
+The sequential stub delegated non-watch commands to `a69f389`; each timed-out legacy watch ran a wrapper that would start a second 300-second sleeper when its first child died. Freezing the wrapper before child teardown prevented that replacement, and no tagged sleeper remained after `SMOKE FAIL`.
+
+## Top-level TERM proof
+
+A uniquely tagged blocking proxy was started inside the participant section, then TERM was sent to the top-level smoke PID. Before the fix, the top-level process exited 143 while the section, tagged worker, and temp root remained. With the tracked-section trap, the same probe exits 143 only after the section tree is gone and its temp root is removed:
+
+```text
+top-level-exit=143
+section-alive-after-exit=no
+tagged-pids-after-exit=
+temp-root-exists-after-exit=no
 ```
 
 ## P.2 field contract used
 
 The P.2 lane's `tests/routing.rs`, `tests/fixtures/watch-snapshot-typed.ndjson`, and `src/commands/schema.rs` supply these spellings: `pending`, `pending_by_address`, typed `address.kind` and `address.name`, receipt `recipients`, `already_read`, and the `participants/<id>/cursors.json` v2 `mail[address].seen` shape. Only names and payload shapes were read from that lane; no implementation code was copied.
 
-covered-ids: S1 S2 S3 S4 S5 S6 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 A1 A2 A3 N1 N2 N3 N4 N5 N6 N7 N8 N9 B3 B4 B5 B6 B7 B8 B9 B10
-acknowledged-rulings: 20260916-124930-783613 P.6-mail-round3-1 R28
+covered-ids: S1 S2 S3 S4 S5 S6 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 A1 A2 A3 N1 N2 N3 N4 N5 N6 N7 N8 N9 B3 B4 B5 B6 B7 B8 B9 B10 B11 B12 B13 B14 B15
+acknowledged-rulings: 20260916-124930-783613 P.6-mail-round3-1 R28 20260916-143505-e0803e

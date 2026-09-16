@@ -45,40 +45,52 @@ wait_for_pid() {
         return $?
     fi
 
-    stop_pid_descendants "$1"
+    stop_pid "$1"
+    return 124
+}
+
+stop_pid() {
+    [ -n "$1" ] || return 0
+    if ! kill -0 "$1" 2>/dev/null; then
+        wait "$1" 2>/dev/null || true
+        return 0
+    fi
+
+    # Freeze the parent before discovering children. A wrapper waiting on its
+    # first child must not get a chance to spawn a replacement while the tree is
+    # being dismantled.
+    kill -STOP "$1" 2>/dev/null || {
+        wait "$1" 2>/dev/null || true
+        return 0
+    }
+    stop_pid_children=$(pgrep -P "$1" 2>/dev/null || true)
     kill "$1" 2>/dev/null || true
-    wait_attempt=0
-    while kill -0 "$1" 2>/dev/null && [ "$wait_attempt" -lt 20 ]; do
+    kill -CONT "$1" 2>/dev/null || true
+    for stop_pid_child in $stop_pid_children; do
+        stop_pid "$stop_pid_child"
+    done
+
+    stop_pid_attempt=0
+    while kill -0 "$1" 2>/dev/null && [ "$stop_pid_attempt" -lt 20 ]; do
         sleep 0.1
-        wait_attempt=$((wait_attempt + 1))
+        stop_pid_attempt=$((stop_pid_attempt + 1))
     done
     if kill -0 "$1" 2>/dev/null; then
-        stop_pid_descendants "$1"
+        kill -STOP "$1" 2>/dev/null || true
+        stop_pid_children=$(pgrep -P "$1" 2>/dev/null || true)
         kill -9 "$1" 2>/dev/null || true
-        wait_attempt=0
-        while kill -0 "$1" 2>/dev/null && [ "$wait_attempt" -lt 20 ]; do
+        for stop_pid_child in $stop_pid_children; do
+            stop_pid "$stop_pid_child"
+        done
+        stop_pid_attempt=0
+        while kill -0 "$1" 2>/dev/null && [ "$stop_pid_attempt" -lt 20 ]; do
             sleep 0.1
-            wait_attempt=$((wait_attempt + 1))
+            stop_pid_attempt=$((stop_pid_attempt + 1))
         done
     fi
     if ! kill -0 "$1" 2>/dev/null; then
         wait "$1" 2>/dev/null || true
     fi
-    return 124
-}
-
-stop_pid_descendants() {
-    [ -n "$1" ] || return 0
-    for stop_pid_child in $(pgrep -P "$1" 2>/dev/null); do
-        stop_pid "$stop_pid_child"
-    done
-}
-
-stop_pid() {
-    [ -n "$1" ] || return 0
-    stop_pid_descendants "$1"
-    kill "$1" 2>/dev/null || true
-    wait_for_pid "$1" 20 >/dev/null 2>&1 || true
 }
 
 remove_temp_tree() {
@@ -174,6 +186,7 @@ PY
 # at the first unknown subcommand.
 participants_smoke() (
     set +e
+    exec 3>&1 4>&2
     PS_BIN=$1
     PS_BASE=$(mktemp -d 2>&1)
     PS_MKTEMP_RC=$?
@@ -213,10 +226,11 @@ participants_smoke() (
         stop_pid "$PS_WATCH_PID"
         stop_pid "$RUN_BOUNDED_PID"
         if remove_temp_tree "$PS_BASE" "$PS_CREATED_ROOT"; then
-            printf 'participants smoke root removed: %s\n' "$PS_BASE"
+            printf 'participants smoke root removed: %s\n' "$PS_BASE" >&3
         else
-            printf 'participants smoke root retained after cleanup failure: %s\n' "$PS_BASE" >&2
+            printf 'participants smoke root retained after cleanup failure: %s\n' "$PS_BASE" >&4
         fi
+        exec 3>&- 4>&-
     }
     stop_participants_on_signal() {
         signal_rc=$1
@@ -681,17 +695,17 @@ PY
 
     row_08() {
         inbox="$PS_ROOT/smoke/inbox"
-        mkdir -p "$inbox"
+        mkdir -p "$inbox" || { ROW_REASON="could not create row08 inbox"; return 1; }
         newer=20990916-030300-bbb222
         older=20990916-030200-aaa111
         printf '%s\n---\n%s\n' \
             "{\"id\":\"$newer\",\"from\":\"smoke\",\"to\":\"smoke\",\"kind\":\"note\",\"subject\":\"newer\",\"sent\":\"2026-09-16 03:03:00 -0500\",\"from_participant\":\"$C_ID\",\"address_kind\":\"workspace\"}" \
-            newer >"$inbox/$newer.mail"
+            newer >"$inbox/$newer.mail" || { ROW_REASON="could not seed row08 newer fixture"; return 1; }
         write_workspace_receipt "$newer" "$A_ID" || return 1
         capture_json "$PS_BASE/row08-newer-read.json" as_a read "$newer" --json || return 1
         printf '%s\n---\n%s\n' \
             "{\"id\":\"$older\",\"from\":\"smoke\",\"to\":\"smoke\",\"kind\":\"note\",\"subject\":\"older\",\"sent\":\"2026-09-16 03:02:00 -0500\",\"from_participant\":\"$C_ID\",\"address_kind\":\"workspace\"}" \
-            older >"$inbox/$older.mail"
+            older >"$inbox/$older.mail" || { ROW_REASON="could not seed row08 older fixture"; return 1; }
         write_workspace_receipt "$older" "$A_ID" || return 1
         capture_json "$PS_BASE/row08-newer-reread.json" as_a read "$newer" --peek --json || return 1
         assert_jq "$PS_BASE/row08-newer-reread.json" \
@@ -1134,6 +1148,7 @@ PY
 
 legacy_smoke() (
     set +e
+    exec 3>&1 4>&2
     BIN=$1
     BASE=$(mktemp -d 2>&1)
     LEGACY_MKTEMP_RC=$?
@@ -1175,10 +1190,11 @@ legacy_smoke() (
         stop_pid "$RUN_BOUNDED_PID"
         stop_watch
         if remove_temp_tree "$BASE" "$LEGACY_CREATED_ROOT"; then
-            printf 'legacy smoke root removed: %s\n' "$BASE"
+            printf 'legacy smoke root removed: %s\n' "$BASE" >&3
         else
-            printf 'legacy smoke root retained after cleanup failure: %s\n' "$BASE" >&2
+            printf 'legacy smoke root retained after cleanup failure: %s\n' "$BASE" >&4
         fi
+        exec 3>&- 4>&-
     }
     stop_legacy_on_signal() {
         signal_rc=$1
@@ -1987,16 +2003,33 @@ legacy_smoke() (
     [ "$LEGACY_FAILURES" -eq 0 ]
 )
 
+SMOKE_SECTION_PID=
+stop_smoke_on_signal() {
+    smoke_signal_rc=$1
+    trap - INT TERM
+    stop_pid "$SMOKE_SECTION_PID"
+    SMOKE_SECTION_PID=
+    exit "$smoke_signal_rc"
+}
+trap 'stop_smoke_on_signal 130' INT
+trap 'stop_smoke_on_signal 143' TERM
+
 SMOKE_FAILURES=0
 participants_rc=0
-participants_smoke "$BIN" || participants_rc=$?
+participants_smoke "$BIN" &
+SMOKE_SECTION_PID=$!
+wait "$SMOKE_SECTION_PID" || participants_rc=$?
+SMOKE_SECTION_PID=
 case "$participants_rc" in
     0) ;;
     130|143) exit "$participants_rc" ;;
     *) SMOKE_FAILURES=$((SMOKE_FAILURES + 1)) ;;
 esac
 legacy_rc=0
-legacy_smoke "$BIN" || legacy_rc=$?
+legacy_smoke "$BIN" &
+SMOKE_SECTION_PID=$!
+wait "$SMOKE_SECTION_PID" || legacy_rc=$?
+SMOKE_SECTION_PID=
 case "$legacy_rc" in
     0) ;;
     130|143) exit "$legacy_rc" ;;
