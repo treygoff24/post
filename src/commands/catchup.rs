@@ -824,11 +824,11 @@ fn collect_mail(
     let mut messages = Vec::new();
     let mut moves = Vec::new();
     let mut addresses = BTreeMap::new();
-    for address in super::inbox::visible_addresses(participant) {
+    for address in super::inbox::visible_addresses(context, participant)? {
         for item in cursor_state::eligibility::unread_mail(context, participant, &address)? {
             let id = item.envelope.id.clone();
             messages.push(CatchupMailItem {
-                envelope: item.envelope.into(),
+                envelope: output::MessageEnvelope::new(context, item.envelope, false),
                 body: item.body,
             });
             moves.push(MailMove {
@@ -910,7 +910,12 @@ fn collect_channel(
         let signed_verified = mailbox::signed_status(owner, &message, &body, channel_name)
             .map(|status| matches!(status, mailbox::SignedStatus::Verified { .. }));
         seen_ids.push(message.id.clone());
-        messages.push(ChatMessageItem::new(message, body, signed_verified));
+        messages.push(ChatMessageItem::new(
+            context,
+            message,
+            body,
+            signed_verified,
+        ));
     }
     messages.sort_by(|left, right| left.message.id.cmp(&right.message.id));
     seen_ids.sort();

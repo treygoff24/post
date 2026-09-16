@@ -54,6 +54,57 @@ pub(crate) fn render_slice_gutter_body(rendered: &mut String, body: &str) {
     rendered.push('\n');
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReplyMetadata {
+    pub origin: String,
+    pub participant: Option<String>,
+    pub shared: String,
+}
+
+pub(crate) fn reply_metadata(
+    context: &crate::mailbox::Context,
+    from: &str,
+    from_participant: Option<&str>,
+    sender_provenance: Option<&str>,
+) -> ReplyMetadata {
+    let remote = sender_provenance
+        .is_some_and(|value| matches!(value, "bridge" | "bridged" | "remote" | "bridge-import"))
+        || remote_workspace(context, from);
+    let local = !remote
+        && from_participant.is_some_and(|id| {
+            crate::participant::load(context, id)
+                .ok()
+                .flatten()
+                .is_some()
+        });
+    ReplyMetadata {
+        origin: if remote {
+            "remote"
+        } else if local {
+            "local"
+        } else {
+            "unknown"
+        }
+        .to_owned(),
+        participant: local.then(|| format!("participant:{}", from_participant.unwrap())),
+        shared: from.to_owned(),
+    }
+}
+
+fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool {
+    let peers = context.root.join("bridge/rooms/peers");
+    let Ok(entries) = std::fs::read_dir(peers) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        std::fs::read(entry.path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|rooms| rooms.contains_key(workspace))
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendOutput {
     pub ok: bool,
@@ -218,9 +269,13 @@ pub struct MessageEnvelope {
     #[serde(flatten)]
     pub envelope: Envelope,
     #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
     pub reply_to_participant: Option<String>,
     #[serde(default)]
     pub reply_to_shared: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 impl From<Envelope> for MessageEnvelope {
@@ -232,8 +287,32 @@ impl From<Envelope> for MessageEnvelope {
         let reply_to_shared = envelope.from.clone();
         Self {
             envelope,
+            origin: "unknown".to_owned(),
             reply_to_participant,
             reply_to_shared,
+            pending: false,
+        }
+    }
+}
+
+impl MessageEnvelope {
+    pub(crate) fn new(
+        context: &crate::mailbox::Context,
+        envelope: Envelope,
+        pending: bool,
+    ) -> Self {
+        let reply = reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        );
+        Self {
+            envelope,
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
+            pending,
         }
     }
 }
@@ -263,6 +342,8 @@ pub struct ChatMessageItem {
     #[serde(flatten)]
     pub message: crate::model::ChannelMessage,
     #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
     pub reply_to_participant: Option<String>,
     #[serde(default)]
     pub reply_to_shared: String,
@@ -276,19 +357,22 @@ pub struct ChatMessageItem {
 
 impl ChatMessageItem {
     pub(crate) fn new(
+        context: &crate::mailbox::Context,
         message: crate::model::ChannelMessage,
         body: String,
         signed_verified: Option<bool>,
     ) -> Self {
-        let reply_to_participant = message
-            .from_participant
-            .as_deref()
-            .map(|id| format!("participant:{id}"));
-        let reply_to_shared = message.from.clone();
+        let reply = reply_metadata(
+            context,
+            &message.from,
+            message.from_participant.as_deref(),
+            message.sender_provenance.as_deref(),
+        );
         Self {
             message,
-            reply_to_participant,
-            reply_to_shared,
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
             body,
             signed_verified,
         }
@@ -430,6 +514,8 @@ pub struct SearchResult {
     pub id: String,
     pub from: String,
     #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
     pub reply_to_participant: Option<String>,
     #[serde(default)]
     pub reply_to_shared: String,
@@ -471,6 +557,10 @@ pub struct ChannelListItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub members: Vec<String>,
+    /// Host-local effective participant ids. `members` remains the bridge and
+    /// doorbell compatible workspace-level membership projection.
+    #[serde(default)]
+    pub participants: Vec<String>,
     pub messages: usize,
     /// The acting room for unread count calculation, null when no acting room.
     #[serde(default)]
@@ -568,9 +658,13 @@ pub struct InboxItem {
     pub id: String,
     pub from: String,
     #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
     pub reply_to_participant: Option<String>,
     #[serde(default)]
     pub reply_to_shared: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     pub kind: MailKind,
     pub subject: String,
     pub sent: String,
@@ -613,8 +707,10 @@ impl From<Envelope> for InboxItem {
         Self {
             id,
             from,
+            origin: "unknown".to_owned(),
             reply_to_participant,
             reply_to_shared,
+            pending: false,
             kind,
             subject,
             sent,
@@ -626,10 +722,33 @@ impl From<Envelope> for InboxItem {
     }
 }
 
+impl InboxItem {
+    pub(crate) fn new(
+        context: &crate::mailbox::Context,
+        envelope: Envelope,
+        pending: bool,
+    ) -> Self {
+        let reply = reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        );
+        let mut item = Self::from(envelope);
+        item.origin = reply.origin;
+        item.reply_to_participant = reply.participant;
+        item.reply_to_shared = reply.shared;
+        item.pending = pending;
+        item
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WatchEvent {
     Mail {
+        address: WatchAddress,
+        #[serde(default, skip_serializing_if = "typed_watch_room")]
         room: String,
         #[serde(flatten)]
         item: InboxItem,
@@ -643,6 +762,8 @@ pub enum WatchEvent {
     /// but nothing from the file is echoed except its filename-derived id.
     /// `reason` is `mail` or `channel` (mention is unknowable without a body).
     Unreadable {
+        address: WatchAddress,
+        #[serde(default, skip_serializing_if = "typed_watch_room")]
         room: String,
         id: String,
         reason: WatchReason,
@@ -659,9 +780,14 @@ pub enum WatchEvent {
     /// invariant). No `kind`: channel messages carry none (Decision 1). The
     /// serde tag renders this as `"event":"channel_message"`.
     ChannelMessage {
+        address: WatchAddress,
+        #[serde(default, skip_serializing_if = "typed_watch_room")]
+        room: String,
         channel: String,
         id: String,
         from: String,
+        #[serde(default)]
+        origin: String,
         #[serde(default)]
         reply_to_participant: Option<String>,
         #[serde(default)]
@@ -691,6 +817,37 @@ pub enum WatchEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchAddress {
+    pub kind: String,
+    pub name: String,
+}
+
+impl WatchAddress {
+    fn from_room(room: &str) -> Self {
+        if let Some(name) = room.strip_prefix("participant:") {
+            Self {
+                kind: "participant".to_owned(),
+                name: name.to_owned(),
+            }
+        } else if let Some(name) = room.strip_prefix("lineage:") {
+            Self {
+                kind: "lineage".to_owned(),
+                name: name.to_owned(),
+            }
+        } else {
+            Self {
+                kind: "workspace".to_owned(),
+                name: room.to_owned(),
+            }
+        }
+    }
+}
+
+fn typed_watch_room(room: &String) -> bool {
+    room.starts_with("participant:") || room.starts_with("lineage:")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WatchReason {
@@ -712,6 +869,7 @@ impl WatchReason {
 impl WatchEvent {
     pub fn mail(room: &str, item: InboxItem, preview: Option<String>) -> Self {
         Self::Mail {
+            address: WatchAddress::from_room(room),
             room: room.to_owned(),
             item,
             reason: WatchReason::Mail,
@@ -720,6 +878,7 @@ impl WatchEvent {
     }
     pub(crate) fn unreadable_mail(room: &str, id: String) -> Self {
         Self::Unreadable {
+            address: WatchAddress::from_room(room),
             room: room.to_owned(),
             id,
             reason: WatchReason::Mail,
@@ -730,6 +889,7 @@ impl WatchEvent {
 
     pub(crate) fn unreadable_channel(room: &str, channel: &str, id: String) -> Self {
         Self::Unreadable {
+            address: WatchAddress::from_room(room),
             room: room.to_owned(),
             id,
             reason: WatchReason::Channel,
@@ -739,6 +899,7 @@ impl WatchEvent {
     }
 
     pub(crate) fn channel_message(
+        context: &crate::mailbox::Context,
         message: crate::model::ChannelMessage,
         watching_room: &str,
         preview: Option<String>,
@@ -748,11 +909,12 @@ impl WatchEvent {
         } else {
             WatchReason::Channel
         };
-        let reply_to_participant = message
-            .from_participant
-            .as_deref()
-            .map(|id| format!("participant:{id}"));
-        let reply_to_shared = message.from.clone();
+        let reply = reply_metadata(
+            context,
+            &message.from,
+            message.from_participant.as_deref(),
+            message.sender_provenance.as_deref(),
+        );
         let crate::model::ChannelMessage {
             id,
             from,
@@ -770,11 +932,14 @@ impl WatchEvent {
             ..
         } = message;
         Self::ChannelMessage {
+            address: WatchAddress::from_room(watching_room),
+            room: watching_room.to_owned(),
             channel,
             id,
             from,
-            reply_to_participant,
-            reply_to_shared,
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
             subject,
             sent,
             display_name,
@@ -904,6 +1069,10 @@ pub struct ReadOutput {
     pub framing: Framing,
     pub envelope: MessageEnvelope,
     pub body: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     /// Present, and always true, only when the mail was served from the read
     /// or archive store rather than the inbox. A fresh read omits the field
     /// entirely, so existing consumers keep byte-identical output.
@@ -1258,9 +1427,15 @@ mod tests {
 
     fn stamped(display_name: Option<&str>, pfp: Option<&str>) -> WatchEvent {
         WatchEvent::ChannelMessage {
+            address: WatchAddress {
+                kind: "workspace".to_owned(),
+                name: "alpha".to_owned(),
+            },
+            room: "alpha".to_owned(),
             channel: "tax".to_owned(),
             id: "20260722-013000-000001-aaa111".to_owned(),
             from: "alpha".to_owned(),
+            origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "alpha".to_owned(),
             subject: String::new(),
@@ -1325,8 +1500,10 @@ mod tests {
             InboxItem {
                 id: "20260722-013000-000002-bbb222".to_owned(),
                 from: "beta".to_owned(),
+                origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: "beta".to_owned(),
+                pending: false,
                 kind: MailKind::Letter,
                 subject: String::new(),
                 sent: "2026-07-22 01:31:00 -0500".to_owned(),
@@ -1346,8 +1523,10 @@ mod tests {
             InboxItem {
                 id: "20260722-013000-000002-bbb222".to_owned(),
                 from: "beta".to_owned(),
+                origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: "beta".to_owned(),
+                pending: false,
                 kind: MailKind::Letter,
                 subject: String::new(),
                 sent: "2026-07-22 01:31:00 -0500".to_owned(),
@@ -1367,8 +1546,10 @@ mod tests {
             InboxItem {
                 id: "20260722-013000-000002-bbb222".to_owned(),
                 from: "beta".to_owned(),
+                origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: "beta".to_owned(),
+                pending: false,
                 kind: MailKind::Letter,
                 subject: String::new(),
                 sent: "2026-07-22 01:31:00 -0500".to_owned(),

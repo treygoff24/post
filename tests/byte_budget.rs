@@ -1101,21 +1101,13 @@ fn omission_continuations_measure_large_slice_scaffolds_for_chat_read_and_catchu
         .join("participants")
         .join(&beta_participant)
         .join("participant.json");
-    let mut beta_json: Value =
+    let beta_json: Value =
         serde_json::from_slice(&fs::read(&beta_record).expect("beta participant"))
             .expect("beta participant JSON");
-    beta_json
-        .as_object_mut()
-        .expect("participant object")
-        .remove("last_seen");
-    fs::write(
-        &beta_record,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&beta_json).expect("serialize beta participant")
-        ),
-    )
-    .expect("restore legacy-active beta participant");
+    assert!(beta_json["last_seen"].is_string());
+    assert!(beta_json["lease_hours"]
+        .as_u64()
+        .is_some_and(|hours| hours > 0));
     let expected_mail = format!("{}é🙂\"\\\n\u{1f}mail-tail", "m".repeat(8_000));
     let sent = sandbox.run_as_participant(
         &[

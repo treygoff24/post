@@ -295,16 +295,60 @@ fn lock_cursor_dir(directory: &Path) -> AppResult<File> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path)
-        .map_err(|error| AppError::io("open cursor lock", &path, error))?;
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                cursor_write_refused(&path, "lock path is a symlink")
+            } else {
+                AppError::io("open cursor state lock", &path, error)
+            }
+        })?;
+    let before = file
+        .metadata()
+        .map_err(|error| AppError::io("inspect cursor state lock", &path, error))?;
+    if !trusted_lock_metadata(&before) {
+        return Err(cursor_write_refused(
+            &path,
+            "lock must be a solitary regular file",
+        ));
+    }
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
         return Err(AppError::io(
             "lock cursor state",
             &path,
             std::io::Error::last_os_error(),
         ));
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| AppError::io("reinspect cursor state lock", &path, error))?;
+    let on_path = fs::symlink_metadata(&path).map_err(|error| {
+        cursor_write_refused(
+            &path,
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "lock path disappeared while acquiring its flock"
+            } else {
+                "lock path cannot be inspected after acquiring its flock"
+            },
+        )
+    })?;
+    if !trusted_lock_metadata(&after)
+        || !trusted_lock_metadata(&on_path)
+        || after.dev() != on_path.dev()
+        || after.ino() != on_path.ino()
+        || after.nlink() != on_path.nlink()
+    {
+        return Err(cursor_write_refused(
+            &path,
+            "lock path changed while acquiring its flock",
+        ));
+    }
+    if after.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| AppError::io("restrict cursor state lock", &path, error))?;
     }
     Ok(file)
 }
@@ -1001,69 +1045,11 @@ fn is_canonical_mail_id(id: &str) -> bool {
 }
 
 fn lock_room_cursors(context: &Context, room: &str) -> AppResult<File> {
-    let path = cursor_path(context, room)?.with_file_name(CURSORS_LOCK_FILE);
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
-        .map_err(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                cursor_write_refused(&path, "lock path is a symlink")
-            } else {
-                AppError::io("open cursor state lock", &path, error)
-            }
-        })?;
-    let before = file
-        .metadata()
-        .map_err(|error| AppError::io("inspect cursor state lock", &path, error))?;
-    if !trusted_lock_metadata(&before) {
-        return Err(cursor_write_refused(
-            &path,
-            "lock must be a solitary regular file",
-        ));
-    }
-    // SAFETY: file owns a live descriptor for this function, and the return
-    // code is checked before assuming that the lock is held.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
-        return Err(AppError::io(
-            "lock cursor state",
-            &path,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let after = file
-        .metadata()
-        .map_err(|error| AppError::io("reinspect cursor state lock", &path, error))?;
-    let on_path = fs::symlink_metadata(&path).map_err(|error| {
-        cursor_write_refused(
-            &path,
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "lock path disappeared while acquiring its flock"
-            } else {
-                "lock path cannot be inspected after acquiring its flock"
-            },
-        )
-    })?;
-    if !trusted_lock_metadata(&after)
-        || !trusted_lock_metadata(&on_path)
-        || after.dev() != on_path.dev()
-        || after.ino() != on_path.ino()
-        || after.nlink() != on_path.nlink()
-    {
-        return Err(cursor_write_refused(
-            &path,
-            "lock path changed while acquiring its flock",
-        ));
-    }
-    if after.permissions().mode() & 0o777 != 0o600 {
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| AppError::io("restrict cursor state lock", &path, error))?;
-    }
-    Ok(file)
+    let directory = cursor_path(context, room)?
+        .parent()
+        .expect("room cursor path has a parent")
+        .to_path_buf();
+    lock_cursor_dir(&directory)
 }
 
 fn trusted_lock_metadata(metadata: &fs::Metadata) -> bool {

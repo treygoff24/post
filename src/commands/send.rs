@@ -164,39 +164,6 @@ where
         Err(error) => return Err(error),
     };
 
-    // A workspace is a fan-out address, so two participants bound to one
-    // workspace must be able to mail each other. The deliberate self-send
-    // gate applies only to an explicit participant:<own-id> target.
-    if resolved_target.as_ref().is_some_and(|target| {
-        target.kind == crate::participant::AddressKind::Participant
-            && target.name == actor.participant.id
-    }) && !args.allow_self
-    {
-        // Reproduce the caller's own invocation with the one change that makes
-        // it succeed, INCLUDING the body when the body is knowable from argv or
-        // a file. The old fix said `--body '<text>'`; the test that ran it
-        // asserted success and got it, because a mail whose body is literally
-        // "<text>" does land. Runnable and correct are not the same property.
-        let body_flag = send_body_flag(
-            args.body.as_deref(),
-            args.body_file.as_deref().or(args.file.as_deref()),
-        );
-        let fix = format!("{fix_prefix} --allow-self{body_flag}");
-        return Err(AppError::new(
-            ErrorCode::InvalidArgument,
-            format!(
-                "refusing to send participant '{}' mail to itself",
-                actor.participant.id
-            ),
-            format!(
-                "Instances of one room coordinate via channels. For a deliberate self-send (doorbell probe, smoke test), run `{fix}`."
-            ),
-        )
-        .exact_fix(fix)
-        .input(args.to.clone())
-        .reason("participant addressed itself without --allow-self"));
-    }
-
     if resolved_target.is_none() {
         // Rooms and channels are disjoint namespaces, so a channel name reaching
         // --to used to produce a flat "room is unknown" that never mentioned the
@@ -492,9 +459,6 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
     if args.oversize {
         prefix.push_str(" --oversize");
     }
-    if args.allow_self {
-        prefix.push_str(" --allow-self");
-    }
     prefix
 }
 
@@ -726,7 +690,6 @@ mod tests {
                 body: None,
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -773,7 +736,6 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -817,7 +779,6 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -874,7 +835,6 @@ mod tests {
                 body: Some("new delivery".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -918,7 +878,6 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -961,7 +920,6 @@ mod tests {
                 body: Some("body".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             true,

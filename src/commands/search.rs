@@ -33,7 +33,7 @@ pub(super) fn run(
 
     if let Some(participant) = resolved.participant() {
         if search_mail {
-            for address in super::inbox::visible_addresses(participant) {
+            for address in super::inbox::visible_addresses(context, participant)? {
                 collect_mail(context, participant, &address, &pattern, &mut matches)?;
             }
         }
@@ -58,7 +58,7 @@ pub(super) fn run(
     let count = results.len();
     let pending = if let Some(participant) = resolved.participant() {
         let mut count = 0;
-        for address in super::inbox::visible_addresses(participant) {
+        for address in super::inbox::visible_addresses(context, participant)? {
             count += crate::cursor_state::routing::provisional_pending_for(
                 context,
                 participant,
@@ -242,17 +242,20 @@ fn collect_mail(
             continue;
         }
         let id = envelope.id.clone();
-        let reply_to_participant = envelope
-            .from_participant
-            .as_deref()
-            .map(|sender| format!("participant:{sender}"));
+        let reply = output::reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        );
         let result = SearchResult {
             source: "mail".to_owned(),
             channel: None,
             id: id.clone(),
             from: envelope.from.clone(),
-            reply_to_participant,
-            reply_to_shared: envelope.from,
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
             sent: envelope.sent,
             subject: envelope.subject,
             preview: preview(&item.body),
@@ -289,17 +292,20 @@ fn collect_channel(
             continue;
         }
         let id = message.id.clone();
-        let reply_to_participant = message
-            .from_participant
-            .as_deref()
-            .map(|sender| format!("participant:{sender}"));
+        let reply = output::reply_metadata(
+            context,
+            &message.from,
+            message.from_participant.as_deref(),
+            message.sender_provenance.as_deref(),
+        );
         let result = SearchResult {
             source: "channel".to_owned(),
             channel: Some(channel_name.to_owned()),
             id: id.clone(),
             from: message.from.clone(),
-            reply_to_participant,
-            reply_to_shared: message.from,
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
             sent: message.sent,
             subject: message.subject,
             preview: preview(&item.body),

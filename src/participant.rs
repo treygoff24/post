@@ -554,8 +554,14 @@ pub(crate) fn list(context: &Context) -> AppResult<Vec<Participant>> {
         if id == "by-session" {
             continue;
         }
-        if let Some(participant) = load(context, &id)? {
-            participants.push(participant);
+        match load(context, &id) {
+            Ok(Some(participant)) => participants.push(participant),
+            Ok(None) => {}
+            Err(error) if error.code == ErrorCode::ConfigInvalid => eprintln!(
+                "post: warning: skipped corrupt participant {:?}: {:?}",
+                id, error.message
+            ),
+            Err(error) => return Err(error),
         }
     }
     participants.sort_by(|left, right| left.id.cmp(&right.id));

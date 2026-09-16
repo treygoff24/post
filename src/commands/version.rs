@@ -2,7 +2,8 @@ use crate::command_result::CommandResult;
 use crate::error::AppResult;
 use serde::Serialize;
 
-pub(crate) const CAPABILITIES: [&str; 3] = ["participants", "routing-receipts", "cursors-v2"];
+pub(crate) const CAPABILITIES: [&str; 4] =
+    ["participants", "lineages", "routing-receipts", "cursors-v2"];
 
 #[derive(Serialize)]
 struct VersionOutput {
@@ -25,9 +26,10 @@ pub(super) fn run(json: bool, pretty: bool) -> AppResult<CommandResult> {
         CommandResult::json(&output, pretty)
     } else {
         Ok(CommandResult::success(format!(
-            "post {} (build {}, store v2; {})\n",
+            "post {} (build {}, store v{}; {})\n",
             output.version,
             output.build_sha,
+            output.store_version,
             CAPABILITIES.join(",")
         )))
     }

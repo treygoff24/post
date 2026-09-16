@@ -29,6 +29,30 @@ pub(crate) fn unread_mail(
     address: &Address,
 ) -> AppResult<Vec<EligibleMail>> {
     let cursors = ParticipantCursors::load(context, participant);
+    let mut unread = Vec::new();
+    for item in validated_mail(context, participant, address, false)? {
+        if cursors.mail_has_seen(address, &item.envelope.id) {
+            continue;
+        }
+        if address.kind != crate::participant::AddressKind::Participant
+            && item.envelope.from_participant.as_deref() == Some(participant.id.as_str())
+        {
+            continue;
+        }
+        unread.push(item);
+    }
+    Ok(unread)
+}
+
+/// One receipt/digest/parser path for every participant mail projection.
+/// `include_own` admits explicit inspection of the sender's own canonical
+/// message even when workspace/lineage fan-out correctly excluded it.
+pub(crate) fn validated_mail(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    include_own: bool,
+) -> AppResult<Vec<EligibleMail>> {
     let directory = routing::inbox_path(context, address);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -52,24 +76,14 @@ pub(crate) fn unread_mail(
     }
     paths.sort();
 
-    let mut unread = Vec::new();
+    let mut visible = Vec::new();
     for path in paths {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        if cursors.mail_has_seen(address, id) {
-            continue;
-        }
         let Some(receipt) = routing::receipt(context, address, id)? else {
             continue;
         };
-        if !receipt
-            .recipients
-            .iter()
-            .any(|recipient| recipient == &participant.id)
-        {
-            continue;
-        }
         let bytes =
             fs::read(&path).map_err(|error| AppError::io("read routed mail", &path, error))?;
         if sha256(&bytes) != receipt.digest {
@@ -78,28 +92,18 @@ pub(crate) fn unread_mail(
                 "routed mail bytes do not match the frozen routing receipt digest",
             ));
         }
-        let parsed = match parse_mail(&path) {
-            Ok(parsed) => parsed,
-            Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
-                eprintln!(
-                    "post: warning: skipped malformed routed mail '{}': {}",
-                    path.display(),
-                    error.message
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str()) {
+        let parsed = parse_mail(&path)?;
+        let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());
+        if !receipt.recipients.contains(&participant.id) && !(include_own && own) {
             continue;
         }
-        unread.push(EligibleMail {
+        visible.push(EligibleMail {
             path,
             envelope: parsed.envelope,
             body: parsed.body,
         });
     }
-    Ok(unread)
+    Ok(visible)
 }
 
 pub(crate) fn unread_channel(

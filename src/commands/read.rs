@@ -55,6 +55,8 @@ fn run_legacy(
                 already_read: false,
                 address: None,
                 participant: None,
+                own: false,
+                pending: false,
             }
         }
         None => resolve_already_read(context, &room, &read, &args.id)?,
@@ -85,11 +87,14 @@ fn run_legacy(
         )?,
         None => (
             render(
+                context,
                 &resolved.mail,
                 resolved.already_read,
                 json_output,
                 pretty,
                 framing,
+                false,
+                false,
             )?,
             true,
         ),
@@ -130,30 +135,60 @@ fn run_participant(
         cursor_state::routing::route_for_participant(context, participant)?;
     }
     let addresses = if let Some(room) = args.room.clone() {
+        let rooms = context.load_rooms()?;
+        let room = context.resolved_room(Some(room), &rooms)?;
         vec![Address {
             kind: AddressKind::Workspace,
             name: room,
         }]
     } else {
-        super::inbox::visible_addresses(participant)
+        super::inbox::visible_addresses(context, participant)?
     };
     let cursors = ParticipantCursors::load(context, participant);
     let mut candidates = Vec::new();
     for address in addresses {
-        let directory = cursor_state::routing::inbox_path(context, &address);
-        for path in prefix_matches(&directory, &args.id)? {
-            let parsed = parse_mail(&path)?;
-            if parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str()) {
+        for item in cursor_state::eligibility::validated_mail(context, participant, &address, true)?
+        {
+            if item.envelope.id.starts_with(&args.id) {
+                let already_read = cursors.mail_has_seen(&address, &item.envelope.id);
+                candidates.push((
+                    address.clone(),
+                    ParsedMail {
+                        envelope: item.envelope,
+                        body: item.body,
+                    },
+                    already_read,
+                    false,
+                ));
+            }
+        }
+        let provisional = if consuming {
+            Vec::new()
+        } else {
+            cursor_state::routing::provisional_pending_for(context, participant, &address)?
+        };
+        for path in prefix_matches(
+            &cursor_state::routing::inbox_path(context, &address),
+            &args.id,
+        )? {
+            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if cursor_state::routing::receipt(context, &address, id)?.is_some() {
                 continue;
             }
-            let routed = cursor_state::routing::receipt(context, &address, &parsed.envelope.id)?
-                .is_some_and(|receipt| receipt.recipients.contains(&participant.id));
-            let provisional = !consuming
-                && cursor_state::routing::provisional_pending_for(context, participant, &address)?
-                    .contains(&parsed.envelope.id);
-            if routed || provisional {
-                let already_read = cursors.mail_has_seen(&address, &parsed.envelope.id);
-                candidates.push((address.clone(), parsed, already_read));
+            // Parse before eligibility filtering so an addressed corrupt
+            // pending entry is reported as corrupt, not as a visibility miss.
+            let parsed = parse_mail(&path)?;
+            if consuming {
+                continue;
+            }
+            if !provisional.iter().any(|candidate| candidate == id) {
+                continue;
+            }
+            let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());
+            if !own {
+                candidates.push((address.clone(), parsed, false, true));
             }
         }
     }
@@ -162,7 +197,7 @@ fn run_participant(
     if candidates.len() > 1 {
         let paths: Vec<PathBuf> = candidates
             .iter()
-            .map(|(_, mail, _)| PathBuf::from(format!("{}.mail", mail.envelope.id)))
+            .map(|(_, mail, _, _)| PathBuf::from(format!("{}.mail", mail.envelope.id)))
             .collect();
         return Err(ambiguous(
             &paths,
@@ -171,7 +206,7 @@ fn run_participant(
             "participant-visible",
         ));
     }
-    let Some((address, mail, already_read)) = candidates.pop() else {
+    let Some((address, mail, already_read, pending)) = candidates.pop() else {
         if let Some((channel, full_id, depth)) =
             crate::channel::find_channel_message(context, &args.id)
         {
@@ -205,6 +240,7 @@ fn run_participant(
     } else {
         super::inbox::address_label(&address)
     };
+    let own = mail.envelope.from_participant.as_deref() == Some(participant.id.as_str());
     let resolved = ResolvedMail {
         mail,
         source: None,
@@ -212,6 +248,8 @@ fn run_participant(
         already_read,
         address: Some(address.clone()),
         participant: Some(participant.clone()),
+        own,
+        pending,
     };
     if args.ack {
         return acknowledge(context, &room, resolved, json_output, pretty);
@@ -239,16 +277,19 @@ fn run_participant(
         )?,
         None => (
             render(
+                context,
                 &resolved.mail,
                 resolved.already_read,
                 json_output,
                 pretty,
                 framing,
+                resolved.own,
+                resolved.pending,
             )?,
             true,
         ),
     };
-    if args.peek || resolved.already_read || !body_complete {
+    if args.peek || resolved.already_read || resolved.own || resolved.pending || !body_complete {
         return Ok(CommandResult::success(rendered));
     }
     let id = resolved.mail.envelope.id;
@@ -266,6 +307,8 @@ struct ResolvedMail {
     already_read: bool,
     address: Option<Address>,
     participant: Option<Participant>,
+    own: bool,
+    pending: bool,
 }
 
 fn acknowledge(
@@ -833,6 +876,8 @@ fn resolve_already_read(
         already_read: true,
         address: None,
         participant: None,
+        own: false,
+        pending: false,
     })
 }
 
@@ -881,11 +926,14 @@ fn ambiguous(matches: &[PathBuf], prefix: &str, room: &str, scope: &str) -> AppE
 }
 
 fn render(
+    context: &Context,
     mail: &ParsedMail,
     already_read: bool,
     json_output: bool,
     pretty: bool,
     framing: FramingMode,
+    own: bool,
+    pending: bool,
 ) -> AppResult<String> {
     if json_output {
         output::json(
@@ -895,19 +943,23 @@ fn render(
                     FramingMode::Auto | FramingMode::Full => Framing::default(),
                     FramingMode::Compact => Framing::compact(),
                 },
-                envelope: mail.envelope.clone().into(),
+                envelope: output::MessageEnvelope::new(context, mail.envelope.clone(), pending),
                 body: mail.body.clone(),
+                own,
+                pending,
                 already_read,
             },
             pretty,
         )
     } else {
-        Ok(render_text(
-            &mail.envelope,
-            &mail.body,
-            already_read,
-            framing,
-        ))
+        let mut rendered = render_text(&mail.envelope, &mail.body, already_read, framing);
+        if own {
+            rendered.push_str("own: true (explicit sender-history inspection; unread unchanged)\n");
+        }
+        if pending {
+            rendered.push_str("pending: true (provisional eligibility; not routed unread)\n");
+        }
+        Ok(rendered)
     }
 }
 

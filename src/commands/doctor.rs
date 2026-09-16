@@ -56,22 +56,30 @@ fn finish(
         })?;
         let resolved =
             crate::participant::resolve(context).unwrap_or(crate::participant::Resolved::Unbound);
+        let mut projection_errors = Vec::new();
         let (participant, pending) = match &resolved {
             crate::participant::Resolved::Bound {
                 participant,
                 provenance,
             } => {
                 let mut pending = BTreeMap::new();
-                for address in super::inbox::visible_addresses(participant) {
-                    pending.insert(
-                        super::inbox::address_label(&address),
-                        crate::cursor_state::routing::provisional_pending_for(
-                            context,
-                            participant,
-                            &address,
-                        )?
-                        .len(),
-                    );
+                match super::inbox::visible_addresses(context, participant) {
+                    Ok(addresses) => {
+                        for address in addresses {
+                            match crate::cursor_state::routing::provisional_pending_for(
+                                context,
+                                participant,
+                                &address,
+                            ) {
+                                Ok(ids) => {
+                                    pending
+                                        .insert(super::inbox::address_label(&address), ids.len());
+                                }
+                                Err(error) => projection_errors.push(error.message),
+                            }
+                        }
+                    }
+                    Err(error) => projection_errors.push(error.message),
                 }
                 (
                     serde_json::json!({
@@ -91,10 +99,12 @@ fn finish(
                         kind: crate::participant::AddressKind::Workspace,
                         name: room,
                     };
-                    pending.insert(
-                        super::inbox::address_label(&address),
-                        crate::cursor_state::routing::pending_count(context, &address)?,
-                    );
+                    match crate::cursor_state::routing::pending_count(context, &address) {
+                        Ok(count) => {
+                            pending.insert(super::inbox::address_label(&address), count);
+                        }
+                        Err(error) => projection_errors.push(error.message),
+                    }
                 }
                 (
                     serde_json::json!({
@@ -110,6 +120,10 @@ fn finish(
         object.insert(
             "pending".to_owned(),
             serde_json::to_value(pending).expect("pending map"),
+        );
+        object.insert(
+            "projection_errors".to_owned(),
+            serde_json::to_value(projection_errors).expect("projection errors"),
         );
         CommandResult::json(&value, pretty)?
     };
@@ -317,6 +331,27 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
 }
 
 fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let root = context.root.join(crate::participant::PARTICIPANTS_DIR);
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if id == "by-session" || !entry.path().is_dir() {
+                continue;
+            }
+            if let Err(error) = crate::participant::load(context, &id) {
+                checks.push(check(
+                    &format!("participant.{id}.invalid"),
+                    DoctorSeverity::Error,
+                    &entry.path().join("participant.json"),
+                    &error.message,
+                    false,
+                    "Repair the participant record by hand; post skips it for routing until valid.",
+                ));
+            }
+        }
+    }
     let now = std::time::SystemTime::now();
     let participants = match crate::participant::list(context) {
         Ok(participants) => participants,
@@ -522,11 +557,32 @@ fn detect_cursor_state(context: &Context, room: &str, checks: &mut Vec<DoctorChe
                 &format!("cursor_state.{room}.invalid"),
                 DoctorSeverity::Warning,
                 &cursor_path,
-                &format!("cursors.json cannot be used ({reason}); reads degrade to all unread"),
+                &format!("legacy room cursors.json cannot be used ({reason}); participant reads ignore it"),
                 false,
-                "Inspect or remove cursors.json by hand; reads currently degrade to all unread and `post doctor --fix` never changes cursor state.",
+                "Inspect the read-only legacy room state by hand; participant cursors live under participants/<id>/cursors.json.",
+            ));
+        } else {
+            checks.push(check(
+                &format!("legacy_room_state.{room}.cursors"),
+                DoctorSeverity::Info,
+                &cursor_path,
+                "legacy room cursors.json is read-only; participant reads do not consume or update it",
+                false,
+                "Keep it for rollback evidence or archive it deliberately after migration acceptance.",
             ));
         }
+    }
+
+    let legacy_read = room_dir.join("read");
+    if legacy_read.is_dir() {
+        checks.push(check(
+            &format!("legacy_room_state.{room}.read"),
+            DoctorSeverity::Info,
+            &legacy_read,
+            "legacy room read/ history is read-only and is never listed as participant unread mail",
+            false,
+            "Keep it as consumed history; routed canonical mail remains in inbox/.",
+        ));
     }
 
     let lock_invalid = match fs::symlink_metadata(&lock_path) {
@@ -572,9 +628,9 @@ fn detect_cursor_state(context: &Context, room: &str, checks: &mut Vec<DoctorChe
                 &format!("cursor_state.{room}.legacy"),
                 DoctorSeverity::Info,
                 &legacy_path,
-                "valid channel-state.json will import on the first consuming cursor write",
+                "legacy channel-state.json is read-only; participant channel seen-sets live under participants/<id>/cursors.json",
                 false,
-                "Run a consuming read or catchup to materialize cursors.json; the legacy file remains untouched.",
+                "Keep it for legacy readers; participant writes never import or replace it.",
             ));
         }
     } else {

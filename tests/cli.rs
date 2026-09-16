@@ -191,10 +191,10 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, room, id, from, kind, subject, sent, reason=mail, preview? [, display_name, pfp, sender_address, sender_provenance]",
-            "unreadable: event, room, id, reason=mail|channel, channel? (required for channel; no preview)",
-            "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
-            "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
+            "mail: event, address{kind,name}, room? (workspace only), id, from, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?",
+            "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
+            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
+            "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]
     );
     assert!(
@@ -366,7 +366,6 @@ fn reserved_sender_refuses_but_free_form_and_participant_binding_work() {
             "claude-space",
             "--from",
             "claude-space",
-            "--allow-self",
             "--body",
             "inside room",
         ],
@@ -2621,8 +2620,12 @@ fn channel_two_room_flow_lists_participants_and_advances_each_seen_set() {
         .iter()
         .find(|channel| channel.name == "tax")
         .expect("tax channel should be listed");
-    assert!(tax.members.contains(&sandbox.test_participant("alpha")));
-    assert!(tax.members.contains(&sandbox.test_participant("beta")));
+    assert!(tax.members.contains(&"alpha".to_owned()));
+    assert!(tax.members.contains(&"beta".to_owned()));
+    assert!(tax
+        .participants
+        .contains(&sandbox.test_participant("alpha")));
+    assert!(tax.participants.contains(&sandbox.test_participant("beta")));
     assert!(tax.messages >= 3);
 }
 
@@ -3033,14 +3036,7 @@ fn codex_identity_cannot_impersonate_registered_rooms_but_aliases_remain_allowed
     let project = workspace.join("some-project");
     fs::create_dir(&project).expect("create workspace child");
     let inferred = sandbox.run_in(
-        &[
-            "send",
-            "--to",
-            "workspace",
-            "--allow-self",
-            "--body",
-            "from workspace",
-        ],
+        &["send", "--to", "workspace", "--body", "from workspace"],
         None,
         &project,
     );
@@ -4403,6 +4399,10 @@ fn watch_snapshot_limit_digest_summarizes_only_admitted_events() {
     assert_eq!(lines.len(), 1, "one source must produce one digest line");
     let digest: serde_json::Value = serde_json::from_str(lines[0]).expect("digest JSON");
     assert_eq!(digest["event"], "digest");
+    assert_eq!(
+        digest["address"],
+        serde_json::json!({"kind":"workspace","name":"beta"})
+    );
     assert_eq!(digest["room"], "beta");
     assert_eq!(digest["source"], "channel:bounded-digest");
     assert_eq!(digest["count"], 2);
@@ -4484,6 +4484,7 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
             reason,
             preview: _,
             channel,
+            ..
         } => {
             assert_eq!(room, "claude-space");
             assert_eq!(id, "20260721-010101-abcdef");
@@ -4499,7 +4500,7 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
         "watch must not echo malformed mail content"
     );
     assert!(
-        stderr(&output).contains("left malformed mail")
+        stderr(&output).contains("left unroutable mail")
             && stderr(&output).contains("20260721-010101-abcdef.mail"),
         "expected one stderr warning naming the malformed pending file: {}",
         stderr(&output)
@@ -4888,14 +4889,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     let active = Sandbox::new_unseeded();
     seed_fence_store(&active, r#"{"state":"active","generation":7}"#);
     assert_success(&active.run_in_env(
-        &[
-            "send",
-            "--to",
-            "dest",
-            "--allow-self",
-            "--body",
-            "active exact",
-        ],
+        &["send", "--to", "dest", "--body", "active exact"],
         None,
         &active.path,
         &[("POST_ARX_GENERATION", "7")],
@@ -5074,14 +5068,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     );
     let started = std::time::Instant::now();
     assert_success(&watched.run_in_env(
-        &[
-            "send",
-            "--to",
-            "dest",
-            "--allow-self",
-            "--body",
-            "concurrent admitted send",
-        ],
+        &["send", "--to", "dest", "--body", "concurrent admitted send"],
         None,
         &watched.path,
         &[("POST_ARX_GENERATION", "7")],
@@ -6101,18 +6088,14 @@ fn description_over_1kib_is_refused() {
 
 #[test]
 fn exact_fix_carries_a_body_full_of_angle_brackets_without_tripping_the_guard() {
-    // The exact_fix funnel rejects `<PLACEHOLDER>` arguments, and exact_fix now
-    // reproduces the caller's real body -- so a body that legitimately contains
-    // angle brackets runs straight into the guard. In a debug build a false
-    // positive is a PANIC (exit 101), not a bad message: the refusal a caller
-    // asked for would come back as a crash. Caught at review by Fable before it
-    // could happen to anyone.
+    // Direct self delivery is ordinary readable mail. Bracketed bodies must
+    // therefore bypass exact-fix construction and persist byte-for-byte.
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
     let sender = sandbox.test_participant("alpha");
     let body = "see the <tag> here and this <note>xml</note> too";
 
-    let refused = sandbox.run_as_participant(
+    let sent = sandbox.run_as_participant(
         &[
             "send",
             "--to",
@@ -6123,26 +6106,7 @@ fn exact_fix_carries_a_body_full_of_angle_brackets_without_tripping_the_guard() 
         &sender,
         &alpha,
     );
-    assert_eq!(
-        refused.status.code(),
-        Some(2),
-        "a bracketed body must produce the ordinary refusal, not a guard panic: {}",
-        stderr(&refused)
-    );
-    let error: ErrorEnvelope = from_stderr(&refused);
-    let fix = error
-        .error
-        .details
-        .exact_fix
-        .as_deref()
-        .expect("self-send refusal must still supply exact_fix");
-    assert!(
-        fix.contains("<tag>") && fix.contains("<note>xml</note>"),
-        "the body must survive into the fix verbatim: {fix}"
-    );
-
-    // And it still runs, brackets and all, through a real shell.
-    assert_success(&sandbox.run_fix(fix, &alpha));
+    assert_success(&sent);
     let direct = sandbox
         .mail_root
         .join("participants")
@@ -6152,7 +6116,7 @@ fn exact_fix_carries_a_body_full_of_angle_brackets_without_tripping_the_guard() 
         .expect("direct participant inbox")
         .map(|entry| fs::read_to_string(entry.expect("direct entry").path()).expect("direct mail"))
         .collect::<Vec<_>>();
-    assert_eq!(stored.len(), 1);
+    assert_eq!(stored.len(), 1, "one direct self delivery");
     assert!(stored[0].contains(body));
 }
 
@@ -9230,7 +9194,7 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
 }
 
 #[test]
-fn workspace_send_to_own_address_reaches_a_sibling_and_direct_self_requires_allow() {
+fn workspace_send_to_own_address_reaches_a_sibling_and_direct_self_is_readable() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
     let sender = sandbox.test_participant("alpha");
@@ -9277,32 +9241,11 @@ fn workspace_send_to_own_address_reaches_a_sibling_and_direct_self_requires_allo
     assert_eq!(delivered["kind"], "letter");
     assert_eq!(delivered["subject"], subject);
 
-    let refused = sandbox.run_as_participant(
+    let direct = sandbox.run_as_participant(
         &[
             "send",
             "--to",
             &format!("participant:{sender}"),
-            "--body",
-            "direct self",
-        ],
-        &sender,
-        &alpha,
-    );
-    assert_eq!(refused.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&refused);
-    assert_eq!(error.error.code, "invalid_argument");
-    let fix = error
-        .error
-        .details
-        .exact_fix
-        .expect("direct self refusal exact fix");
-    assert!(fix.contains("--allow-self"));
-    let applied = sandbox.run_as_participant(
-        &[
-            "send",
-            "--to",
-            &format!("participant:{sender}"),
-            "--allow-self",
             "--body",
             "direct self",
             "--json",
@@ -9310,7 +9253,17 @@ fn workspace_send_to_own_address_reaches_a_sibling_and_direct_self_requires_allo
         &sender,
         &alpha,
     );
-    assert_success(&applied);
+    assert_success(&direct);
+    let direct: serde_json::Value = from_stdout(&direct);
+    let direct_id = direct["envelope"]["id"].as_str().expect("direct id");
+    let own_inbox = sandbox.run_as_participant(&["inbox", "--json"], &sender, &alpha);
+    assert_success(&own_inbox);
+    let own_inbox: serde_json::Value = from_stdout(&own_inbox);
+    assert!(own_inbox["unread"]
+        .as_array()
+        .expect("own direct unread")
+        .iter()
+        .any(|message| message["id"] == direct_id));
 }
 
 #[test]
@@ -9583,12 +9536,10 @@ fn global_json_before_any_human_only_flag_is_refused() {
     }
 }
 
-/// `post send` reported archived=true and `post read <id>` from the sending
-/// room answered "not in the archive" about a file sitting in the archive. The
-/// filter admitted only `to == room`, so a sender could never read back what it
-/// had just written, and the error asserted a state the code never checked.
+/// An explicit read of a participant's own workspace send is an inspection,
+/// not unread consumption. The intended recipient still consumes independently.
 #[test]
-fn workspace_sender_is_self_suppressed_while_recipient_reads_the_canonical_mail() {
+fn workspace_sender_can_inspect_own_mail_without_consuming_a_recipient_copy() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let gamma = sandbox.path.join("gamma");
@@ -9617,7 +9568,10 @@ fn workspace_sender_is_self_suppressed_while_recipient_reads_the_canonical_mail(
 
     let sender_read =
         sandbox.run_as_participant(&["read", id, "--json"], &alpha_participant, &alpha);
-    assert_eq!(sender_read.status.code(), Some(66));
+    assert_success(&sender_read);
+    let sender_read: serde_json::Value = from_stdout(&sender_read);
+    assert_eq!(sender_read["own"], true);
+    assert!(sender_read["pending"].is_null());
     let recipient_read =
         sandbox.run_as_participant(&["read", id, "--json"], &beta_participant, &beta);
     assert_success(&recipient_read);

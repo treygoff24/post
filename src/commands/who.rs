@@ -184,7 +184,7 @@ fn mail_counts(
 ) -> AppResult<(BTreeMap<String, usize>, BTreeMap<String, usize>)> {
     let mut unread = BTreeMap::new();
     let mut pending = BTreeMap::new();
-    for address in super::inbox::visible_addresses(participant) {
+    for address in super::inbox::visible_addresses(context, participant)? {
         let label = format!("{}:{}", address.kind.as_str(), address.name);
         unread.insert(
             label.clone(),

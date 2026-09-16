@@ -115,9 +115,9 @@ fn bounded_channel_consumption_marks_only_emitted_page() {
     join_channel(&sandbox, "paged", &beta);
     assert_success(&sandbox.run_in(&["chat", "paged", "--discard", "--json"], None, &beta));
     let ids = [
-        "20990101-000000-000001-aaaa01",
-        "20990101-000000-000002-aaaa02",
-        "20990101-000000-000003-aaaa03",
+        "20000101-000000-000001-aaaa01",
+        "20000101-000000-000002-aaaa02",
+        "20000101-000000-000003-aaaa03",
     ];
     for id in ids {
         write_channel_message(&sandbox, "paged", id, "alpha", "page", id);
@@ -157,7 +157,7 @@ fn late_older_channel_id_remains_unread_and_seen_by_names_participants() {
     let sent: Value = from_stdout(&sent);
     let newer = sent["message"]["id"].as_str().expect("newer id").to_owned();
     assert_success(&sandbox.run_in(&["chat", "late", "--json"], None, &beta));
-    let older = "20990101-000000-000001-aaaa01";
+    let older = "20000101-000000-000001-aaaa01";
     write_channel_message(&sandbox, "late", older, "alpha", "older", "older");
     let peek = sandbox.run_in(&["chat", "late", "--peek", "--json"], None, &beta);
     assert_success(&peek);

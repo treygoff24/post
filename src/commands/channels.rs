@@ -24,15 +24,25 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
             }
             _ => None,
         };
+        let participants: Vec<String> = effective_members
+            .iter()
+            .map(|member| member.id.clone())
+            .collect();
+        let mut members: Vec<String> = summary.members.into_keys().collect();
+        members.extend(
+            effective_members
+                .iter()
+                .filter_map(|member| member.workspace.clone()),
+        );
+        members.sort();
+        members.dedup();
         channels.push(ChannelListItem {
             name: summary.info.name,
             created: summary.info.created,
             created_by: summary.info.created_by,
             description: summary.info.description,
-            members: effective_members
-                .into_iter()
-                .map(|member| member.id)
-                .collect(),
+            members,
+            participants,
             messages: summary.messages,
             room: acting_room.clone(),
             unread,
@@ -41,7 +51,7 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
 
     let pending = if let Some(participant) = participant {
         let mut count = 0;
-        for address in super::inbox::visible_addresses(participant) {
+        for address in super::inbox::visible_addresses(context, participant)? {
             count += routing::provisional_pending_for(context, participant, &address)?.len();
         }
         count

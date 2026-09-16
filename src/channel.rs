@@ -236,24 +236,42 @@ pub(crate) fn join(
     // state is written. Checked under the lock so a concurrent join of the
     // blocked counterpart cannot slip in between check and write.
     let rules = context.load_rules(&rooms)?;
-    for member in crate::channel_state::effective_participants(context, channel)? {
-        let member_address = member.workspace.as_deref().unwrap_or(&member.id);
+    let mut existing_members: Vec<(String, String)> =
+        crate::channel_state::effective_participants(context, channel)?
+            .into_iter()
+            .map(|member| {
+                let address = member
+                    .workspace
+                    .clone()
+                    .unwrap_or_else(|| member.id.clone());
+                (member.id, address)
+            })
+            .collect();
+    for workspace in paths.load_members()?.into_keys() {
+        if !existing_members
+            .iter()
+            .any(|(_, address)| address == &workspace)
+        {
+            existing_members.push((workspace.clone(), workspace));
+        }
+    }
+    for (member_id, member_address) in existing_members {
         if let Some(rule) = rules.blocked.iter().find(|rule| {
-            rule.matches_route(&room, member_address)
-                || rule.matches_route(member_address, &room)
-                || rule.matches_route(&actor.participant.id, &member.id)
-                || rule.matches_route(&member.id, &actor.participant.id)
+            rule.matches_route(&room, &member_address)
+                || rule.matches_route(&member_address, &room)
+                || rule.matches_route(&actor.participant.id, &member_id)
+                || rule.matches_route(&member_id, &actor.participant.id)
         }) {
             return Err(AppError::new(
                 ErrorCode::BlockedRoute,
                 format!(
                     "joining '{channel}' would put '{room}' and existing member '{member}' in one channel, and that route is blocked: {}",
                     rule.reason,
-                    member = member.id
+                    member = member_id
                 ),
                 "Do not route around this block. Ask the human operator to review rules.json.",
             )
-            .input(format!("{} <-> {}", actor.participant.id, member.id))
+            .input(format!("{} <-> {}", actor.participant.id, member_id))
             .reason(rule.reason.clone())
             .rule(rule.clone()));
         }

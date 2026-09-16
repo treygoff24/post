@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 struct InboxItemV2 {
     id: String,
     from: String,
+    origin: String,
     kind: MailKind,
     subject: String,
     sent: String,
@@ -33,16 +34,18 @@ struct InboxItemV2 {
     reply_to_shared: String,
 }
 
-impl From<Envelope> for InboxItemV2 {
-    fn from(envelope: Envelope) -> Self {
-        let reply_to_participant = envelope
-            .from_participant
-            .as_ref()
-            .map(|id| format!("participant:{id}"));
-        let reply_to_shared = envelope.from.clone();
+impl InboxItemV2 {
+    fn new(context: &Context, envelope: Envelope) -> Self {
+        let reply = output::reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        );
         Self {
             id: envelope.id,
             from: envelope.from,
+            origin: reply.origin,
             kind: envelope.kind,
             subject: envelope.subject,
             sent: envelope.sent,
@@ -52,8 +55,8 @@ impl From<Envelope> for InboxItemV2 {
             sender_provenance: envelope.sender_provenance,
             from_participant: envelope.from_participant,
             from_lineage: envelope.from_lineage,
-            reply_to_participant,
-            reply_to_shared,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
         }
     }
 }
@@ -102,18 +105,20 @@ fn list_bound(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let addresses = if let Some(room) = args.room {
+        let rooms = context.load_rooms()?;
+        let room = context.resolved_room(Some(room), &rooms)?;
         vec![Address {
             kind: AddressKind::Workspace,
             name: room,
         }]
     } else {
-        visible_addresses(participant)
+        visible_addresses(context, participant)?
     };
     let mut unread = Vec::new();
     let mut pending_by_address = BTreeMap::new();
     for address in &addresses {
         for item in eligibility::unread_mail(context, participant, address)? {
-            unread.push(InboxItemV2::from(item.envelope));
+            unread.push(InboxItemV2::new(context, item.envelope));
         }
         let pending = routing::provisional_pending_for(context, participant, address)?.len();
         pending_by_address.insert(address_label(address), pending);
@@ -231,7 +236,10 @@ fn adopt(context: &Context, participant: &Participant, pretty: bool) -> AppResul
     )
 }
 
-pub(crate) fn visible_addresses(participant: &Participant) -> Vec<Address> {
+pub(crate) fn visible_addresses(
+    context: &Context,
+    participant: &Participant,
+) -> AppResult<Vec<Address>> {
     let mut addresses = Vec::new();
     if let Some(workspace) = participant.workspace.as_ref() {
         addresses.push(Address {
@@ -249,7 +257,15 @@ pub(crate) fn visible_addresses(participant: &Participant) -> Vec<Address> {
             name: lineage.clone(),
         });
     }
-    addresses
+    addresses.extend(routing::received_addresses(context, participant)?);
+    addresses.sort_by(|left, right| {
+        left.kind
+            .as_str()
+            .cmp(right.kind.as_str())
+            .then(left.name.cmp(&right.name))
+    });
+    addresses.dedup_by(|left, right| left == right);
+    Ok(addresses)
 }
 
 pub(crate) fn address_label(address: &Address) -> String {

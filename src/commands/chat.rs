@@ -94,6 +94,9 @@ fn acknowledge_exact(
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
     let participant = context.sender().ok().map(|sender| sender.participant);
+    if let Some(participant) = participant.as_ref() {
+        cursor_state::routing::route_for_participant(context, participant)?;
+    }
     let paths = member_channel_paths(context, channel_name, &room)?;
     let id = resolve_message_stem(&paths, channel_name, target_input)?;
     // Parse the exact target before rendering an acknowledgement. A malformed
@@ -606,6 +609,7 @@ fn read(
             .zip(&signed_statuses)
             .map(|((message, body), status)| {
                 output::ChatMessageItem::new(
+                    context,
                     message.clone(),
                     body.clone(),
                     status
@@ -1405,6 +1409,9 @@ fn discard_through(
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
     let participant = context.sender().ok().map(|sender| sender.participant);
+    if let Some(participant) = participant.as_ref() {
+        cursor_state::routing::route_for_participant(context, participant)?;
+    }
     let paths = member_channel_paths(context, channel_name, &room)?;
     let target = resolve_message_stem(&paths, channel_name, target_input)?;
 
@@ -1988,16 +1995,28 @@ fn full_banner_due_today(context: &Context, room: &str) -> bool {
 }
 
 fn banner_due_today(context: &Context, room: &str) -> bool {
-    let path = context.root.join(room).join("banner-day");
+    let path = banner_day_path(context, room);
     !std::fs::read_to_string(path).is_ok_and(|stored| stored.trim() == banner_day_value())
 }
 
 fn stamp_banner_day(context: &Context, room: &str) {
-    let path = context.root.join(room).join("banner-day");
+    let path = banner_day_path(context, room);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, banner_day_value());
+}
+
+fn banner_day_path(context: &Context, room: &str) -> std::path::PathBuf {
+    let participant_dir = context
+        .root
+        .join(crate::participant::PARTICIPANTS_DIR)
+        .join(room);
+    if participant_dir.join("participant.json").is_file() {
+        participant_dir.join("banner-day")
+    } else {
+        context.root.join(room).join("banner-day")
+    }
 }
 
 fn banner_day_value() -> String {
