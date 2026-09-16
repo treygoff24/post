@@ -118,7 +118,7 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
     assert_eq!(schema.store_version, 2);
     assert_eq!(
         schema.capabilities,
-        vec!["participants", "routing-receipts", "cursors-v2"]
+        vec!["participants", "lineages", "routing-receipts", "cursors-v2"]
     );
     let watch = schema
         .commands
@@ -332,6 +332,14 @@ fn schema_matches_catchup_and_search_help_and_json() {
         }
     }
 
+    write_channel_message(
+        &sandbox,
+        "tax",
+        "20260820-120001-000001-bbbbbb",
+        "alpha",
+        "searchable after catchup",
+        "schema surface marker",
+    );
     let search_output = sandbox.run_in(&["search", "schema surface marker", "--json"], None, &beta);
     assert_success(&search_output);
     let search_json = json_object(&search_output);
@@ -345,6 +353,8 @@ fn schema_matches_catchup_and_search_help_and_json() {
         "count",
         "limit",
         "truncated",
+        "participant",
+        "pending",
     ];
     assert_keys_in_shape(&schema.output_shapes.search, &search_top);
     assert_keys_in_shape(
@@ -422,7 +432,7 @@ fn schema_matches_catchup_and_search_help_and_json() {
 #[test]
 fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let (alpha, beta) = register_alpha_beta(&sandbox);
     write_bad_channel(
         &sandbox,
         "bounded",
@@ -439,22 +449,24 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         "schema budget",
         &"x".repeat(4_000),
     );
-    let inbox = sandbox.mail_root.join("beta/inbox");
-    fs::create_dir_all(&inbox).expect("inbox");
-    let mail_id = "20990906-121000-666667";
-    write_custom_mail(
-        &inbox,
-        mail_id,
-        &serde_json::json!({
-            "id": mail_id,
-            "from": "alpha",
-            "to": "beta",
-            "kind": "note",
-            "subject": "schema budget",
-            "sent": "2026-09-06 12:10:00 +0000"
-        }),
-        &"y".repeat(4_000),
+    let body = "y".repeat(4_000);
+    let sent = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--subject",
+            "schema budget",
+            "--body",
+            &body,
+            "--json",
+        ],
+        None,
+        &alpha,
     );
+    assert_success(&sent);
+    let sent = json_object(&sent);
+    let mail_id = sent["envelope"]["id"].as_str().expect("mail id").to_owned();
     let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
     for (command, tokens) in [
         (
@@ -533,10 +545,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &schema.output_shapes.chat_slice,
     );
 
-    let read_budget = sandbox.run_in(
+    let beta_participant = sandbox.test_participant("beta");
+    let read_budget = sandbox.run_as_participant(
         &[
             "read",
-            mail_id,
+            &mail_id,
             "--room",
             "beta",
             "--peek",
@@ -544,7 +557,7 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
             "1200",
             "--json",
         ],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&read_budget);
@@ -553,10 +566,10 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &schema.output_shapes.read_budget,
     );
 
-    let read_slice = sandbox.run_in(
+    let read_slice = sandbox.run_as_participant(
         &[
             "read",
-            mail_id,
+            &mail_id,
             "--room",
             "beta",
             "--offset",
@@ -565,7 +578,7 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
             "1200",
             "--json",
         ],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&read_slice);
@@ -603,7 +616,7 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &schema.output_shapes.chat_ack,
     );
     let read_ack = sandbox.run_in(
-        &["read", mail_id, "--room", "beta", "--ack", "--json"],
+        &["read", &mail_id, "--room", "beta", "--ack", "--json"],
         None,
         &beta,
     );
@@ -635,7 +648,7 @@ fn doctor_reports_cursor_state_without_repairing_it() {
         .find(|check| check.id == "cursor_state.claude-space.invalid")
         .expect("malformed cursor check");
     assert_eq!(invalid.severity, DoctorSeverity::Warning);
-    assert!(invalid.message.contains("all unread"));
+    assert!(invalid.message.contains("participant reads ignore it"));
 
     let fixed = sandbox.run(&["doctor", "--fix"]);
     assert_eq!(fixed.status.code(), Some(1));

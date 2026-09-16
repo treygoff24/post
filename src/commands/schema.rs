@@ -304,6 +304,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         search: fields(&[
             "ok",
+            "participant",
+            "pending",
             "framing (source, authority, laws)",
             "room",
             "pattern",
