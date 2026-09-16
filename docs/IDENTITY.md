@@ -45,9 +45,10 @@ credential**. Read banners render provenance as frozen sentences, e.g.
 "sender identity was inferred from the directory this was sent from — it is
 a location, not a claim."
 
-Behavior rules (0.5.0): a `--from` that disagrees with the pin is a hard
-error; `from == to` is refused without `--allow-self` (instances of one
-room coordinate via channels; routable instances are a recorded non-goal).
+Behavior rules: a `--from` that disagrees with the pin is a hard error.
+Workspace sends fan out to the other bound participants and suppress only the
+sending participant; an explicit `participant:<self>` target is the self-send
+path and needs no flag.
 
 ## Layer 2 — Card (optional, self-authored)
 

@@ -149,6 +149,64 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
         .any(|line| line.trim_start().starts_with("new ")));
 }
 
+#[test]
+fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
+    let sandbox = Sandbox::new();
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    let watch = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "watch")
+        .expect("watch command");
+    assert!(watch
+        .side_effects
+        .contains("long-running watch requires a bound participant"));
+    assert!(watch.side_effects.contains("bounded sanitized previews"));
+    assert!(watch
+        .side_effects
+        .contains("snapshot is the read-only unbound exception"));
+    assert!(!watch.side_effects.contains("legacy unbound watches"));
+    assert!(!watch.side_effects.contains("never emits body content"));
+
+    let laws = schema.laws.join("\n");
+    assert!(laws.contains(
+        "Already-read participant mail stays in its canonical inbox and remains retrievable"
+    ));
+    assert!(laws.contains("legacy room cursor, read/, and channel-state files are read-only"));
+    assert!(laws.contains("never imported into participant cursor state"));
+    assert!(laws.contains("Search is participant-visible history"));
+    assert!(!laws.contains("retrievable by id or prefix from the read store"));
+    assert!(!laws.contains("legacy channel-state.json is imported"));
+
+    let environment = schema.environment.join("\n");
+    assert!(environment.contains("legacy cursor state is never imported or materialized"));
+    assert!(!environment.contains("valid legacy channel-state.json imports"));
+
+    for shape in [
+        &schema.output_shapes.read_json,
+        &schema.output_shapes.read_budget,
+        &schema.output_shapes.read_slice,
+    ] {
+        assert_keys_in_shape(
+            shape,
+            &[
+                "origin",
+                "reply_to_participant",
+                "reply_to_shared",
+                "address",
+                "own",
+                "pending",
+                "already_read",
+            ],
+        );
+    }
+    assert_keys_in_shape(
+        &schema.output_shapes.search,
+        &["own", "pending", "already_read"],
+    );
+    assert_keys_in_shape(&schema.output_shapes.watch, &["digest", "pending"]);
+}
+
 fn option_names(text: &str) -> BTreeSet<String> {
     text.split_whitespace()
         .filter_map(|token| {
