@@ -62,7 +62,7 @@ No durable watcher-notification store is required or tested.
 
 `P13-08` plants valid receipts for the newer and late older fixtures. The older id must appear in `.unread`, with `unread_count == 1`, before it is consumed. This exercises routed unread state rather than the pending path.
 
-`LIFECYCLE-touch` seeds lease 7 twice. With `POST_PARTICIPANT_LEASE_HOURS` unset, touch must preserve 7. With the env set to 3, touch must reapply 3. `LIFECYCLE-frozen` performs a consuming read after `participant end`, then proves `ended_at` remains set and `who` still reports `ended`.
+`LIFECYCLE-touch` seeds lease 7 twice. With `POST_PARTICIPANT_LEASE_HOURS` unset, touch must preserve 7. With the env set to 3, touch must reapply 3. `LIFECYCLE-frozen` performs a consuming read after `participant end`, proves the exact id enters the ended actor's workspace cursor and leaves its unread inbox, then proves `ended_at` remains set and `who` still reports `ended`.
 
 Every spawned watch and every snapshot is bounded. Background subshells `exec` the binary, timeout cleanup also walks descendants with `pgrep -P`, and the closed-pipe row takes the writer exit status from `wait_for_pid`. The closed-pipe proof still requires at least one stdout byte, the specific `io_error` for `write stdout` with an EPIPE reason, an unchanged cursor, and a successful regular-file retry that consumes the same id. INT, TERM, and EXIT run the same cleanup. Cleanup accepts any exact root returned by this run's `mktemp`, including roots below `~/.delegate/run-scratch`, and reports the root as removed.
 

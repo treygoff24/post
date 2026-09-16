@@ -68,13 +68,12 @@ wait_for_pid() {
 }
 
 stop_pid() {
-    stop_pid_value=$1
-    [ -n "$stop_pid_value" ] || return 0
-    for stop_pid_child in $(pgrep -P "$stop_pid_value" 2>/dev/null); do
+    [ -n "$1" ] || return 0
+    for stop_pid_child in $(pgrep -P "$1" 2>/dev/null); do
         stop_pid "$stop_pid_child"
     done
-    kill "$stop_pid_value" 2>/dev/null || true
-    wait_for_pid "$stop_pid_value" 20 >/dev/null 2>&1 || true
+    kill "$1" 2>/dev/null || true
+    wait_for_pid "$1" 20 >/dev/null 2>&1 || true
 }
 
 remove_temp_tree() {
@@ -910,6 +909,14 @@ PY
         assert_jq "$PS_BASE/lifecycle-frozen-read.json" '.envelope.id == $id' --arg id "$id" || return 1
         cmp -s "$participant_file" "$PS_BASE/lifecycle-frozen-ended.json" || { ROW_REASON="consuming read reactivated or changed ended participant"; return 1; }
         assert_jq "$participant_file" '.ended_at != null' || return 1
+        cursor="$PS_ROOT/participants/$frozen/cursors.json"
+        [ -f "$cursor" ] || { ROW_REASON="ended participant cursor missing after consumption"; return 1; }
+        assert_jq "$cursor" \
+            '([.mail["workspace:smoke"].seen[]?] | index($id)) != null' \
+            --arg id "$id" || return 1
+        capture_json "$PS_BASE/lifecycle-frozen-inbox.json" as_participant "$frozen" inbox --json || return 1
+        assert_jq "$PS_BASE/lifecycle-frozen-inbox.json" \
+            '([.unread[]?.id] | index($id)) == null' --arg id "$id" || return 1
         capture_json "$PS_BASE/lifecycle-frozen-who.json" as_a who --json || return 1
         assert_jq "$PS_BASE/lifecycle-frozen-who.json" \
             '([.participants[] | select(.id==$id and .state=="ended")] | length) == 1' \
