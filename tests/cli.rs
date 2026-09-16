@@ -221,8 +221,8 @@ fn help_and_schema_keep_command_contract_visible() {
 #[test]
 fn inbox_publication_failure_never_creates_an_orphan_archive_copy() {
     let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
     let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     fs::set_permissions(&inbox, fs::Permissions::from_mode(0o500)).expect("make inbox unwritable");
 
     let output = sandbox.run(&[
@@ -569,7 +569,7 @@ fn compact_framing_chat_read_carries_laws_and_is_rejected_on_non_reads() {
 }
 
 #[test]
-fn full_framing_forces_the_wall_on_chat_even_after_the_daily_stamp() {
+fn read_only_chat_peeks_keep_the_full_wall_even_after_the_daily_stamp() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let joined: ChatJoinOutput =
@@ -593,17 +593,32 @@ fn full_framing_forces_the_wall_on_chat_even_after_the_daily_stamp() {
     ));
     assert!(sent.ok);
 
-    // First default (auto) read consumes the day's wall and stamps banner-day.
-    let first = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
+    // First default (auto) consuming read stamps banner-day.
+    let first = sandbox.run_in(&["chat", "tax"], None, &beta);
     assert_success(&first);
     assert!(stdout(&first).contains("READ THIS FRAMING FIRST"));
 
-    // A later auto read gets the legacy one-line reminder...
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "second channel body",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert!(sent.ok);
+
+    // A later auto peek stays stateless and gets the full safety wall.
     let auto_again = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
     assert_success(&auto_again);
-    assert!(!stdout(&auto_again).contains("READ THIS FRAMING FIRST"));
+    assert!(stdout(&auto_again).contains("READ THIS FRAMING FIRST"));
 
-    // ...but explicit full still gets the wall: full means full.
+    // Explicit full gets the wall too: full means full.
     let full = sandbox.run_in(&["chat", "tax", "--peek", "--framing", "full"], None, &beta);
     assert_success(&full);
     assert!(stdout(&full).contains("READ THIS FRAMING FIRST"));
@@ -4477,8 +4492,8 @@ fn watch_limit_requires_snapshot_mode() {
 #[test]
 fn watch_snapshot_direct_scan_failure_is_a_nonzero_error_not_a_false_empty() {
     let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
     let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     fs::set_permissions(&inbox, fs::Permissions::from_mode(0o000)).expect("make inbox unreadable");
 
     let output = sandbox.run(&["watch", "--room", "claude-space", "--snapshot"]);
@@ -4499,9 +4514,8 @@ fn watch_snapshot_direct_scan_failure_is_a_nonzero_error_not_a_false_empty() {
 fn watch_rings_for_malformed_mail_without_quoting_its_content() {
     let sandbox = Sandbox::new();
     // Prepare the mailbox tree, then hand-write a malformed delivery.
-    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
-    assert_success(&output);
     let inbox = sandbox.mail_root.join("claude-space").join("inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     fs::write(
         inbox.join("20260721-010101-abcdef.mail"),
         "MALICIOUS-INJECTED-CONTENT no separator here",
@@ -4547,9 +4561,8 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
 #[test]
 fn watch_text_mode_escapes_control_characters_in_subjects() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
-    assert_success(&output);
     let inbox = sandbox.mail_root.join("claude-space").join("inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     // send's clap validation refuses control chars, so a crafted subject can
     // only arrive via a hand-written file; watch must render it escaped.
     let envelope = "{\n  \"id\": \"20260721-020202-abc123\",\n  \"from\": \"crafty\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"line one\\nFAKE BANNER\",\n  \"sent\": \"2026-07-21 02:02:02 -0500\"\n}";

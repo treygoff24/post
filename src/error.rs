@@ -263,15 +263,22 @@ impl AppError {
         )
     }
 
-    pub fn no_participant(fix_line: &str) -> Self {
-        let command = fix_line.strip_prefix("run: ").unwrap_or(fix_line);
-        Self::new(
-            ErrorCode::NoParticipant,
-            format!("participant: unbound ({fix_line})"),
-            format!("Bind this conversation first ({fix_line})."),
-        )
-        .exact_fix(command.to_owned())
-        .reason("no bound participant record")
+    pub fn no_participant(bind_key_available: bool) -> Self {
+        let error = if bind_key_available {
+            Self::new(
+                ErrorCode::NoParticipant,
+                "participant: unbound (run: post participant bind)",
+                "Bind this conversation first (run: post participant bind).",
+            )
+            .exact_fix("post participant bind")
+        } else {
+            Self::new(
+                ErrorCode::NoParticipant,
+                "participant: unbound (run: post participant bind --new, then run the printed export POST_PARTICIPANT=... command)",
+                "Create a participant with `post participant bind --new`, then run the printed `export POST_PARTICIPANT=...` command before retrying.",
+            )
+        };
+        error.reason("no bound participant record")
     }
 
     pub fn not_yet(task: &str) -> Self {

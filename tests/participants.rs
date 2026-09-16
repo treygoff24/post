@@ -317,8 +317,9 @@ fn participant_read_only_unbound_commands_create_nothing() {
 #[test]
 fn participant_unbound_send_fails_with_exact_bind_fix() {
     let sandbox = Sandbox::new_unseeded();
-    let output = sandbox.run_unbound(
+    let output = sandbox.run_as_claude(
         &["send", "--to", "anywhere", "--body", "must not write"],
+        "unbound-but-bindable-key",
         &sandbox.path,
     );
     assert_eq!(output.status.code(), Some(65));

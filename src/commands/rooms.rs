@@ -1,7 +1,7 @@
 use crate::cli::{RoomsAddArgs, RoomsArgs, RoomsCommand};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{validate_room_name, Context};
+use crate::mailbox::{validate_new_room_name, Context};
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{RoomOutput, RoomsOutput};
 use std::fs;
@@ -21,7 +21,7 @@ fn list(context: &Context, pretty: bool) -> AppResult<CommandResult> {
 }
 
 fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<CommandResult> {
-    validate_room_name(&args.name).map_err(|reason| {
+    validate_new_room_name(&args.name).map_err(|reason| {
         AppError::new(
             ErrorCode::InvalidArgument,
             format!("room name '{}' is invalid: {reason}", args.name),
@@ -30,6 +30,18 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .input(args.name.clone())
         .reason(reason)
     })?;
+    if crate::lineage::load(context, &args.name)?.is_some() {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "room name '{}' is already used by an existing lineage",
+                args.name
+            ),
+            "Choose a room name that does not collide with an existing lineage.",
+        )
+        .input(args.name)
+        .reason("room names cannot collide with existing lineages"));
+    }
 
     let _lock = context.lock_rooms()?;
     let mut rooms = context.load_rooms()?;

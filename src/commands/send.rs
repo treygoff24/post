@@ -90,63 +90,7 @@ where
     // Built before `sender` is consumed, so a body-input fix can echo the
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
-    #[cfg(test)]
-    let (sender, provenance) = match args.sender.clone() {
-        Some(sender) => {
-            // Pin vs flag DISAGREEMENT is a hard error (M4): a prepared
-            // command carrying --from inside a pinned session is exactly the
-            // ambiguity the identity layer exists to eliminate. An AGREEING
-            // flag is not a conflict and proceeds as declared-flag.
-            if let Some(pinned) = identity.pin.as_deref() {
-                if pinned != sender {
-                    return Err(AppError::new(
-                        ErrorCode::InvalidArgument,
-                        format!(
-                            "--from '{sender}' conflicts with the POST_FROM pin '{pinned}' set by this session's launcher"
-                        ),
-                        "Drop --from to send as the pinned identity, or unset POST_FROM if this shell should not be pinned.",
-                    )
-                    .input(sender)
-                    .reason("explicit sender disagrees with the environment pin"));
-                }
-            }
-            (sender, SenderProvenance::DeclaredFlag)
-        }
-        None => match identity.pin.clone() {
-            Some(pinned) => {
-                // M4 made a disagreeing --from a hard error, so the old
-                // "pass --from to send as someone else" advice would name a
-                // command guaranteed to fail. Tell the truth instead.
-                eprintln!(
-                    "post: sending as '{pinned}' (POST_FROM pin; the pin governs this session — to send as another identity, use a shell without POST_FROM set)"
-                );
-                (pinned, SenderProvenance::DeclaredEnv)
-            }
-            None => {
-                let (inferred, provenance) = context.infer_from_cwd(&rooms)?;
-                // Sender identity is derived from cwd, so a prepared command run
-                // from the wrong tree posts as that tree's room. Name the resolved
-                // sender on stderr before anything is written; the success receipt
-                // is otherwise the first place it appears, which is too late.
-                eprintln!(
-                    "post: sending as '{inferred}' (identity inferred from cwd); pass --from <NAME> to send as someone else"
-                );
-                (inferred, provenance)
-            }
-        },
-    };
-    // The POST_FROM pin deliberately bypasses the cwd-containment
-    // reservation: the pin exists precisely so identity survives a cwd
-    // outside the room's tree (specimen 21). It is still only a declaration —
-    // recorded as `declared-env` and rendered as evidence at read time, never
-    // as a credential. Flag and inference keep the location guard unchanged.
-    #[cfg(test)]
-    if provenance != SenderProvenance::DeclaredEnv {
-        context.ensure_sender_allowed(&sender, &rooms)?;
-    }
-    #[cfg(not(test))]
     let actor = context.sender()?;
-    #[cfg(not(test))]
     let (sender, provenance) = {
         if let Some(declared) = args.sender.as_deref() {
             if let Some(pinned) = identity.pin.as_deref() {
@@ -219,7 +163,11 @@ where
         (actor.from.clone(), provenance)
     };
     let sender_address = identity.address;
-    let resolved_target = resolve_target(context, &rooms, &args.to)?;
+    let resolved_target = match crate::participant::resolve_target(context, &args.to) {
+        Ok(target) => Some(target),
+        Err(error) if error.code == ErrorCode::UnknownRoom => None,
+        Err(error) => return Err(error),
+    };
 
     // Self-mail refusal (M4): instances of one room coordinate via channels;
     // routable instances are a recorded non-goal. --allow-self is the
@@ -375,11 +323,8 @@ where
             kind: args.kind,
             subject: args.subject.clone(),
             sent: sent.clone(),
-            #[cfg(not(test))]
             from_participant: Some(actor.participant.id.clone()),
-            #[cfg(not(test))]
             from_lineage: actor.lineage.clone(),
-            #[cfg(not(test))]
             address_kind: Some(target.kind.as_str().to_owned()),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
@@ -389,7 +334,7 @@ where
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;
         if inbox.is_none() {
-            ensure_route_allowed(context, &rooms, &sender, &target.name)?;
+            ensure_route_allowed(context, &rooms, &sender, &target)?;
             fs::create_dir_all(&archive)
                 .map_err(|error| AppError::io("create archive directory", &archive, error))?;
             inbox = Some(target.inbox(context)?);
@@ -397,7 +342,7 @@ where
         let inbox = inbox.as_ref().expect("mailbox was initialized");
         let archive_path = archive.join(format!("{id}.mail"));
         let inbox_path = inbox.join(format!("{id}.mail"));
-        ensure_route_allowed(context, &rooms, &sender, &target.name)?;
+        ensure_route_allowed(context, &rooms, &sender, &target)?;
         match exclusive_atomic_write(&inbox_path, &payload) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -466,138 +411,13 @@ where
     Ok(CommandResult::committed(rendered))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetKind {
-    Workspace,
-    Lineage,
-    Participant,
-}
-
-impl TargetKind {
-    #[cfg_attr(test, allow(dead_code))]
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Workspace => "workspace",
-            Self::Lineage => "lineage",
-            Self::Participant => "participant",
-        }
-    }
-}
-
-struct ResolvedTarget {
-    kind: TargetKind,
-    name: String,
-    participant_dir: Option<std::path::PathBuf>,
-}
-
-impl ResolvedTarget {
-    fn inbox(&self, context: &Context) -> AppResult<std::path::PathBuf> {
-        let inbox = match self.kind {
-            TargetKind::Workspace => context.mailbox_dirs(&self.name)?.0,
-            TargetKind::Lineage => context
-                .root
-                .join(crate::lineage::LINEAGES_DIR)
-                .join(&self.name)
-                .join("inbox"),
-            TargetKind::Participant => self
-                .participant_dir
-                .as_ref()
-                .expect("participant target carries its directory")
-                .join("inbox"),
-        };
-        fs::create_dir_all(&inbox)
-            .map_err(|error| AppError::io("create canonical target inbox", &inbox, error))?;
-        Ok(inbox)
-    }
-}
-
-fn resolve_target(
-    context: &Context,
-    rooms: &RoomMap,
-    requested: &str,
-) -> AppResult<Option<ResolvedTarget>> {
-    if let Some((kind, name)) = requested.split_once(':') {
-        if name.is_empty() || name.contains(':') {
-            return Err(AppError::invalid_argument(format!(
-                "typed target '{requested}' must contain exactly one non-empty name after ':'"
-            )));
-        }
-        return match kind {
-            "workspace" => {
-                if rooms.contains_key(name) {
-                    Ok(Some(ResolvedTarget {
-                        kind: TargetKind::Workspace,
-                        name: name.to_owned(),
-                        participant_dir: None,
-                    }))
-                } else {
-                    Err(unknown_typed_target(kind, name))
-                }
-            }
-            "lineage" => match crate::lineage::load(context, name)? {
-                Some(_) => Ok(Some(ResolvedTarget {
-                    kind: TargetKind::Lineage,
-                    name: name.to_owned(),
-                    participant_dir: None,
-                })),
-                None => Err(unknown_typed_target(kind, name)),
-            },
-            "participant" => match crate::participant::load(context, name)? {
-                Some(participant) => Ok(Some(ResolvedTarget {
-                    kind: TargetKind::Participant,
-                    name: name.to_owned(),
-                    participant_dir: Some(participant.dir),
-                })),
-                None => Err(unknown_typed_target(kind, name)),
-            },
-            _ => Err(AppError::invalid_argument(format!(
-                "typed target prefix '{kind}' is unknown; expected workspace, lineage, or participant"
-            ))
-            .input(requested)
-            .reason("unknown typed target prefix")),
-        };
-    }
-
-    if rooms.contains_key(requested) {
-        return Ok(Some(ResolvedTarget {
-            kind: TargetKind::Workspace,
-            name: requested.to_owned(),
-            participant_dir: None,
-        }));
-    }
-    if crate::lineage::load(context, requested)?.is_some() {
-        return Ok(Some(ResolvedTarget {
-            kind: TargetKind::Lineage,
-            name: requested.to_owned(),
-            participant_dir: None,
-        }));
-    }
-    if let Some(participant) = crate::participant::load(context, requested)? {
-        return Ok(Some(ResolvedTarget {
-            kind: TargetKind::Participant,
-            name: requested.to_owned(),
-            participant_dir: Some(participant.dir),
-        }));
-    }
-    Ok(None)
-}
-
-fn unknown_typed_target(kind: &str, name: &str) -> AppError {
-    AppError::new(
-        ErrorCode::NotFound,
-        format!("{kind} target '{name}' does not exist in this local store"),
-        "Run `post rooms`, `post identity list`, or `post participant list`, then retry with an existing target.",
-    )
-    .input(format!("{kind}:{name}"))
-    .reason("typed target is absent")
-}
-
 fn ensure_route_allowed(
     context: &Context,
     rooms: &RoomMap,
     sender: &str,
-    recipient: &str,
+    target: &crate::participant::Address,
 ) -> AppResult<()> {
+    let recipient = &target.name;
     let rules = context.load_rules(rooms)?;
     let Some(rule) = rules
         .blocked
@@ -862,6 +682,11 @@ mod tests {
         )
     }
 
+    fn test_identity(context: &Context, workspace: &str) -> EnvIdentity {
+        crate::participant::bind_test_actor(context, workspace);
+        EnvIdentity::none()
+    }
+
     #[test]
     fn body_after_rule_add_is_refused_before_any_mail_write() {
         let (root, context) = test_context("order");
@@ -880,7 +705,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "race-test"),
             |_| {
                 fs::write(
                     root.join("rules.json"),
@@ -927,7 +752,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "collision-test"),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(ids.next().expect("test provides two ids").to_owned()),
         )
@@ -971,7 +796,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "rule-race"),
             |source| Ok(source.inline.expect("inline body")),
             |_, attempt| {
                 if attempt == 1 {
@@ -1028,7 +853,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "archive-collision"),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
@@ -1072,7 +897,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "exhaustion-test"),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
@@ -1115,7 +940,7 @@ mod tests {
             },
             true,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "unit-sender"),
             |source| Ok(source.inline.expect("inline body")),
         )
         .expect("unit send");

@@ -158,7 +158,6 @@ pub(crate) fn acting_room(
     context: &Context,
     rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
-    #[cfg(not(test))]
     let (room, provenance) = {
         let actor = context.sender()?;
         let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
@@ -170,11 +169,6 @@ pub(crate) fn acting_room(
                 .unwrap_or(SenderProvenance::InferredBasename)
         };
         (actor.from, provenance)
-    };
-    #[cfg(test)]
-    let (room, provenance) = match crate::mailbox::declared_env_pin()? {
-        Some(pinned) => (pinned, SenderProvenance::DeclaredEnv),
-        None => context.infer_from_cwd(rooms)?,
     };
     if rooms.contains_key(&room) {
         return Ok((room, provenance));
@@ -1034,9 +1028,7 @@ fn write_message(
     let rooms = context.load_rooms()?;
     let profile = crate::profile::stamp_for(context, opts.room, &rooms);
     let sender_address = crate::mailbox::declared_sender_address()?;
-    #[cfg(not(test))]
     let actor = context.sender()?;
-    #[cfg(not(test))]
     if actor.from != opts.room {
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
@@ -1056,11 +1048,8 @@ fn write_message(
             channel: opts.channel.to_owned(),
             subject: opts.subject.to_owned(),
             sent,
-            #[cfg(not(test))]
             from_participant: Some(actor.participant.id.clone()),
-            #[cfg(not(test))]
             from_lineage: actor.lineage.clone(),
-            #[cfg(not(test))]
             address_kind: Some("channel".to_owned()),
             event: opts.event.map(str::to_owned),
             display_name: profile.name.clone(),
@@ -1381,13 +1370,12 @@ mod tests {
         let root = test_root(&format!("channel-{label}"));
         fs::write(root.join("rooms.json"), rooms).expect("write rooms config");
         fs::write(root.join("rules.json"), rules).expect("write rules config");
-        (
-            root.clone(),
-            Context {
-                root: root.clone(),
-                home: root,
-            },
-        )
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        crate::participant::bind_test_actor(&context, "alpha");
+        (root, context)
     }
 
     fn rooms_json(root: &Path) -> String {
@@ -1415,6 +1403,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:00:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1438,6 +1429,9 @@ mod tests {
             channel: "tax\nFORGED".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1460,6 +1454,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:20:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1752,6 +1749,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,

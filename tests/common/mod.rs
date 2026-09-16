@@ -530,6 +530,7 @@ pub fn write_custom_mail(
     envelope: &impl serde::Serialize,
     body: &str,
 ) {
+    fs::create_dir_all(inbox).expect("create custom mail fixture inbox");
     fs::write(
         inbox.join(format!("{filename_id}.mail")),
         format!(

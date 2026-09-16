@@ -303,10 +303,8 @@ fn read_state(context: &Context) -> AppResult<Option<FenceState>> {
     parsed.into_state(&path).map(Some)
 }
 
-pub(crate) fn read_only_must_not_mutate(context: &Context) -> bool {
-    // Presence is enough for reads: never parse or reject a writer-only
-    // declaration on a read path. A set declaration also protects a missing
-    // root/state pair from legacy first-run initialization.
+#[cfg(test)]
+fn read_only_must_not_mutate(context: &Context) -> bool {
     if std::env::var_os(GENERATION_ENV).is_some() {
         return true;
     }

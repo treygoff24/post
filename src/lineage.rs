@@ -51,7 +51,11 @@ impl Lineage {
 }
 
 pub(crate) fn load(context: &Context, name: &str) -> AppResult<Option<Lineage>> {
-    validate_name(context, name)?;
+    crate::mailbox::validate_component(name).map_err(|reason| {
+        AppError::invalid_argument(format!("lineage name '{name}' is invalid: {reason}"))
+            .input(name)
+            .reason(reason)
+    })?;
     let dir = context.root.join(LINEAGES_DIR).join(name);
     let path = dir.join(LINEAGE_FILE);
     let bytes = match fs::read(&path) {
@@ -74,15 +78,9 @@ pub(crate) fn load(context: &Context, name: &str) -> AppResult<Option<Lineage>> 
     Ok(Some(lineage))
 }
 
+#[allow(dead_code)] // creation seam consumed by P.3 identity new
 pub(crate) fn validate_name(context: &Context, name: &str) -> AppResult<()> {
-    if name.contains(':') {
-        return Err(AppError::invalid_argument(format!(
-            "lineage name '{name}' must not contain ':'"
-        ))
-        .input(name)
-        .reason("typed address delimiter is reserved"));
-    }
-    crate::mailbox::validate_room_name(name).map_err(|reason| {
+    crate::mailbox::validate_new_room_name(name).map_err(|reason| {
         AppError::invalid_argument(format!("lineage name '{name}' is invalid: {reason}"))
             .input(name)
             .reason(reason)

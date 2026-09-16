@@ -24,6 +24,11 @@ use crate::mailbox::Context;
 use crate::migration_fence;
 
 pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
+    let pretty = cli.pretty;
+    let json = cli.json;
+    if matches!(&cli.command, Command::Version) {
+        return version::run(json, pretty);
+    }
     let context = Context::from_env()?;
     let resolved_participant = crate::participant::resolve(&context)?;
     let writes = migration_fence::classify_write(&cli.command);
@@ -34,20 +39,17 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         None
     };
     if participant_required(&cli.command) && resolved_participant.participant().is_none() {
-        return Err(AppError::no_participant("run: post participant bind"));
+        return Err(AppError::no_participant(
+            crate::participant::bind_key_available()?,
+        ));
     }
     let enrolled_watch = long_watch
         && admission
             .as_ref()
             .is_some_and(migration_fence::WriteAdmission::is_enrolled);
-    // An unbound discovery command must not bootstrap the root. Existing
-    // bound legacy behavior remains until P.2 replaces room cursors/banner
-    // state; enrolled stores retain CONTRACT.md's strict read-only guard.
-    let fenced_read = enrolled_watch
-        || (!writes
-            && (resolved_participant.participant().is_none()
-                || migration_fence::read_only_must_not_mutate(&context)
-                || matches!(&cli.command, Command::Search(_))));
+    // Listings, peeks, snapshots, and other readers are pure regardless of
+    // whether a participant is bound or whether the store is enrolled.
+    let fenced_read = enrolled_watch || !writes;
     let _read_only = crate::mailbox::enter_read_only_command(fenced_read);
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;
@@ -57,8 +59,6 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     if long_watch {
         drop(admission.take());
     }
-    let pretty = cli.pretty;
-    let json = cli.json;
     let report_unbound = resolved_participant.participant().is_none()
         && matches!(
             &cli.command,
@@ -104,7 +104,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Schema => schema::run(&context, pretty),
         Command::Watch(args) => watch::run(&context, args),
         Command::Who(args) => who::run(&context, args, pretty),
-        Command::Version => version::run(json, pretty),
+        Command::Version => unreachable!("version dispatches before mailbox context resolution"),
     }?;
     if report_unbound {
         annotate_unbound(&mut result, pretty)?;

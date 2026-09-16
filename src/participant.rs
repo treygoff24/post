@@ -14,7 +14,6 @@ pub(crate) const PARTICIPANTS_LOCK_FILE: &str = ".participants.lock";
 const RECORD_FILE: &str = "participant.json";
 const RECORD_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
-const FIX_LINE: &str = "run: post participant bind";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Participant {
@@ -90,6 +89,120 @@ pub(crate) struct Sender {
     pub lineage: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AddressKind {
+    Workspace,
+    Lineage,
+    Participant,
+}
+
+impl AddressKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Lineage => "lineage",
+            Self::Participant => "participant",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Address {
+    pub kind: AddressKind,
+    pub name: String,
+}
+
+impl Address {
+    pub(crate) fn inbox(&self, context: &Context) -> AppResult<PathBuf> {
+        let inbox = match self.kind {
+            AddressKind::Workspace => context.mailbox_dirs(&self.name)?.0,
+            AddressKind::Lineage => context
+                .root
+                .join(crate::lineage::LINEAGES_DIR)
+                .join(&self.name)
+                .join("inbox"),
+            AddressKind::Participant => context
+                .root
+                .join(PARTICIPANTS_DIR)
+                .join(&self.name)
+                .join("inbox"),
+        };
+        fs::create_dir_all(&inbox)
+            .map_err(|error| AppError::io("create canonical target inbox", &inbox, error))?;
+        Ok(inbox)
+    }
+}
+
+/// Resolve an explicit typed address or a bare name. Exact workspace names
+/// win before typed parsing so legacy rooms containing ':' remain addressable.
+pub(crate) fn resolve_target(context: &Context, raw: &str) -> AppResult<Address> {
+    let rooms = context.load_rooms()?;
+    if rooms.contains_key(raw) {
+        return Ok(Address {
+            kind: AddressKind::Workspace,
+            name: raw.to_owned(),
+        });
+    }
+
+    if let Some((prefix, name)) = raw.split_once(':') {
+        if name.is_empty() {
+            return Err(AppError::invalid_argument(format!(
+                "typed target '{raw}' must contain a non-empty name after ':'"
+            )));
+        }
+        let kind = match prefix {
+            "workspace" if rooms.contains_key(name) => AddressKind::Workspace,
+            "lineage" if crate::lineage::load(context, name)?.is_some() => AddressKind::Lineage,
+            "participant" if load(context, name)?.is_some() => AddressKind::Participant,
+            "workspace" | "lineage" | "participant" => {
+                return Err(unknown_typed_target(prefix, name));
+            }
+            _ => {
+                return Err(AppError::invalid_argument(format!(
+                    "typed target prefix '{prefix}' is unknown; expected workspace, lineage, or participant"
+                ))
+                .input(raw)
+                .reason("unknown typed target prefix"));
+            }
+        };
+        return Ok(Address {
+            kind,
+            name: name.to_owned(),
+        });
+    }
+
+    if crate::lineage::load(context, raw)?.is_some() {
+        return Ok(Address {
+            kind: AddressKind::Lineage,
+            name: raw.to_owned(),
+        });
+    }
+    if load(context, raw)?.is_some() {
+        return Ok(Address {
+            kind: AddressKind::Participant,
+            name: raw.to_owned(),
+        });
+    }
+    Err(AppError::new(
+        ErrorCode::UnknownRoom,
+        format!("recipient room '{raw}' is unknown"),
+        "Run `post rooms`, `post identity list`, or `post participant list`, then retry with an existing target.",
+    )
+    .input(raw)
+    .reason("target is absent"))
+}
+
+fn unknown_typed_target(kind: &str, name: &str) -> AppError {
+    AppError::new(
+        ErrorCode::NotFound,
+        format!("{kind} target '{name}' does not exist in this local store"),
+        "Run `post rooms`, `post identity list`, or `post participant list`, then retry with an existing target.",
+    )
+    .input(format!("{kind}:{name}"))
+    .reason("typed target is absent")
+}
+
 #[derive(Debug)]
 struct ConversationBinding {
     harness: String,
@@ -98,6 +211,15 @@ struct ConversationBinding {
 }
 
 pub(crate) fn resolve(context: &Context) -> AppResult<Resolved> {
+    #[cfg(test)]
+    if let Some(id) = test_actor_id(context) {
+        if let Some(participant) = load(context, &id)? {
+            return Ok(Resolved::Bound {
+                participant: Box::new(participant),
+                provenance: Provenance::ExplicitEnv,
+            });
+        }
+    }
     if let Some(explicit) = env_utf8("POST_PARTICIPANT")? {
         validate_participant_id(&explicit)?;
         return Ok(match load(context, &explicit)? {
@@ -143,6 +265,13 @@ pub(crate) fn resolve(context: &Context) -> AppResult<Resolved> {
     Ok(Resolved::Unbound)
 }
 
+pub(crate) fn bind_key_available() -> AppResult<bool> {
+    if env_utf8("POST_PARTICIPANT")?.is_some() {
+        return Ok(false);
+    }
+    Ok(conversation_binding()?.is_some())
+}
+
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn require(context: &Context) -> AppResult<(Participant, Provenance)> {
     match resolve(context)? {
@@ -150,7 +279,7 @@ pub(crate) fn require(context: &Context) -> AppResult<(Participant, Provenance)>
             participant,
             provenance,
         } => Ok((*participant, provenance)),
-        Resolved::Unbound => Err(AppError::no_participant(FIX_LINE)),
+        Resolved::Unbound => Err(AppError::no_participant(bind_key_available()?)),
     }
 }
 
@@ -186,12 +315,12 @@ pub(crate) fn bind(
     if let Some(explicit) = explicit {
         validate_participant_id(&explicit)?;
         if workspace_override.is_none() && declared_env_pin()?.is_none() {
-            return load(context, &explicit)?.ok_or_else(|| AppError::no_participant(FIX_LINE));
+            return load(context, &explicit)?.ok_or_else(|| AppError::no_participant(false));
         }
         let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
         let _lock = lock(context)?;
         let mut participant =
-            load(context, &explicit)?.ok_or_else(|| AppError::no_participant(FIX_LINE))?;
+            load(context, &explicit)?.ok_or_else(|| AppError::no_participant(false))?;
         participant.workspace = workspace;
         participant.workspace_path = workspace_path;
         write_record(&participant)?;
@@ -205,7 +334,7 @@ pub(crate) fn bind(
             // invocations resolve through POST_PARTICIPANT.
             provenance: Provenance::ExplicitEnv,
         },
-        None => conversation_binding()?.ok_or_else(|| AppError::no_participant(FIX_LINE))?,
+        None => conversation_binding()?.ok_or_else(|| AppError::no_participant(false))?,
     };
     let digest = digest(&binding.key);
     let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
@@ -710,6 +839,52 @@ fn participant_id(harness: &str, digest: &str, width: usize) -> String {
 
 fn digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ACTORS: std::cell::RefCell<std::collections::BTreeMap<PathBuf, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn test_actor_id(context: &Context) -> Option<String> {
+    TEST_ACTORS.with(|actors| actors.borrow().get(&context.root).cloned())
+}
+
+/// Unit-test support that seeds one durable participant record per fixture and
+/// selects it without changing process-global environment. Product resolution
+/// remains the only algorithm used after this explicit fixture binding.
+#[cfg(test)]
+pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant {
+    let key = format!("{}:{workspace}", context.root.display());
+    let digest = digest(&key);
+    let id = participant_id("test", &digest, 8);
+    let dir = context.root.join(PARTICIPANTS_DIR).join(&id);
+    let path = dir.join(RECORD_FILE);
+    if !path.exists() {
+        fs::create_dir_all(&dir).expect("create test participant directory");
+        let participant = Participant {
+            version: RECORD_VERSION,
+            id: id.clone(),
+            harness: "test".to_owned(),
+            conversation_key_digest: digest,
+            created: "2026-09-16 00:00:00 -0500".to_owned(),
+            workspace: Some(workspace.to_owned()),
+            workspace_path: None,
+            lineage: None,
+            lineage_since: None,
+            display_name: None,
+            dir: dir.clone(),
+        };
+        write_record(&participant).expect("write test participant record");
+    }
+    TEST_ACTORS.with(|actors| {
+        actors.borrow_mut().insert(context.root.clone(), id.clone());
+    });
+    load(context, &id)
+        .expect("load test participant")
+        .expect("test participant exists")
 }
 
 #[cfg(test)]

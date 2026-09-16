@@ -754,7 +754,7 @@ fn budget_caps_json_pretty_and_text_after_utf8_and_escape_encoding() {
 }
 
 #[test]
-fn budgeted_auto_text_inspects_banner_day_and_only_consuming_success_stamps_it() {
+fn auto_text_peeks_never_stamp_banner_day_and_only_consuming_success_does() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, "banner-budget", "beta");
@@ -781,14 +781,17 @@ fn budgeted_auto_text_inspects_banner_day_and_only_consuming_success_stamps_it()
     let ordinary_peek = sandbox.run_in(&["chat", "banner-budget", "--peek"], None, &beta);
     assert_success(&ordinary_peek);
     assert!(common::stdout(&ordinary_peek).contains("READ THIS FRAMING FIRST"));
-    assert!(sandbox.mail_root.join("beta/banner-day").exists());
+    assert!(
+        !sandbox.mail_root.join("beta/banner-day").exists(),
+        "unbudgeted peeks are read-only too"
+    );
     let same_day_budget = sandbox.run_in(
         &["chat", "banner-budget", "--peek", "--max-bytes", "3000"],
         None,
         &beta,
     );
     assert_success(&same_day_budget);
-    assert!(!common::stdout(&same_day_budget).contains("READ THIS FRAMING FIRST"));
+    assert!(common::stdout(&same_day_budget).contains("READ THIS FRAMING FIRST"));
 
     let consuming = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&consuming);
@@ -850,7 +853,7 @@ fn fenced_auto_text_keeps_the_read_only_full_wall_despite_an_old_stamp() {
 }
 
 #[test]
-fn unbudgeted_banner_state_uses_raw_room_identity_not_sanitized_display() {
+fn consuming_banner_state_uses_raw_room_identity_not_sanitized_display() {
     let sandbox = Sandbox::new();
     let (_alpha, _beta) = register_alpha_beta(&sandbox);
     let raw_room = "alpha\u{200e}";
@@ -867,7 +870,7 @@ fn unbudgeted_banner_state_uses_raw_room_identity_not_sanitized_display() {
         "body",
     );
 
-    let output = sandbox.run_in(&["chat", "identity", "--peek"], None, &raw_path);
+    let output = sandbox.run_in(&["chat", "identity"], None, &raw_path);
     assert_success(&output);
     assert!(common::stdout(&output).contains("Reading as room: alpha"));
     assert!(sandbox.mail_root.join(raw_room).join("banner-day").exists());
