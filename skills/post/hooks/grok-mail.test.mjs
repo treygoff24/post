@@ -182,13 +182,13 @@ test("channel-only snapshot names the channels, not a phantom mail room", () => 
   assert.ok(!context.includes("secret-peer"));
 });
 
-test("empty snapshot emits {}", () => {
+test("empty snapshot emits the fresh binding line", () => {
   setStub({ events: [] });
   const out = run(
     { ...BASE, hookEventName: "UserPromptSubmit", session_id: "s-empty" },
     { stateDir: freshStateDir() }
   );
-  assert.deepEqual(out, {});
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant test-participant; prefix Post commands with POST_PARTICIPANT=test-participant");
 });
 
 test("SessionStart surfaces the launch backlog with metadata only", () => {
@@ -700,26 +700,34 @@ test("first prompt with an old binary emits only the repair line", () => {
   assert.equal(allStubCalls().at(-1).args[0], "version");
 });
 
-test("capability mismatch is reported once, then the next prompt uses watch", () => {
+test("capability mismatch stays retryable until the binary is upgraded", () => {
   const stateDir = freshStateDir();
   setStub({ version: { ok: true, version: "0.9.0", capabilities: [] }, events: [] });
   const first = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(first.hookSpecificOutput.additionalContext, /lacks the participants capability/);
-  const before = allStubCalls().length;
+  assert.equal(fs.existsSync(path.join(stateDir, "session-cap-once.json")), false);
   setStub({ events: [MAIL_A] });
   const second = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(second.hookSpecificOutput.additionalContext, /20260730-010101-aaa111/);
-  assert.deepEqual(allStubCalls().slice(before).map((call) => call.args), [["watch", "--snapshot"]]);
+  assert.deepEqual(allStubCalls().slice(-5).map((call) => call.args), [
+    ["version", "--json"],
+    ["participant", "bind", "--harness", "grok", "--key", "cap-once", "--json"],
+    ["participant", "touch"],
+    ["watch", "--snapshot"],
+    ["participant", "show", "--json"],
+  ]);
 });
 
-test("long affiliated lineage is truncated inside the one-line budget", () => {
+test("long affiliated lineage omits a truncated executable command", () => {
   const stateDir = freshStateDir();
   const lineage = "x".repeat(255);
-  setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage } } });
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "long-lineage" }, { stateDir });
-  const line = out.hookSpecificOutput.additionalContext;
-  assert.ok(line.includes("…"));
-  assert.ok(Buffer.byteLength(line, "utf8") <= 256);
+  const lines = out.hookSpecificOutput.additionalContext.split("\n");
+  assert.equal(lines[0], "[post] participant grok-abc12345; prefix Post commands with POST_PARTICIPANT=grok-abc12345");
+  assert.match(lines[1], /voices on request: post identity show --help$/);
+  assert.ok(!lines[1].includes("--voices"));
+  assert.ok(Buffer.byteLength(lines[1], "utf8") <= 256);
 });
 
 test("first prompt binds before snapshot with the session cwd", () => {
@@ -738,17 +746,43 @@ test("first prompt binds before snapshot with the session cwd", () => {
   assert.ok(calls.every((call) => call.cwd === fs.realpathSync(CWD)));
 });
 
-test("unaffiliated participant gets no identity text", () => {
+test("unaffiliated participant gets a neutral binding line", () => {
   const stateDir = freshStateDir();
-  setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: null } } });
-  assert.deepEqual(run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "unaffiliated" }, { stateDir }), {});
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: null } } });
+  const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "unaffiliated" }, { stateDir });
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345; prefix Post commands with POST_PARTICIPANT=grok-abc12345");
 });
 
-test("affiliated participant gets exactly one identity line", () => {
+test("affiliated participant gets binding and identity lines", () => {
   const stateDir = freshStateDir();
-  setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "ember" } } });
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "ember" } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "affiliated" }, { stateDir });
-  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix with POST_PARTICIPANT=grok-abc12345; export POST_PARTICIPANT=grok-abc12345 only if shell persists");
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345; prefix Post commands with POST_PARTICIPANT=grok-abc12345\n[post] participant grok-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices");
+});
+
+test("setup retry emits the binding line again", () => {
+  const stateDir = freshStateDir();
+  setStub({ exit: 1, bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-retry123", participant: { id: "grok-retry123", lineage: null } }) });
+  const failed = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "retry-binding" }, { stateDir });
+  assert.match(failed.hookSpecificOutput.additionalContext, /UNKNOWN/);
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-retry123", participant: { id: "grok-retry123", lineage: null } }), show: { ok: true, status: "bound", id: "grok-retry123", participant: { id: "grok-retry123", lineage: null } } });
+  const recovered = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "retry-binding" }, { stateDir });
+  assert.equal(recovered.hookSpecificOutput.additionalContext, "[post] participant grok-retry123; prefix Post commands with POST_PARTICIPANT=grok-retry123");
+});
+
+test("legacy initialized state without a participant retries setup", () => {
+  const stateDir = freshStateDir();
+  const stateFile = path.join(stateDir, "session-legacy-state.json");
+  fs.writeFileSync(stateFile, JSON.stringify({ initialized: true, participantId: null, seen: [] }));
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-legacy123", participant: { id: "grok-legacy123", lineage: null } }) });
+  run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "legacy-state" }, { stateDir });
+  assert.deepEqual(allStubCalls().slice(-5).map((call) => call.args), [
+    ["version", "--json"],
+    ["participant", "bind", "--harness", "grok", "--key", "legacy-state", "--json"],
+    ["participant", "touch"],
+    ["watch", "--snapshot"],
+    ["participant", "show", "--json"],
+  ]);
 });
 
 test("payload session key mints and reuses one participant across prompts", () => {
@@ -782,7 +816,7 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
   assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
   assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
   setStub({ events: [] });
-  assert.deepEqual(run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "bind-failure" }, { stateDir }), {});
+  assert.match(run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "bind-failure" }, { stateDir }).hookSpecificOutput.additionalContext, /prefix Post commands with POST_PARTICIPANT=test-participant/);
 });
 
 test("lineage names are shell-quoted in the voice command", () => {
@@ -790,7 +824,6 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "quoted-lineage" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
-  assert.match(out.hookSpecificOutput.additionalContext, /bootstrap: prefix with POST_PARTICIPANT=grok-abc12345/);
 });
 
 test("unsupported participant touch emits one bounded warning", () => {

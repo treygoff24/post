@@ -178,13 +178,13 @@ test("channel-only snapshot names the channels, not a phantom mail room", () => 
   assert.ok(!context.includes("secret-peer"));
 });
 
-test("empty snapshot emits {}", () => {
+test("empty snapshot emits the fresh binding line", () => {
   setStub({ events: [] });
   const out = run(
     { ...BASE, hook_event_name: "sessionStart", session_id: "s-empty" },
     { stateDir: freshStateDir() }
   );
-  assert.deepEqual(out, {});
+  assert.equal(out.additional_context, "[post] participant test-participant; prefix Post commands with POST_PARTICIPANT=test-participant");
 });
 
 test("SessionStart surfaces the launch backlog with metadata only", () => {
@@ -746,17 +746,28 @@ test("sessionStart binds before snapshot with the session cwd", () => {
   assert.ok(calls.every((call) => call.cwd === fs.realpathSync(CWD)));
 });
 
-test("unaffiliated participant gets no identity text", () => {
+test("unaffiliated participant gets a neutral binding line", () => {
   const stateDir = freshStateDir();
-  setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } } });
-  assert.deepEqual(run({ ...BASE, hook_event_name: "sessionStart", session_id: "unaffiliated" }, { stateDir }), {});
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } } });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "unaffiliated" }, { stateDir });
+  assert.equal(out.additional_context, "[post] participant cursor-abc12345; prefix Post commands with POST_PARTICIPANT=cursor-abc12345");
 });
 
-test("affiliated participant gets exactly one identity line", () => {
+test("affiliated participant gets binding and identity lines", () => {
   const stateDir = freshStateDir();
-  setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "ember" } } });
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "ember" } } });
   const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "affiliated" }, { stateDir });
-  assert.equal(out.additional_context, "[post] participant cursor-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix with POST_PARTICIPANT=cursor-abc12345; export POST_PARTICIPANT=cursor-abc12345 only if shell persists");
+  assert.equal(out.additional_context, "[post] participant cursor-abc12345; prefix Post commands with POST_PARTICIPANT=cursor-abc12345\n[post] participant cursor-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices");
+});
+
+test("setup retry emits the binding line again", () => {
+  const stateDir = freshStateDir();
+  setStub({ exit: 1, bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-retry123", participant: { id: "cursor-retry123", lineage: null } }) });
+  const failed = run({ ...BASE, hook_event_name: "sessionStart", session_id: "retry-binding" }, { stateDir });
+  assert.match(failed.additional_context, /UNKNOWN/);
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-retry123", participant: { id: "cursor-retry123", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-retry123", participant: { id: "cursor-retry123", lineage: null } } });
+  const recovered = run({ ...BASE, hook_event_name: "sessionStart", session_id: "retry-binding" }, { stateDir });
+  assert.equal(recovered.additional_context, "[post] participant cursor-retry123; prefix Post commands with POST_PARTICIPANT=cursor-retry123");
 });
 
 test("payload session key mints and reuses one participant across lifecycle events", () => {
@@ -790,7 +801,7 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
   assert.match(failed.additional_context, /participant setup failed/);
   assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
   setStub({ events: [] });
-  assert.deepEqual(run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-failure" }, { stateDir }), {});
+  assert.match(run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-failure" }, { stateDir }).additional_context, /prefix Post commands with POST_PARTICIPANT=test-participant/);
 });
 
 test("lineage names are shell-quoted in the voice command", () => {
@@ -798,17 +809,18 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "quoted-lineage" }, { stateDir });
   assert.match(out.additional_context, /post identity show 'Ember Grove!' --voices/);
-  assert.match(out.additional_context, /bootstrap: prefix with POST_PARTICIPANT=cursor-abc12345/);
 });
 
-test("long affiliated lineage is truncated inside the one-line budget", () => {
+test("long affiliated lineage omits a truncated executable command", () => {
   const stateDir = freshStateDir();
   const lineage = "x".repeat(255);
-  setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage } } });
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage } } });
   const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "long-lineage" }, { stateDir });
-  const line = out.additional_context;
-  assert.ok(line.includes("…"));
-  assert.ok(Buffer.byteLength(line, "utf8") <= 256);
+  const lines = out.additional_context.split("\n");
+  assert.equal(lines[0], "[post] participant cursor-abc12345; prefix Post commands with POST_PARTICIPANT=cursor-abc12345");
+  assert.match(lines[1], /voices on request: post identity show --help$/);
+  assert.ok(!lines[1].includes("--voices"));
+  assert.ok(Buffer.byteLength(lines[1], "utf8") <= 256);
 });
 
 test("unsupported participant touch emits one bounded warning", () => {

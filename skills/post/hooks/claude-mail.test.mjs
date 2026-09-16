@@ -749,13 +749,14 @@ test("lineage names are shell-quoted in the voice command", () => {
   assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
 });
 
-test("long affiliated lineage is truncated inside the one-line budget", () => {
+test("long affiliated lineage omits a truncated executable command", () => {
   const stateDir = freshStateDir();
   const lineage = "x".repeat(255);
   setStub({ events: [], show: { ok: true, status: "bound", id: "claude-abc12345", participant: { id: "claude-abc12345", lineage } } });
   const out = run({ ...BASE, hook_event_name: "SessionStart", session_id: "long-lineage" }, { stateDir });
   const line = out.hookSpecificOutput.additionalContext;
-  assert.ok(line.includes("…"));
+  assert.match(line, /voices on request: post identity show --help$/);
+  assert.ok(!line.includes("--voices"));
   assert.ok(Buffer.byteLength(line, "utf8") <= 256);
 });
 
