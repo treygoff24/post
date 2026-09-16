@@ -276,7 +276,7 @@ section { scroll-margin-top: 2rem; }
 /* ------------------------------------------------------------- masthead -- */
 
 .masthead {
-  padding: clamp(1.5rem, 4vh, 3rem) 0 0;
+  padding: clamp(0.9rem, 2.4vh, 1.75rem) 0 0;
 }
 
 .masthead__bar {
@@ -301,61 +301,108 @@ section { scroll-margin-top: 2rem; }
   flex-wrap: wrap;
 }
 
-.masthead__body {
+/* ------------------------------------------------------------- opening -- */
+/* The first viewport is the instrument. A narrow brief on the left carries the
+   headline, the computed acceptance line and one paragraph of orientation; the
+   working field takes the rest of the row. On a phone the order is headline,
+   status, field, then the orientation paragraph, so the mode switch and both
+   named rails arrive before any long prose. */
+
+.opening {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 1.75rem;
-  padding: clamp(1.75rem, 4.5vh, 2.75rem) 0 clamp(1.5rem, 3.5vh, 2.25rem);
+  gap: 0.85rem;
+  padding: 0.95rem 0 0;
+  align-items: start;
 }
-.masthead__col { display: flex; flex-direction: column; gap: 0; }
-
-.masthead h1 {
-  font-variation-settings: "opsz" 72, "wght" 380;
-  font-size: clamp(2.375rem, 1.1rem + 4.9vw, 4.75rem);
-  line-height: 0.96;
-  letter-spacing: -0.032em;
-  max-width: 17ch;
+.opening__title {
+  font-variation-settings: "opsz" 60, "wght" 400;
+  font-size: clamp(1.625rem, 1.2rem + 1.5vw, 2.625rem);
+  line-height: 1.02;
+  letter-spacing: -0.024em;
+  max-width: 19ch;
   margin: 0;
+  text-wrap: balance;
 }
-.masthead h1 em {
-  font-style: italic;
-  font-variation-settings: "opsz" 72, "wght" 380;
-}
-
-.masthead__standfirst {
-  font-variation-settings: "opsz" 22, "wght" 380;
-  font-size: clamp(1.125rem, 1rem + 0.6vw, 1.4rem);
-  line-height: 1.44;
-  color: var(--ink-2);
-  max-width: 54ch;
-}
-.masthead__standfirst b {
-  color: var(--ink);
-  font-variation-settings: "opsz" 22, "wght" 600;
-}
-
-/* The epistemic status of the page, stated where it is read first rather than
-   left to the receipts table at the foot. */
-.masthead__status {
+.opening__status {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.7rem;
   border-top: 1px solid var(--alert);
   border-bottom: 1px solid var(--alert);
   background: var(--alert-wash);
-  padding: 0.7rem 0.9rem;
-  margin: 1.15rem 0 0;
-  font-variation-settings: "opsz" 15, "wght" 400;
-  font-size: 0.9375rem;
-  line-height: 1.55;
-  max-width: 54ch;
+  padding: 0.45rem 0.75rem;
+  font-variation-settings: "opsz" 14, "wght" 450;
+  font-size: 0.875rem;
+  line-height: 1.45;
   color: var(--ink);
 }
-.masthead__status b { font-variation-settings: "opsz" 15, "wght" 680; }
+.opening__status .label { color: var(--alert); }
+.opening__status[data-status="pass"] {
+  border-color: var(--ch-c);
+  background: var(--ch-c-wash);
+}
+.opening__status[data-status="pass"] .label { color: var(--ch-c); }
+.opening__status[data-status="fail"] {
+  border-color: var(--ch-a);
+  background: var(--ch-a-wash);
+}
+.opening__status[data-status="fail"] .label { color: var(--ch-a); }
 
-@media (min-width: 62rem) {
-  .masthead__body {
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-    align-items: end;
-    gap: 3rem;
+.opening__deck {
+  margin: 0.4rem 0 0;
+  font-variation-settings: "opsz" 20, "wght" 380;
+  font-size: clamp(1.0625rem, 0.98rem + 0.3vw, 1.1875rem);
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 44ch;
+}
+.opening__deck b {
+  color: var(--ink);
+  font-variation-settings: "opsz" 20, "wght" 600;
+}
+
+@media (min-width: 64rem) {
+  .opening {
+    grid-template-columns: minmax(17rem, 0.62fr) minmax(0, 1.6fr);
+    grid-template-rows: auto auto 1fr;
+    grid-template-areas:
+      "title  field"
+      "status field"
+      "deck   field";
+    column-gap: clamp(2rem, 3vw, 3rem);
+    row-gap: 1.1rem;
+    padding-top: clamp(1.25rem, 3.2vh, 2.25rem);
   }
+  .opening__title  { grid-area: title; font-size: clamp(2.25rem, 0.9rem + 2vw, 2.875rem); }
+  .opening__deck   { grid-area: deck; margin: 0; font-size: 1.0625rem; align-self: start; }
+  .opening__status { grid-area: status; }
+  .opening > .field { grid-area: field; }
+}
+
+.opening__after {
+  display: grid;
+  gap: 0 clamp(1.75rem, 4vw, 3rem);
+  margin-top: clamp(2.5rem, 6vh, 4rem);
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--ink);
+  max-width: 100%;
+}
+.opening__after p { max-width: 58ch; }
+.opening__subhead {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 84, "wght" 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  margin: 0 0 0.6rem;
+  color: var(--ink);
+}
+@media (min-width: 52rem) {
+  .opening__after { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
 
 /* ============================================================ THE FIELD == */
@@ -623,7 +670,8 @@ section { scroll-margin-top: 2rem; }
 .ev[data-state="unread"] .ev__state { color: var(--paper); }
 
 /* READ: hollow, struck through. */
-.ev[data-state="read"] { background: var(--paper); border-style: solid; opacity: 0.9; }
+/* No subtree opacity: at 0.9 it composited Astra's label down to 4.43:1. */
+.ev[data-state="read"] { background: var(--paper); border-style: solid; }
 .ev[data-state="read"] .ev__state { color: var(--ch); }
 .ev[data-state="read"]::after {
   content: "";
@@ -635,8 +683,10 @@ section { scroll-margin-top: 2rem; }
 }
 
 /* SUPPRESSED: this participant is the sender; the routing receipt excludes it. */
+/* Opaque stock, not transparent: the rail and dispatch hairlines would
+   otherwise cross behind the label text. */
 .ev[data-state="suppressed"] {
-  background: transparent;
+  background: var(--paper-inset);
   border-style: dotted;
   border-color: var(--ink-3);
   min-height: 2.05rem;
@@ -646,7 +696,7 @@ section { scroll-margin-top: 2rem; }
 
 /* CONSUMED: the legacy defect, drawn. The copy is gone, not read. */
 .ev[data-state="consumed"] {
-  background: transparent;
+  background: var(--paper-inset);
   border-style: dashed;
   border-color: var(--alert);
 }
@@ -1058,9 +1108,18 @@ section { scroll-margin-top: 2rem; }
   padding: 0.28rem 0.6rem;
   border: 1.5px solid currentColor;
 }
+.stamp:not([class*="stamp--"]) { color: var(--ink-2); border-style: dashed; }
 .stamp--pending { color: var(--alert); }
 .stamp--pass    { color: var(--ch-c); }
 .stamp--fail    { color: var(--ch-a); }
+
+.receipt__detail {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  margin-top: 0.15rem;
+}
+.receipt__none { color: var(--ink-3); }
 
 .receipts table {
   width: 100%;
@@ -1173,10 +1232,9 @@ section { scroll-margin-top: 2rem; }
 @container field (max-width: 44rem) {
   .field__head { align-items: stretch; }
   .field__mode { margin-left: 0; width: 100%; }
-  .field__mode div { width: 100%; flex-direction: column; }
-  .mode-opt { flex: 1 1 auto; }
-  .mode-opt span { width: 100%; text-align: center; white-space: normal; }
-  .mode-opt + .mode-opt span { border-left: 0; border-top: 1px solid var(--rule-major); }
+  .field__mode div { width: 100%; }
+  .mode-opt { flex: 1 1 50%; }
+  .mode-opt span { width: 100%; text-align: center; white-space: normal; padding: 0.45rem 0.5rem; }
 }
 
 /* Labels move above their rails; the field shows fewer events, not smaller
@@ -1192,6 +1250,7 @@ section { scroll-margin-top: 2rem; }
   .held__id {
     text-align: left;
     align-items: baseline;
+    justify-content: flex-start;
     flex-direction: row;
     flex-wrap: wrap;
     gap: 0.5rem;
@@ -1210,7 +1269,9 @@ section { scroll-margin-top: 2rem; }
 @media (max-width: 40rem) {
   :root { --rail-pitch: 4.1rem; }
   .controls__row > .label { flex: 0 0 100%; }
-  .masthead__meta { margin-left: 0; }
+  .masthead__meta { margin-left: 0; gap: 0.6rem 1.25rem; align-items: baseline; }
+  .masthead__repo { display: none; }
+  .masthead__bar { gap: 0.45rem 1.5rem; padding-bottom: 0.55rem; }
 }
 
 /* The acceptance table has three columns of real content. Below the width

@@ -165,3 +165,15 @@ direction has failed and the section, not the world, is what to fix.
 Second risk: a diagram this abstract can teach nothing if the reader has to
 infer the rule from motion. Every state change is therefore also a sentence,
 visible on the page, not only in a live region.
+
+## Quality-bar calibration waiver (2026-09-16)
+
+Astra ruled this under Trey's explicit overnight design authority. This page
+was built code-first in an existing world, and no QUALITY BAR card or approved
+comp exists for it. External reference-card calibration is waived. Fidelity is
+judged against this written direction and the actual renders only. This page
+therefore makes no claim to have reached a ceiling set by an external reference.
+
+The waiver covers that calibration step and nothing else. The first-viewport
+contract above, factual accuracy against `docs/PARTICIPANTS.md` and the
+installed CLI, contrast, and runtime-evidence gates still apply in full.

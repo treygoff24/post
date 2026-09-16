@@ -438,65 +438,114 @@
 
   /* ------------------------------------------------------------ receipts */
 
+  /* One model, derived from POST_RECEIPTS and nothing else. Every surface
+     that states acceptance status (the masthead stamp, the status line above
+     the field, the record's stamp, count and caption) reads this object, so
+     no sentence on the page can disagree with the rows. */
+  function receiptModel(data) {
+    var checks = (data && data.checks) || [];
+    var counts = { pending: 0, pass: 0, fail: 0 };
+    checks.forEach(function (c) {
+      var st = c.status === "pass" || c.status === "fail" ? c.status : "pending";
+      counts[st] += 1;
+    });
+    var total = checks.length;
+    var overall = total === 0 ? "pending"
+      : counts.fail ? "fail" : counts.pending ? "pending" : "pass";
+    var run = (data && data.run) || {};
+    var noun = function (n) { return n === 1 ? "check" : "checks"; };
+
+    var stamp = overall === "pass" ? "Acceptance passed"
+      : overall === "fail" ? "Acceptance failing" : "Acceptance pending";
+    var shortStamp = overall === "pass" ? "Complete"
+      : overall === "fail" ? "Failing" : "Pending";
+
+    var tally = total === 0 ? "No checks recorded"
+      : counts.pending === total ? "No run recorded · " + total + " " + noun(total) + " waiting"
+      : counts.pass + " of " + total + " passing" +
+        (counts.fail ? " · " + counts.fail + " failing" : "") +
+        (counts.pending ? " · " + counts.pending + " pending" : "");
+
+    var sentence;
+    if (overall === "pass") {
+      sentence = "All " + total + " acceptance " + noun(total) +
+        " passed, with evidence recorded in each row of the record at the foot.";
+    } else if (overall === "fail") {
+      sentence = counts.fail + " of " + total + " acceptance " + noun(total) +
+        (counts.fail === 1 ? " is" : " are") + " failing" +
+        (counts.pending ? " and " + counts.pending + (counts.pending === 1 ? " is" : " are") + " still pending" : "") +
+        ". The demonstration shows the agreed design, not a working install.";
+    } else if (counts.pass) {
+      sentence = counts.pass + " of " + total + " acceptance " + noun(total) +
+        " passed; " + counts.pending + (counts.pending === 1 ? " is" : " are") +
+        " still pending. Nothing here proves the rest.";
+    } else {
+      sentence = "This page is not evidence that it works. All " + total + " acceptance " +
+        noun(total) + " for both machines are still pending.";
+    }
+
+    var caption = run.recordedAt
+      ? "Recorded " + run.recordedAt + (run.headCommit ? " at " + String(run.headCommit).slice(0, 12) : "") + "."
+      : null;
+
+    return { overall: overall, counts: counts, total: total, stamp: stamp,
+             shortStamp: shortStamp, tally: tally, sentence: sentence, caption: caption };
+  }
+
+  function stampEl(id, overall, text) {
+    var e = document.getElementById(id);
+    if (!e) return;
+    e.className = "stamp stamp--" + overall;
+    e.textContent = text;
+  }
+
   function receipts() {
     var data = window.POST_RECEIPTS;
+    var m = receiptModel(data);
+
+    stampEl("masthead-stamp", m.overall, m.stamp);
+    stampEl("overall-stamp", m.overall, m.shortStamp);
+
+    var panel = document.getElementById("page-status");
+    if (panel) panel.setAttribute("data-status", m.overall);
+    var ptext = document.getElementById("page-status-text");
+    if (ptext) ptext.textContent = m.sentence;
+    var note = document.getElementById("overall-note");
+    if (note) note.textContent = m.tally;
+    if (m.caption) {
+      var cap = document.getElementById("receipts-caption");
+      if (cap) cap.textContent = m.caption;
+    }
+
     var body = document.getElementById("receipts-body");
     if (!data || !body) return;
-
-    var counts = { pending: 0, pass: 0, fail: 0 };
     body.textContent = "";
 
-    data.checks.forEach(function (c) {
-      counts[c.status] = (counts[c.status] || 0) + 1;
+    (data.checks || []).forEach(function (c) {
+      var status = c.status === "pass" || c.status === "fail" ? c.status : "pending";
       var tr = document.createElement("tr");
-      tr.setAttribute("data-status", c.status);
+      tr.setAttribute("data-status", status);
 
       var th = document.createElement("td");
       th.appendChild(el("div", null, c.label));
-      var d = el("div", null, c.detail);
-      d.style.color = "var(--ink-3)";
-      d.style.fontSize = "0.8125rem";
-      d.style.lineHeight = "1.45";
-      d.style.marginTop = "0.15rem";
+      var d = el("div", "receipt__detail", c.detail);
       th.appendChild(d);
 
       var st = document.createElement("td");
-      var stamp = el("span", "stamp stamp--" + c.status,
-        c.status === "pass" ? "Pass" : c.status === "fail" ? "Fail" : "Pending");
-      st.appendChild(stamp);
+      st.appendChild(el("span", "stamp stamp--" + status,
+        status === "pass" ? "Pass" : status === "fail" ? "Fail" : "Pending"));
 
       var ev = document.createElement("td");
-      if (c.evidence) {
-        var code = el("code", "mono", c.evidence);
-        ev.appendChild(code);
-      } else {
-        var none = el("span", null, "Nothing recorded yet.");
-        none.style.color = "var(--ink-3)";
-        ev.appendChild(none);
-      }
+      if (c.evidence) ev.appendChild(el("code", "mono", c.evidence));
+      else ev.appendChild(el("span", "receipt__none", "Nothing recorded yet."));
 
       tr.appendChild(th); tr.appendChild(st); tr.appendChild(ev);
       body.appendChild(tr);
     });
-
-    var overall = counts.fail ? "fail" : counts.pending ? "pending" : "pass";
-    var stampEl = document.getElementById("overall-stamp");
-    stampEl.className = "stamp stamp--" + overall;
-    stampEl.textContent = overall === "pass" ? "Complete" : overall === "fail" ? "Failing" : "Pending";
-
-    var note = counts.pending === data.checks.length
-      ? "No run recorded · " + data.checks.length + " checks waiting"
-      : counts.pass + " of " + data.checks.length + " passing" +
-        (counts.fail ? " · " + counts.fail + " failing" : "") +
-        (counts.pending ? " · " + counts.pending + " pending" : "");
-    document.getElementById("overall-note").textContent = note;
-
-    if (data.run && data.run.recordedAt) {
-      document.getElementById("receipts-caption").textContent =
-        "Recorded " + data.run.recordedAt +
-        (data.run.headCommit ? " at " + data.run.headCommit.slice(0, 12) : "") + ".";
-    }
   }
+
+  /* Exposed for fixture validation only; the page itself never calls it. */
+  window.POST_RECEIPT_MODEL = receiptModel;
 
   /* ----------------------------------------------------------------- init */
 
