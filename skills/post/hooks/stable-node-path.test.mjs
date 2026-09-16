@@ -82,3 +82,27 @@ test("on this machine, the result is the running interpreter by another name", (
   fs.accessSync(resolved, fs.constants.X_OK);
   assert.equal(path.isAbsolute(resolved), true);
 });
+
+test("the built-in candidate list is absolute and covers the estate's package managers", () => {
+  for (const candidate of STABLE_CANDIDATES) {
+    assert.equal(path.isAbsolute(candidate), true, `${candidate} must be absolute`);
+    assert.equal(path.basename(candidate), "node", `${candidate} must name a node binary`);
+  }
+  // Homebrew on the Mac, mise on the devbox: both broke the same way, so both
+  // must be reachable. mise's version-alias directory is a plain symlink, which
+  // the realpath guard validates; its shim is context-sensitive and must not
+  // appear here (a shim resolves per-directory, so a hook's interpreter would
+  // depend on where it fired).
+  assert.ok(
+    STABLE_CANDIDATES.includes("/opt/homebrew/bin/node"),
+    "Homebrew's stable symlink must be a candidate"
+  );
+  assert.ok(
+    STABLE_CANDIDATES.some((c) => c.includes("mise/installs/node/latest")),
+    "mise's version-alias directory must be a candidate"
+  );
+  assert.ok(
+    !STABLE_CANDIDATES.some((c) => c.includes("/shims/")),
+    "no shim may be a candidate: shims resolve per-directory at run time"
+  );
+});

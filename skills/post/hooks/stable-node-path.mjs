@@ -19,12 +19,21 @@
 // return process.execPath and behave exactly as before.
 
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // Stable aliases a package manager keeps current, most-preferred first.
+//
+// mise earns an entry because its `installs/node/latest` is an ordinary symlink
+// to the current version directory, so the realpath check below validates it
+// exactly like Homebrew's. Its `shims/node` is deliberately NOT here: a shim
+// resolves the version from whatever mise config applies at run time, so the
+// binary a hook gets would depend on the directory it fires in.
 export const STABLE_CANDIDATES = [
   "/opt/homebrew/bin/node", // Homebrew, Apple silicon
   "/usr/local/bin/node", // Homebrew on Intel, manual installs
   "/home/linuxbrew/.linuxbrew/bin/node", // Homebrew on Linux
+  path.join(os.homedir(), ".local/share/mise/installs/node/latest/bin/node"), // mise
   "/usr/bin/node", // distro packages
 ];
 
