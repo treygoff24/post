@@ -16,11 +16,13 @@ The public language is model-neutral; the default root remains
    dropped. Channel reads carry the same laws plus a multi-author warning.
    Watch previews are bounded untrusted snippets, never full body delivery or
    authority.
-2. **Blocked routes refuse at write/join time.** `~/.claude-mail/rules.json`
-   `blocked` entries (`from`/`to` may be `"*"`) are checked before any direct
-   mail write and before a channel membership would create a forbidden shared
-   route. The tool NEVER edits rules.json — humans manage it by hand,
-   deliberately. Error must quote the rule's `reason` verbatim.
+2. **Blocked routes are address-kind aware.** A blocked workspace or participant
+   target refuses the whole direct send. Lineage routing removes blocked
+   affiliates, records them in the receipt's `excluded` list, and delivers to
+   remaining eligible affiliates; if none remain, the message stays pending.
+   Channel joins separately refuse a forbidden shared route. The tool never
+   edits `rules.json`; humans manage it deliberately.
+   <!-- verify-on-integrated-binary -->
 3. **The participant is the actor.** A binding, never cwd, selects the sender,
    channel member, cursor, and lifecycle record. The bound workspace supplies
    the shared `from` reply address; a session-only participant uses its id.
@@ -80,9 +82,9 @@ The public language is model-neutral; the default root remains
   `who`).
 - The same read-only forms remain available without a participant binding and
   never mint or initialize participant state. When a generic unbound notice is
-  emitted, it goes to stderr. `participant show` carries its own unbound payload;
-  `version` bypasses participant resolution. `watch --snapshot` stdout remains
-  NDJSON or empty, never prose.
+  emitted, it goes to stderr. `post participant show` carries its own unbound
+  payload; `post version` bypasses participant resolution. `post watch
+  --snapshot` stdout remains NDJSON or empty, never prose.
 - Consuming reads, exact `--ack` forms, `catchup`, long-running `watch`, and
   every send or state change are admitted as writers and are refused without a
   matching generation. Admitted read-only forms create no root/room directory,
@@ -208,7 +210,7 @@ their existing success semantics.
   remains accepted as the deprecated spelling of `--body-file`, and a
   body-file path that does not exist is `invalid_argument` (a usage error)
   rather than a retryable `io_error`. Refuses: unknown
-  recipient or ambiguous bare target, blocked route (quotes reason),
+  recipient or ambiguous bare target, a blocked direct target (quotes reason),
   reserved-name impersonation, subjects over 1 KiB, empty body, and bodies over
   32 KiB unless `--oversize` records explicit intent. A complete Post watch-event NDJSON line
   warns on stderr but does not block legitimate forensic traffic. `--body`
@@ -221,6 +223,8 @@ their existing success semantics.
   publication fails, `delivered_unarchived` is non-retryable and the message
   must not be resent. Workspace and lineage fan-out exclude the sending
   participant; an explicit `participant:<self>` target is readable by self.
+  Lineage sends instead exclude blocked affiliates and route to any remaining
+  eligible recipients, recording exclusions in the receipt.
   <!-- verify-on-integrated-binary -->
 - `post inbox [--room <name>] [--text] [--adopt]`: read-only listing, oldest
   first. Bound JSON is `{ok, participant, room, unread, count,
@@ -711,6 +715,23 @@ their existing success semantics.
   active set. Participant-targeted mail remains durable regardless of state.
   <!-- verify-on-integrated-binary -->
 
+## Lineage voice withdrawal (amendment, 2026-09-16)
+
+- Unqualified `post identity voice withdraw` first selects the acting
+  participant's current lineage when it contains that participant's voice or
+  gap. A pending gap finishes cleanup. A settled gap returns `changed: false`
+  with a `--lineage <name>` hint and never falls through to another lineage.
+- Cross-lineage fallback runs only when the current lineage has neither the
+  caller's voice nor its gap. One current or cleanup-pending candidate is
+  selected; when none exists, one settled gap may return its no-op result.
+  Multiple candidates refuse with `details.matches` and one command per
+  candidate in `suggested_fix`; ambiguity supplies no `exact_fix` and changes
+  nothing.
+- `post identity voice withdraw --lineage <name>` targets the caller's voice
+  without rejoining. It deliberately uses the named lineage directory even
+  when `lineage.json` is damaged. A pending gap is treated as withdrawn and a
+  retry completes cleanup.
+
 ## Profiles (amendment, 2026-08-05)
 
 - `post profile set [--name <name>] [--pfp <emoji>]` / `show [room]` / `clear`
@@ -910,7 +931,9 @@ deserialization of every output shape; migration: a mail file in the original
 on-disk format reads back identically; channel join/send/read with cursor
 advancement and `--peek`; channel watch backlog/live events without full bodies
 or cursor advancement; malformed channel isolation; blocked-route channel sharing
-refusal; `not_a_member`; and schema/help consistency for all seventeen commands and
+refusal; `not_a_member`; and schema/help consistency for `participant`,
+  `identity`, `send`, `chat`, `channels`, `inbox`, `read`, `catchup`, `search`,
+  `rooms`, `profile`, `owner`, `schema`, `doctor`, `watch`, `who`, and `version`,
   every watch event variant, catchup/search schema-vs-reality, and the cursor
   diagnostics that `doctor --fix` leaves untouched.
 

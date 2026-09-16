@@ -8,8 +8,8 @@
   through `from_participant` and `participant-binding` provenance.
 - Lineages: host-local affiliation retained through stale and ended states,
   attributed voices and terms, terms-aware `identity new` recovery for an
-  unaffiliated founder, and targeted voice withdrawal with a durable cleanup
-  gap marker.
+  unaffiliated founder, and current-first or explicitly targeted voice
+  withdrawal with durable cleanup gaps and damaged-metadata recovery.
 - Routing receipts: workspace and lineage sends freeze active recipients;
   unrouted mail remains pending, pending counts stay separate from unread,
   `inbox --adopt` routes held lineage mail to active eligible affiliates, and
@@ -99,7 +99,7 @@
   `.cursors.lock`; valid legacy `channel-state.json` imports read-only and is
   retained as rollback evidence after first materialization. Malformed cursor
   state degrades reads to all-unread and doctor reports it without repairing it.
-- The machine-readable schema now advertises fourteen commands, including the
+- The machine-readable schema now advertises the command list, including the
   catchup/search grammar and all new output fields. Doctor distinguishes invalid
   cursor state, invalid cursor locks, and legacy state without allowing
   `--fix` to touch cursor files.
