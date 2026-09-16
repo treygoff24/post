@@ -2,8 +2,7 @@ use crate::command_result::CommandResult;
 use crate::error::AppResult;
 use serde::Serialize;
 
-pub(crate) const CAPABILITIES: [&str; 4] =
-    ["participants", "lineages", "routing-receipts", "cursors-v2"];
+pub(crate) const CAPABILITIES: [&str; 2] = ["participants", "lineages"];
 
 #[derive(Serialize)]
 struct VersionOutput {

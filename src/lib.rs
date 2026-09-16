@@ -7,6 +7,7 @@ mod commands;
 mod cursor_state;
 mod error;
 mod lineage;
+mod lineage_store;
 mod mailbox;
 mod migration_fence;
 mod model;
