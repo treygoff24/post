@@ -752,7 +752,7 @@ fn voice_lineage_dir(context: &Context, name: &str) -> AppResult<PathBuf> {
             .reason(reason)
     })?;
     let dir = context.root.join(LINEAGES_DIR).join(name);
-    match fs::metadata(&dir) {
+    match fs::symlink_metadata(&dir) {
         Ok(metadata) if metadata.is_dir() => Ok(dir),
         Ok(_) => Err(AppError::new(
             ErrorCode::NotFound,

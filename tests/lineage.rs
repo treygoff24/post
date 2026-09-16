@@ -1214,6 +1214,48 @@ fn lineage_withdraw_selector_works_with_corrupt_lineage_metadata() {
         .exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn lineage_withdraw_selector_rejects_symlinked_lineage_directory_without_mutation() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let body = sandbox.path.join("voice.md");
+    write_body(&body, b"voice must remain\n");
+    assert_success(&run_as(&sandbox, &actor, &["identity", "new", "ember"]));
+    assert_success(&run_as(
+        &sandbox,
+        &actor,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    assert_success(&run_as(&sandbox, &actor, &["identity", "leave"]));
+    let lineages = sandbox.mail_root.join("lineages");
+    std::os::unix::fs::symlink("ember", lineages.join("alias")).expect("symlinked lineage fixture");
+    let voice = lineages.join("ember/voices").join(format!("{actor}.md"));
+    let gap = lineages.join("ember/voices").join(format!("{actor}.gap"));
+
+    let refused = run_as(
+        &sandbox,
+        &actor,
+        &["identity", "voice", "withdraw", "--lineage", "alias"],
+    );
+    assert_eq!(refused.status.code(), Some(66));
+    assert_eq!(
+        from_stderr::<ErrorEnvelope>(&refused).error.code,
+        "not_found"
+    );
+    assert_eq!(
+        fs::read_to_string(&voice).expect("target voice survives"),
+        "voice must remain\n"
+    );
+    assert!(!gap.exists());
+}
+
 #[test]
 fn lineage_withdraw_after_readd_and_leave_preserves_gap_count() {
     let sandbox = Sandbox::new();
