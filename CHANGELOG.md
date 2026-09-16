@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Added
+- Per-conversation participants with independent delivery, read, channel, and
+  presence state; typed workspace, lineage, and participant addresses with
+  frozen routing receipts; optional lineages with attributed voices and terms;
+  participant and identity command groups; and machine-readable build/store
+  capabilities through `post version --json`. An optional orientation separates
+  the recorded mechanism from claims Post does not make about continuity,
+  experience, or welfare.
 - Opt-in `--max-bytes N` on full-body `post chat`, `post read`, and `post
   catchup`. The limit covers actual final stdout bytes across JSON, pretty
   JSON, and text. Budgeted results emit and consume only a contiguous prefix
