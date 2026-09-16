@@ -748,7 +748,7 @@ test("affiliated participant gets exactly one identity line", () => {
   const stateDir = freshStateDir();
   setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "ember" } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "affiliated" }, { stateDir });
-  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix Post commands with POST_PARTICIPANT=grok-abc12345");
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix with POST_PARTICIPANT=grok-abc12345; export POST_PARTICIPANT=grok-abc12345 only if shell persists");
 });
 
 test("payload session key mints and reuses one participant across prompts", () => {
@@ -790,7 +790,7 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "quoted-lineage" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
-  assert.match(out.hookSpecificOutput.additionalContext, /bootstrap: prefix Post commands with POST_PARTICIPANT=grok-abc12345/);
+  assert.match(out.hookSpecificOutput.additionalContext, /bootstrap: prefix with POST_PARTICIPANT=grok-abc12345/);
 });
 
 test("unsupported participant touch emits one bounded warning", () => {

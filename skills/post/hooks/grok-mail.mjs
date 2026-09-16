@@ -351,7 +351,7 @@ function identityLine(result) {
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
-    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices; bootstrap: prefix Post commands with POST_PARTICIPANT=${id}`;
+    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices; bootstrap: prefix with POST_PARTICIPANT=${id}; export POST_PARTICIPANT=${id} only if shell persists`;
     if (Buffer.byteLength(render(lineage), "utf8") <= 256) return render(lineage);
     const chars = [...lineage];
     while (chars.length > 0 && Buffer.byteLength(render(`${chars.join("")}…`), "utf8") > 256) chars.pop();

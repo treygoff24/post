@@ -756,7 +756,7 @@ test("affiliated participant gets exactly one identity line", () => {
   const stateDir = freshStateDir();
   setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "ember" } } });
   const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "affiliated" }, { stateDir });
-  assert.equal(out.additional_context, "[post] participant cursor-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix Post commands with POST_PARTICIPANT=cursor-abc12345");
+  assert.equal(out.additional_context, "[post] participant cursor-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix with POST_PARTICIPANT=cursor-abc12345; export POST_PARTICIPANT=cursor-abc12345 only if shell persists");
 });
 
 test("payload session key mints and reuses one participant across lifecycle events", () => {
@@ -798,7 +798,7 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "quoted-lineage" }, { stateDir });
   assert.match(out.additional_context, /post identity show 'Ember Grove!' --voices/);
-  assert.match(out.additional_context, /bootstrap: prefix Post commands with POST_PARTICIPANT=cursor-abc12345/);
+  assert.match(out.additional_context, /bootstrap: prefix with POST_PARTICIPANT=cursor-abc12345/);
 });
 
 test("long affiliated lineage is truncated inside the one-line budget", () => {

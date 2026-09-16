@@ -433,13 +433,19 @@ session-start event), each adapter:
 
 Claude and Codex have verified native conversation keys, so their payload-key
 bind converges with the harness environment. Cursor and Grok do not; their
-affiliated line also includes `bootstrap: prefix Post commands with
-POST_PARTICIPANT=<id>`; an export is not assumed to persist across tool shells.
+affiliated line also includes `bootstrap: prefix with POST_PARTICIPANT=<id>`;
+it notes that exporting the same value is safe only in a genuinely persistent
+shell, and an export is never assumed to persist across tool shells.
 The adapter
 passes that participant explicitly to `watch` and `participant show`, and
 persists it for later lifecycle events.
 Claude also attempts `post participant end` on `SessionEnd`; Codex, Cursor,
 and Grok do not expose a reliable session-end hook, so they make no end call.
+Prompt events and PostToolUse scans attempt `post participant touch`; an older
+binary that lacks these commands is tolerated with one bounded warning.
+For Grok, a capability-mismatch repair notice is committed once so the next
+prompt can still fall through to the normal watch path while setup remains
+unavailable.
 
 The participant id is an attributable conversation binding, not a credential.
 A lineage is standing with optional, authored voices; no adapter injects a voice
