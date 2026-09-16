@@ -9,8 +9,14 @@ use std::path::PathBuf;
 pub(crate) const LINEAGES_DIR: &str = "lineages";
 const LINEAGE_FILE: &str = "lineage.json";
 
+const fn default_lineage_version() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Lineage {
+    #[serde(default = "default_lineage_version")]
+    pub version: u64,
     pub name: String,
     pub founder: String,
     pub created: String,
