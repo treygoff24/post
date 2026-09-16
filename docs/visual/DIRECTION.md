@@ -2,7 +2,7 @@
 
 Scoped to `docs/visual/`. Authored 2026-09-16 by the visual lane under Astra's
 ownership, against the brief in `/tmp/post-papercuts-2026-09-15/visual-brief.md`
-and the settled architecture in `astra-architecture-reply.md`.
+and the final amended architecture in `docs/PARTICIPANTS.md` at `239ae8b`.
 
 ## Concept seed record
 
@@ -100,8 +100,9 @@ rails, two unread marks, and the words that name them.
    a definition register: what each is, what it can do, what it cannot do.
 4. **Same name, separate mail.** Two participants continuing Ember. Self
    suppression by participant id, never by name.
-5. **Continuing is a choice.** Session-only, preview, promotion, decline. Four
-   outcomes, none of them drawn as failure.
+5. **Continuing is a choice.** Session-only, continue an existing lineage, or
+   found a new one are the neutral identity choices; preview and decline remain
+   legitimate interactions. None is drawn as failure.
 6. **A lineage speaks in more than one voice.** Polyphony, with illustrative
    voices attributed to synthetic participant ids, including one dissent and
    one withdrawal showing a visible gap.

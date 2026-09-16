@@ -19,7 +19,7 @@
 window.POST_RECEIPTS = {
   run: {
     recordedAt: null,          // ISO 8601 string once a run exists
-    baseCommit: "4f7f95d19b4138c355fe671bb5b5013fa1006a3a",
+    baseCommit: null,
     headCommit: null,
     note: "No acceptance run recorded."
   },
@@ -83,8 +83,8 @@ window.POST_RECEIPTS = {
     },
     {
       id: "no-injection",
-      label: "No identity injection on preview or decline",
-      detail: "Previewing a lineage writes nothing about the previewing participant",
+      label: "Preview is non-affiliating; voice loading is explicit",
+      detail: "Showing a lineage without --voices loads no voice body, and previewing writes nothing about the participant",
       status: "pending",
       evidence: ""
     },

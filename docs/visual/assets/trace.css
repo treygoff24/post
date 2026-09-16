@@ -634,7 +634,7 @@ section { scroll-margin-top: 2rem; }
   border-top: 1.5px solid var(--ch);
 }
 
-/* SUPPRESSED: this participant is the sender; no copy exists for it. */
+/* SUPPRESSED: this participant is the sender; the routing receipt excludes it. */
 .ev[data-state="suppressed"] {
   background: transparent;
   border-style: dotted;
@@ -972,7 +972,7 @@ section { scroll-margin-top: 2rem; }
   border: 1px solid var(--rule-major);
 }
 @media (min-width: 46rem) { .choices { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 72rem) { .choices { grid-template-columns: repeat(4, 1fr); } }
+@media (min-width: 72rem) { .choices { grid-template-columns: repeat(5, 1fr); } }
 .choice {
   background: var(--paper);
   padding: 1.15rem 1.15rem 1.35rem;

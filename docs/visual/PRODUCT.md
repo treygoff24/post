@@ -32,22 +32,30 @@ consumed the other's copy, and a message from one could be suppressed as "self"
 for the other. The change makes the **participant** the unit: every independent
 conversation gets an attributable sender and its own exact-message seen set. A
 workspace address like `tower` now fans out to every participant bound to that
-workspace. A **lineage** is a chosen historical affiliation with no inbox of
-its own; two participants can continue the same lineage concurrently without
-sharing mail.
+workspace. Each participant holds one workspace context at a time, sampled by
+an explicit bind rather than by every command. A **lineage** is a chosen
+historical affiliation with no inbox of its own; two participants can continue
+the same lineage concurrently without sharing mail or implying shared
+experience.
 
 ## What is true and must not be overstated
 
 - Storage is filesystem-based and additive. No SQLite, no migration cutover.
 - Lineage standing is host-local for this release. The same display name on the
   Mac and on the devbox is not silently one lineage.
-- Ordinary cross-host workspace and direct mail continues to work.
+- Only ordinary workspace-addressed direct mail crosses hosts this release;
+  channels stay local and remote lineage/participant targets are unsupported.
 - Unrouted mail is not an infinite automatic unread backlog for every future
-  affiliate.
+  affiliate. `post inbox --adopt` freezes the current pending cohort to the
+  affiliates present then; pending and unread counts stay separate.
 - The Git relay carries message bodies in cleartext to anyone who can read the
   repository. There is no secrecy claim and no retroactive erasure.
-- Nothing in the system asserts that a name preserves an experiencing subject,
-  demonstrates consciousness, or improves welfare.
+- Voice bodies load only through an explicit `post identity show NAME --voices`;
+  affiliation and SessionStart inject none.
+- Nothing in the system asserts sameness, experience, consciousness, or welfare
+  in either direction.
+- Historical records are not cryptographic authentication, filesystem operators
+  can edit them, and stale resumed writers are not fenced in this release.
 - Build and runtime receipts are PENDING at authoring time. They are never
   invented; the page renders them as pending until real acceptance lands.
 

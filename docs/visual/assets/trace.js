@@ -11,8 +11,8 @@
   var SLOTS = 4;
 
   var PEOPLE = [
-    { id: "astra", name: "Astra", ch: "a", glyph: "g-square", pid: "p-7f3a91c4" },
-    { id: "fable", name: "Fable", ch: "b", glyph: "g-circle", pid: "p-2c68ade0" }
+    { id: "astra", name: "Astra", ch: "a", glyph: "g-square", pid: "codex-7f3a91c4" },
+    { id: "fable", name: "Fable", ch: "b", glyph: "g-circle", pid: "claude-2c68ade0" }
   ];
 
   var SEED = [{ mid: "m-4f21", from: "trey", to: "tower" }];
@@ -38,9 +38,9 @@
 
   /* --------------------------------------------------------- the model ---
    * cellFor(person, message) returns what that participant's rail shows.
-   *   "unread"     a copy exists for this participant and is not in its seen set
-   *   "read"       a copy exists and its id is in this participant's seen set
-   *   "suppressed" this participant is the sender, so no copy was made for it
+   *   "unread"     the receipt names this participant and the id is unseen
+   *   "read"       the receipt names this participant and the id is in its seen set
+   *   "suppressed" this participant is the sender, so the receipt excludes it
    *   "consumed"   0.9.0 only: the shared read moved the file out from under it
    *   null         nothing routed here
    */
@@ -155,7 +155,7 @@
       // The label column carries the file that owns this rail's read state.
       // Under 0.9.0 both rails name the same file. That is the bug, written out.
       var path = el("span", "rail__pid",
-        state.mode === "legacy" ? "tower/cursors.json" : "cursors/" + p.pid + ".json");
+        state.mode === "legacy" ? "tower/cursors.json" : "participants/" + p.pid + "/cursors.json");
       idCol.appendChild(path);
 
       var u = unreadFor(p).length;
@@ -273,14 +273,14 @@
           "Astra is also the room, so " + mid + " is suppressed as self on both rails. " +
           "Astra never learns it exists."
         : "Fable sent " + mid + " to tower. Fable's own notification is suppressed, " +
-          "because the comparison is on the sending participant id. Astra's copy is " +
-          "unread and untouched.";
+          "because the comparison is on the sending participant id. Astra is named " +
+          "in the routing receipt, and the message is unread for Astra.";
     } else {
       text = state.mode === "legacy"
         ? who + " sent " + mid + " to tower. One copy arrived for the room, and both " +
           "rails are reading the same seen set."
-        : who + " sent " + mid + " to tower. It routed to both bound participants, and " +
-          "each holds its own copy.";
+        : who + " sent " + mid + " to tower. Its routing receipt names both bound " +
+          "participants, and each reads against its own seen set.";
     }
     announce(text);
     draw();
@@ -298,15 +298,15 @@
       state.seen[personId][msg.mid] = true;
       var otherState = cellFor(other, msg);
       var clause =
-        otherState === "unread"     ? other.name + "'s copy of " + msg.mid + " is still unread"
+        otherState === "unread"     ? msg.mid + " is still unread for " + other.name
       : otherState === "read"       ? other.name + " had already read " + msg.mid + " out of its own seen set"
       : otherState === "suppressed" ? other.name + " has no copy of " + msg.mid + ", because it sent it"
       :                               other.name + " has no copy of " + msg.mid;
       var tail = otherState === "read"
         ? ", and this read did not touch it."
         : ", and nothing opened " + other.name + "'s seen set.";
-      text = p.name + " read " + msg.mid + ". One id went into cursors/" + p.pid +
-        ".json. " + clause + tail;
+      text = p.name + " read " + msg.mid + ". One id went into participants/" + p.pid +
+        "/cursors.json. " + clause + tail;
     } else {
       state.roomSeen[msg.mid] = personId;
       text = p.name + " read " + msg.mid + ". The room's shared cursor advanced and " +
@@ -343,8 +343,8 @@
     var wrap = document.getElementById("sib-rails");
     if (!wrap) return;
     var sibs = [
-      { name: "Ember", ch: "c", glyph: "g-tri", pid: "p-9d41c07b", cell: "unread" },
-      { name: "Ember", ch: "c", glyph: "g-diamond", pid: "p-31ba78e2", cell: "read" }
+      { name: "Ember", ch: "c", glyph: "g-tri", pid: "demo-9d41c07b", cell: "unread" },
+      { name: "Ember", ch: "c", glyph: "g-diamond", pid: "demo-31ba78e2", cell: "read" }
     ];
     sibs.forEach(function (s) {
       var rail = el("div", "rail");
@@ -354,7 +354,7 @@
       name.appendChild(use(s.glyph));
       name.appendChild(document.createTextNode(s.name));
       idCol.appendChild(name);
-      idCol.appendChild(el("span", "rail__pid", "cursors/" + s.pid + ".json"));
+      idCol.appendChild(el("span", "rail__pid", "participants/" + s.pid + "/cursors.json"));
       idCol.appendChild(el("span", "rail__count", s.cell === "read" ? "0 unread · 1 read" : "1 unread · 0 read"));
 
       var track = el("div", "rail__track");
