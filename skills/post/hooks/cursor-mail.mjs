@@ -31,7 +31,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 const THROTTLE_MS = Number(process.env.POST_CURSOR_HOOK_THROTTLE_MS ?? 30_000);
@@ -46,12 +46,15 @@ const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const HARNESS = "cursor";
+const SESSION_DEADLINE_MS = 4500;
 const VERSION_PROBE_FAILED =
   "[post] could not verify installed post capabilities (version query failed or timed out); repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 const PARTICIPANTS_MISSING =
   "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 const PARTICIPANT_SETUP_FAILED =
   "[post] participant setup failed; inbox state is UNKNOWN (not empty). Retry setup or run: post participant bind";
+const LIFECYCLE_WARNING =
+  "[post] participant lifecycle update unavailable; continuing without presence refresh";
 
 function writeAllSync(fd, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -87,9 +90,10 @@ function readState(file) {
       seen: Array.isArray(parsed.seen) ? parsed.seen.filter((k) => typeof k === "string") : [],
       failStreak: Number.isInteger(parsed.failStreak) ? parsed.failStreak : 0,
       participantId: typeof parsed.participantId === "string" ? parsed.participantId : null,
+      lifecycleWarned: parsed.lifecycleWarned === true,
     };
   } catch {
-    return { seen: [], failStreak: 0, participantId: null };
+    return { seen: [], failStreak: 0, participantId: null, lifecycleWarned: false };
   }
 }
 
@@ -303,7 +307,7 @@ function failDiagnostic(eventName) {
   );
 }
 
-function runPost(args, cwd, { participantId = null, clearParticipant = false, clearConversationKeys = false } = {}) {
+function runPost(args, cwd, { participantId = null, clearParticipant = false, clearConversationKeys = false, deadline = null } = {}) {
   const env = { ...process.env };
   if (participantId) env.POST_PARTICIPANT = participantId;
   else if (clearParticipant || env.POST_PARTICIPANT === "") delete env.POST_PARTICIPANT;
@@ -316,7 +320,7 @@ function runPost(args, cwd, { participantId = null, clearParticipant = false, cl
   return spawnSync(postBinary(), args, {
     cwd,
     encoding: "utf8",
-    timeout: 4000,
+    timeout: deadline === null ? 4000 : Math.max(1, Math.min(4000, deadline - Date.now())),
     env,
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -355,7 +359,11 @@ function identityLine(result) {
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
-    return `[post] participant ${id}, continuing lineage ${lineage}; voices on request: post identity show ${shellQuote(lineage)} --voices; bootstrap: export POST_PARTICIPANT=${id}`;
+    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices; bootstrap: prefix Post commands with POST_PARTICIPANT=${id}`;
+    if (Buffer.byteLength(render(lineage), "utf8") <= 256) return render(lineage);
+    const chars = [...lineage];
+    while (chars.length > 0 && Buffer.byteLength(render(`${chars.join("")}…`), "utf8") > 256) chars.pop();
+    return chars.length > 0 ? render(`${chars.join("")}…`) : null;
   } catch {
     return null;
   }
@@ -384,6 +392,12 @@ function appendIdentity(context, line) {
   return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
+function appendLine(context, line) {
+  if (!line) return context;
+  const merged = context ? `${context}\n${line}` : line;
+  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
+}
+
 function setupPayload(eventName, context) {
   return {
     additional_context: context,
@@ -394,12 +408,23 @@ function setupPayload(eventName, context) {
   };
 }
 
-function setupParticipant(cwd, sessionId) {
+function setupParticipant(cwd, sessionId, deadline) {
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
   const args = explicit
     ? ["participant", "bind", "--json"]
     : ["participant", "bind", "--harness", HARNESS, "--key", sessionId, "--json"];
-  return boundParticipantId(runPost(args, cwd, { clearParticipant: !explicit, clearConversationKeys: true }));
+  return boundParticipantId(runPost(args, cwd, { clearParticipant: !explicit, clearConversationKeys: true, deadline }));
+}
+
+function participantConflict(sessionId, explicit) {
+  if (!explicit) return false;
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  return explicit !== `${HARNESS}-${digest.slice(0, 8)}` && explicit !== `${HARNESS}-${digest.slice(0, 12)}`;
+}
+
+function lifecycleWarning(cwd, participantId, command, deadline) {
+  const result = runPost(["participant", command], cwd, { participantId, clearConversationKeys: true, deadline });
+  return Boolean(result?.error || result?.status !== 0);
 }
 
 function deliverThenCommit(stateFile, payload, nextState) {
@@ -450,17 +475,22 @@ function main() {
   const sessionId = sessionRaw.replace(/[^A-Za-z0-9._-]/g, "_");
   const stateFile = path.join(stateDir(), `session-${sessionId}.json`);
 
-  const state = eventName === "sessionStart" ? { seen: [], failStreak: 0, participantId: null } : readState(stateFile);
+  const state = eventName === "sessionStart" ? { seen: [], failStreak: 0, participantId: null, lifecycleWarned: false } : readState(stateFile);
+  const deadline = eventName === "sessionStart" ? Date.now() + SESSION_DEADLINE_MS : null;
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
+  if (participantConflict(sessionRaw, explicit)) {
+    tryEmit(setupPayload(eventName, "[post] POST_PARTICIPANT conflicts with this hook session key; unset it to bind from the payload or use the matching participant id"));
+    return;
+  }
   const needsSetup = eventName === "sessionStart" || !state.participantId || (explicit && explicit !== state.participantId);
   let participantId = state.participantId;
   if (needsSetup) {
-    const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true }));
+    const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true, deadline }));
     if (versionError) {
       tryEmit(setupPayload(eventName, versionError));
       return;
     }
-    participantId = setupParticipant(cwd, sessionRaw);
+    participantId = setupParticipant(cwd, sessionRaw, deadline);
     if (!participantId) {
       tryEmit(setupPayload(eventName, PARTICIPANT_SETUP_FAILED));
       return;
@@ -475,12 +505,17 @@ function main() {
     }
   }
 
-  const result = runPost(["watch", "--snapshot"], cwd, { participantId, clearConversationKeys: true });
+  const touchFailed = participantId && (eventName === "beforeSubmitPrompt" || eventName === "postToolUse")
+    ? lifecycleWarning(cwd, participantId, "touch", deadline)
+    : false;
+  const result = runPost(["watch", "--snapshot"], cwd, { participantId, clearConversationKeys: true, deadline });
 
   if (result.error || result.status !== 0) {
-    const nextState = { ...state, participantId, failStreak: state.failStreak + 1 };
+    const nextState = { ...state, participantId, lifecycleWarned: state.lifecycleWarned || touchFailed, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    const identity = eventName === "sessionStart" ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
+    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    deliverThenCommit(stateFile, context ? noticePayload(eventName, context) : payload, nextState);
     return;
   }
 
@@ -497,9 +532,11 @@ function main() {
     }
   }
   if (malformed) {
-    const nextState = { ...state, participantId, failStreak: state.failStreak + 1 };
+    const nextState = { ...state, participantId, lifecycleWarned: state.lifecycleWarned || touchFailed, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    const identity = eventName === "sessionStart" ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
+    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    deliverThenCommit(stateFile, context ? noticePayload(eventName, context) : payload, nextState);
     return;
   }
 
@@ -509,12 +546,13 @@ function main() {
     seen: [...new Set(events.map((event) => eventKey(event)))],
     failStreak: 0,
     participantId,
+    lifecycleWarned: state.lifecycleWarned || touchFailed,
   };
   let identity = null;
   if (eventName === "sessionStart") {
-    identity = identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true }));
+    identity = identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline }));
   }
-  const context = appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity);
+  const context = appendLine(appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
   const payload = context ? noticePayload(eventName, context) : {};
   deliverThenCommit(stateFile, payload, nextState);
 }

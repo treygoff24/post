@@ -28,7 +28,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 const CANONICAL_EVENT = "UserPromptSubmit";
@@ -43,12 +43,15 @@ const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const HARNESS = "grok";
+const SESSION_DEADLINE_MS = 4500;
 const VERSION_PROBE_FAILED =
   "[post] could not verify installed post capabilities (version query failed or timed out); repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 const PARTICIPANTS_MISSING =
   "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 const PARTICIPANT_SETUP_FAILED =
   "[post] participant setup failed; inbox state is UNKNOWN (not empty). Retry setup or run: post participant bind";
+const LIFECYCLE_WARNING =
+  "[post] participant lifecycle update unavailable; continuing without presence refresh";
 
 function writeAllSync(fd, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -85,9 +88,10 @@ function readState(file) {
       failStreak: Number.isInteger(parsed.failStreak) ? parsed.failStreak : 0,
       initialized: parsed.initialized === true,
       participantId: typeof parsed.participantId === "string" ? parsed.participantId : null,
+      lifecycleWarned: parsed.lifecycleWarned === true,
     };
   } catch {
-    return { seen: [], failStreak: 0, initialized: false, participantId: null };
+    return { seen: [], failStreak: 0, initialized: false, participantId: null, lifecycleWarned: false };
   }
 }
 
@@ -294,7 +298,7 @@ function failDiagnostic() {
   };
 }
 
-function runPost(args, cwd, { participantId = null, clearParticipant = false, clearConversationKeys = false } = {}) {
+function runPost(args, cwd, { participantId = null, clearParticipant = false, clearConversationKeys = false, deadline = null } = {}) {
   const env = { ...process.env };
   if (participantId) env.POST_PARTICIPANT = participantId;
   else if (clearParticipant || env.POST_PARTICIPANT === "") delete env.POST_PARTICIPANT;
@@ -307,7 +311,7 @@ function runPost(args, cwd, { participantId = null, clearParticipant = false, cl
   return spawnSync(postBinary(), args, {
     cwd,
     encoding: "utf8",
-    timeout: 4000,
+    timeout: deadline === null ? 4000 : Math.max(1, Math.min(4000, deadline - Date.now())),
     env,
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -346,7 +350,11 @@ function identityLine(result) {
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
-    return `[post] participant ${id}, continuing lineage ${lineage}; voices on request: post identity show ${shellQuote(lineage)} --voices; bootstrap: export POST_PARTICIPANT=${id}`;
+    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices; bootstrap: prefix Post commands with POST_PARTICIPANT=${id}`;
+    if (Buffer.byteLength(render(lineage), "utf8") <= 256) return render(lineage);
+    const chars = [...lineage];
+    while (chars.length > 0 && Buffer.byteLength(render(`${chars.join("")}…`), "utf8") > 256) chars.pop();
+    return chars.length > 0 ? render(`${chars.join("")}…`) : null;
   } catch {
     return null;
   }
@@ -375,6 +383,12 @@ function appendIdentity(context, line) {
   return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
+function appendLine(context, line) {
+  if (!line) return context;
+  const merged = context ? `${context}\n${line}` : line;
+  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
+}
+
 function setupPayload(context) {
   return {
     hookSpecificOutput: {
@@ -384,12 +398,23 @@ function setupPayload(context) {
   };
 }
 
-function setupParticipant(cwd, sessionId) {
+function setupParticipant(cwd, sessionId, deadline) {
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
   const args = explicit
     ? ["participant", "bind", "--json"]
     : ["participant", "bind", "--harness", HARNESS, "--key", sessionId, "--json"];
-  return boundParticipantId(runPost(args, cwd, { clearParticipant: !explicit, clearConversationKeys: true }));
+  return boundParticipantId(runPost(args, cwd, { clearParticipant: !explicit, clearConversationKeys: true, deadline }));
+}
+
+function participantConflict(sessionId, explicit) {
+  if (!explicit) return false;
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  return explicit !== `${HARNESS}-${digest.slice(0, 8)}` && explicit !== `${HARNESS}-${digest.slice(0, 12)}`;
+}
+
+function lifecycleWarning(cwd, participantId, command, deadline) {
+  const result = runPost(["participant", command], cwd, { participantId, clearConversationKeys: true, deadline });
+  return Boolean(result?.error || result?.status !== 0);
 }
 
 function deliverThenCommit(stateFile, payload, nextState) {
@@ -448,33 +473,44 @@ function main() {
   // Grok exposes only UserPromptSubmit; treat the first prompt as SessionStart
   // for participant setup and capability gating.
   const firstPrompt = !state.initialized;
+  const deadline = firstPrompt ? Date.now() + SESSION_DEADLINE_MS : null;
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
-  const needsSetup = firstPrompt || !state.participantId || (explicit && explicit !== state.participantId);
+  if (participantConflict(sessionRaw, explicit)) {
+    tryEmit(setupPayload("[post] POST_PARTICIPANT conflicts with this hook session key; unset it to bind from the payload or use the matching participant id"));
+    return;
+  }
+  const needsSetup = !state.initialized || (explicit && explicit !== state.participantId);
   let participantId = state.participantId;
   if (needsSetup) {
-    const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true }));
+    const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true, deadline }));
     if (versionError) {
-      tryEmit(setupPayload(versionError));
+      if (tryEmit(setupPayload(versionError)) && versionError === PARTICIPANTS_MISSING) {
+        writeState(stateFile, { ...state, initialized: true, participantId: null });
+      }
       return;
     }
-    participantId = setupParticipant(cwd, sessionRaw);
+    participantId = setupParticipant(cwd, sessionRaw, deadline);
     if (!participantId) {
       tryEmit(setupPayload(PARTICIPANT_SETUP_FAILED));
       return;
     }
   }
 
-  const result = runPost(["watch", "--snapshot"], cwd, { participantId, clearConversationKeys: true });
+  const touchFailed = participantId ? lifecycleWarning(cwd, participantId, "touch", deadline) : false;
+  const result = runPost(["watch", "--snapshot"], cwd, { participantId, clearConversationKeys: true, deadline });
 
   if (result.error || result.status !== 0) {
     const nextState = {
       ...state,
       participantId,
+      lifecycleWarned: state.lifecycleWarned || touchFailed,
       failStreak: state.failStreak + 1,
       initialized: state.initialized,
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    const identity = firstPrompt ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
+    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    deliverThenCommit(stateFile, context ? setupPayload(context) : payload, nextState);
     return;
   }
 
@@ -494,11 +530,14 @@ function main() {
     const nextState = {
       ...state,
       participantId,
+      lifecycleWarned: state.lifecycleWarned || touchFailed,
       failStreak: state.failStreak + 1,
       initialized: state.initialized,
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
-    deliverThenCommit(stateFile, payload, nextState);
+    const identity = firstPrompt ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
+    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    deliverThenCommit(stateFile, context ? setupPayload(context) : payload, nextState);
     return;
   }
 
@@ -509,11 +548,12 @@ function main() {
     failStreak: 0,
     initialized: true,
     participantId,
+    lifecycleWarned: state.lifecycleWarned || touchFailed,
   };
   const identity = firstPrompt
-    ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true }))
+    ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline }))
     : null;
-  const context = appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity);
+  const context = appendLine(appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
   const payload = context
     ? { hookSpecificOutput: { hookEventName: CANONICAL_EVENT, additionalContext: context } }
     : {};

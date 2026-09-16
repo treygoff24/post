@@ -34,7 +34,7 @@ fs.writeFileSync(
     // Natural exit when the control exit is 0: process.exit() would drop
     // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
     // 64 KiB pipe buffer), truncating the snapshot mid-line.
-    "const exit = args[0] === \"participant\" && args[1] === \"bind\" ? (control.bind_exit ?? 0) : args[0] === \"watch\" ? (control.exit ?? 0) : 0;",
+    "const exit = args[0] === \"participant\" && args[1] === \"bind\" ? (control.bind_exit ?? 0) : args[0] === \"participant\" && args[1] === \"touch\" ? (control.touch_exit ?? 0) : args[0] === \"participant\" && args[1] === \"end\" ? (control.end_exit ?? 0) : args[0] === \"watch\" ? (control.exit ?? 0) : 0;",
     "if (exit) process.exit(exit);",
     "",
   ].join("\n")
@@ -54,10 +54,10 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit }));
 }
 
 function allStubCalls() {
@@ -730,10 +730,10 @@ test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
   const stateDir = freshStateDir();
   fs.writeFileSync(CALLS, "");
   setStub({ events: [] });
-  run({ ...BASE, hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "explicit-id" } });
+  run({ ...BASE, hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "claude-9922f537" } });
   const calls = allStubCalls();
   assert.deepEqual(calls[1].args, ["participant", "bind", "--json"]);
-  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "explicit-id");
+  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "claude-9922f537");
 });
 
 test("bind failure emits one setup diagnostic and leaves state retryable", () => {
@@ -752,4 +752,33 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "claude-abc12345", participant: { id: "claude-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ ...BASE, hook_event_name: "SessionStart", session_id: "quoted-lineage" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
+});
+
+test("long affiliated lineage is truncated inside the one-line budget", () => {
+  const stateDir = freshStateDir();
+  const lineage = "x".repeat(255);
+  setStub({ events: [], show: { ok: true, status: "bound", id: "claude-abc12345", participant: { id: "claude-abc12345", lineage } } });
+  const out = run({ ...BASE, hook_event_name: "SessionStart", session_id: "long-lineage" }, { stateDir });
+  const line = out.hookSpecificOutput.additionalContext;
+  assert.ok(line.includes("…"));
+  assert.ok(Buffer.byteLength(line, "utf8") <= 256);
+});
+
+test("unsupported participant touch emits one bounded warning", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], touch_exit: 1 });
+  const first = run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
+  assert.match(first.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
+  const second = run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
+  assert.deepEqual(second, {});
+});
+
+test("SessionEnd attempts participant end without scanning", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], end_exit: 1 });
+  run({ ...BASE, hook_event_name: "SessionStart", session_id: "end-test" }, { stateDir });
+  fs.writeFileSync(CALLS, "");
+  const out = run({ ...BASE, hook_event_name: "SessionEnd", session_id: "end-test" }, { stateDir });
+  assert.match(out.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
+  assert.deepEqual(allStubCalls().map((call) => call.args), [["participant", "end"]]);
 });

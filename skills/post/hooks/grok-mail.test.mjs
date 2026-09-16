@@ -34,7 +34,7 @@ fs.writeFileSync(
     // Natural exit when the control exit is 0: process.exit() would drop
     // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
     // 64 KiB pipe buffer), truncating the snapshot mid-line.
-    "const exit = args[0] === \"participant\" && args[1] === \"bind\" ? (control.bind_exit ?? 0) : args[0] === \"watch\" ? (control.exit ?? 0) : 0;",
+    "const exit = args[0] === \"participant\" && args[1] === \"bind\" ? (control.bind_exit ?? 0) : args[0] === \"participant\" && args[1] === \"touch\" ? (control.touch_exit ?? 0) : args[0] === \"participant\" && args[1] === \"end\" ? (control.end_exit ?? 0) : args[0] === \"watch\" ? (control.exit ?? 0) : 0;",
     "if (exit) process.exit(exit);",
     "",
   ].join("\n")
@@ -54,10 +54,10 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit }));
 }
 
 function allStubCalls() {
@@ -705,6 +705,28 @@ test("first prompt with an old binary emits only the repair line", () => {
   assert.equal(allStubCalls().at(-1).args[0], "version");
 });
 
+test("capability mismatch is reported once, then the next prompt uses watch", () => {
+  const stateDir = freshStateDir();
+  setStub({ version: { ok: true, version: "0.9.0", capabilities: [] }, events: [] });
+  const first = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
+  assert.match(first.hookSpecificOutput.additionalContext, /lacks the participants capability/);
+  const before = allStubCalls().length;
+  setStub({ events: [MAIL_A] });
+  const second = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
+  assert.match(second.hookSpecificOutput.additionalContext, /20260730-010101-aaa111/);
+  assert.deepEqual(allStubCalls().slice(before).map((call) => call.args), [["watch", "--snapshot"]]);
+});
+
+test("long affiliated lineage is truncated inside the one-line budget", () => {
+  const stateDir = freshStateDir();
+  const lineage = "x".repeat(255);
+  setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage } } });
+  const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "long-lineage" }, { stateDir });
+  const line = out.hookSpecificOutput.additionalContext;
+  assert.ok(line.includes("…"));
+  assert.ok(Buffer.byteLength(line, "utf8") <= 256);
+});
+
 test("first prompt binds before snapshot with the session cwd", () => {
   const stateDir = freshStateDir();
   setStub({ events: [] });
@@ -714,6 +736,7 @@ test("first prompt binds before snapshot with the session cwd", () => {
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "grok", "--key", "bind-order", "--json"],
+    ["participant", "touch"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],
   ]);
@@ -730,7 +753,7 @@ test("affiliated participant gets exactly one identity line", () => {
   const stateDir = freshStateDir();
   setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "ember" } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "affiliated" }, { stateDir });
-  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: export POST_PARTICIPANT=grok-abc12345");
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant grok-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices; bootstrap: prefix Post commands with POST_PARTICIPANT=grok-abc12345");
 });
 
 test("payload session key mints and reuses one participant across prompts", () => {
@@ -751,10 +774,10 @@ test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
   const stateDir = freshStateDir();
   fs.writeFileSync(CALLS, "");
   setStub({ events: [] });
-  run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "explicit-id" } });
+  run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "grok-9922f537" } });
   const calls = allStubCalls();
   assert.deepEqual(calls[1].args, ["participant", "bind", "--json"]);
-  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "explicit-id");
+  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "grok-9922f537");
 });
 
 test("bind failure emits one setup diagnostic and leaves state retryable", () => {
@@ -772,5 +795,14 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "grok-abc12345", participant: { id: "grok-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "quoted-lineage" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
-  assert.match(out.hookSpecificOutput.additionalContext, /bootstrap: export POST_PARTICIPANT=grok-abc12345/);
+  assert.match(out.hookSpecificOutput.additionalContext, /bootstrap: prefix Post commands with POST_PARTICIPANT=grok-abc12345/);
+});
+
+test("unsupported participant touch emits one bounded warning", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], touch_exit: 1 });
+  const first = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "touch-warning" }, { stateDir });
+  assert.match(first.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
+  const second = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "touch-warning" }, { stateDir });
+  assert.deepEqual(second, {});
 });

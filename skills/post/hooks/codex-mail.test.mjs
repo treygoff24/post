@@ -34,7 +34,7 @@ fs.writeFileSync(
     // Natural exit when the control exit is 0: process.exit() would drop
     // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
     // 64 KiB pipe buffer), truncating the snapshot mid-line.
-    'const exit = args[0] === "participant" && args[1] === "bind" ? (control.bind_exit ?? 0) : args[0] === "watch" ? (control.exit ?? 0) : 0;',
+    'const exit = args[0] === "participant" && args[1] === "bind" ? (control.bind_exit ?? 0) : args[0] === "participant" && args[1] === "touch" ? (control.touch_exit ?? 0) : args[0] === "participant" && args[1] === "end" ? (control.end_exit ?? 0) : args[0] === "watch" ? (control.exit ?? 0) : 0;',
     "if (exit) process.exit(exit);",
     "",
   ].join("\n")
@@ -54,10 +54,10 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit }));
 }
 
 function allStubCalls() {
@@ -740,10 +740,19 @@ test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
   const stateDir = freshStateDir();
   fs.writeFileSync(CALLS, "");
   setStub({ events: [] });
-  run({ hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "explicit-id" } });
+  run({ hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "codex-9922f537" } });
   const calls = allStubCalls();
   assert.deepEqual(calls[1].args, ["participant", "bind", "--json"]);
-  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "explicit-id");
+  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "codex-9922f537");
+});
+
+test("conflicting explicit participant does not silently override the payload key", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [MAIL_A] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "codex-other" } });
+  assert.match(out.hookSpecificOutput.additionalContext, /conflicts with this hook session key/);
+  assert.deepEqual(allStubCalls(), []);
 });
 
 test("bind failure emits one setup diagnostic and leaves state retryable", () => {
@@ -769,6 +778,25 @@ test("lineage names are shell-quoted in the voice command", () => {
   setStub({ events: [], show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage: "Ember Grove!" } } });
   const out = run({ hook_event_name: "SessionStart", session_id: "quoted-lineage" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
+});
+
+test("long affiliated lineage is truncated inside the one-line budget", () => {
+  const stateDir = freshStateDir();
+  const lineage = "x".repeat(255);
+  setStub({ events: [], show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage } } });
+  const out = run({ hook_event_name: "SessionStart", session_id: "long-lineage" }, { stateDir });
+  const line = out.hookSpecificOutput.additionalContext;
+  assert.ok(line.includes("…"));
+  assert.ok(Buffer.byteLength(line, "utf8") <= 256);
+});
+
+test("SessionStart still reads affiliation when snapshot fails", () => {
+  const stateDir = freshStateDir();
+  setStub({ exit: 1, show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage: "ember" } } });
+  const out = run({ hook_event_name: "SessionStart", session_id: "show-on-failure" }, { stateDir });
+  assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
+  assert.match(out.hookSpecificOutput.additionalContext, /continuing lineage ember/);
+  assert.equal(allStubCalls().at(-1).args[0], "participant");
 });
 
 test("release binary binds from payload keys and reuses the participant later", () => {
@@ -836,7 +864,7 @@ test("release binary binds from payload keys and reuses the participant later", 
       { CODEX_THREAD_ID: "another-native-key", CODEX_SESSION_ID: "another-native-key" }
     );
     invoke(
-      { hook_event_name: "SessionStart", session_id: "payload-explicit", cwd },
+      { hook_event_name: "SessionStart", session_id: "payload-alpha", cwd },
       { POST_PARTICIPANT: alphaId }
     );
     assert.equal(participantIds().length, 2, "explicit participant must not mint a third record");
@@ -850,4 +878,13 @@ test("release binary binds from payload keys and reuses the participant later", 
   } finally {
     fs.rmSync(proofRoot, { recursive: true, force: true });
   }
+});
+
+test("unsupported participant touch emits one bounded warning", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], touch_exit: 1 });
+  const first = run({ hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
+  assert.match(first.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
+  const second = run({ hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
+  assert.deepEqual(second, {});
 });

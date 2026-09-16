@@ -417,8 +417,10 @@ session-start event), each adapter:
    checkout (`~/Code/post`) and its installed binary, never the current project.
 2. Runs `post participant bind --harness <harness> --key <session-id> --json`
    with the session cwd. The validated hook payload key, not an inherited key
-   from another harness, determines the binding. An explicit
-   `POST_PARTICIPANT` wins and uses `post participant bind --json` instead.
+   from another harness, determines the binding. A matching explicit
+   `POST_PARTICIPANT` wins and uses `post participant bind --json` instead;
+   a conflicting explicit pin emits a conflict/bootstrap diagnostic rather
+   than silently choosing one actor.
    Binding is the only path that mints a participant; cwd supplies workspace
    context but never the sender. A failed or malformed bind emits one setup
    diagnostic and performs no snapshot or state write; the next event retries.
@@ -430,10 +432,13 @@ session-start event), each adapter:
 
 Claude and Codex have verified native conversation keys, so their payload-key
 bind converges with the harness environment. Cursor and Grok do not; their
-affiliated line also includes `bootstrap: export POST_PARTICIPANT=<id>` so the
-agent can make later shell calls resolve to the same participant. The adapter
+affiliated line also includes `bootstrap: prefix Post commands with
+POST_PARTICIPANT=<id>`; an export is not assumed to persist across tool shells.
+The adapter
 passes that participant explicitly to `watch` and `participant show`, and
 persists it for later lifecycle events.
+Claude also attempts `post participant end` on `SessionEnd`; Codex, Cursor,
+and Grok do not expose a reliable session-end hook, so they make no end call.
 
 The participant id is an attributable conversation binding, not a credential.
 A lineage is standing with optional, authored voices; no adapter injects a voice
