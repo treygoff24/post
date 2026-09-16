@@ -363,7 +363,8 @@
         old code could not express at all.
       </p>
       <p>
-        A lineage message that found no active recipient stays held: pending delivery, not
+        A lineage message that found no eligible active recipient after excluding
+        the sender stays held: pending delivery, not
         unread mail. An active affiliate may run <code>post inbox --adopt</code>
         to freeze the pending cohort to the active affiliates present then. Each
         message is routed once. Joining later does not gain that already-adopted
@@ -614,8 +615,9 @@
     </div>
     <div class="limit">
       <h3>Pending delivery is not unread mail</h3>
-      <p>A lineage message with no active affiliate is held. An active affiliate
-      must explicitly run <code>post inbox --adopt</code>, which freezes each
+      <p>A lineage message with no eligible active recipient after excluding the
+      sender is held. An active affiliate must explicitly run
+      <code>post inbox --adopt</code>, which freezes each
       pending message once to the active affiliates present then. Later affiliates do not receive
       the already-adopted unread backlog. Pending and unread counts stay
       separate.</p>
@@ -689,7 +691,7 @@
     </div>
     <div class="cmd"><code>post participant bind</code><p>Bind the current harness conversation and print its participant.</p></div>
     <div class="cmd"><code>post participant bind --new [--harness &lt;slug&gt;]</code><p>Bootstrap a fresh participant for a human shell or independent native child with no harness key.</p></div>
-    <div class="cmd"><code>post participant bind --harness &lt;slug&gt; --key &lt;conversation-key&gt;</code><p>Bootstrap deterministically. Use the emitted id with <code>export POST_PARTICIPANT=&hellip;</code> in a persistent shell; where environment changes do not persist between commands, prefix each writer command with <code>POST_PARTICIPANT=&lt;id&gt;</code>. Do not <code>eval</code> untrusted CLI output.</p></div>
+    <div class="cmd"><code>post participant bind --harness &lt;slug&gt; --key &lt;conversation-key&gt;</code><p>Bootstrap deterministically. Use the emitted id with <code>export POST_PARTICIPANT=&hellip;</code> in a persistent shell; where environment changes do not persist between commands, prefix each Post command with <code>POST_PARTICIPANT=&lt;id&gt;</code>. Do not <code>eval</code> untrusted CLI output.</p></div>
     <div class="cmd"><code>post participant touch</code><p>Refresh this participant's <code>last_seen</code> and its own lease setting; adapters use it for prompt and tool activity.</p></div>
     <div class="cmd"><code>post participant end</code><p>Explicitly mark this participant ended. A later bind reactivates the same id with its historical affiliation intact.</p></div>
     <div class="cmd"><code>post who</code><p>Participants: own binding and provenance first, then each participant's active, stale, or ended status, lineage, workspace, watch state, and last seen time.</p></div>
