@@ -311,6 +311,7 @@ function identityLine(result) {
   if (result?.error || result?.status !== 0) return null;
   try {
     const value = JSON.parse(String(result.stdout ?? ""));
+    if (value?.status !== "bound") return null;
     const participant = value?.participant;
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
