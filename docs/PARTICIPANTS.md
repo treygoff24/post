@@ -140,7 +140,7 @@ Two participants, one workspace, isolated `POST_MAIL_ROOT`, driven through the i
 6. `identity list`/`show` from an unaffiliated participant loads no voice text; `show --voices` prints framed voices; `continue` on a lineage with terms requires `--acknowledge`; `leave` clears only the leaver.
 7. Channel: both subscribed by workspace default; B `--leave`s; A's membership and B's seen set are untouched; a SessionStart hook run does not rejoin B.
 8. Late older message id arrives after a newer one was read: still unread. A failed emit records nothing.
-9. Watcher restart preserves dedupe; a new participant is independently notified.
+9. Consumed ids stay suppressed across watcher restart; unconsumed ids may ring again. A new participant is independently notified; adapters separately retain per-participant notice state across hook invocations.
 10. `post version --json` on both hosts reports the same `build_sha` and capabilities; hooks refuse with the repair line against a 0.9.0 binary.
 11. Cross-host: an ordinary workspace-addressed message Mac→devbox and back, through the unchanged bridge, is routed at the destination and read by a participant there.
 12. Full `scripts/gate.sh` green at the integrated HEAD; `scripts/smoke-installed.sh` green against both installed binaries.
