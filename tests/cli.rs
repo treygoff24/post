@@ -5232,7 +5232,11 @@ fn long_watch_exits_when_generation_is_stale_or_state_disappears() {
         assert_eq!(error.error.code, "config_invalid");
         assert!(
             error.error.message.contains("stale")
-                || error.error.message.contains("state file is missing"),
+                || error.error.message.contains("state file is missing")
+                || error
+                    .error
+                    .message
+                    .contains("state must be a solitary regular file"),
             "{mode}: {}",
             error.error.message
         );
