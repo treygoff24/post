@@ -123,7 +123,8 @@ pub(super) fn run(
         let selected_count = targets.iter().map(CatchupTarget::count).sum();
         let rendered = match args.max_bytes {
             Some(max_bytes) => {
-                let remainders = CatchupRemainderIndex::new(context, &targets, &room, max_bytes)?;
+                let remainders =
+                    CatchupRemainderIndex::new(context, &participant, &targets, &room, max_bytes)?;
                 let admission = if json_output {
                     let json_sizes = CatchupJsonSizes::new(&targets, framing, pretty)?;
                     super::byte_budget::admit_prefix_measured(
@@ -712,6 +713,7 @@ struct CatchupRemainderIndex {
 impl CatchupRemainderIndex {
     fn new(
         context: &Context,
+        participant: &crate::participant::Participant,
         targets: &[CatchupTarget],
         room: &str,
         max_bytes: usize,
@@ -740,7 +742,8 @@ impl CatchupRemainderIndex {
                                 super::read::ReadProjection::participant(
                                     context,
                                     address,
-                                    false,
+                                    item.envelope.from_participant.as_deref()
+                                        == Some(participant.id.as_str()),
                                     item.envelope.pending,
                                 )
                             },

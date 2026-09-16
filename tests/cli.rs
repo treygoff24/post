@@ -9755,7 +9755,7 @@ fn send_receipt_offers_a_runnable_sender_history_readback_command() {
     assert_success(&sent);
     let text = stdout(&sent);
     assert!(text.contains("canonical message retained at workspace:beta"));
-    assert!(text.contains("suppresses the sender"));
+    assert!(text.contains("sender is not a frozen recipient"));
     let id = text
         .lines()
         .next()

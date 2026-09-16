@@ -628,6 +628,96 @@ fn routing_pending_own_read_succeeds_and_excluded_own_ack_is_a_noop() {
 }
 
 #[test]
+fn routing_pending_lineage_ack_names_unrouted_delivery_not_sender_history() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let actor = bind(&sandbox, "pending-lineage-reader", &alpha, "alpha");
+    let sender = bind(&sandbox, "pending-lineage-sender", &beta, "beta");
+    patch_participant(&sandbox, &actor, |record| {
+        record["lineage"] = json!("Ember Grove!");
+        record["lineage_since"] = json!("2026-09-16T10:00:00Z");
+    });
+    let lineage = sandbox.mail_root.join("lineages/Ember Grove!");
+    fs::create_dir_all(lineage.join("inbox")).expect("lineage inbox");
+    fs::write(
+        lineage.join("lineage.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "name": "Ember Grove!",
+                "founder": actor,
+                "created": "2026-09-16T10:00:00Z",
+                "host": "test"
+            }))
+            .unwrap()
+        ),
+    )
+    .expect("lineage record");
+    let id = "20990916-045000-acde50";
+    write_custom_mail(
+        &lineage.join("inbox"),
+        id,
+        &json!({
+            "id": id,
+            "from": "beta",
+            "to": "Ember Grove!",
+            "kind": "note",
+            "subject": "pending lineage",
+            "sent": "2026-09-16 04:50:00 -0500",
+            "from_participant": sender,
+            "address_kind": "lineage"
+        }),
+        "pending lineage",
+    );
+    let ack = sandbox.run_as_participant(&["read", id, "--ack"], &actor, &alpha);
+    assert_success(&ack);
+    let text = common::stdout(&ack);
+    assert!(text.contains("pending delivery"), "{text}");
+    assert!(text.contains("not yet routed"), "{text}");
+    assert!(!text.contains("sender history"), "{text}");
+}
+
+#[test]
+fn routing_sender_history_discovers_pending_unattended_workspace() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let empty = sandbox.path.join("empty");
+    fs::create_dir(&empty).expect("empty workspace");
+    assert_success(&sandbox.run(&["rooms", "add", "empty", empty.to_string_lossy().as_ref()]));
+    let actor = bind(&sandbox, "unattended-sender", &alpha, "alpha");
+    let sent = send_as(
+        &sandbox,
+        &actor,
+        &alpha,
+        "workspace:empty",
+        "unattended sender history",
+    );
+    let id = sent["envelope"]["id"].as_str().expect("mail id");
+    assert!(!sandbox
+        .mail_root
+        .join(format!("empty/routing/{id}.json"))
+        .exists());
+
+    let read = sandbox.run_as_participant(&["read", id, "--json"], &actor, &alpha);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    assert_eq!(read["own"], true);
+    assert_eq!(read["pending"], true);
+    let search = sandbox.run_as_participant(
+        &["search", "unattended sender history", "--mail", "--json"],
+        &actor,
+        &alpha,
+    );
+    assert_success(&search);
+    let search: Value = from_stdout(&search);
+    assert_eq!(search["count"], 1);
+    assert_eq!(search["results"][0]["id"], id);
+    assert_eq!(search["results"][0]["own"], true);
+    assert_eq!(search["results"][0]["pending"], true);
+}
+
+#[test]
 fn routing_send_text_prints_a_runnable_readback_for_routed_and_pending_own_mail() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
@@ -642,6 +732,25 @@ fn routing_send_text_prints_a_runnable_readback_for_routed_and_pending_own_mail(
     let read = run_printed_readback(&sandbox, &command, &actor, &alpha);
     assert_success(&read);
     assert!(common::stdout(&read).contains("own: true"));
+
+    let self_sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{actor}"),
+            "--body",
+            "printed self",
+        ],
+        &actor,
+        &alpha,
+    );
+    assert_success(&self_sent);
+    assert!(
+        common::stdout(&self_sent)
+            .contains("sender is a frozen recipient and the message is initially unread"),
+        "{}",
+        common::stdout(&self_sent)
+    );
 
     let pending = Sandbox::new_unseeded();
     let solo = pending.path.join("solo");
@@ -851,6 +960,193 @@ fn routing_read_modes_share_context_projection_and_pending_own_state() {
         assert_eq!(output["own"], true);
         assert_eq!(output["pending"], true);
         assert_eq!(output["envelope"]["pending"], true);
+    }
+}
+
+#[test]
+fn routing_text_read_modes_share_own_pending_and_consumption_state() {
+    let pending = Sandbox::new_unseeded();
+    let solo = pending.path.join("solo");
+    fs::create_dir_all(&solo).expect("solo workspace");
+    assert_success(&pending.run(&["rooms", "add", "solo", solo.to_string_lossy().as_ref()]));
+    let actor = pending.bind_claude("text-state", &solo, Some("solo"))["id"]
+        .as_str()
+        .expect("actor")
+        .to_owned();
+    let sent = pending.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:solo",
+            "--body",
+            "pending text state",
+            "--json",
+        ],
+        &actor,
+        &solo,
+    );
+    assert_success(&sent);
+    let sent: Value = from_stdout(&sent);
+    let id = sent["envelope"]["id"].as_str().expect("pending id");
+    for args in [
+        vec!["read", id, "--peek", "--max-bytes", "10000"],
+        vec![
+            "read",
+            id,
+            "--offset",
+            "0",
+            "--length",
+            "10",
+            "--max-bytes",
+            "10000",
+        ],
+    ] {
+        let output = pending.run_as_participant(&args, &actor, &solo);
+        assert_success(&output);
+        let text = common::stdout(&output);
+        assert!(text.contains("own: true"), "{args:?}: {text}");
+        assert!(text.contains("pending: true"), "{args:?}: {text}");
+        assert!(text.contains("unread unchanged"), "{args:?}: {text}");
+    }
+
+    let direct = pending.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{actor}"),
+            "--body",
+            "self consumption",
+            "--json",
+        ],
+        &actor,
+        &solo,
+    );
+    assert_success(&direct);
+    let direct: Value = from_stdout(&direct);
+    let direct_id = direct["envelope"]["id"].as_str().expect("direct id");
+    let read = pending.run_as_participant(&["read", direct_id], &actor, &solo);
+    assert_success(&read);
+    let text = common::stdout(&read);
+    assert!(text.contains("own: true"), "{text}");
+    assert!(text.contains("consumed for this participant"), "{text}");
+    assert_eq!(inbox_as(&pending, &actor, &solo)["unread_count"], 0);
+    let reread = pending.run_as_participant(&["read", direct_id, "--peek"], &actor, &solo);
+    assert_success(&reread);
+    let text = common::stdout(&reread);
+    assert!(text.contains("exact-id cursor"), "{text}");
+    assert!(!text.contains("read/archive"), "{text}");
+}
+
+#[test]
+fn routing_read_and_catchup_continuations_run_for_every_address_kind() {
+    for kind in ["workspace", "participant", "lineage"] {
+        let sandbox = Sandbox::new();
+        let (alpha, beta) = register_alpha_beta(&sandbox);
+        let actor = bind(&sandbox, &format!("continuation-{kind}"), &alpha, "alpha");
+        let peer = bind(
+            &sandbox,
+            &format!("continuation-{kind}-peer"),
+            &beta,
+            "beta",
+        );
+        let target = match kind {
+            "workspace" => "workspace:alpha".to_owned(),
+            "participant" => format!("participant:{actor}"),
+            "lineage" => {
+                patch_participant(&sandbox, &actor, |record| {
+                    record["lineage"] = json!("Ember Grove!");
+                    record["lineage_since"] = json!("2026-09-16T10:00:00Z");
+                });
+                let lineage = sandbox.mail_root.join("lineages/Ember Grove!");
+                fs::create_dir_all(&lineage).expect("lineage directory");
+                fs::write(
+                    lineage.join("lineage.json"),
+                    format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&json!({
+                            "version": 1,
+                            "name": "Ember Grove!",
+                            "founder": actor,
+                            "created": "2026-09-16T10:00:00Z",
+                            "host": "test"
+                        }))
+                        .unwrap()
+                    ),
+                )
+                .expect("lineage record");
+                "lineage:Ember Grove!".to_owned()
+            }
+            _ => unreachable!(),
+        };
+        let sender = if kind == "participant" { &actor } else { &peer };
+        let sender_cwd = if kind == "participant" { &alpha } else { &beta };
+        let body = format!("{kind}-continuation-{}", "x".repeat(6000));
+        let sent = send_as(&sandbox, sender, sender_cwd, &target, &body);
+        let id = sent["envelope"]["id"].as_str().expect("mail id");
+
+        let bounded = sandbox.run_as_participant(
+            &["read", id, "--max-bytes", "2600", "--json"],
+            &actor,
+            &alpha,
+        );
+        assert_success(&bounded);
+        let bounded: Value = from_stdout(&bounded);
+        let bounded_command = bounded["omitted"]["continuation"]
+            .as_str()
+            .expect("bounded continuation");
+        assert_eq!(bounded_command.contains(" --room "), kind == "workspace");
+        let resumed = run_printed_readback(&sandbox, bounded_command, &actor, &alpha);
+        assert_success(&resumed);
+        let resumed: Value = from_stdout(&resumed);
+        assert_eq!(
+            resumed["own"].as_bool().unwrap_or(false),
+            kind == "participant"
+        );
+
+        let slice = sandbox.run_as_participant(
+            &[
+                "read",
+                id,
+                "--offset",
+                "0",
+                "--length",
+                "10",
+                "--max-bytes",
+                "2600",
+                "--json",
+            ],
+            &actor,
+            &alpha,
+        );
+        assert_success(&slice);
+        let slice: Value = from_stdout(&slice);
+        let slice_command = slice["continuation"].as_str().expect("slice continuation");
+        assert_eq!(slice_command.contains(" --room "), kind == "workspace");
+        assert_success(&run_printed_readback(
+            &sandbox,
+            slice_command,
+            &actor,
+            &alpha,
+        ));
+
+        let catchup = sandbox.run_as_participant(
+            &["catchup", "--mail", "--max-bytes", "2600", "--json"],
+            &actor,
+            &alpha,
+        );
+        assert_success(&catchup);
+        let catchup: Value = from_stdout(&catchup);
+        let catchup_command = catchup["omitted"]["continuation"]
+            .as_str()
+            .expect("catchup continuation");
+        assert_eq!(catchup_command.contains(" --room "), kind == "workspace");
+        let resumed = run_printed_readback(&sandbox, catchup_command, &actor, &alpha);
+        assert_success(&resumed);
+        let resumed: Value = from_stdout(&resumed);
+        assert_eq!(
+            resumed["own"].as_bool().unwrap_or(false),
+            kind == "participant"
+        );
     }
 }
 

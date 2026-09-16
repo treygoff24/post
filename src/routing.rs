@@ -200,9 +200,9 @@ pub(crate) fn provisional_pending_for_quiet(
     provisional_pending(context, participant, address, false)
 }
 
-/// Current addresses plus every canonical store whose frozen receipt has ever
-/// named this participant. Membership and workspace rebinding cannot revoke a
-/// delivery that was already published.
+/// Every canonical store whose frozen receipt names this participant or whose
+/// message was authored by it. Membership and workspace rebinding cannot hide
+/// frozen deliveries or sender history.
 pub(crate) fn received_addresses(
     context: &Context,
     participant: &Participant,
@@ -211,32 +211,41 @@ pub(crate) fn received_addresses(
     let mut received = Vec::new();
     for address in candidates {
         let directory = routing_dir(context, &address);
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
         let mut named = false;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
+        if let Ok(entries) = fs::read_dir(&directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                match receipt(context, &address, id) {
+                    Ok(Some(receipt))
+                        if receipt.recipients.contains(&participant.id)
+                            || canonical_sender_is(context, &address, id, &participant.id) =>
+                    {
+                        named = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.code == ErrorCode::ConfigInvalid => warn_once(
+                        path,
+                        format!("corrupt routing receipt skipped: {}", error.message),
+                    ),
+                    Err(error) => return Err(error),
+                }
             }
-            match receipt(context, &address, id) {
-                Ok(Some(receipt))
-                    if receipt.recipients.contains(&participant.id)
-                        || canonical_sender_is(context, &address, id, &participant.id) =>
-                {
+        }
+        if !named {
+            for path in message_files(&inbox_path(context, &address))? {
+                if parse_mail(&path).is_ok_and(|mail| {
+                    mail.envelope.from_participant.as_deref() == Some(participant.id.as_str())
+                }) {
                     named = true;
                     break;
                 }
-                Ok(_) => {}
-                Err(error) if error.code == ErrorCode::ConfigInvalid => warn_once(
-                    path,
-                    format!("corrupt routing receipt skipped: {}", error.message),
-                ),
-                Err(error) => return Err(error),
             }
         }
         if named {

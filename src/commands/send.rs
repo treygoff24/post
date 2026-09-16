@@ -349,13 +349,24 @@ where
     // The canonical mail and archive copy are already committed. A receipt
     // failure deliberately leaves the message pending so the next admitted
     // writer can recover it without a duplicate send.
-    if let Err(error) = crate::cursor_state::routing::route_message(context, &target, &envelope.id)
+    let receipt = match crate::cursor_state::routing::route_message(context, &target, &envelope.id)
     {
-        eprintln!(
-            "post: warning: mail {} was delivered but remains pending because routing failed: {}",
-            envelope.id, error.message
-        );
-    }
+        Ok(receipt) => receipt,
+        Err(error) => {
+            eprintln!(
+                "post: warning: mail {} was delivered but remains pending because routing failed: {}",
+                envelope.id, error.message
+            );
+            None
+        }
+    };
+    let delivery_status = match receipt.as_ref() {
+        Some(receipt) if receipt.recipients.contains(&actor.participant.id) => {
+            "sender is a frozen recipient and the message is initially unread"
+        }
+        Some(_) => "sender is not a frozen recipient; unread is recipient-specific",
+        None => "no frozen recipient exists yet; message is pending sender history",
+    };
 
     let rendered = if json_output {
         output::json(
@@ -368,7 +379,7 @@ where
         )?
     } else {
         format!(
-            "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; unread is recipient-specific and suppresses the sender\npost: read it back with: post read {}\n",
+            "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; {delivery_status}\npost: read it back with: post read {}\n",
             envelope.kind,
             envelope.id,
             envelope.from,
