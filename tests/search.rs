@@ -5,7 +5,7 @@ use common::{
     write_channel_message, Sandbox,
 };
 use post::output::{ErrorEnvelope, SearchOutput};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -85,7 +85,27 @@ fn search_mail_is_visible_history_for_recipient_and_sender_after_consumption() {
         .map(|result| result.id.clone())
         .collect();
 
-    assert_eq!(search_ids, vec![ids[1].clone(), ids[0].clone()]);
+    assert_eq!(
+        search_ids.iter().cloned().collect::<BTreeSet<_>>(),
+        ids.iter().cloned().collect::<BTreeSet<_>>(),
+        "history search must return exactly both same-second sends"
+    );
+    let repeated = sandbox.run_as_participant(
+        &["search", marker, "--mail", "--json"],
+        &beta_participant,
+        &beta,
+    );
+    assert_success(&repeated);
+    let repeated: SearchOutput = from_stdout(&repeated);
+    assert_eq!(
+        repeated
+            .results
+            .iter()
+            .map(|result| result.id.clone())
+            .collect::<Vec<_>>(),
+        search_ids,
+        "same-second history order must still be deterministic"
+    );
     let read = parsed
         .results
         .iter()
