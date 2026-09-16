@@ -1917,6 +1917,7 @@ fn acting_notice(provenance: crate::model::SenderProvenance) -> &'static str {
         P::DeclaredEnv => "POST_FROM pin",
         P::DeclaredFlag => "explicit flag",
         P::InferredCwd | P::InferredBasename => "identity inferred from cwd",
+        P::ParticipantBinding => "participant binding",
     }
 }
 

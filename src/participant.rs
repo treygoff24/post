@@ -306,12 +306,13 @@ pub(crate) fn bind(
     workspace_override: Option<&str>,
     bootstrap: Option<(&str, &str)>,
 ) -> AppResult<Participant> {
-    let explicit = env_utf8("POST_PARTICIPANT")?;
-    if bootstrap.is_some() && explicit.is_some() {
-        return Err(AppError::invalid_argument(
-            "--key/--new cannot be combined with POST_PARTICIPANT; unset it to mint a different participant",
-        ));
-    }
+    // An explicit bootstrap deliberately starts an independent participant.
+    // It must not inspect or reuse an inherited parent binding.
+    let explicit = if bootstrap.is_some() {
+        None
+    } else {
+        env_utf8("POST_PARTICIPANT")?
+    };
     if let Some(explicit) = explicit {
         validate_participant_id(&explicit)?;
         if workspace_override.is_none() && declared_env_pin()?.is_none() {
@@ -337,15 +338,18 @@ pub(crate) fn bind(
         None => conversation_binding()?.ok_or_else(|| AppError::no_participant(false))?,
     };
     let digest = digest(&binding.key);
-    let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
 
     let _lock = lock(context)?;
     let (id, mut participant) = select_record(context, &binding.harness, &digest)?;
     if let Some(existing) = participant.as_mut() {
-        existing.workspace = workspace;
-        existing.workspace_path = workspace_path;
-        write_record(existing)?;
+        if workspace_override.is_some() || declared_env_pin()?.is_some() {
+            let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
+            existing.workspace = workspace;
+            existing.workspace_path = workspace_path;
+            write_record(existing)?;
+        }
     } else {
+        let (workspace, workspace_path) = workspace_context(context, cwd, workspace_override)?;
         let (_, created) = crate::mailbox::local_timestamp()?;
         let dir = context.root.join(PARTICIPANTS_DIR).join(&id);
         fs::create_dir_all(&dir)
@@ -670,52 +674,61 @@ fn codex_key(thread: Option<String>, session: Option<String>) -> AppResult<Strin
 }
 
 fn nearest_native_harness() -> Option<NativeHarness> {
-    let ancestors = process_ancestors()?;
     let claude_pid = std::env::var("CLAUDE_PID")
         .ok()
         .and_then(|value| value.parse::<u32>().ok());
-    nearest_native_harness_in(
-        ancestors
-            .iter()
-            .map(|(pid, command)| (*pid, command.as_str())),
-        claude_pid,
-    )
+    nearest_native_harness_from(std::process::id(), claude_pid, process_info)
 }
 
+fn nearest_native_harness_from<F>(
+    start_pid: u32,
+    claude_pid: Option<u32>,
+    mut info: F,
+) -> Option<NativeHarness>
+where
+    F: FnMut(u32) -> Option<(u32, String)>,
+{
+    let (mut pid, _) = info(start_pid)?;
+    for _ in 0..16 {
+        if pid == 0 {
+            break;
+        }
+        let (parent, command) = info(pid)?;
+        if let Some(harness) = native_harness(pid, &command, claude_pid) {
+            return Some(harness);
+        }
+        pid = parent;
+    }
+    None
+}
+
+#[cfg(test)]
 fn nearest_native_harness_in<'a>(
     ancestors: impl IntoIterator<Item = (u32, &'a str)>,
     claude_pid: Option<u32>,
 ) -> Option<NativeHarness> {
     for (pid, command) in ancestors {
-        if claude_pid == Some(pid) {
-            return Some(NativeHarness::Claude);
-        }
-        let basename = Path::new(command)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(command)
-            .trim_start_matches('-');
-        match basename {
-            "claude" => return Some(NativeHarness::Claude),
-            "codex" => return Some(NativeHarness::Codex),
-            _ => {}
+        if let Some(harness) = native_harness(pid, command, claude_pid) {
+            return Some(harness);
         }
     }
     None
 }
 
-fn process_ancestors() -> Option<Vec<(u32, String)>> {
-    let (mut pid, _) = process_info(std::process::id())?;
-    let mut ancestors = Vec::new();
-    for _ in 0..16 {
-        if pid == 0 {
-            break;
-        }
-        let (parent, command) = process_info(pid)?;
-        ancestors.push((pid, command));
-        pid = parent;
+fn native_harness(pid: u32, command: &str, claude_pid: Option<u32>) -> Option<NativeHarness> {
+    if claude_pid == Some(pid) {
+        return Some(NativeHarness::Claude);
     }
-    Some(ancestors)
+    let basename = Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command)
+        .trim_start_matches('-');
+    match basename {
+        "claude" => Some(NativeHarness::Claude),
+        "codex" => Some(NativeHarness::Codex),
+        _ => None,
+    }
 }
 
 fn process_info(pid: u32) -> Option<(u32, String)> {

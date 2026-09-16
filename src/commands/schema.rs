@@ -149,7 +149,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
-            "show/bind: ok, status=bound|unbound, id?, participant?, provenance?, fix?",
+            "show/bind: ok, status=bound|unbound, id?, participant?, provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
             "list: ok, participants, count",
         ]),
         identity: fields(&["declared surface; P.3 bodies currently return not_yet"]),
@@ -157,7 +157,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "ok",
             "version",
             "build_sha",
-            "store_version=2",
+            "store_version=1",
             "capabilities",
         ]),
         doctor: fields(&[
@@ -219,6 +219,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "store_version",
             "capabilities",
             "participant=unbound and participant_fix (when no participant is bound)",
+            "participant_error (when ambient participant resolution failed but this read-only command remained available)",
             "global_flags",
             "commands",
             "output_shapes",
@@ -344,7 +345,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ok: true,
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
-        store_version: 2,
+        store_version: 1,
         capabilities: version::CAPABILITIES
             .iter()
             .map(|value| (*value).to_owned())
@@ -418,7 +419,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Budgeted chat auto framing inspects banner-day without mutating during admission: first-day output is full, same-day output compact, fenced read-only output remains always-full, and a consuming stamp occurs only after successful stdout; cursorless, zero-admission, null-sink and failed-output paths do not stamp. Banner state uses the raw validated acting-room id, never sanitized presentation text. Omission continuations use a measured fixed-point cap covering the exact stored envelope at the body's widest later offsets plus its costliest encoded UTF-8 scalar, so the unchanged-message chain crosses decimal/scalar boundaries; this cap may exceed the original byte_limit without changing it.",
             "Channel sends bounce with crossed_send when unseen ordinary messages from others exist in the channel; --anyway delivers regardless. Direct mail is unaffected.",
             "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
-            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; authority comes only from signature verification, and post never synthesizes either field.",
+            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; participant-binding means the bound reply address differed from cwd inference; authority comes only from signature verification, and post never synthesizes either field.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override — a supported first-class root (r2.1); must be absolute, defaults to $HOME/.claude-mail",

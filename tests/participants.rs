@@ -800,9 +800,15 @@ fn participant_round2_resolution_errors_are_advisory_on_read_only_surfaces() {
             &sandbox.path,
             &[("POST_PARTICIPANT", "bad:id")],
         );
-        assert_success(&output);
+        if args == ["doctor"] {
+            assert_eq!(output.status.code(), Some(1));
+        } else {
+            assert_success(&output);
+        }
         let value: Value = from_stdout(&output);
-        assert_eq!(value["ok"], true, "{args:?}: {}", common::stdout(&output));
+        if args != ["doctor"] {
+            assert_eq!(value["ok"], true, "{args:?}: {}", common::stdout(&output));
+        }
         assert!(
             value["participant_error"]
                 .as_str()
@@ -820,6 +826,26 @@ fn participant_round2_resolution_errors_are_advisory_on_read_only_surfaces() {
         &[("POST_PARTICIPANT", "bad:id")],
     );
     assert_eq!(plain_bind.status.code(), Some(2));
+
+    let malformed = Sandbox::new();
+    let record = malformed
+        .mail_root
+        .join("participants/broken/participant.json");
+    fs::create_dir_all(record.parent().expect("record parent")).expect("participant dir");
+    fs::write(&record, b"{not json").expect("malformed participant");
+    let before = tree(&malformed.mail_root);
+    let who = malformed.run_in_env(
+        &["who"],
+        None,
+        &malformed.path,
+        &[("POST_PARTICIPANT", "broken")],
+    );
+    assert_success(&who);
+    let who: Value = from_stdout(&who);
+    assert!(who["participant_error"]
+        .as_str()
+        .is_some_and(|message| message.contains("invalid participant JSON")));
+    assert_eq!(tree(&malformed.mail_root), before);
 }
 
 #[test]

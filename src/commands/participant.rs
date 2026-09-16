@@ -17,6 +17,8 @@ struct ParticipantOutput {
     provenance: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fix: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    participant_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -91,9 +93,13 @@ pub(super) fn run(
                     participant.id
                 )));
             }
-            let provenance = participant::resolve(context)?
-                .provenance()
-                .map(|p| p.as_str());
+            let provenance = if bootstrap.is_some() {
+                Some("explicit-bootstrap")
+            } else {
+                participant::resolve(context)?
+                    .provenance()
+                    .map(|p| p.as_str())
+            };
             let id = participant.id.clone();
             CommandResult::json(
                 &ParticipantOutput {
@@ -103,6 +109,7 @@ pub(super) fn run(
                     participant: Some(participant),
                     provenance,
                     fix: None,
+                    participant_error: None,
                 },
                 pretty,
             )
@@ -123,25 +130,36 @@ pub(super) fn run(
 }
 
 fn show(context: &Context, pretty: bool) -> AppResult<CommandResult> {
-    let output = match participant::resolve(context)? {
-        Resolved::Bound {
+    let output = match participant::resolve(context) {
+        Ok(Resolved::Bound {
             participant,
             provenance,
-        } => ParticipantOutput {
+        }) => ParticipantOutput {
             ok: true,
             status: "bound",
             id: Some(participant.id.clone()),
             participant: Some(*participant),
             provenance: Some(provenance.as_str()),
             fix: None,
+            participant_error: None,
         },
-        Resolved::Unbound => ParticipantOutput {
+        Ok(Resolved::Unbound) => ParticipantOutput {
             ok: true,
             status: "unbound",
             id: None,
             participant: None,
             provenance: None,
             fix: Some("run: post participant bind"),
+            participant_error: None,
+        },
+        Err(error) => ParticipantOutput {
+            ok: true,
+            status: "unbound",
+            id: None,
+            participant: None,
+            provenance: None,
+            fix: Some("run: post participant bind"),
+            participant_error: Some(error.message),
         },
     };
     CommandResult::json(&output, pretty)

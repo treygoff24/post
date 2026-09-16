@@ -149,26 +149,40 @@ fn lock_channels(context: &Context) -> AppResult<File> {
     Ok(file)
 }
 
-/// Resolve the acting room for channel operations. Identity comes from the
-/// POST_FROM pin when the launch helper set one, else from cwd — there is
-/// deliberately no --from/--room override on channel commands. Membership
-/// additionally requires the room to be registered: cursors and join records
-/// need a durable identity, and the cwd-basename fallback is not one.
+/// Resolve the acting room for channel operations. A bound participant's
+/// workspace is authoritative; unbound read-only commands retain the legacy
+/// POST_FROM-or-cwd lookup. There is deliberately no --from/--room override
+/// on channel commands. Membership additionally requires a registered room.
 pub(crate) fn acting_room(
     context: &Context,
     rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
-    let (room, provenance) = {
-        let actor = context.sender()?;
-        let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
-            SenderProvenance::DeclaredEnv
-        } else {
-            context
-                .infer_from_cwd(rooms)
-                .map(|(_, provenance)| provenance)
-                .unwrap_or(SenderProvenance::InferredBasename)
-        };
-        (actor.from, provenance)
+    let (room, provenance) = match crate::participant::resolve(context) {
+        Ok(crate::participant::Resolved::Bound { participant, .. }) => {
+            let Some(room) = participant.workspace.clone() else {
+                return Err(missing_participant_workspace(
+                    context,
+                    rooms,
+                    &participant.id,
+                ));
+            };
+            let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
+                SenderProvenance::DeclaredEnv
+            } else {
+                match context.infer_from_cwd(rooms) {
+                    Ok((inferred, provenance)) if inferred == room => provenance,
+                    _ => SenderProvenance::ParticipantBinding,
+                }
+            };
+            (room, provenance)
+        }
+        Ok(crate::participant::Resolved::Unbound) => {
+            context.resolved_room_with_provenance(None, rooms)?
+        }
+        Err(_) if crate::mailbox::read_only_command() => {
+            context.resolved_room_with_provenance(None, rooms)?
+        }
+        Err(error) => return Err(error),
     };
     if rooms.contains_key(&room) {
         return Ok((room, provenance));
@@ -251,6 +265,39 @@ pub(crate) fn acting_room(
         error = error.exact_fix(command);
     }
     Err(error)
+}
+
+fn missing_participant_workspace(context: &Context, rooms: &RoomMap, id: &str) -> AppError {
+    let inferred = context
+        .infer_from_cwd(rooms)
+        .ok()
+        .map(|(room, _)| room)
+        .filter(|room| rooms.contains_key(room));
+    let (suggested_fix, exact_fix) = match inferred {
+        Some(room) => {
+            let command = format!("post participant bind --workspace {}", shell_quote(&room));
+            (
+                format!("Bind this participant to the current workspace with `{command}`."),
+                Some(command),
+            )
+        }
+        None => (
+            "Choose a registered room, then run `post participant bind --workspace <room>`."
+                .to_owned(),
+            None,
+        ),
+    };
+    let mut error = AppError::new(
+        ErrorCode::UnknownRoom,
+        format!("bound participant '{id}' has no workspace for channel operations"),
+        suggested_fix,
+    )
+    .input(id)
+    .reason("bound participant has no workspace context");
+    if let Some(command) = exact_fix {
+        error = error.exact_fix(command);
+    }
+    error
 }
 
 pub(crate) struct JoinOutcome {

@@ -704,6 +704,7 @@ pub fn is_identity_notice(line: &str) -> bool {
     line.contains("(identity inferred from cwd)")
         || line.contains("(POST_FROM pin")
         || line.contains("(bound participant ")
+        || line.contains("(participant binding)")
 }
 
 fn argument_value<'a>(args: &'a [&str], flag: &str) -> Option<&'a str> {

@@ -6,7 +6,7 @@ use crate::commands::schema::doctor_exit_codes;
 use crate::cursor_state::{CURSORS_FILE, CURSORS_LOCK_FILE};
 use crate::error::{AppError, AppResult};
 use crate::mailbox::{
-    parse_mail, validate_component, validate_room_name, Context, DEFAULT_ROOMS_JSON,
+    parse_mail, validate_component, validate_new_room_name, Context, DEFAULT_ROOMS_JSON,
     DEFAULT_RULES_JSON,
 };
 use crate::model::{RoomMap, RulesConfig};
@@ -572,7 +572,7 @@ fn detect_rooms(context: &Context, path: &Path, checks: &mut Vec<DoctorCheck>) -
                 ));
             } else {
                 for (name, value) in &rooms {
-                    if let Err(reason) = validate_room_name(name) {
+                    if let Err(reason) = validate_new_room_name(name) {
                         checks.push(check(
                             &format!("config.room_name.{name}"),
                             DoctorSeverity::Error,

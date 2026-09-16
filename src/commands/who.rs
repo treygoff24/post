@@ -31,7 +31,10 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     }
     legacy_rooms.sort_by(|a, b| a.room.cmp(&b.room));
 
-    let resolved = crate::participant::resolve(context)?;
+    let (resolved, resolution_failed) = match crate::participant::resolve(context) {
+        Ok(resolved) => (resolved, false),
+        Err(_) => (Resolved::Unbound, true),
+    };
     let acting_id = resolved
         .participant()
         .map(|participant| participant.id.clone());
@@ -63,7 +66,12 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         home: context.home.clone(),
     };
     let mut participants = Vec::new();
-    for participant in crate::participant::list(context)? {
+    let participant_records = match crate::participant::list(context) {
+        Ok(participants) => participants,
+        Err(_) if resolution_failed => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    for participant in participant_records {
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
         participants.push(WhoParticipant {
             id: participant.id,

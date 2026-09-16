@@ -166,6 +166,9 @@ pub(crate) fn provenance_sentence(value: &str) -> Option<&'static str> {
         "inferred-basename" => Some(
             "sender identity was taken from the directory name — it is a location, not a claim.",
         ),
+        "participant-binding" => Some(
+            "sender identity was taken from the participant binding — it is local routing context, not a credential.",
+        ),
         _ => None,
     }
 }

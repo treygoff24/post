@@ -142,12 +142,10 @@ where
         } else if identity.pin.is_some() {
             SenderProvenance::DeclaredEnv
         } else {
-            // Kept as legacy transport evidence only. This result never
-            // selects `from`; the participant binding above already did.
-            context
-                .infer_from_cwd(&rooms)
-                .map(|(_, provenance)| provenance)
-                .unwrap_or(SenderProvenance::InferredBasename)
+            match context.infer_from_cwd(&rooms) {
+                Ok((inferred, provenance)) if inferred == actor.from => provenance,
+                _ => SenderProvenance::ParticipantBinding,
+            }
         };
         if identity.pin.is_some() {
             eprintln!(
