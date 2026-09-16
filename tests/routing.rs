@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    assert_success, from_stdout, register_alpha_beta, write_channel_message, write_custom_mail,
-    Sandbox,
+    assert_success, from_stdout, register_alpha_beta, register_room, write_channel_message,
+    write_custom_mail, Sandbox,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -94,9 +94,17 @@ fn routing_reply_origin_distinguishes_local_unknown_and_remote_with_collision() 
     assert!(unknown_read["envelope"]["reply_to_participant"].is_null());
     assert_eq!(unknown_read["envelope"]["reply_to_shared"], "legacy-room");
 
-    let peers = sandbox.mail_root.join("bridge/rooms/peers");
-    fs::create_dir_all(&peers).expect("peer topology");
-    fs::write(peers.join("peer.json"), br#"{"remote-room":"/remote"}"#).expect("peer room map");
+    let remote = sandbox.mail_root.join("remote/peer-host/remote-room");
+    fs::create_dir_all(&remote).expect("remote placeholder");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: Value = serde_json::from_slice(&fs::read(&rooms_path).expect("rooms registry"))
+        .expect("rooms JSON");
+    rooms["remote-room"] = json!(remote);
+    fs::write(
+        &rooms_path,
+        format!("{}\n", serde_json::to_string_pretty(&rooms).unwrap()),
+    )
+    .expect("register remote placeholder");
     let remote = "20990916-040101-aa0002";
     write_custom_mail(
         &inbox,
@@ -365,7 +373,7 @@ fn routing_frozen_workspace_and_lineage_deliveries_survive_rebind_and_leave() {
 }
 
 #[test]
-fn routing_receipt_digest_mismatch_fails_inbox_catchup_and_read_consistently() {
+fn routing_digest_mismatch_isolates_one_message_and_explicit_read_fails_closed() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let recipient = bind(&sandbox, "digest-recipient", &alpha, "alpha");
@@ -378,23 +386,122 @@ fn routing_receipt_digest_mismatch_fails_inbox_catchup_and_read_consistently() {
         fs::read_to_string(&canonical).unwrap() + "tamper",
     )
     .expect("tamper");
+    let good = send_as(&sandbox, &sender, &beta, "workspace:alpha", "good sibling");
+    let good_id = good["envelope"]["id"].as_str().expect("good id");
+
+    let inbox = sandbox.run_as_participant(&["inbox", "--json"], &recipient, &alpha);
+    assert!(inbox.status.success(), "{}", common::stderr(&inbox));
+    assert!(common::stderr(&inbox).contains("digest mismatch"));
+    let inbox: Value = from_stdout(&inbox);
+    assert_eq!(inbox["skipped_unreadable"], 1);
+    assert!(inbox["unread"]
+        .as_array()
+        .expect("unread")
+        .iter()
+        .any(|item| item["id"] == good_id));
 
     for args in [
-        vec!["inbox", "--json"],
-        vec!["catchup", "--mail", "--json"],
-        vec!["read", id, "--json"],
+        vec!["watch", "--snapshot"],
+        vec!["search", "good sibling", "--mail", "--json"],
     ] {
         let output = sandbox.run_as_participant(&args, &recipient, &alpha);
-        assert_eq!(
-            output.status.code(),
-            Some(78),
+        assert!(
+            output.status.success(),
             "{args:?}: {}",
             common::stderr(&output)
         );
-        let error: post::output::ErrorEnvelope = common::from_stderr(&output);
-        assert_eq!(error.error.code, "config_invalid");
-        assert!(error.error.message.contains("digest"));
+        assert!(common::stderr(&output).contains("digest mismatch"));
+        assert!(common::stdout(&output).contains(good_id));
     }
+    let who = sandbox.run_as_participant(&["who"], &recipient, &alpha);
+    assert!(who.status.success(), "{}", common::stderr(&who));
+    assert!(common::stderr(&who).contains("digest mismatch"));
+    let catchup = sandbox.run_as_participant(&["catchup", "--mail", "--json"], &recipient, &alpha);
+    assert!(catchup.status.success(), "{}", common::stderr(&catchup));
+    assert!(common::stderr(&catchup).contains("digest mismatch"));
+    assert!(common::stdout(&catchup).contains(good_id));
+
+    let explicit = sandbox.run_as_participant(&["read", id, "--json"], &recipient, &alpha);
+    assert_eq!(explicit.status.code(), Some(78));
+    let error: post::output::ErrorEnvelope = common::from_stderr(&explicit);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(error.error.message.contains("digest"));
+}
+
+#[test]
+fn routing_corrupt_receipt_isolated_from_other_workspaces_and_bind() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&gamma).expect("gamma workspace");
+    register_room(&sandbox, "gamma", &gamma);
+    let gamma_actor = bind(&sandbox, "gamma-reader", &gamma, "gamma");
+
+    let bad_id = "20990916-043100-acde01";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        bad_id,
+        &json!({"id":bad_id,"from":"beta","to":"alpha","kind":"note","subject":"bad receipt","sent":"2026-09-16 04:31:00 -0500","address_kind":"workspace"}),
+        "bad receipt",
+    );
+    let routing = sandbox.mail_root.join("alpha/routing");
+    fs::create_dir_all(&routing).expect("routing directory");
+    fs::write(routing.join(format!("{bad_id}.json")), b"{corrupt").expect("corrupt receipt");
+
+    for args in [
+        vec!["inbox"],
+        vec!["watch", "--snapshot"],
+        vec!["catchup", "--mail", "--json"],
+        vec!["channels"],
+    ] {
+        let output = sandbox.run_as_participant(&args, &gamma_actor, &gamma);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            common::stderr(&output)
+        );
+        assert!(common::stderr(&output).contains("corrupt routing receipt"));
+    }
+    let rebound = sandbox.run_as_claude(
+        &["participant", "bind", "--workspace", "alpha", "--json"],
+        "corrupt-receipt-sibling",
+        &alpha,
+    );
+    assert!(rebound.status.success(), "{}", common::stderr(&rebound));
+    assert!(common::stderr(&rebound).contains("corrupt routing receipt"));
+}
+
+#[test]
+fn routing_corrupt_participant_channels_do_not_break_other_members() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let corrupt = bind(&sandbox, "corrupt-channels", &alpha, "alpha");
+    let healthy = bind(&sandbox, "healthy-channels", &beta, "beta");
+    fs::write(
+        sandbox
+            .mail_root
+            .join("participants")
+            .join(&corrupt)
+            .join("channels.json"),
+        b"{corrupt",
+    )
+    .expect("corrupt channels state");
+
+    let joined =
+        sandbox.run_as_participant(&["chat", "healthy", "--join", "--json"], &healthy, &beta);
+    assert!(joined.status.success(), "{}", common::stderr(&joined));
+    assert!(common::stderr(&joined).contains("invalid participant channels"));
+    let listed = sandbox.run_as_participant(&["channels"], &healthy, &beta);
+    assert!(listed.status.success(), "{}", common::stderr(&listed));
+    assert!(common::stderr(&listed).contains("invalid participant channels"));
+    let doctor = sandbox.run_as_participant(&["doctor"], &healthy, &beta);
+    assert_eq!(doctor.status.code(), Some(1));
+    let doctor: Value = from_stdout(&doctor);
+    assert!(doctor["checks"]
+        .as_array()
+        .expect("doctor checks")
+        .iter()
+        .any(|check| check["id"] == format!("participant.{corrupt}.channels_invalid")));
 }
 
 #[test]
@@ -597,12 +704,21 @@ fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_or
             "{args:?}: {text}"
         );
         assert!(!text.contains("crossed the bridge"), "{args:?}: {text}");
+        if args[0] != "watch" {
+            assert!(text.contains("origin: unknown"), "{args:?}: {text}");
+            assert!(
+                text.contains("sender not known on this host"),
+                "{args:?}: {text}"
+            );
+        }
     }
     let catchup = sandbox.run_as_participant(&["catchup", "--mail"], &actor, &alpha);
     assert_success(&catchup);
     let text = common::stdout(&catchup);
     assert!(!text.contains("participant:missing-local"), "{text}");
     assert!(!text.contains("crossed the bridge"), "{text}");
+    assert!(text.contains("origin: unknown"), "{text}");
+    assert!(text.contains("sender not known on this host"), "{text}");
 
     for (participant, cwd) in [(&actor, &alpha), (&peer, &beta)] {
         assert_success(&sandbox.run_as_participant(
@@ -634,10 +750,20 @@ fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_or
         assert_success(&output);
         let text = common::stdout(&output);
         assert!(!text.contains("crossed the bridge"), "{args:?}: {text}");
+        if args[0] != "watch" {
+            assert!(text.contains("origin: unknown"), "{args:?}: {text}");
+            assert!(
+                text.contains("sender not known on this host"),
+                "{args:?}: {text}"
+            );
+        }
     }
     let catchup = sandbox.run_as_participant(&["catchup", "unknown-renderer"], &actor, &alpha);
     assert_success(&catchup);
-    assert!(!common::stdout(&catchup).contains("crossed the bridge"));
+    let text = common::stdout(&catchup);
+    assert!(!text.contains("crossed the bridge"));
+    assert!(text.contains("origin: unknown"), "{text}");
+    assert!(text.contains("sender not known on this host"), "{text}");
 }
 
 #[test]
@@ -935,6 +1061,7 @@ fn routing_blocked_pending_is_held_without_stalling_catchup_or_bind() {
     );
     let inbox = inbox_as(&sandbox, &recipient, &alpha);
     assert_eq!(inbox["pending_by_address"]["workspace:alpha"], 0);
+    assert_eq!(inbox["held"], 1);
     let catchup = sandbox.run_as_participant(&["catchup", "--mail", "--json"], &recipient, &alpha);
     assert!(catchup.status.success());
     assert!(common::stderr(&catchup).contains("left unroutable mail"));
@@ -950,6 +1077,20 @@ fn routing_blocked_pending_is_held_without_stalling_catchup_or_bind() {
     );
     assert!(rebound.status.success());
     assert!(common::stderr(&rebound).contains("left unroutable mail"));
+    let doctor = sandbox.run_as_participant(&["doctor"], &recipient, &alpha);
+    assert_eq!(doctor.status.code(), Some(1));
+    let doctor: Value = from_stdout(&doctor);
+    assert!(
+        doctor["checks"]
+            .as_array()
+            .expect("doctor checks")
+            .iter()
+            .any(|check| check["id"] == "routing.held.workspace.alpha"
+                && check["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(id))),
+        "doctor did not report held id: {doctor}"
+    );
 }
 
 #[test]
@@ -1075,7 +1216,8 @@ fn routing_workspace_less_chat_state_stays_under_participant_directory() {
 fn routing_skips_corrupt_participant_and_delivers_to_valid_sibling() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
-    let valid = bind(&sandbox, "valid-sibling", &alpha, "alpha");
+    let valid_a = bind(&sandbox, "valid-sibling-a", &alpha, "alpha");
+    let valid_b = bind(&sandbox, "valid-sibling-b", &alpha, "alpha");
     let sender = bind(&sandbox, "corrupt-sender", &beta, "beta");
     let corrupt = sandbox.mail_root.join("participants/claude-deadbeef");
     fs::create_dir_all(&corrupt).expect("corrupt participant dir");
@@ -1100,11 +1242,11 @@ fn routing_skips_corrupt_participant_and_delivers_to_valid_sibling() {
         &fs::read(sandbox.mail_root.join(format!("alpha/routing/{id}.json"))).unwrap(),
     )
     .unwrap();
-    assert!(receipt["recipients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|value| value == &valid));
+    let recipients = receipt["recipients"].as_array().expect("recipients");
+    assert!(recipients.iter().any(|value| value == &valid_a));
+    assert!(recipients.iter().any(|value| value == &valid_b));
+    assert!(recipients.len() >= 2);
+    assert!(!recipients.iter().any(|value| value == "claude-deadbeef"));
 }
 
 #[test]
@@ -1121,16 +1263,49 @@ fn routing_doctor_keeps_reporting_when_pending_projection_hits_a_bad_receipt() {
     .expect("malformed receipt");
 
     let doctor = sandbox.run_as_participant(&["doctor"], &actor, &alpha);
-    assert!(matches!(doctor.status.code(), Some(0 | 1)));
+    assert_eq!(doctor.status.code(), Some(1));
     let doctor: Value = from_stdout(&doctor);
     assert_eq!(doctor["participant"]["id"], actor);
-    assert!(doctor["projection_errors"]
+    assert_eq!(doctor["status"], "broken");
+    assert!(doctor["checks"]
         .as_array()
-        .expect("projection errors")
+        .expect("doctor checks")
         .iter()
-        .any(|error| error
+        .any(|check| check["id"]
             .as_str()
-            .is_some_and(|message| message.contains("invalid routing receipt"))));
+            .is_some_and(|id| id.starts_with("routing.receipt."))
+            && check["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("invalid routing receipt"))));
+    let brief = sandbox.run_as_participant(&["doctor", "--brief"], &actor, &alpha);
+    assert_eq!(brief.status.code(), Some(1));
+    assert!(common::stdout(&brief).contains("findings"));
+    assert!(!common::stdout(&brief).contains("doctor: ok"));
+}
+
+#[test]
+fn routing_explicit_workspace_inbox_keeps_the_selected_room_after_rebind() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let actor = bind(&sandbox, "explicit-room-actor", &alpha, "alpha");
+    let sender = bind(&sandbox, "explicit-room-sender", &beta, "beta");
+    let sent = send_as(&sandbox, &sender, &beta, "workspace:alpha", "alpha history");
+    let id = sent["envelope"]["id"].as_str().expect("mail id");
+    assert_success(&sandbox.run_as_participant(
+        &["participant", "bind", "--workspace", "beta", "--json"],
+        &actor,
+        &beta,
+    ));
+
+    let listed = sandbox.run_as_participant(&["inbox", "--room", "alpha"], &actor, &beta);
+    assert_success(&listed);
+    let listed: Value = from_stdout(&listed);
+    assert_eq!(listed["room"], "alpha");
+    assert!(listed["unread"]
+        .as_array()
+        .expect("unread")
+        .iter()
+        .any(|item| item["id"] == id));
 }
 
 #[test]

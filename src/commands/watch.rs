@@ -5,7 +5,7 @@ use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::migration_fence;
-use crate::output::{InboxItem, WatchEvent, WatchReason};
+use crate::output::{InboxItem, WatchAddress, WatchEvent, WatchReason};
 use crate::participant::{Address, AddressKind, Participant, Resolved};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
@@ -431,6 +431,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             &mut targets,
             &owned_rooms,
             &mut emitted_channel_ids,
+            false,
             |_| true,
         );
     }
@@ -449,6 +450,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 target,
                 &owned_rooms,
                 &mut emitted_channel_ids,
+                false,
             )?);
         }
         dedupe_unreadable_channels(&mut batch);
@@ -464,10 +466,6 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         }
         return Ok(CommandResult::success(String::new()));
     }
-    // Presence first: the watch is live from this moment, and backend
-    // registration (FSEvents especially) can take hundreds of ms — `post who`
-    // must not report a dead watch during that window.
-    touch_heartbeats(context, &targets, interval_ms)?;
     // Register every watch BEFORE the first scan (r2): nothing created in
     // the gap can be missed, because the first pass inside the loop is an
     // unconditional scan. Any registration failure falls back to polling
@@ -524,11 +522,20 @@ fn run_watch_loop(
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
 ) -> AppResult<CommandResult> {
-    // The caller completed the initial hard admission before registering the
-    // backend. A fence may land in that gap; from here on admission failures
-    // are transient scan failures and the long-running watch must recover.
-    refresh_heartbeats(context, targets, interval_ms);
-    let mut batch = scan_targets(context, targets, owned_rooms, emitted_channel_ids, |_| true);
+    let mut warned_fenced = false;
+    let (initial_admission, allow_writes) = watch_admission(context, &mut warned_fenced)?;
+    if allow_writes {
+        touch_admitted_heartbeats(context, targets, interval_ms);
+    }
+    let mut batch = scan_targets(
+        context,
+        targets,
+        owned_rooms,
+        emitted_channel_ids,
+        allow_writes,
+        |_| true,
+    );
+    drop(initial_admission);
     if !batch.is_empty() {
         emit(&batch, text, digest)?;
         if once {
@@ -548,7 +555,9 @@ fn run_watch_loop(
     // or slower than ticks (`post who` presence depends on it).
     let mut last_beat = Instant::now();
     loop {
-        batch = match wake.wait(Duration::from_millis(interval_ms)) {
+        let wake_result = wake.wait(Duration::from_millis(interval_ms));
+        let (admission, allow_writes) = watch_admission(context, &mut warned_fenced)?;
+        batch = match wake_result {
             None => {
                 // Backend died mid-run: degrade to polling rather than to
                 // silence, with one warning like the startup fallback. The
@@ -562,13 +571,15 @@ fn run_watch_loop(
                 Vec::new()
             }
             Some(Wake::TimedOut) => {
-                refresh_heartbeats(context, targets, interval_ms);
+                if allow_writes {
+                    touch_admitted_heartbeats(context, targets, interval_ms);
+                }
                 last_beat = Instant::now();
                 Vec::new()
             }
             Some(Wake::Events(dirs)) => {
-                if last_beat.elapsed() >= Duration::from_millis(interval_ms) {
-                    refresh_heartbeats(context, targets, interval_ms);
+                if allow_writes && last_beat.elapsed() >= Duration::from_millis(interval_ms) {
+                    touch_admitted_heartbeats(context, targets, interval_ms);
                     last_beat = Instant::now();
                 }
                 // Rescan every affected target through the full existing scan
@@ -578,6 +589,7 @@ fn run_watch_loop(
                     targets,
                     owned_rooms,
                     emitted_channel_ids,
+                    allow_writes,
                     |target| target.dirs.iter().any(|dir| dirs.contains(dir)),
                 )
             }
@@ -594,8 +606,16 @@ fn run_watch_loop(
                 .flat_map(|target| target.dirs.iter().cloned())
                 .collect();
             wake.reconcile(&desired);
-            batch = scan_targets(context, targets, owned_rooms, emitted_channel_ids, |_| true);
+            batch = scan_targets(
+                context,
+                targets,
+                owned_rooms,
+                emitted_channel_ids,
+                allow_writes,
+                |_| true,
+            );
         }
+        drop(admission);
         if !batch.is_empty() {
             emit(&batch, text, digest)?;
             if once {
@@ -605,19 +625,32 @@ fn run_watch_loop(
     }
 }
 
-fn refresh_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) {
-    if let Err(error) = touch_heartbeats(context, targets, interval_ms) {
+fn watch_admission(
+    context: &Context,
+    warned_fenced: &mut bool,
+) -> AppResult<(crate::migration_fence::LongWatchAdmission, bool)> {
+    let admission = migration_fence::admit_long_watch(context)?;
+    let allow_writes = match &admission {
+        crate::migration_fence::LongWatchAdmission::Active(guard) => {
+            let _ = guard.is_enrolled();
+            true
+        }
+        crate::migration_fence::LongWatchAdmission::Fenced => false,
+    };
+    if allow_writes {
+        *warned_fenced = false;
+    } else if !*warned_fenced {
         eprintln!(
-            "post: warning: watch heartbeat admission failed (watch keeps polling): {}",
-            error.message
+            "post: warning: migration fence active; watch continues read-only until same-generation recovery"
         );
+        *warned_fenced = true;
     }
+    Ok((admission, allow_writes))
 }
 
-fn touch_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) -> AppResult<()> {
+fn touch_admitted_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) {
     let mut participants = HashSet::new();
     for target in targets {
-        let _admission = migration_fence::admit(context, true)?;
         if let Some(participant) = target.participant.as_ref() {
             if participants.insert(participant.id.clone()) {
                 if let Err(error) = crate::participant::touch(context, &participant.id) {
@@ -632,7 +665,6 @@ fn touch_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64
             crate::presence::touch_heartbeat(context, &target.room, interval_ms);
         }
     }
-    Ok(())
 }
 
 /// One full scan pass over the selected targets, preserving the old loop's
@@ -643,11 +675,18 @@ fn scan_targets(
     targets: &mut [WatchTarget],
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
+    allow_writes: bool,
     selected: impl Fn(&WatchTarget) -> bool,
 ) -> Vec<WatchDelivery> {
     let mut batch = Vec::new();
     for target in targets.iter_mut().filter(|target| selected(target)) {
-        match scan_watch_target(context, target, owned_rooms, emitted_channel_ids) {
+        match scan_watch_target(
+            context,
+            target,
+            owned_rooms,
+            emitted_channel_ids,
+            allow_writes,
+        ) {
             Ok(events) => {
                 if target.scan_failing {
                     target.scan_failing = false;
@@ -890,6 +929,7 @@ fn scan_watch_target(
     target: &mut WatchTarget,
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
+    allow_writes: bool,
 ) -> AppResult<Vec<WatchDelivery>> {
     let (Some(participant), Some(address)) = (target.participant.as_ref(), target.address.as_ref())
     else {
@@ -903,22 +943,32 @@ fn scan_watch_target(
             emitted_channel_ids,
         );
     };
-    if target.route_pending
+    if allow_writes
+        && target.route_pending
         && matches!(
             address.kind,
             AddressKind::Workspace | AddressKind::Participant
         )
     {
-        let _admission = migration_fence::admit(context, true)?;
         crate::cursor_state::routing::route_pending(context, address)?;
     }
     let mut batch = Vec::new();
-    let channel_context = participant.workspace.clone().unwrap_or_else(|| {
-        format!(
-            "participant:{}",
-            crate::output::sanitize_text_header(&participant.id)
-        )
-    });
+    let channel_address = participant.workspace.as_ref().map_or_else(
+        || Address {
+            kind: AddressKind::Participant,
+            name: participant.id.clone(),
+        },
+        |workspace| Address {
+            kind: AddressKind::Workspace,
+            name: workspace.clone(),
+        },
+    );
+    let channel_watch_address = WatchAddress::from_address(&channel_address);
+    let channel_context = if channel_address.kind == AddressKind::Workspace {
+        channel_address.name.clone()
+    } else {
+        super::inbox::address_label(&channel_address)
+    };
 
     let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
     let pending =
@@ -993,6 +1043,7 @@ fn scan_watch_target(
                 scan_unreadable_participant_channel(
                     context,
                     participant,
+                    &channel_watch_address,
                     &channel_context,
                     &channel,
                     &mut target.seen,
@@ -1022,9 +1073,10 @@ fn scan_watch_target(
             batch.push(WatchDelivery::channel(
                 &channel_context,
                 &channel,
-                WatchEvent::channel_message(
+                WatchEvent::channel_message_at(
                     context,
                     item.message,
+                    channel_watch_address.clone(),
                     &channel_context,
                     Some(sanitize_preview(&item.body)),
                 ),
@@ -1038,6 +1090,7 @@ fn scan_watch_target(
 fn scan_unreadable_participant_channel(
     context: &Context,
     participant: &Participant,
+    channel_watch_address: &WatchAddress,
     channel_context: &str,
     channel: &str,
     seen_paths: &mut HashSet<PathBuf>,
@@ -1071,9 +1124,10 @@ fn scan_unreadable_participant_channel(
                 batch.push(WatchDelivery::channel(
                     channel_context,
                     channel,
-                    WatchEvent::channel_message(
+                    WatchEvent::channel_message_at(
                         context,
                         parsed.message,
+                        channel_watch_address.clone(),
                         channel_context,
                         Some(sanitize_preview(&parsed.body)),
                     ),
@@ -1092,7 +1146,12 @@ fn scan_unreadable_participant_channel(
                     batch.push(WatchDelivery::channel(
                         channel_context,
                         channel,
-                        WatchEvent::unreadable_channel(channel_context, channel, id.to_owned()),
+                        WatchEvent::unreadable_channel_at(
+                            channel_watch_address.clone(),
+                            channel_context,
+                            channel,
+                            id.to_owned(),
+                        ),
                     ));
                 }
             }
@@ -1477,7 +1536,7 @@ mod tests {
             scan_failing: false,
             route_pending: false,
         }];
-        touch_heartbeats(&context, &targets, 100).expect("refresh activity");
+        touch_admitted_heartbeats(&context, &targets, 100);
         let refreshed = crate::participant::load(&context, &participant.id)
             .expect("load participant")
             .expect("participant exists");
@@ -1504,10 +1563,15 @@ mod tests {
         let mut reported = HashSet::new();
         let mut emitted = HashSet::new();
         let mut batch = Vec::new();
+        let watch_address = WatchAddress {
+            kind: "workspace".to_owned(),
+            name: "alpha".to_owned(),
+        };
 
         scan_unreadable_participant_channel(
             &context,
             &participant,
+            &watch_address,
             "alpha",
             channel,
             &mut seen,
@@ -1527,6 +1591,7 @@ mod tests {
         scan_unreadable_participant_channel(
             &context,
             &participant,
+            &watch_address,
             "alpha",
             channel,
             &mut seen,
@@ -1563,6 +1628,7 @@ mod tests {
         scan_unreadable_participant_channel(
             &context,
             &participant,
+            &watch_address,
             "alpha",
             channel,
             &mut seen,

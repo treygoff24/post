@@ -4,7 +4,48 @@ use common::{
     assert_success, from_stdout, join_channel, register_alpha_beta, write_custom_mail, Sandbox,
 };
 use serde_json::Value;
-use std::process::Stdio;
+use std::path::Path;
+use std::process::{Child, Stdio};
+
+fn start_watch(sandbox: &Sandbox, participant: &str, cwd: &Path) -> std::process::Child {
+    let mut child = common::post_command()
+        .args(["watch", "--interval-ms", "100"])
+        .current_dir(cwd)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", participant)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn live watch");
+    let heartbeat = sandbox
+        .mail_root
+        .join("participants")
+        .join(participant)
+        .join("watch.heartbeat");
+    for _ in 0..100 {
+        if heartbeat.is_file() {
+            return child;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.kill().expect("stop heartbeat-less watch");
+    let output = child
+        .wait_with_output()
+        .expect("collect heartbeat-less watch");
+    panic!(
+        "watch heartbeat never appeared: stdout={} stderr={}",
+        common::stdout(&output),
+        common::stderr(&output)
+    )
+}
+
+fn stop_watch(mut child: Child) -> std::process::Output {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    child.kill().expect("stop live watch");
+    child.wait_with_output().expect("collect live watch")
+}
 
 #[test]
 fn watch_snapshot_is_cursorless_then_channel_catchup_consumes_for_participant() {
@@ -206,4 +247,94 @@ fn live_participant_watch_routes_bridge_arrival_and_emits_without_consuming() {
         .join(recipient)
         .join("cursors.json")
         .exists());
+}
+
+#[test]
+fn armed_watch_rings_again_after_catchup_consumes_the_previous_message() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "armed", &alpha);
+    join_channel(&sandbox, "armed", &beta);
+    let recipient = sandbox.test_participant("beta");
+    let child = start_watch(&sandbox, &recipient, &beta);
+
+    let first = sandbox.run_in(
+        &[
+            "chat",
+            "armed",
+            "--send",
+            "--anyway",
+            "--body",
+            "first ring",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&first);
+    let first: Value = from_stdout(&first);
+    let first_id = first["message"]["id"].as_str().expect("first id");
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    assert_success(&sandbox.run_as_participant(&["catchup", "armed", "--json"], &recipient, &beta));
+    let second = sandbox.run_in(
+        &[
+            "chat",
+            "armed",
+            "--send",
+            "--anyway",
+            "--body",
+            "second ring",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&second);
+    let second: Value = from_stdout(&second);
+    let second_id = second["message"]["id"].as_str().expect("second id");
+
+    let output = stop_watch(child);
+    assert!(output.status.success() || output.status.code().is_none());
+    let text = common::stdout(&output);
+    assert!(text.contains(first_id), "first ring missing: {text}");
+    assert!(text.contains(second_id), "second ring missing: {text}");
+}
+
+#[test]
+fn watch_started_after_catchup_uses_unified_floor_without_replaying_backlog() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "floor", &alpha);
+    join_channel(&sandbox, "floor", &beta);
+    let recipient = sandbox.test_participant("beta");
+    let backlog = sandbox.run_in(
+        &[
+            "chat", "floor", "--send", "--anyway", "--body", "backlog", "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&backlog);
+    let backlog: Value = from_stdout(&backlog);
+    let backlog_id = backlog["message"]["id"].as_str().expect("backlog id");
+    assert_success(&sandbox.run_as_participant(&["catchup", "floor", "--json"], &recipient, &beta));
+
+    let child = start_watch(&sandbox, &recipient, &beta);
+    let live = sandbox.run_in(
+        &[
+            "chat", "floor", "--send", "--anyway", "--body", "live", "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&live);
+    let live: Value = from_stdout(&live);
+    let live_id = live["message"]["id"].as_str().expect("live id");
+    let output = stop_watch(child);
+    let text = common::stdout(&output);
+    assert!(
+        !text.contains(backlog_id),
+        "consumed backlog replayed: {text}"
+    );
+    assert!(text.contains(live_id), "live ring missing: {text}");
 }

@@ -4,8 +4,10 @@ use crate::mailbox::{atomic_replace, parse_mail, Context};
 use crate::participant::{self, Address, AddressKind, Participant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const RECEIPT_VERSION: u64 = 1;
 
@@ -32,7 +34,10 @@ pub(crate) struct ExcludedRecipient {
 pub(crate) struct RouteReport {
     pub routed: Vec<(String, Vec<String>)>,
     pub pending: usize,
+    pub held: Vec<String>,
 }
+
+static WARNED_RECORDS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 pub(crate) fn inbox_path(context: &Context, address: &Address) -> PathBuf {
     match address.kind {
@@ -94,8 +99,18 @@ pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<R
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        if receipt(context, address, id)?.is_some() {
-            continue;
+        match receipt(context, address, id) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                warn_once(
+                    receipt_path(context, address, id),
+                    format!("corrupt routing receipt held for doctor: {}", error.message),
+                );
+                report.held.push(id.to_owned());
+                continue;
+            }
+            Err(error) => return Err(error),
         }
         match route_message_locked(context, address, id) {
             Ok(Some(receipt)) => report.routed.push((id.to_owned(), receipt.recipients)),
@@ -106,12 +121,11 @@ pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<R
                     ErrorCode::ConfigInvalid | ErrorCode::BlockedRoute
                 ) =>
             {
-                eprintln!(
-                    "post: warning: left unroutable mail {:?} pending: {:?}",
-                    path.display().to_string(),
-                    error.message
+                warn_once(
+                    path.clone(),
+                    format!("left unroutable mail held: {}", error.message),
                 );
-                report.pending += 1;
+                report.held.push(id.to_owned());
             }
             Err(error) => return Err(error),
         }
@@ -150,16 +164,24 @@ pub(crate) fn route_for_participant(
 }
 
 pub(crate) fn pending_count(context: &Context, address: &Address) -> AppResult<usize> {
-    let mut pending = 0;
+    let mut pending = 0usize;
     for path in message_files(&inbox_path(context, address))? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        if receipt(context, address, id)?.is_none() {
-            pending += 1;
+        match receipt(context, address, id) {
+            Ok(None) => pending += 1,
+            Ok(Some(_)) => {}
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                warn_once(
+                    receipt_path(context, address, id),
+                    format!("corrupt routing receipt held for doctor: {}", error.message),
+                );
+            }
+            Err(error) => return Err(error),
         }
     }
-    Ok(pending)
+    Ok(pending.saturating_sub(held_ids(context, address)?.len()))
 }
 
 pub(crate) fn provisional_pending_for(
@@ -185,32 +207,7 @@ pub(crate) fn received_addresses(
     context: &Context,
     participant: &Participant,
 ) -> AppResult<Vec<Address>> {
-    let mut candidates = Vec::new();
-    if let Ok(entries) = fs::read_dir(&context.root) {
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if entry.path().join("routing").is_dir()
-                && crate::mailbox::validate_room_name(&name).is_ok()
-            {
-                candidates.push(Address {
-                    kind: AddressKind::Workspace,
-                    name,
-                });
-            }
-        }
-    }
-    collect_nested_addresses(
-        &context.root.join(lineage::LINEAGES_DIR),
-        AddressKind::Lineage,
-        &mut candidates,
-    );
-    collect_nested_addresses(
-        &context.root.join(participant::PARTICIPANTS_DIR),
-        AddressKind::Participant,
-        &mut candidates,
-    );
+    let candidates = store_addresses(context);
     let mut received = Vec::new();
     for address in candidates {
         let directory = routing_dir(context, &address);
@@ -226,12 +223,20 @@ pub(crate) fn received_addresses(
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            if receipt(context, &address, id)?.is_some_and(|receipt| {
-                receipt.recipients.contains(&participant.id)
-                    || canonical_sender_is(context, &address, id, &participant.id)
-            }) {
-                named = true;
-                break;
+            match receipt(context, &address, id) {
+                Ok(Some(receipt))
+                    if receipt.recipients.contains(&participant.id)
+                        || canonical_sender_is(context, &address, id, &participant.id) =>
+                {
+                    named = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if error.code == ErrorCode::ConfigInvalid => warn_once(
+                    path,
+                    format!("corrupt routing receipt skipped: {}", error.message),
+                ),
+                Err(error) => return Err(error),
             }
         }
         if named {
@@ -248,6 +253,36 @@ pub(crate) fn received_addresses(
     Ok(received)
 }
 
+pub(crate) fn store_addresses(context: &Context) -> Vec<Address> {
+    let mut candidates = context
+        .load_rooms()
+        .unwrap_or_default()
+        .into_keys()
+        .map(|name| Address {
+            kind: AddressKind::Workspace,
+            name,
+        })
+        .collect::<Vec<_>>();
+    collect_nested_addresses(
+        &context.root.join(lineage::LINEAGES_DIR),
+        AddressKind::Lineage,
+        &mut candidates,
+    );
+    collect_nested_addresses(
+        &context.root.join(participant::PARTICIPANTS_DIR),
+        AddressKind::Participant,
+        &mut candidates,
+    );
+    candidates.sort_by(|left, right| {
+        left.kind
+            .as_str()
+            .cmp(right.kind.as_str())
+            .then(left.name.cmp(&right.name))
+    });
+    candidates.dedup();
+    candidates
+}
+
 fn canonical_sender_is(context: &Context, address: &Address, id: &str, participant: &str) -> bool {
     let path = inbox_path(context, address).join(format!("{id}.mail"));
     parse_mail(&path)
@@ -262,7 +297,7 @@ fn collect_nested_addresses(root: &Path, kind: AddressKind, addresses: &mut Vec<
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name != "by-session" && entry.path().join("routing").is_dir() {
+        if name != "by-session" && entry.path().is_dir() {
             addresses.push(Address { kind, name });
         }
     }
@@ -279,8 +314,17 @@ fn provisional_pending(
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        if receipt(context, address, id)?.is_some() {
-            continue;
+        match receipt(context, address, id) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                warn_once(
+                    receipt_path(context, address, id),
+                    format!("corrupt routing receipt skipped: {}", error.message),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
         }
         let parsed = match parse_mail(&path) {
             Ok(parsed) => parsed,
@@ -316,6 +360,76 @@ fn provisional_pending(
         ids.push(id.to_owned());
     }
     Ok(ids)
+}
+
+pub(crate) fn warn_once(path: PathBuf, message: String) {
+    let warned = WARNED_RECORDS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut warned = warned.lock().expect("routing warning mutex");
+    if warned.insert(path.clone()) {
+        eprintln!(
+            "post: warning: {:?}: {:?}",
+            message,
+            path.display().to_string()
+        );
+    }
+}
+
+pub(crate) fn held_for(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+) -> AppResult<Vec<String>> {
+    let mut held = Vec::new();
+    for path in message_files(&inbox_path(context, address))? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        match receipt(context, address, id) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) if error.code == ErrorCode::ConfigInvalid => continue,
+            Err(error) => return Err(error),
+        }
+        let parsed = match parse_mail(&path) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let recipients = candidate_recipients(context, address, &parsed.envelope)?;
+        if !recipients.contains(&participant.id) {
+            continue;
+        }
+        match filtered_recipients(context, address, &parsed.envelope) {
+            Err(error) if error.code == ErrorCode::BlockedRoute => held.push(id.to_owned()),
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(held)
+}
+
+pub(crate) fn held_ids(context: &Context, address: &Address) -> AppResult<Vec<String>> {
+    let mut held = Vec::new();
+    for path in message_files(&inbox_path(context, address))? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !matches!(receipt(context, address, id), Ok(None)) {
+            continue;
+        }
+        let parsed = match parse_mail(&path) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        match filtered_recipients(context, address, &parsed.envelope) {
+            Err(error) if error.code == ErrorCode::BlockedRoute => held.push(id.to_owned()),
+            Ok((recipients, exclusions)) if recipients.is_empty() && !exclusions.is_empty() => {
+                held.push(id.to_owned());
+            }
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(held)
 }
 
 fn route_message_locked(
@@ -369,12 +483,7 @@ fn filtered_recipients(
     address: &Address,
     envelope: &crate::model::Envelope,
 ) -> AppResult<(Vec<String>, Vec<ExcludedRecipient>)> {
-    let mut recipients = resolved_recipients(context, address)?;
-    if matches!(address.kind, AddressKind::Workspace | AddressKind::Lineage) {
-        if let Some(sender) = envelope.from_participant.as_ref() {
-            recipients.retain(|recipient| recipient != sender);
-        }
-    }
+    let mut recipients = candidate_recipients(context, address, envelope)?;
     let excluded = if address.kind == AddressKind::Lineage {
         exclude_blocked_lineage_recipients(context, &envelope.from, &mut recipients)?
     } else {
@@ -384,6 +493,20 @@ fn filtered_recipients(
         ensure_resolved_routes_allowed(context, &envelope.from, address)?;
     }
     Ok((recipients, excluded))
+}
+
+fn candidate_recipients(
+    context: &Context,
+    address: &Address,
+    envelope: &crate::model::Envelope,
+) -> AppResult<Vec<String>> {
+    let mut recipients = resolved_recipients(context, address)?;
+    if matches!(address.kind, AddressKind::Workspace | AddressKind::Lineage) {
+        if let Some(sender) = envelope.from_participant.as_ref() {
+            recipients.retain(|recipient| recipient != sender);
+        }
+    }
+    Ok(recipients)
 }
 
 pub(crate) fn resolved_recipients(context: &Context, address: &Address) -> AppResult<Vec<String>> {
@@ -537,4 +660,5 @@ fn hex_sha256(bytes: &[u8]) -> String {
 fn merge_report(target: &mut RouteReport, source: RouteReport) {
     target.routed.extend(source.routed);
     target.pending += source.pending;
+    target.held.extend(source.held);
 }

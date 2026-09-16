@@ -47,6 +47,12 @@ impl WriteAdmission {
 }
 
 #[derive(Debug)]
+pub(crate) enum LongWatchAdmission {
+    Active(WriteAdmission),
+    Fenced,
+}
+
+#[derive(Debug)]
 struct StateFile {
     state: String,
     generation: Option<u64>,
@@ -341,6 +347,36 @@ pub(crate) fn admit(context: &Context, writes: bool) -> AppResult<WriteAdmission
         });
     }
     admit_generation(context, true, current_generation()?)
+}
+
+pub(crate) fn admit_long_watch(context: &Context) -> AppResult<LongWatchAdmission> {
+    let generation = current_generation()?;
+    match read_state(context)? {
+        Some(FenceState::Fenced {
+            generation: expected,
+        }) => match generation {
+            Some(actual) if actual == expected => Ok(LongWatchAdmission::Fenced),
+            Some(actual) => Err(refuse(
+                context,
+                format!("watch generation {actual} is stale; fenced generation is {expected}"),
+            )),
+            None => Err(refuse(
+                context,
+                "an enrolled long watch requires an explicit generation",
+            )),
+        },
+        Some(FenceState::Active { .. }) => match admit_generation(context, true, generation) {
+            Ok(admission) => Ok(LongWatchAdmission::Active(admission)),
+            Err(error) => match read_state(context)? {
+                Some(FenceState::Fenced {
+                    generation: expected,
+                }) if generation == Some(expected) => Ok(LongWatchAdmission::Fenced),
+                _ => Err(error),
+            },
+        },
+        None if generation.is_some() => Err(refuse(context, "the enrolled state file is missing")),
+        None => admit_generation(context, true, None).map(LongWatchAdmission::Active),
+    }
 }
 
 fn admit_generation(

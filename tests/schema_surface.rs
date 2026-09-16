@@ -205,6 +205,27 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
         &["own", "pending", "already_read"],
     );
     assert_keys_in_shape(&schema.output_shapes.watch, &["digest", "pending"]);
+    assert_keys_in_shape(
+        &schema.output_shapes.inbox,
+        &[
+            "participant",
+            "pending",
+            "pending_by_address",
+            "held",
+            "unread[]",
+            "origin",
+            "reply_to_participant",
+            "reply_to_shared",
+        ],
+    );
+    assert_keys_in_shape(
+        &schema.output_shapes.channels,
+        &["participant", "pending", "channels"],
+    );
+    assert!(schema
+        .global_flags
+        .iter()
+        .any(|flag| flag.contains("participant binding") && flag.contains("never cwd")));
 }
 
 fn option_names(text: &str) -> BTreeSet<String> {
@@ -237,7 +258,7 @@ fn declared_option_names(help_options: &str) -> BTreeSet<String> {
 #[test]
 fn schema_matches_catchup_and_search_help_and_json() {
     let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let (alpha, beta) = register_alpha_beta(&sandbox);
     write_bad_channel(
         &sandbox,
         "tax",
@@ -465,6 +486,14 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let channels_output = sandbox.run_in(&["channels"], None, &beta);
     assert_success(&channels_output);
     let channels_json = json_object(&channels_output);
+    assert_eq!(
+        keys(&channels_json),
+        ["ok", "channels", "count", "participant", "pending"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_keys_are_documented(&keys(&channels_json), &schema.output_shapes.channels);
     assert_keys_in_shape(&schema.output_shapes.channels, &["room", "unread"]);
     for channel in channels_json["channels"].as_array().expect("channels") {
         let channel_keys = keys(channel);
@@ -480,11 +509,71 @@ fn schema_matches_catchup_and_search_help_and_json() {
     assert_eq!(private["room"], "beta");
     assert!(private["unread"].is_null());
 
-    let inbox_output = sandbox.run_in(&["inbox", "--room", "beta"], None, &beta);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--body",
+            "schema inbox fields",
+            "--json",
+        ],
+        &alpha_participant,
+        &alpha,
+    );
+    assert_success(&sent);
+    let sent = json_object(&sent);
+    let sent_id = sent["envelope"]["id"].as_str().expect("sent id");
+    let inbox_output =
+        sandbox.run_as_participant(&["inbox", "--room", "beta"], &beta_participant, &beta);
     assert_success(&inbox_output);
     let inbox_json = json_object(&inbox_output);
-    assert_keys_in_shape(&schema.output_shapes.inbox, &["unread_count"]);
-    assert!(keys(&inbox_json).contains("unread_count"));
+    assert_eq!(
+        keys(&inbox_json),
+        [
+            "ok",
+            "room",
+            "participant",
+            "unread",
+            "count",
+            "skipped_unreadable",
+            "unread_count",
+            "pending",
+            "pending_by_address",
+            "held",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_keys_are_documented(&keys(&inbox_json), &schema.output_shapes.inbox);
+    let item = inbox_json["unread"]
+        .as_array()
+        .expect("unread")
+        .iter()
+        .find(|item| item["id"] == sent_id)
+        .unwrap_or_else(|| panic!("new inbox item {sent_id}: {inbox_json}"));
+    assert_eq!(
+        keys(item),
+        [
+            "id",
+            "from",
+            "origin",
+            "kind",
+            "subject",
+            "sent",
+            "sender_provenance",
+            "from_participant",
+            "reply_to_participant",
+            "reply_to_shared",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_keys_are_documented(&keys(item), &schema.output_shapes.inbox);
 }
 
 #[test]
@@ -619,8 +708,10 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &beta,
     );
     assert_success(&read_budget);
+    let read_budget = json_object(&read_budget);
+    assert_keys_are_documented(&keys(&read_budget), &schema.output_shapes.read_budget);
     assert_keys_are_documented(
-        &keys(&json_object(&read_budget)),
+        &keys(&read_budget["envelope"]),
         &schema.output_shapes.read_budget,
     );
 
@@ -640,8 +731,10 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &beta,
     );
     assert_success(&read_slice);
+    let read_slice = json_object(&read_slice);
+    assert_keys_are_documented(&keys(&read_slice), &schema.output_shapes.read_slice);
     assert_keys_are_documented(
-        &keys(&json_object(&read_slice)),
+        &keys(&read_slice["envelope"]),
         &schema.output_shapes.read_slice,
     );
 

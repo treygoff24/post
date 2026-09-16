@@ -175,6 +175,12 @@ fn run_participant(
                 continue;
             };
             if cursor_state::routing::receipt(context, &address, id)?.is_some() {
+                let _ = cursor_state::eligibility::strict_visible_routed_mail(
+                    context,
+                    participant,
+                    &address,
+                    &path,
+                )?;
                 continue;
             }
             if !candidates.iter().any(|(candidate_address, mail, ..)| {

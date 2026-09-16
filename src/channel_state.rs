@@ -191,7 +191,17 @@ pub(crate) fn effective_participants(
 ) -> AppResult<Vec<Participant>> {
     let mut participants = Vec::new();
     for participant in crate::participant::list(context)? {
-        let state = ParticipantChannels::load(&participant)?;
+        let state = match ParticipantChannels::load(&participant) {
+            Ok(state) => state,
+            Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                eprintln!(
+                    "post: warning: skipped invalid participant channels {:?}: {:?}",
+                    participant.id, error.message
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if state.effective(context, &participant, channel)? {
             participants.push(participant);
         }

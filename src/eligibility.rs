@@ -3,7 +3,7 @@ use crate::channel::{self, ChannelPaths};
 use crate::channel_state::ParticipantChannels;
 use crate::error::{AppError, AppResult};
 use crate::mailbox::{parse_mail, Context};
-use crate::model::{ChannelMessage, Envelope};
+use crate::model::{ChannelMessage, Envelope, ParsedMail};
 use crate::participant::{Address, Participant};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -33,16 +33,31 @@ pub(crate) struct EligibleChannelMessage {
     pub already_read: bool,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct MailSnapshot {
+    pub items: Vec<EligibleMail>,
+    pub skipped_unreadable: usize,
+}
+
 pub(crate) fn unread_mail(
     context: &Context,
     participant: &Participant,
     address: &Address,
 ) -> AppResult<Vec<EligibleMail>> {
+    Ok(unread_mail_snapshot(context, participant, address)?.items)
+}
+
+pub(crate) fn unread_mail_snapshot(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+) -> AppResult<MailSnapshot> {
     let cursors = ParticipantCursors::load(context, participant);
-    Ok(visible_mail(context, participant, address)?
-        .into_iter()
-        .filter(|item| item.recipient && !cursors.mail_has_seen(address, &item.envelope.id))
-        .collect())
+    let mut snapshot = visible_mail_snapshot(context, participant, address)?;
+    snapshot
+        .items
+        .retain(|item| item.recipient && !cursors.mail_has_seen(address, &item.envelope.id));
+    Ok(snapshot)
 }
 
 /// One receipt/digest/parser/status path for every participant mail projection.
@@ -56,10 +71,20 @@ pub(crate) fn visible_mail(
     participant: &Participant,
     address: &Address,
 ) -> AppResult<Vec<EligibleMail>> {
+    Ok(visible_mail_snapshot(context, participant, address)?.items)
+}
+
+pub(crate) fn visible_mail_snapshot(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+) -> AppResult<MailSnapshot> {
     let directory = routing::inbox_path(context, address);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MailSnapshot::default())
+        }
         Err(error) => {
             return Err(AppError::io(
                 "list canonical mail directory",
@@ -84,20 +109,58 @@ pub(crate) fn visible_mail(
             .into_iter()
             .collect();
     let mut visible = Vec::new();
+    let mut skipped_unreadable = 0;
     for path in paths {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        let receipt = routing::receipt(context, address, id)?;
-        if let Some(receipt) = receipt.as_ref() {
-            let bytes =
-                fs::read(&path).map_err(|error| AppError::io("read routed mail", &path, error))?;
-            if sha256(&bytes) != receipt.digest {
-                return Err(AppError::config(
-                    &path,
-                    "routed mail bytes do not match the frozen routing receipt digest",
-                ));
+        let receipt = match routing::receipt(context, address, id) {
+            Ok(receipt) => receipt,
+            Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                routing::warn_once(
+                    routing::receipt_path(context, address, id),
+                    format!("corrupt routing receipt skipped: {}", error.message),
+                );
+                skipped_unreadable += 1;
+                continue;
             }
+            Err(error) => return Err(error),
+        };
+        if let Some(receipt) = receipt.as_ref() {
+            match parse_routed_mail(&path, receipt) {
+                Ok(parsed) => {
+                    let own = parsed.envelope.from_participant.as_deref()
+                        == Some(participant.id.as_str());
+                    let recipient = receipt.recipients.contains(&participant.id);
+                    if recipient || own {
+                        visible.push(EligibleMail {
+                            path,
+                            envelope: parsed.envelope,
+                            body: parsed.body,
+                            recipient,
+                            own,
+                            pending: false,
+                        });
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.code,
+                        crate::error::ErrorCode::ConfigInvalid | crate::error::ErrorCode::IoError
+                    ) =>
+                {
+                    routing::warn_once(
+                        path.clone(),
+                        format!(
+                            "routed mail skipped after digest mismatch or parse failure: {}",
+                            error.message
+                        ),
+                    );
+                    skipped_unreadable += 1;
+                }
+                Err(error) => return Err(error),
+            }
+            continue;
         }
         let parsed = match parse_mail(&path) {
             Ok(parsed) => parsed,
@@ -108,23 +171,61 @@ pub(crate) fn visible_mail(
             Err(error) => return Err(error),
         };
         let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());
-        let recipient = receipt
-            .as_ref()
-            .is_some_and(|receipt| receipt.recipients.contains(&participant.id));
-        let pending = receipt.is_none();
-        if !recipient && !own && !(pending && provisional.contains(id)) {
+        if !own && !provisional.contains(id) {
             continue;
         }
         visible.push(EligibleMail {
             path,
             envelope: parsed.envelope,
             body: parsed.body,
-            recipient,
+            recipient: false,
             own,
-            pending,
+            pending: true,
         });
     }
-    Ok(visible)
+    Ok(MailSnapshot {
+        items: visible,
+        skipped_unreadable,
+    })
+}
+
+pub(crate) fn strict_visible_routed_mail(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    path: &std::path::Path,
+) -> AppResult<Option<EligibleMail>> {
+    let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    let Some(receipt) = routing::receipt(context, address, id)? else {
+        return Ok(None);
+    };
+    let parsed = parse_routed_mail(path, &receipt)?;
+    let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());
+    let recipient = receipt.recipients.contains(&participant.id);
+    if !recipient && !own {
+        return Ok(None);
+    }
+    Ok(Some(EligibleMail {
+        path: path.to_path_buf(),
+        envelope: parsed.envelope,
+        body: parsed.body,
+        recipient,
+        own,
+        pending: false,
+    }))
+}
+
+fn parse_routed_mail(path: &std::path::Path, receipt: &routing::Receipt) -> AppResult<ParsedMail> {
+    let bytes = fs::read(path).map_err(|error| AppError::io("read routed mail", path, error))?;
+    if sha256(&bytes) != receipt.digest {
+        return Err(AppError::config(
+            path,
+            "routed mail digest mismatch: bytes do not match the frozen routing receipt",
+        ));
+    }
+    parse_mail(path)
 }
 
 pub(crate) fn unread_channel(

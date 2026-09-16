@@ -1,5 +1,10 @@
+mod common;
+
+use common::{assert_success, register_alpha_beta, write_custom_mail, Sandbox};
 use post::output::{InboxItem, MailKind, WatchAddress, WatchEvent, WatchReason};
 use post::sanitize_preview;
+use serde_json::{json, Value};
+use std::fs;
 
 #[test]
 fn watch_text_line_includes_sanitized_preview_cap_at_80_chars() {
@@ -221,44 +226,210 @@ fn watch_ndjson_omits_preview_field_when_none() {
 }
 
 #[test]
+fn watch_text_marks_pending_mail() {
+    let event = WatchEvent::mail(
+        "alpha",
+        InboxItem {
+            id: "20260916-050004-aa0004".to_owned(),
+            from: "beta".to_owned(),
+            origin: "unknown".to_owned(),
+            reply_to_participant: None,
+            reply_to_shared: "beta".to_owned(),
+            pending: true,
+            kind: MailKind::Note,
+            subject: "pending".to_owned(),
+            sent: "2026-09-16 05:00:04 -0500".to_owned(),
+            display_name: None,
+            pfp: None,
+            sender_address: None,
+            sender_provenance: None,
+        },
+        Some("held preview".to_owned()),
+    );
+    let text = event.text_line();
+    assert!(text.contains(" pending "), "pending marker missing: {text}");
+}
+
+#[test]
 fn watch_typed_snapshot_contract_matches_checked_in_ndjson_fixture() {
-    let item = |id: &str, second: &str, subject: &str, pending: bool| InboxItem {
-        id: id.to_owned(),
-        from: "beta".to_owned(),
-        origin: "unknown".to_owned(),
-        reply_to_participant: None,
-        reply_to_shared: "beta".to_owned(),
-        pending,
-        kind: MailKind::Note,
-        subject: subject.to_owned(),
-        sent: format!("2026-09-16 05:00:{second} -0500"),
-        display_name: None,
-        pfp: None,
-        sender_address: None,
-        sender_provenance: None,
+    let sandbox = Sandbox::new_unseeded();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let actor = "claude-deadbeefcafe";
+    let actor_dir = sandbox.mail_root.join("participants").join(actor);
+    fs::create_dir_all(&actor_dir).expect("actor directory");
+    let write_actor = |workspace: Option<&str>, lineage: Option<&str>| {
+        fs::write(
+            actor_dir.join("participant.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({
+                    "version": 1,
+                    "id": actor,
+                    "harness": "claude",
+                    "conversation_key_digest": "0".repeat(64),
+                    "created": "2026-09-16 05:00:00 -0500",
+                    "last_seen": "2099-01-01T00:00:00Z",
+                    "lease_hours": 24,
+                    "workspace": workspace,
+                    "workspace_path": workspace.map(|_| alpha.clone()),
+                    "lineage": lineage,
+                    "lineage_since": lineage.map(|_| "2026-09-16T10:00:00Z")
+                }))
+                .expect("actor JSON")
+            ),
+        )
+        .expect("write actor");
     };
-    let events = [
-        WatchEvent::mail(
-            "alpha",
-            item("20260916-050001-aa0001", "01", "workspace", false),
-            None,
+    write_actor(Some("alpha"), None);
+    let sender = sandbox.test_participant("beta");
+    let send = |target: &str, subject: &str, body: &str| {
+        let output = sandbox.run_as_participant(
+            &[
+                "send",
+                "--to",
+                target,
+                "--subject",
+                subject,
+                "--body",
+                body,
+                "--json",
+            ],
+            &sender,
+            &beta,
+        );
+        assert_success(&output);
+    };
+    send("workspace:alpha", "workspace", "workspace preview");
+
+    let lineage_dir = sandbox.mail_root.join("lineages/Ember Grove!");
+    fs::create_dir_all(&lineage_dir).expect("lineage directory");
+    fs::write(
+        lineage_dir.join("lineage.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "name": "Ember Grove!",
+                "founder": actor,
+                "created": "2026-09-16T10:00:00Z",
+                "host": "test"
+            }))
+            .unwrap()
         ),
-        WatchEvent::mail(
-            "lineage:Ember Grove!",
-            item("20260916-050002-aa0002", "02", "lineage", false),
-            None,
+    )
+    .expect("lineage record");
+    write_actor(Some("alpha"), Some("Ember Grove!"));
+    send("lineage:Ember Grove!", "lineage", "lineage preview");
+    send(
+        &format!("participant:{actor}"),
+        "participant",
+        "participant preview",
+    );
+    write_actor(None, Some("Ember Grove!"));
+
+    let channel = sandbox.mail_root.join("channels/typed-snapshot");
+    fs::create_dir_all(channel.join("messages")).expect("channel messages");
+    fs::write(
+        channel.join("channel.json"),
+        r#"{"name":"typed-snapshot","created":"2026-09-16 05:00:00 -0500","created_by":"beta"}"#,
+    )
+    .expect("channel info");
+    fs::write(channel.join("members.json"), b"{}\n").expect("legacy members");
+    for participant in [actor, sender.as_str()] {
+        fs::write(
+            sandbox
+                .mail_root
+                .join("participants")
+                .join(participant)
+                .join("channels.json"),
+            r#"{"version":1,"joined":["typed-snapshot"],"left":[]}"#,
+        )
+        .expect("participant channels");
+    }
+    let channel_message = sandbox.run_as_participant(
+        &[
+            "chat",
+            "typed-snapshot",
+            "--send",
+            "--anyway",
+            "--subject",
+            "channel",
+            "--body",
+            "channel preview",
+            "--json",
+        ],
+        &sender,
+        &beta,
+    );
+    assert_success(&channel_message);
+
+    let pending_id = "20990916-050004-aa0004";
+    write_custom_mail(
+        &sandbox
+            .mail_root
+            .join("participants")
+            .join(actor)
+            .join("inbox"),
+        pending_id,
+        &json!({
+            "id": pending_id,
+            "from": "beta",
+            "to": actor,
+            "kind": "note",
+            "subject": "pending",
+            "sent": "2026-09-16 05:00:04 -0500",
+            "from_participant": sender,
+            "address_kind": "participant"
+        }),
+        "pending preview",
+    );
+
+    let snapshot = sandbox.run_as_participant(&["watch", "--snapshot"], actor, &sandbox.path);
+    assert!(snapshot.status.success(), "{}", common::stderr(&snapshot));
+    let canonical = [
+        (
+            "workspace",
+            "20260916-050001-aa0001",
+            "2026-09-16 05:00:01 -0500",
         ),
-        WatchEvent::mail(
-            "participant:claude-deadbeefcafe",
-            item("20260916-050003-aa0003", "03", "participant", false),
-            None,
+        (
+            "lineage",
+            "20260916-050002-aa0002",
+            "2026-09-16 05:00:02 -0500",
         ),
-        WatchEvent::mail(
-            "alpha",
-            item("20260916-050004-aa0004", "04", "pending", true),
-            None,
+        (
+            "participant",
+            "20260916-050003-aa0003",
+            "2026-09-16 05:00:03 -0500",
+        ),
+        (
+            "pending",
+            "20260916-050004-aa0004",
+            "2026-09-16 05:00:04 -0500",
+        ),
+        (
+            "channel",
+            "20260916-050005-000001-aa0005",
+            "2026-09-16 05:00:05 -0500",
         ),
     ];
+    let events = common::stdout(&snapshot)
+        .lines()
+        .map(|line| {
+            let mut event: Value = serde_json::from_str(line).expect("snapshot event");
+            let subject = event["subject"].as_str().expect("subject");
+            let (_, id, sent) = canonical
+                .iter()
+                .find(|(name, _, _)| *name == subject)
+                .expect("known fixture subject");
+            event["id"] = json!(id);
+            event["sent"] = json!(sent);
+            if !event["reply_to_participant"].is_null() {
+                event["reply_to_participant"] = json!("participant:test-sender");
+            }
+            event
+        })
+        .collect::<Vec<_>>();
     let rendered = events
         .iter()
         .map(|event| serde_json::to_string(event).expect("watch event JSON"))

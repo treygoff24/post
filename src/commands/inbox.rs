@@ -72,6 +72,7 @@ struct InboxOutputV2 {
     unread_count: usize,
     pending: usize,
     pending_by_address: BTreeMap<String, usize>,
+    held: usize,
 }
 
 #[derive(Serialize)]
@@ -104,7 +105,8 @@ fn list_bound(
     args: InboxArgs,
     pretty: bool,
 ) -> AppResult<CommandResult> {
-    let addresses = if let Some(room) = args.room {
+    let selected_room = args.room.clone();
+    let addresses = if let Some(room) = selected_room.as_ref() {
         vec![crate::participant::resolve_target(
             context,
             &format!("workspace:{room}"),
@@ -114,24 +116,31 @@ fn list_bound(
     };
     let mut unread = Vec::new();
     let mut pending_by_address = BTreeMap::new();
+    let mut skipped_unreadable = 0;
+    let mut held = 0;
     for address in &addresses {
-        for item in eligibility::unread_mail(context, participant, address)? {
+        let snapshot = eligibility::unread_mail_snapshot(context, participant, address)?;
+        skipped_unreadable += snapshot.skipped_unreadable;
+        for item in snapshot.items {
             unread.push(InboxItemV2::new(context, item.envelope));
         }
         let pending = routing::provisional_pending_for(context, participant, address)?.len();
         pending_by_address.insert(address_label(address), pending);
+        held += routing::held_for(context, participant, address)?.len();
     }
     unread.sort_by(|left, right| left.id.cmp(&right.id));
     unread.dedup_by(|left, right| left.id == right.id);
     let count = unread.len();
     let pending = pending_by_address.values().sum();
-    let room = participant
-        .workspace
-        .clone()
-        .unwrap_or_else(|| participant.id.clone());
+    let room = selected_room.unwrap_or_else(|| {
+        participant
+            .workspace
+            .clone()
+            .unwrap_or_else(|| participant.id.clone())
+    });
     if args.text {
         let mut rendered = format!(
-            "participant: {}\npost: inbox for {} ({count} unread; pending {pending})\n",
+            "participant: {}\npost: inbox for {} ({count} unread; pending {pending}; held {held}; skipped unreadable {skipped_unreadable})\n",
             output::sanitize_text_header(&participant.id),
             output::sanitize_text_header(&room)
         );
@@ -169,10 +178,11 @@ fn list_bound(
             participant: participant.id.clone(),
             unread,
             count,
-            skipped_unreadable: 0,
+            skipped_unreadable,
             unread_count: count,
             pending,
             pending_by_address,
+            held,
         },
         pretty,
     )
@@ -186,9 +196,10 @@ fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<C
         name: room.clone(),
     };
     let pending = routing::pending_count(context, &address)?;
+    let held = routing::held_ids(context, &address)?.len();
     if args.text {
         return Ok(CommandResult::success(format!(
-            "participant: unbound (run: post participant bind)\npost: inbox for {} (pending {pending}; unread unavailable)\n",
+            "participant: unbound (run: post participant bind)\npost: inbox for {} (pending {pending}; held {held}; unread unavailable)\n",
             output::sanitize_text_header(&room)
         )));
     }
@@ -205,6 +216,7 @@ fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<C
             unread_count: 0,
             pending,
             pending_by_address,
+            held,
         },
         pretty,
     )

@@ -177,15 +177,19 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         inbox: fields(&[
             "ok",
             "room",
-            "unread",
+            "participant",
+            "unread[] (id, from, origin, reply_to_participant?, reply_to_shared, kind, subject, sent, display_name?, pfp?, sender_address?, sender_provenance?, from_participant?, from_lineage?)",
             "count",
             "skipped_unreadable",
             "unread_count",
+            "pending",
+            "pending_by_address{address:count}",
+            "held",
         ]),
         read_json: fields(&[
             "ok",
             "framing",
-            "envelope (stored fields plus origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
+            "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
             "body",
             "own (when true)",
             "pending (when true)",
@@ -194,7 +198,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         read_budget: fields(&[
             "ok",
             "framing",
-            "envelope (stored fields plus origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
+            "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
             "body (only when complete)",
             "own (when true)",
             "pending (when true)",
@@ -208,7 +212,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         read_slice: fields(&[
             "ok",
             "framing",
-            "envelope (stored fields plus origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
+            "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
             "body_slice",
             "range (start, end_exclusive)",
             "total_body_bytes",
@@ -325,6 +329,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "ok",
             "channels (name, created, created_by, description?, members=workspace addresses, participants=host-local ids, messages, room, unread)",
             "count",
+            "participant",
+            "pending",
         ]),
         profile: fields(&[
             "ok",
@@ -367,7 +373,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         global_flags: fields(&[
             "--json: switch send/read/chat/catchup/search from text to JSON; inbox/rooms/channels/profile/schema/doctor/who are already JSON",
             "--pretty: pretty-print JSON",
-            "--room <name>: command option for inbox/read/watch/who only; chat and channels derive identity from cwd and reject --room",
+            "--room <name>: command option for inbox/read/watch/who only; it selects an address while the participant binding remains the actor (never cwd); chat and channels reject --room",
         ]),
         commands,
         output_shapes,

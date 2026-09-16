@@ -69,6 +69,7 @@ pub(crate) fn render_reply_metadata(
     participant: Option<&str>,
     shared: &str,
 ) {
+    rendered.push_str(&format!("  origin: {}\n", sanitize_text_header(origin)));
     match (origin, participant) {
         ("local", Some(participant)) => rendered.push_str(&format!(
             "  reply_to_participant: {} (local, sender only)\n",
@@ -77,7 +78,8 @@ pub(crate) fn render_reply_metadata(
         ("remote", _) => {
             rendered.push_str("  reply_to_participant: unavailable (message crossed the bridge)\n")
         }
-        _ => rendered.push_str("  reply_to_participant: unavailable (sender origin unknown)\n"),
+        _ => rendered
+            .push_str("  reply_to_participant: unavailable (sender not known on this host)\n"),
     }
     rendered.push_str(&format!(
         "  reply_to_shared: {} (shared fan-out)\n",
@@ -116,17 +118,21 @@ pub(crate) fn reply_metadata(
 }
 
 fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool {
-    let peers = context.root.join("bridge/rooms/peers");
-    let Ok(entries) = std::fs::read_dir(peers) else {
+    let Ok(rooms) = context.load_rooms() else {
         return false;
     };
-    entries.flatten().any(|entry| {
-        std::fs::read(entry.path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value.as_object().cloned())
-            .is_some_and(|rooms| rooms.contains_key(workspace))
-    })
+    let Some(stored) = rooms.get(workspace) else {
+        return false;
+    };
+    let Ok(path) = context.expand_room_path(stored) else {
+        return false;
+    };
+    let remote_root = context.root.join("remote");
+    let Ok(remote_root) = remote_root.canonicalize() else {
+        return false;
+    };
+    path.canonicalize()
+        .is_ok_and(|path| path.starts_with(&remote_root) && path != remote_root)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -302,24 +308,6 @@ pub struct MessageEnvelope {
     pub pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<WatchAddress>,
-}
-
-impl From<Envelope> for MessageEnvelope {
-    fn from(envelope: Envelope) -> Self {
-        let reply_to_participant = envelope
-            .from_participant
-            .as_deref()
-            .map(|id| format!("participant:{id}"));
-        let reply_to_shared = envelope.from.clone();
-        Self {
-            envelope,
-            origin: "unknown".to_owned(),
-            reply_to_participant,
-            reply_to_shared,
-            pending: false,
-            address: None,
-        }
-    }
 }
 
 impl MessageEnvelope {
@@ -943,8 +931,17 @@ impl WatchEvent {
     }
 
     pub(crate) fn unreadable_channel(room: &str, channel: &str, id: String) -> Self {
+        Self::unreadable_channel_at(WatchAddress::from_room(room), room, channel, id)
+    }
+
+    pub(crate) fn unreadable_channel_at(
+        address: WatchAddress,
+        room: &str,
+        channel: &str,
+        id: String,
+    ) -> Self {
         Self::Unreadable {
-            address: WatchAddress::from_room(room),
+            address,
             room: room.to_owned(),
             id,
             reason: WatchReason::Channel,
@@ -959,7 +956,27 @@ impl WatchEvent {
         watching_room: &str,
         preview: Option<String>,
     ) -> Self {
-        let reason = if message.mentions.iter().any(|m| m == watching_room) {
+        Self::channel_message_at(
+            context,
+            message,
+            WatchAddress::from_room(watching_room),
+            watching_room,
+            preview,
+        )
+    }
+
+    pub(crate) fn channel_message_at(
+        context: &crate::mailbox::Context,
+        message: crate::model::ChannelMessage,
+        address: WatchAddress,
+        watching_identity: &str,
+        preview: Option<String>,
+    ) -> Self {
+        let reason = if message
+            .mentions
+            .iter()
+            .any(|mention| mention == watching_identity)
+        {
             WatchReason::Mention
         } else {
             WatchReason::Channel
@@ -986,9 +1003,13 @@ impl WatchEvent {
             sender_provenance,
             ..
         } = message;
+        let room = match address.kind.as_str() {
+            "workspace" => address.name.clone(),
+            kind => format!("{kind}:{}", address.name),
+        };
         Self::ChannelMessage {
-            address: WatchAddress::from_room(watching_room),
-            room: watching_room.to_owned(),
+            address,
+            room,
             channel,
             id,
             from,
@@ -1032,9 +1053,10 @@ impl WatchEvent {
                     item.pfp.as_deref(),
                 );
                 let preview = preview.as_ref().map_or(String::new(), |p| format!("  {p}"));
+                let pending = if item.pending { "  pending" } else { "" };
                 format!(
-                    "{}  [{}] from {}{}{}\n",
-                    item.id, item.kind, sender, subject, preview
+                    "{}  [{}] from {}{}{}{}\n",
+                    item.id, item.kind, sender, subject, pending, preview
                 )
             }
             // Debug-quoted: this id comes from a filename that never passed
