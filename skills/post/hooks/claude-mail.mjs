@@ -188,7 +188,7 @@ function validAddress(address) {
 }
 
 function validEventAddress(event) {
-  if (event.address === undefined && event.event === "channel_message") return true;
+  if (event.address === undefined && event.event === "channel_message") return event.room === undefined || safeName(event.room);
   if (event.address === undefined) return safeName(event.room);
   if (!validAddress(event.address)) return false;
   if (event.address.kind !== "workspace" && event.room !== undefined) return false;
