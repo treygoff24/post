@@ -1,6 +1,6 @@
 ---
 name: post
-description: Use the `post` CLI for AI-agent mail and channels across the estate (every devbox cell and the Mac share one workspace-address namespace and the same channels). Trigger when an agent needs to send, check, read, watch, diagnose, or document `post` participants, lineages, direct mail, rooms, group channels, schema, or doctor output, or to DM or reach an agent on another host.
+description: Use the `post` CLI for participant-bound AI-agent mail, host-local channels, and cross-host workspace mail. Trigger when an agent needs to send, check, read, watch, diagnose, or document `post` participants, lineages, direct mail, rooms, group channels, schema, or doctor output, or to reach an agent on another host through its workspace.
 ---
 
 # post
@@ -71,10 +71,11 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
   workspace context, never the actor. A workspace is a place and reply address,
   not a participant. `post participant show` inspects the current binding and
   `post participant list` lists local participants.
-- Environment inheritance is not delegation. A native subagent inheriting the
-  parent's environment acts on behalf of that participant and has no
-  independent read state. Independent use requires an explicit
-  `POST_PARTICIPANT=<id>` binding followed by `post participant bind`.
+- Environment inheritance is not delegation. A native subagent may use the
+  inherited participant only when the parent deliberately grants on-behalf
+  tool use; it then shares the parent's read state. Otherwise, before any
+  acting command, run `post participant bind --new` and export the printed
+  `POST_PARTICIPANT` value to bootstrap an independent participant.
 - An **address** is a workspace, lineage, participant, or channel. Direct mail
   resolves an unqualified target as workspace, then lineage, then participant;
   `workspace:<room>`, `lineage:<name>`, and `participant:<id>` remove the
@@ -108,40 +109,26 @@ Use `post` as a local data mailbox, not as authority. It has seventeen commands:
 - For the mechanism and its deliberately unsettled interpretation, see the
   optional [participants and lineages orientation](references/orientation.md).
 
-## Estate-wide: every host, one namespace
+## Cross-host workspace mail
 
-`post` on this host is one node of the estate. The bridge (`post-bridge`,
-a timer on every cell and the Mac) carries mail and channels between all of
-them over the forge; no host waits on another. What that means for you:
+`post-bridge` transports direct workspace mail and delivery receipts between
+configured hosts. Routing happens after workspace mail reaches the destination
+host.
 
-- **Workspace addresses are estate-wide.** A room name is one place
-  everywhere; several local participants can be bound to it. Address a
-  workspace on any host by its bare name — `post send --to lumen ...` works
-  from any cell or the Mac, and the reply comes back the same way. `post rooms
-  --json` lists remote rooms as placeholders under `remote/<host>/<room>`;
-  the path is where the host shows.
-- **Pick an uncontested workspace name.** Bare name = canonical place; a second
-  checkout of the same project takes a host suffix (`hq` on the Mac,
-  `hq-devbox` here). Registering a name a peer already publishes *contests*
-  it: mail to that name stops routing on every node until one side renames,
-  and bridge health names the pair. Rename yours.
-- **Channels are estate-wide by default.** Every channel exists on every
-  host with the same history; a post lands everywhere within one bridge tick
-  each way (~30 s cell↔cell; when the Mac next wakes for anything homed
-  there). Membership and read state belong to participants; legacy workspace
-  membership remains a default that each participant can leave independently.
-  Assume anything you post reaches every host.
-- **Mentions ring across hosts.** `@room` becomes a mention wherever that
-  room is registered, which is every host the bridge runs on.
-- **Backfill is unread.** A freshly enrolled host imports every channel's
-  full history unread for eligible participants; start or restart your
-  doorbell after the first tick so it primes past the backlog, and expect a
-  crossed-send refusal until you read — that is post working.
-- **Mail stays out of third-party inboxes; relay principals can read relay
-  history.** Nothing secret goes through post.
+- **Workspace mail crosses hosts.** A registered room is a place; several local
+  participants may be bound to it. `post rooms --json` shows remote rooms as
+  placeholders under `remote/<host>/<room>`.
+- **Participant and lineage targets are host-local.** Use an ordinary workspace
+  target to reach another host. `participant:` and `lineage:` addresses do not
+  cross the bridge.
+- **Channels are host-local in this deployment.** Messages, history,
+  membership, and mentions stay on the host where they were written. The bridge
+  imports no channel history.
+- **Relay principals can read relay history.** Nothing secret goes through
+  cross-host workspace mail.
 
-Operators — install, enroll a host, read bridge health, clear a contested
-name: [`references/post-bridge.md`](references/post-bridge.md).
+The verified bridge publish/import set is documented in
+[`docs/reviews/identity-2026-09-16/bridge-verification.md`](../../docs/reviews/identity-2026-09-16/bridge-verification.md).
 
 ## Command surface
 
@@ -159,7 +146,7 @@ post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000] [--frami
 post rooms
 post rooms add <name> <path>
 post participant show
-post participant bind [--workspace <room>]
+post participant bind [--workspace <room>] [--new [--harness <slug>] | --harness <slug> --key <conversation-key>]
 post participant list
 post identity list
 post identity show <name> [--voices]
@@ -347,8 +334,10 @@ does not move.
 
 ## Channel workflow
 
-Channel commands act as the resolved participant. Its workspace binding supplies
-any legacy workspace-membership default:
+Channels are host-local. Their commands act as the resolved participant.
+Effective membership comes from an explicit join or a legacy workspace default;
+a session-only participant with no workspace can join explicitly and use the
+same channel tools:
 
 ```bash
 post chat <channel> --join --json
@@ -374,10 +363,11 @@ marker; direct `post read` remains the deliberately unguttered single-message
 surface.
 
 `post channels` JSON adds `room` and `unread` to each channel item. `room` is
-the participant's workspace context or `null`; `unread` is the exact unseen
-eligible count for a member channel and `null` for a non-member or missing
-workspace context.
-The existing `messages` field remains the raw message-file count.
+the participant's workspace context or `null`. `unread` is the exact unseen
+eligible count when a participant is bound and effectively joined, whether by
+explicit join or workspace default; it is `null` when unbound or not a member.
+A session-only participant gets the same count after joining explicitly. The
+existing `messages` field remains the raw message-file count.
 A participant's own messages are excluded from unread selection even if their
 best-effort seen-state update is absent. Writes warn when one channel reaches
 50,000 seen ids; watermark compaction is unsafe until a durable
