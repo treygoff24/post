@@ -471,7 +471,7 @@ function main() {
       ...state,
       participantId,
       failStreak: state.failStreak + 1,
-      initialized: true,
+      initialized: state.initialized,
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
     deliverThenCommit(stateFile, payload, nextState);
@@ -495,7 +495,7 @@ function main() {
       ...state,
       participantId,
       failStreak: state.failStreak + 1,
-      initialized: true,
+      initialized: state.initialized,
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
     deliverThenCommit(stateFile, payload, nextState);
