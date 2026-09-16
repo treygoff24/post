@@ -40,6 +40,7 @@ const UNREADABLE_ID_MAX = 255; // filename-derived stem bound
 const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
+const PARTICIPANT_ADDRESS = /^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const HARNESS = "codex";
 const SESSION_DEADLINE_MS = 4500;
@@ -161,17 +162,46 @@ function isSubagent(input) {
 const LEGACY_CHANNEL_EPISODE = "legacy-channel-episode";
 const LEGACY_WARNING = "Post compatibility warning: unreadable channel data from an older Post lacks channel identity. Per-message delivery is unknown; upgrade Post.";
 
+function eventScope(event) {
+  if (event.address) return `${event.address.kind}:${event.address.name}`;
+  return event.room ?? "";
+}
+
 function eventKey(event) {
   if (event.event === "unreadable" && event.reason === "channel") {
     // Presence-only episode, not a per-message acknowledgement.
     return event.channel === undefined ? LEGACY_CHANNEL_EPISODE : JSON.stringify(["unreadable", event.channel, event.id]);
   }
   if (event.event === "channel_message") return `channel:${event.channel}:${event.id}`;
-  return `${event.event}:${event.room}:${event.id}`;
+  const pending = event.pending === true ? ":pending" : "";
+  return `${event.event}:${eventScope(event)}:${event.id}${pending}`;
 }
 
 function safeName(value) {
   return typeof value === "string" && value.length <= NAME_MAX && ROOM_NAME.test(value);
+}
+
+function validAddress(address) {
+  if (!address || typeof address !== "object" || Array.isArray(address)) return false;
+  if (address.kind === "participant") return typeof address.name === "string" && PARTICIPANT_ADDRESS.test(address.name);
+  if (address.kind === "workspace" || address.kind === "lineage") return safeName(address.name);
+  return false;
+}
+
+function validEventAddress(event) {
+  if (event.address === undefined && event.event === "channel_message") return true;
+  if (event.address === undefined) return safeName(event.room);
+  if (!validAddress(event.address)) return false;
+  if (event.address.kind !== "workspace" && event.room !== undefined) return false;
+  return event.room === undefined || safeName(event.room);
+}
+
+function targetDescription(event) {
+  const address = event.address;
+  if (address?.kind === "participant") return "direct to you";
+  if (address?.kind === "lineage") return `lineage ${address.name}`;
+  if (address?.kind === "workspace") return `room ${event.room ?? address.name}`;
+  return event.room ? `room ${event.room}` : null;
 }
 
 // This field is identity-only, never rendered; accept Post's path-safe Unicode
@@ -213,47 +243,65 @@ function contextFor(events) {
   const mail = events.filter((e) => e.event === "mail");
   const channel = events.filter((e) => e.event === "channel_message");
   const unreadable = events.filter((e) => e.event === "unreadable");
+  const unreadMail = mail.filter((e) => e.pending !== true);
+  const pendingMail = mail.filter((e) => e.pending === true);
+  const pendingChannel = channel.filter((e) => e.pending === true);
   const room = mail[0]?.room ?? unreadable[0]?.room;
+  const hasTypedAddress = mail.some((e) => e.address !== undefined);
+  const targets = [...new Set(mail.map(targetDescription).filter(Boolean))];
   const channelOnly = mail.length === 0 && unreadable.length === 0;
   const framing = [
-    "Inspection commands, run from the project directory: post inbox; post read <id>; post channels; post chat <channel> --peek.",
+    "Reading is optional. Inspection commands, run from the project directory: post inbox; post read <id>; post channels; post chat <channel> --peek.",
   ];
 
   function build({ includeIds, includeChannels, includeRoom }) {
-    const lines = [
-      channelOnly
-        ? `[post] New channel message(s): ${includeChannels ? channelSummary(channel) : `${channel.length} item(s)`}.`
-        : includeRoom && room
-          ? `[post] New mail is waiting for room ${room} (resolved from this session's working directory).`
-          : "[post] New mail is waiting for this session's mail room.",
-    ];
-    if (mail.length > 0) {
+    const lines = [];
+    if (channelOnly) {
+      const label = pendingChannel.length === channel.length && channel.length > 0 ? "Pending channel message(s)" : "New channel message(s)";
+      lines.push(`[post] ${label}: ${includeChannels ? channelSummary(channel) : `${channel.length} item(s)`}.`);
+    } else if (mail.length > 0) {
+      if (unreadMail.length === 0) {
+        const target = targets.length ? ` for ${targets.join(", ")}` : "";
+        lines.push(`[post] Pending agent mail is waiting${target}.`);
+      } else if (includeRoom && room && !hasTypedAddress) {
+        lines.push(`[post] New mail is waiting for room ${room} (resolved from this session's working directory).`);
+      } else if (targets.length) {
+        lines.push(`[post] New mail is waiting for ${targets.join(", ")}.`);
+      } else {
+        lines.push("[post] New mail is waiting for this session's mail room.");
+      }
+    } else {
+      lines.push("[post] New mail is waiting for this session's mail room.");
+    }
+    if (unreadMail.length > 0) {
       lines.push(
         includeIds
-          ? `Direct mail id(s): ${formatBoundedList(
-              mail.map((e) => e.id),
-              "more"
-            )}.`
-          : `Direct mail: ${mail.length} item(s).`
+          ? `Direct mail id(s): ${formatBoundedList(unreadMail.map((e) => e.id), "more")}.`
+          : `Direct mail: ${unreadMail.length} item(s).`
+      );
+    }
+    if (pendingMail.length > 0) {
+      lines.push(
+        includeIds
+          ? `Pending mail id(s): ${formatBoundedList(pendingMail.map((e) => e.id), "more")}.`
+          : `Pending mail: ${pendingMail.length} item(s).`
       );
     }
     if (channel.length > 0 && !channelOnly) {
+      const label = pendingChannel.length === channel.length ? "Pending channel message(s)" : "New channel message(s)";
       lines.push(
         includeChannels
-          ? `New channel message(s): ${channelSummary(channel)}.`
-          : `New channel message(s): ${channel.length} item(s).`
+          ? `${label}: ${channelSummary(channel)}.`
+          : `${label}: ${channel.length} item(s).`
       );
     }
-    if (unreadable.length > 0) {
-      lines.push(`Unreadable mail: ${unreadable.length} item(s).`);
-    }
+    if (unreadable.length > 0) lines.push(`Unreadable mail: ${unreadable.length} item(s).`);
     lines.push(...framing);
     return lines.join("\n");
   }
 
   let context = build({ includeIds: true, includeChannels: true, includeRoom: true });
   if (Buffer.byteLength(context, "utf8") <= CONTEXT_MAX) return context;
-  // Omit overlong metadata rather than echoing unbounded strings.
   context = build({ includeIds: false, includeChannels: false, includeRoom: false });
   if (Buffer.byteLength(context, "utf8") <= CONTEXT_MAX) return context;
   return framing.join("\n").slice(0, CONTEXT_MAX);
@@ -265,12 +313,12 @@ function isStringFields(event, fields) {
 
 function validSnapshotEvent(event) {
   if (!event || typeof event !== "object" || Array.isArray(event)) return false;
+  if ((event.pending !== undefined && typeof event.pending !== "boolean") || !validEventAddress(event)) return false;
   switch (event.event) {
     case "mail":
       return (
-        isStringFields(event, ["room", "id", "from", "kind", "subject", "sent", "reason"]) &&
+        isStringFields(event, ["id", "from", "kind", "subject", "sent", "reason"]) &&
         event.reason === "mail" &&
-        safeName(event.room) &&
         MAIL_ID.test(event.id)
       );
     case "channel_message":
@@ -282,10 +330,9 @@ function validSnapshotEvent(event) {
       );
     case "unreadable":
       return (
-        isStringFields(event, ["room", "id", "reason"]) &&
+        isStringFields(event, ["id", "reason"]) &&
         (event.reason === "mail" || event.reason === "channel") &&
         (event.reason !== "channel" || event.channel === undefined || safeUnreadableChannel(event.channel)) &&
-        safeName(event.room) &&
         safeUnreadableId(event.id)
       );
     default:
@@ -519,8 +566,10 @@ function main() {
 
   const events = [];
   let malformed = false;
+  let nonempty = 0;
   for (const line of String(result.stdout ?? "").split("\n")) {
     if (!line.trim()) continue;
+    nonempty += 1;
     try {
       const event = JSON.parse(line);
       if (!validSnapshotEvent(event)) malformed = true;
@@ -529,7 +578,7 @@ function main() {
       malformed = true;
     }
   }
-  if (malformed) {
+  if (malformed && events.length === 0 && nonempty > 0) {
     const nextState = { ...state, participantId, lifecycleWarned: state.lifecycleWarned || touchFailed, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
     const identity = eventName === "SessionStart" ? identityLine(runPost(["participant", "show", "--json"], input.cwd, { participantId, clearConversationKeys: true, deadline })) : null;
