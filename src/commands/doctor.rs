@@ -410,7 +410,7 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
                         &participant.dir.join("channels.json"),
                         &error.message,
                         false,
-                        "Repair or remove this participant's channels.json; other participants remain usable.",
+                        "Restore or repair this participant's channels.json from a backup; other participants remain usable.",
                     ));
                 }
             }

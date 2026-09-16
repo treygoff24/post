@@ -236,12 +236,13 @@ pub(crate) fn participants_for_join_validation(
             Ok(None) => {
                 let participant_dir = entry.path();
                 if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
-                    return Err(invalid_join_participant_record(
+                    return Err(invalid_join_participant_state(
                         &id,
-                        &participant_dir,
+                        &participant_dir.join("participant.json"),
                         format!(
                             "participant record is missing, so membership in channel '{channel}' cannot be validated against a blocked route"
                         ),
+                        "for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable",
                     ));
                 }
                 eprintln!(
@@ -252,13 +253,14 @@ pub(crate) fn participants_for_join_validation(
             Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
                 let participant_dir = entry.path();
                 if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
-                    return Err(invalid_join_participant_record(
+                    return Err(invalid_join_participant_state(
                         &id,
-                        &participant_dir,
+                        &participant_dir.join("participant.json"),
                         format!(
                             "participant record cannot be validated for possible membership in channel '{channel}': {}",
                             error.message
                         ),
+                        "for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable",
                     ));
                 }
                 eprintln!(
@@ -287,12 +289,14 @@ pub(crate) fn participants_for_join_validation(
                         blocked,
                     )
                 {
-                    return Err(crate::error::AppError::config(
+                    return Err(invalid_join_participant_state(
+                        &participant.id,
                         &participant.dir.join("channels.json"),
                         format!(
-                            "participant '{}' may belong to channel '{channel}', but its membership record is unreadable and a blocked route could apply: {}; repair or remove the record, then retry",
-                            participant.id, error.message
+                            "participant may belong to channel '{channel}', but its membership record is unreadable and a blocked route could apply: {}",
+                            error.message
                         ),
+                        "for example, from a backup",
                     ));
                 }
                 eprintln!(
@@ -376,27 +380,30 @@ fn invalid_record_could_block(
         })
 }
 
-fn invalid_join_participant_record(
+fn invalid_join_participant_state(
     participant_id: &str,
-    participant_dir: &std::path::Path,
+    state_path: &std::path::Path,
     reason: impl Into<String>,
+    recovery_example: &str,
 ) -> AppError {
-    let record = participant_dir.join("participant.json");
+    let file_name = state_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("participant state file");
     let reason = format!(
-        "participant '{participant_id}': {}; participant record path is '{}'",
+        "participant '{participant_id}': {}; {file_name} path is '{}'",
         reason.into(),
-        record.display()
+        state_path.display()
     );
     AppError::new(
         ErrorCode::ConfigInvalid,
-        format!("configuration '{}' is invalid: {reason}", record.display()),
+        format!("configuration '{}' is invalid: {reason}", state_path.display()),
         format!(
-            "Restore or repair participant.json at '{}' for participant '{}' (for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable), then retry.",
-            record.display(),
-            participant_id
+            "Restore or repair {file_name} at '{}' for participant '{}' ({recovery_example}), then retry.",
+            state_path.display(), participant_id
         ),
     )
-    .path(record.display().to_string())
+    .path(state_path.display().to_string())
     .reason(reason)
 }
 

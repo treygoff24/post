@@ -674,15 +674,12 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
         &gamma_actor,
         &gamma,
     ));
-    fs::write(
-        sandbox
-            .mail_root
-            .join("participants")
-            .join(&gamma_actor)
-            .join("channels.json"),
-        b"{corrupt",
-    )
-    .expect("corrupt gamma membership");
+    let channels_path = sandbox
+        .mail_root
+        .join("participants")
+        .join(&gamma_actor)
+        .join("channels.json");
+    fs::write(&channels_path, b"{corrupt").expect("corrupt gamma membership");
     fs::write(
         sandbox.mail_root.join("rules.json"),
         r#"{"blocked":[{"from":"alpha","to":"gamma","reason":"separate workspaces"}]}"#,
@@ -695,8 +692,20 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
     let error: post::output::ErrorEnvelope = common::from_stderr(&join);
     assert_eq!(error.error.code, "config_invalid");
     assert!(error.error.message.contains(&gamma_actor));
-    assert!(error.error.message.contains("channels.json"));
-    assert!(error.error.suggested_fix.contains("fix the named file"));
+    assert!(error
+        .error
+        .message
+        .contains(&channels_path.display().to_string()));
+    assert_eq!(
+        error.error.suggested_fix,
+        format!(
+            "Restore or repair channels.json at '{}' for participant '{}' (for example, from a backup), then retry.",
+            channels_path.display(),
+            gamma_actor
+        )
+    );
+    assert!(!error.error.message.to_lowercase().contains("remove"));
+    assert!(!error.error.suggested_fix.to_lowercase().contains("remove"));
     let alpha_channels = sandbox
         .mail_root
         .join("participants")
