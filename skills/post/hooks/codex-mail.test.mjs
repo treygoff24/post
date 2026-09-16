@@ -107,6 +107,9 @@ const MAIL_A = {
   sent: "2026-07-22 01:01:01 -0500",
   reason: "mail",
 };
+const TYPED_PARTICIPANT = { ...MAIL_A, room: undefined, id: "20260730-010101-abc111", address: { kind: "participant", name: "codex-abc12345" } };
+const TYPED_LINEAGE = { ...MAIL_A, room: undefined, id: "20260730-010101-abc112", address: { kind: "lineage", name: "ember" } };
+const TYPED_WORKSPACE = { ...MAIL_A, room: "tower", id: "20260730-010101-abc113", address: { kind: "workspace", name: "tower" } };
 
 test("unreadable channels use distinct current keys; legacy identity is not acknowledged", () => {
   const stateDir = freshStateDir();
@@ -197,6 +200,28 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.ok(!context.includes("SECRET"), "subject must be omitted");
   assert.ok(!context.includes("secret-sender"), "sender must be omitted");
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
+});
+
+test("typed participant, lineage, and workspace addresses render without poisoning valid siblings", () => {
+  const stateDir = freshStateDir();
+  const malformed = { ...TYPED_PARTICIPANT, id: "20260730-010101-abc114", address: { kind: "participant", name: "BAD" } };
+  setStub({ events: [TYPED_PARTICIPANT, TYPED_LINEAGE, TYPED_WORKSPACE, malformed, MAIL_A] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "typed-addresses" }, { stateDir });
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /direct to you/);
+  assert.match(context, /lineage ember/);
+  assert.match(context, /room tower/);
+  assert.match(context, /20260730-010101-abc111/);
+  assert.doesNotMatch(context, /abc114/);
+});
+
+test("pending typed events render as pending rather than unread", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [{ ...TYPED_PARTICIPANT, id: "20260730-010101-abc115", pending: true }] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "typed-pending" }, { stateDir });
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /Pending/);
+  assert.doesNotMatch(context, /New mail is waiting/);
 });
 
 test("the snapshot runs from the hook cwd with no room pin", () => {
