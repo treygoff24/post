@@ -22,10 +22,6 @@ import { stableNodePath } from "./stable-node-path.mjs";
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.join(DIR, "cursor-mail.mjs");
 const NOTICE_SOURCE = path.join(DIR, "watch-notice.mjs");
-// The adapter statically imports ./identity-card.mjs (M5); the private
-// install must carry it alongside or every installed hook fire crashes
-// with ERR_MODULE_NOT_FOUND.
-const HELPER_SOURCE = path.join(DIR, "identity-card.mjs");
 const INSTALL_DIR =
   process.env.POST_CURSOR_HOOK_INSTALL_DIR || path.join(os.homedir(), ".cursor", "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-cursor-mail.mjs");
@@ -191,10 +187,6 @@ if (fs.existsSync(target)) {
 }
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
-// Dependency-ordered: the helper the adapter imports lands first, the
-// adapter that imports it last. A failed later copy leaves the OLD
-// runnable adapter in place; a helper-only partial is harmless.
-const helperChanged = copyScript(HELPER_SOURCE, path.join(path.dirname(ADAPTER), "identity-card.mjs"));
 const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
 const adapterChanged = copyScript(SOURCE, ADAPTER);
 
@@ -256,12 +248,11 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || noticeChanged || helperChanged
+  configChanged || adapterChanged || noticeChanged
     ? [
         configChanged && "hooks updated",
         adapterChanged && "adapter updated",
         noticeChanged && "watch-notice updated",
-        helperChanged && "identity-card helper updated",
       ]
         .filter(Boolean)
         .join("\n")

@@ -29,7 +29,7 @@ const ADAPTER = path.join(
   process.env.POST_CLAUDE_HOOK_INSTALL_DIR || path.join(os.homedir(), ".claude", "hooks"),
   "post-claude-mail.mjs"
 );
-const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
+const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
 
 const requestedTarget = process.argv[2];
 // A flag-looking argv is a usage error, not a settings path: without this
@@ -143,25 +143,6 @@ function writeFileAtomic(file, bytes, mode) {
   }
 }
 
-// Dependency-ordered: the helper the adapter imports lands first, the
-// adapter that imports it last. A failed helper copy leaves the OLD
-// runnable adapter in place; a helper-only partial is harmless.
-// (The adapter statically imports ./identity-card.mjs since M5; an
-// adapter-without-helper install crashes every hook fire.)
-const HELPER = path.join(path.dirname(ADAPTER), "identity-card.mjs");
-const helperSource = fs.readFileSync(
-  path.join(path.dirname(fileURLToPath(import.meta.url)), "identity-card.mjs")
-);
-let helperChanged = true;
-try {
-  helperChanged = !helperSource.equals(fs.readFileSync(HELPER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
-}
-if (helperChanged) {
-  writeFileAtomic(HELPER, helperSource, 0o644);
-}
-
 const source = fs.readFileSync(SOURCE);
 let adapterChanged = true;
 try {
@@ -224,11 +205,10 @@ if (configChanged) {
   fs.renameSync(tmp, target);
 }
 console.log(
-  configChanged || adapterChanged || adapterModeChanged || helperChanged
+  configChanged || adapterChanged || adapterModeChanged
     ? [
         configChanged && "hooks updated",
         (adapterChanged || adapterModeChanged) && "adapter updated",
-        helperChanged && "identity-card helper updated",
       ]
         .filter(Boolean)
         .join("\n")

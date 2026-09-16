@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-hook-test-"));
@@ -23,13 +23,19 @@ fs.writeFileSync(
   [
     "#!/usr/bin/env node",
     'import fs from "node:fs";',
-    'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + "\\n");',
+    'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), participant: process.env.POST_PARTICIPANT || null }) + "\\n");',
     'const control = JSON.parse(fs.readFileSync(process.env.STUB_CONTROL, "utf8"));',
-    'if (control.stdout) process.stdout.write(control.stdout);',
+    'const args = process.argv.slice(2);',
+    'if (control.sleep_ms) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, control.sleep_ms);',
+    'let output = control.stdout ?? "";',
+    'if (args[0] === "version") output = JSON.stringify(control.version ?? { ok: true, capabilities: ["participants"] }) + "\\n";',
+    'else if (args[0] === "participant" && args[1] === "show") output = JSON.stringify(control.show ?? { ok: true, status: "unbound" }) + "\\n";',
+    'else if (args[0] === "participant" && args[1] === "bind") output = control.bind_stdout ?? JSON.stringify({ ok: true, status: "bound", id: process.env.POST_PARTICIPANT || "test-participant", participant: { id: process.env.POST_PARTICIPANT || "test-participant", lineage: null } }) + "\\n";',
+    'if (output) process.stdout.write(output);',
     // Natural exit when the control exit is 0: process.exit() would drop
     // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
     // 64 KiB pipe buffer), truncating the snapshot mid-line.
-    'const exit = control.exit ?? 0;',
+    'const exit = args[0] === "participant" && args[1] === "bind" ? (control.bind_exit ?? 0) : args[0] === "participant" && args[1] === "touch" ? (control.touch_exit ?? 0) : args[0] === "participant" && args[1] === "end" ? (control.end_exit ?? 0) : args[0] === "watch" ? (control.exit ?? 0) : 0;',
     "if (exit) process.exit(exit);",
     "",
   ].join("\n")
@@ -49,30 +55,24 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit, sleep_ms } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit, sleep_ms }));
 }
 
-function stubCallCount() {
+function allStubCalls() {
   try {
-    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean).length;
-  } catch {
-    return 0;
-  }
-}
-
-function stubCalls() {
-  try {
-    return fs
-      .readFileSync(CALLS, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
+}
+function stubCallCount() {
+  return allStubCalls().filter((call) => call.args[0] === "watch").length;
+}
+function stubCalls() {
+  return allStubCalls().filter((call) => call.args[0] === "watch");
 }
 
 function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv = {} } = {}) {
@@ -90,11 +90,6 @@ function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv
       POST_CODEX_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
-      // Hermetic against the developer shell: a live agent-session launch
-      // exports POST_HARNESS/POST_REPO_KEY, which must not leak a real
-      // identity card into tests. Card tests re-add them via extraEnv.
-      POST_HARNESS: "",
-      POST_REPO_KEY: "",
       ...extraEnv,
     },
   });
@@ -112,6 +107,9 @@ const MAIL_A = {
   sent: "2026-07-22 01:01:01 -0500",
   reason: "mail",
 };
+const TYPED_PARTICIPANT = { ...MAIL_A, room: undefined, id: "20260730-010101-abc111", address: { kind: "participant", name: "codex-abc123456789" } };
+const TYPED_LINEAGE = { ...MAIL_A, room: undefined, id: "20260730-010101-abc112", address: { kind: "lineage", name: "Ember Grove!" } };
+const TYPED_WORKSPACE = { ...MAIL_A, room: "tower", id: "20260730-010101-abc113", address: { kind: "workspace", name: "tower" } };
 
 test("unreadable channels use distinct current keys; legacy identity is not acknowledged", () => {
   const stateDir = freshStateDir();
@@ -204,6 +202,30 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
 });
 
+test("typed 12-hex participant, lineage, and workspace addresses render without poisoning valid siblings", () => {
+  const stateDir = freshStateDir();
+  const malformed = { ...TYPED_PARTICIPANT, id: "20260730-010101-abc114", address: { kind: "participant", name: "BAD" } };
+  const malformedColon = { ...TYPED_LINEAGE, id: "20260730-010101-abc116", address: { kind: "lineage", name: "bad:name" } };
+  const malformedControl = { ...TYPED_LINEAGE, id: "20260730-010101-abc117", address: { kind: "lineage", name: "bad\u0001name" } };
+  setStub({ events: [TYPED_PARTICIPANT, TYPED_LINEAGE, TYPED_WORKSPACE, malformed, malformedColon, malformedControl, MAIL_A] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "typed-addresses" }, { stateDir });
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /direct to you/);
+  assert.match(context, /lineage Ember Grove!/);
+  assert.match(context, /room tower/);
+  assert.match(context, /20260730-010101-abc111/);
+  assert.doesNotMatch(context, /abc114|abc116|abc117/);
+});
+
+test("pending typed events render as pending rather than unread", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [{ ...TYPED_PARTICIPANT, id: "20260730-010101-abc115", pending: true }] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "typed-pending" }, { stateDir });
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /Pending/);
+  assert.doesNotMatch(context, /New mail is waiting/);
+});
+
 test("the snapshot runs from the hook cwd with no room pin", () => {
   setStub({ events: [] });
   fs.writeFileSync(CALLS, "");
@@ -212,7 +234,7 @@ test("the snapshot runs from the hook cwd with no room pin", () => {
     { stateDir: freshStateDir() }
   );
   assert.deepEqual(stubCalls(), [
-    { cwd: fs.realpathSync(CWD), args: ["watch", "--snapshot"] },
+    { cwd: fs.realpathSync(CWD), args: ["watch", "--snapshot"], participant: "test-participant" },
   ]);
 });
 
@@ -671,40 +693,246 @@ test("a closed stdout leaves fresh events eligible", async () => {
   assert.match(recovered.hookSpecificOutput.additionalContext, /20260722-010101-aaa111/);
 });
 
-// ---- identity card (M5) ----
-
-function cardEnv(text = "I keep this room's letters.\n") {
-  const data = fs.mkdtempSync(path.join(ROOT, "cards-"));
-  const dir = path.join(data, "agent-identities", "claude", "post-1a2b3c4d");
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "identity.md"), text);
-  return {
-    XDG_DATA_HOME: data,
-    POST_HARNESS: "claude",
-    POST_REPO_KEY: "post-1a2b3c4d",
-  };
-}
-
-test("SessionStart injects the identity card even with an empty inbox", () => {
-  setStub({ events: [] });
-  const out = run(
-    { hook_event_name: "SessionStart", session_id: "card-empty" },
-    { stateDir: freshStateDir(), env: cardEnv() }
-  );
-  assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
-  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card stored/);
+test("SessionStart with an old binary emits only the repair line", () => {
+  const stateDir = freshStateDir();
+  setStub({ version: { ok: true, version: "0.9.0", build_sha: "legacy", store_version: 1, capabilities: [] }, events: [MAIL_A] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "cap-missing" }, { stateDir });
+  assert.deepEqual(out, {
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext:
+        "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post",
+    },
+  });
+  assert.deepEqual(allStubCalls().at(-1).args, ["version", "--json"]);
 });
 
-test("the card never rides UserPromptSubmit or an unlaunched session", () => {
+test("version probe failures are distinguished from missing capabilities", () => {
+  const stateDir = freshStateDir();
+  setStub({ version: "not-json", events: [MAIL_A] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "probe-failure" }, { stateDir });
+  assert.match(out.hookSpecificOutput.additionalContext, /could not verify installed post capabilities/);
+  assert.ok(!out.hookSpecificOutput.additionalContext.includes("lacks the participants capability"));
+  assert.equal(allStubCalls().at(-1).args[0], "version");
+});
+
+test("SessionStart binds before snapshot with the session cwd", () => {
+  const stateDir = freshStateDir();
   setStub({ events: [] });
-  const prompt = run(
-    { hook_event_name: "UserPromptSubmit", session_id: "card-prompt" },
-    { stateDir: freshStateDir(), env: cardEnv() }
-  );
-  assert.deepEqual(prompt, {});
-  const unlaunched = run(
-    { hook_event_name: "SessionStart", session_id: "card-nolaunch" },
-    { stateDir: freshStateDir() }
-  );
-  assert.deepEqual(unlaunched, {});
+  const before = allStubCalls().length;
+  run({ hook_event_name: "SessionStart", session_id: "bind-order" }, { stateDir });
+  const calls = allStubCalls().slice(before);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["version", "--json"],
+    ["participant", "bind", "--harness", "codex", "--key", "bind-order", "--json"],
+    ["watch", "--snapshot"],
+    ["participant", "show", "--json"],
+  ]);
+  assert.ok(calls.every((call) => call.cwd === fs.realpathSync(CWD)));
+});
+
+test("unaffiliated participant gets no identity text", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage: null } } });
+  assert.deepEqual(run({ hook_event_name: "SessionStart", session_id: "unaffiliated" }, { stateDir }), {});
+});
+
+test("affiliated participant gets exactly one identity line", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage: "ember" } } });
+  const out = run({ hook_event_name: "SessionStart", session_id: "affiliated" }, { stateDir });
+  assert.equal(out.hookSpecificOutput.additionalContext, "[post] participant codex-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices");
+});
+
+test("payload session key mints and reuses one participant across lifecycle events", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { CODEX_THREAD_ID: "outer-key", CODEX_SESSION_ID: "outer-key" } });
+  const first = allStubCalls();
+  const participant = first.find((call) => call.args[0] === "participant" && call.args[1] === "bind");
+  assert.deepEqual(participant.args.slice(2), ["--harness", "codex", "--key", "payload-key", "--json"]);
+  const id = first.find((call) => call.args[0] === "watch").participant;
+  assert.equal(id, "test-participant");
+  setStub({ events: [] });
+  run({ hook_event_name: "UserPromptSubmit", session_id: "payload-key" }, { stateDir, env: { CODEX_THREAD_ID: "different-native-key", CODEX_SESSION_ID: "different-native-key" } });
+  assert.equal(allStubCalls().at(-1).participant, id);
+});
+
+test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "codex-9922f537" } });
+  const calls = allStubCalls();
+  assert.deepEqual(calls[1].args, ["participant", "bind", "--json"]);
+  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "codex-9922f537");
+});
+
+test("conflicting explicit participant does not silently override the payload key", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [MAIL_A] });
+  const out = run({ hook_event_name: "SessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "codex-other" } });
+  assert.match(out.hookSpecificOutput.additionalContext, /conflicts with this hook session key/);
+  assert.deepEqual(allStubCalls(), []);
+});
+
+test("bind failure emits one setup diagnostic and leaves state retryable", () => {
+  for (const [index, bind_stdout] of [
+    "not-json",
+    JSON.stringify({ ok: false, status: "unbound" }),
+    JSON.stringify({ ok: true, status: "bound", id: "" }),
+  ].entries()) {
+    const stateDir = freshStateDir();
+    const sessionId = `bind-failure-${index}`;
+    setStub({ events: [MAIL_A], bind_stdout });
+    const failed = run({ hook_event_name: "SessionStart", session_id: sessionId }, { stateDir });
+    assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
+    assert.equal(fs.existsSync(path.join(stateDir, `session-${sessionId}.json`)), false);
+    assert.equal(allStubCalls().at(-1).args[0], "participant");
+    setStub({ events: [] });
+    assert.deepEqual(run({ hook_event_name: "SessionStart", session_id: sessionId }, { stateDir }), {});
+  }
+});
+
+test("lineage names are shell-quoted in the voice command", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage: "Ember Grove!" } } });
+  const out = run({ hook_event_name: "SessionStart", session_id: "quoted-lineage" }, { stateDir });
+  assert.match(out.hookSpecificOutput.additionalContext, /post identity show 'Ember Grove!' --voices/);
+});
+
+test("long affiliated lineage omits a truncated executable command", () => {
+  const stateDir = freshStateDir();
+  const lineage = "x".repeat(255);
+  setStub({ events: [], show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage } } });
+  const out = run({ hook_event_name: "SessionStart", session_id: "long-lineage" }, { stateDir });
+  const line = out.hookSpecificOutput.additionalContext;
+  assert.match(line, /voices on request: post identity show --help$/);
+  assert.ok(!line.includes("--voices"));
+  assert.ok(Buffer.byteLength(line, "utf8") <= 256);
+});
+
+test("SessionStart still reads affiliation when snapshot fails", () => {
+  const stateDir = freshStateDir();
+  setStub({ exit: 1, show: { ok: true, status: "bound", id: "codex-abc12345", participant: { id: "codex-abc12345", lineage: "ember" } } });
+  const out = run({ hook_event_name: "SessionStart", session_id: "show-on-failure" }, { stateDir });
+  assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
+  assert.match(out.hookSpecificOutput.additionalContext, /continuing lineage ember/);
+  assert.equal(allStubCalls().at(-1).args[0], "participant");
+});
+
+test("release binary binds from payload keys and reuses the participant later", () => {
+  const proofRoot = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-real-proof-"));
+  try {
+    const cwd = path.join(proofRoot, "session");
+    const mailRoot = path.join(proofRoot, "mail");
+    const stateDir = path.join(proofRoot, "state");
+    fs.mkdirSync(cwd, { recursive: true });
+    const repoRoot = path.resolve(path.dirname(ADAPTER), "../../..");
+    const releaseBin = execFileSync(
+      process.execPath,
+      [path.join(repoRoot, "scripts", "cargo-release-bin.mjs")],
+      { encoding: "utf8" }
+    ).trim();
+    assert.ok(fs.existsSync(releaseBin), `release binary missing: ${releaseBin}`);
+    const callsPath = path.join(proofRoot, "post-calls.jsonl");
+    const wrapper = path.join(proofRoot, "post-wrapper.mjs");
+    fs.writeFileSync(
+      wrapper,
+      [
+        "#!/usr/bin/env node",
+        'import fs from "node:fs";',
+        'import { spawnSync } from "node:child_process";',
+        `const real = ${JSON.stringify(releaseBin)};`,
+        `const calls = ${JSON.stringify(callsPath)};`,
+        'const args = process.argv.slice(2);',
+        'fs.appendFileSync(calls, JSON.stringify({ args, participant: process.env.POST_PARTICIPANT || null }) + "\\n");',
+        'const result = spawnSync(real, args, { stdio: "inherit", env: process.env });',
+        'if (result.error) { console.error(result.error); process.exit(1); }',
+        'process.exit(result.status ?? 1);',
+        "",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    const cleanEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      POST_CODEX_HOOK_BIN: wrapper,
+      POST_CODEX_HOOK_STATE_DIR: stateDir,
+      POST_MAIL_ROOT: mailRoot,
+    };
+    const invoke = (payload, extraEnv = {}) => {
+      const result = spawnSync(process.execPath, [ADAPTER], {
+        input: JSON.stringify(payload),
+        encoding: "utf8",
+        env: { ...cleanEnv, ...extraEnv },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    invoke({ hook_event_name: "SessionStart", session_id: "payload-alpha", cwd });
+    const participantsDir = path.join(mailRoot, "participants");
+    const participantIds = () => fs.readdirSync(participantsDir).filter((entry) => entry.startsWith("codex-"));
+    const idsAfterAlpha = participantIds();
+    assert.equal(idsAfterAlpha.length, 1);
+    const alphaId = idsAfterAlpha[0];
+    invoke(
+      { hook_event_name: "SessionStart", session_id: "payload-beta", cwd },
+      { CODEX_THREAD_ID: "inherited-outer", CODEX_SESSION_ID: "inherited-outer" }
+    );
+    assert.equal(participantIds().length, 2);
+    invoke(
+      { hook_event_name: "UserPromptSubmit", session_id: "payload-alpha", cwd },
+      { CODEX_THREAD_ID: "another-native-key", CODEX_SESSION_ID: "another-native-key" }
+    );
+    invoke(
+      { hook_event_name: "SessionStart", session_id: "payload-alpha", cwd },
+      { POST_PARTICIPANT: alphaId }
+    );
+    assert.equal(participantIds().length, 2, "explicit participant must not mint a third record");
+    const callLog = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const alphaUses = callLog.filter((call) => call.participant === alphaId);
+    assert.ok(alphaUses.some((call) => call.args[0] === "watch"));
+    assert.ok(alphaUses.some((call) => call.args[0] === "participant" && call.args[1] === "show"));
+  } finally {
+    fs.rmSync(proofRoot, { recursive: true, force: true });
+  }
+});
+
+test("unsupported participant touch emits one bounded warning", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], touch_exit: 1 });
+  const first = run({ hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
+  assert.match(first.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
+  const second = run({ hook_event_name: "UserPromptSubmit", session_id: "touch-warning" }, { stateDir });
+  assert.deepEqual(second, {});
+});
+
+test("normal events share one absolute deadline across touch and snapshot", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id: "deadline-session" }, { stateDir });
+  setStub({ events: [], sleep_ms: 3000 });
+  const started = Date.now();
+  const out = run({ hook_event_name: "UserPromptSubmit", session_id: "deadline-session" }, { stateDir });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 5500, `event exceeded aggregate deadline: ${elapsed}ms`);
+  assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
+});
+
+test("an unthrottled PostToolUse shares the same absolute deadline", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id: "post-tool-deadline" }, { stateDir });
+  setStub({ events: [], sleep_ms: 3000 });
+  const started = Date.now();
+  const out = run({ hook_event_name: "PostToolUse", session_id: "post-tool-deadline" }, { stateDir, throttleMs: 0 });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 5500, `PostToolUse exceeded aggregate deadline: ${elapsed}ms`);
+  assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
 });

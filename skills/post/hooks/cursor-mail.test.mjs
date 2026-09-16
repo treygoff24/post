@@ -23,13 +23,18 @@ fs.writeFileSync(
   [
     "#!/usr/bin/env node",
     'import fs from "node:fs";',
-    'fs.appendFileSync(process.env.STUB_CALLS, process.cwd() + "\\n");',
+    'fs.appendFileSync(process.env.STUB_CALLS, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), participant: process.env.POST_PARTICIPANT || null }) + "\\n");',
     'const control = JSON.parse(fs.readFileSync(process.env.STUB_CONTROL, "utf8"));',
-    "if (control.stdout) process.stdout.write(control.stdout);",
+    'const args = process.argv.slice(2);',
+    'let output = control.stdout ?? "";',
+    'if (args[0] === "version") output = JSON.stringify(control.version ?? { ok: true, capabilities: ["participants"] }) + "\\n";',
+    'else if (args[0] === "participant" && args[1] === "show") output = JSON.stringify(control.show ?? { ok: true, status: "unbound" }) + "\\n";',
+    'else if (args[0] === "participant" && args[1] === "bind") output = control.bind_stdout ?? JSON.stringify({ ok: true, status: "bound", id: process.env.POST_PARTICIPANT || "test-participant", participant: { id: process.env.POST_PARTICIPANT || "test-participant", lineage: null } }) + "\\n";',
+    'if (output) process.stdout.write(output);',
     // Natural exit when the control exit is 0: process.exit() would drop
     // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
     // 64 KiB pipe buffer), truncating the snapshot mid-line.
-    "const exit = control.exit ?? 0;",
+    "const exit = args[0] === \"participant\" && args[1] === \"bind\" ? (control.bind_exit ?? 0) : args[0] === \"participant\" && args[1] === \"touch\" ? (control.touch_exit ?? 0) : args[0] === \"participant\" && args[1] === \"end\" ? (control.end_exit ?? 0) : args[0] === \"watch\" ? (control.exit ?? 0) : 0;",
     "if (exit) process.exit(exit);",
     "",
   ].join("\n")
@@ -49,18 +54,21 @@ function freshStateDir() {
   return dir;
 }
 
-function setStub({ exit = 0, events = [], stdout } = {}) {
+function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit } = {}) {
   stdout ??=
     events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
-  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout }));
+  fs.writeFileSync(CONTROL, JSON.stringify({ exit, stdout, version, show, bind_stdout, bind_exit, touch_exit, end_exit }));
 }
 
-function stubCalls() {
+function allStubCalls() {
   try {
-    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean);
+    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
+}
+function stubCalls() {
+  return allStubCalls().filter((call) => call.args[0] === "watch").map((call) => call.cwd);
 }
 
 function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
@@ -74,11 +82,6 @@ function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
       POST_CURSOR_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
-      // Hermetic against the developer shell: a live agent-session launch
-      // exports POST_HARNESS/POST_REPO_KEY, which must not leak a real
-      // identity card into tests. Card tests re-add them via extraEnv.
-      POST_HARNESS: "",
-      POST_REPO_KEY: "",
       ...extraEnv,
     },
   });
@@ -97,6 +100,9 @@ const MAIL_A = {
   sent: "2026-07-30 01:01:01 -0500",
   reason: "mail",
 };
+const TYPED_PARTICIPANT = { ...MAIL_A, room: undefined, id: "20260730-010101-abc111", address: { kind: "participant", name: "cursor-abc123456789" } };
+const TYPED_LINEAGE = { ...MAIL_A, room: undefined, id: "20260730-010101-abc112", address: { kind: "lineage", name: "Ember Grove!" } };
+const TYPED_WORKSPACE = { ...MAIL_A, room: "tower", id: "20260730-010101-abc113", address: { kind: "workspace", name: "tower" } };
 
 test("unreadable channels use distinct current keys; legacy identity is not acknowledged", () => {
   const stateDir = freshStateDir();
@@ -175,13 +181,13 @@ test("channel-only snapshot names the channels, not a phantom mail room", () => 
   assert.ok(!context.includes("secret-peer"));
 });
 
-test("empty snapshot emits {}", () => {
+test("empty snapshot emits the fresh binding line", () => {
   setStub({ events: [] });
   const out = run(
     { ...BASE, hook_event_name: "sessionStart", session_id: "s-empty" },
     { stateDir: freshStateDir() }
   );
-  assert.deepEqual(out, {});
+  assert.equal(out.additional_context, "[post] participant test-participant; prefix Post commands with POST_PARTICIPANT=test-participant");
 });
 
 test("SessionStart surfaces the launch backlog with metadata only", () => {
@@ -202,6 +208,30 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.ok(!context.includes("SECRET"), "subject must be omitted");
   assert.ok(!context.includes("secret-sender"), "sender must be omitted");
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
+});
+
+test("typed 12-hex participant, lineage, and workspace addresses render without poisoning valid siblings", () => {
+  const stateDir = freshStateDir();
+  const malformed = { ...TYPED_PARTICIPANT, id: "20260730-010101-abc114", address: { kind: "participant", name: "BAD" } };
+  const malformedColon = { ...TYPED_LINEAGE, id: "20260730-010101-abc116", address: { kind: "lineage", name: "bad:name" } };
+  const malformedControl = { ...TYPED_LINEAGE, id: "20260730-010101-abc117", address: { kind: "lineage", name: "bad\u0001name" } };
+  setStub({ events: [TYPED_PARTICIPANT, TYPED_LINEAGE, TYPED_WORKSPACE, malformed, malformedColon, malformedControl, MAIL_A] });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "typed-addresses" }, { stateDir });
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /direct to you/);
+  assert.match(context, /lineage Ember Grove!/);
+  assert.match(context, /room tower/);
+  assert.match(context, /20260730-010101-abc111/);
+  assert.doesNotMatch(context, /abc114|abc116|abc117/);
+});
+
+test("pending typed events render as pending rather than unread", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [{ ...TYPED_PARTICIPANT, id: "20260730-010101-abc115", pending: true }] });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "typed-pending" }, { stateDir });
+  const context = out.additional_context;
+  assert.match(context, /Pending/);
+  assert.doesNotMatch(context, /Unread agent mail/);
 });
 
 test("the snapshot runs from the hook's cwd with no --room pin", () => {
@@ -719,40 +749,112 @@ test("a closed stdout leaves fresh events and failure eligibility intact", async
   );
 });
 
-// ---- identity card (M5) ----
-
-function cardEnv(text = "I keep this room's letters.\n") {
-  const data = fs.mkdtempSync(path.join(ROOT, "cards-"));
-  const dir = path.join(data, "agent-identities", "claude", "post-1a2b3c4d");
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "identity.md"), text);
-  return {
-    XDG_DATA_HOME: data,
-    POST_HARNESS: "claude",
-    POST_REPO_KEY: "post-1a2b3c4d",
-  };
-}
-
-test("sessionStart injects the identity card even with an empty inbox", () => {
-  setStub({ events: [] });
-  const out = run(
-    { ...BASE, hook_event_name: "sessionStart", session_id: "card-empty" },
-    { stateDir: freshStateDir(), env: cardEnv() }
-  );
-  assert.equal(out.hookSpecificOutput.hookEventName, "sessionStart");
-  assert.match(out.hookSpecificOutput.additionalContext, /^\[post\] Identity card stored/);
+test("sessionStart with an old binary emits only the repair line", () => {
+  const stateDir = freshStateDir();
+  setStub({ version: { ok: true, version: "0.9.0", build_sha: "legacy", store_version: 1, capabilities: [] }, events: [MAIL_A] });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "cap-missing" }, { stateDir });
+  assert.equal(out.additional_context, "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post");
+  assert.equal(out.hookSpecificOutput.additionalContext, out.additional_context);
+  assert.equal(allStubCalls().at(-1).args[0], "version");
 });
 
-test("the card never rides beforeSubmitPrompt or an unlaunched session", () => {
+test("sessionStart binds before snapshot with the session cwd", () => {
+  const stateDir = freshStateDir();
   setStub({ events: [] });
-  const prompt = run(
-    { ...BASE, hook_event_name: "beforeSubmitPrompt", session_id: "card-prompt" },
-    { stateDir: freshStateDir(), env: cardEnv() }
-  );
-  assert.deepEqual(prompt, {});
-  const unlaunched = run(
-    { ...BASE, hook_event_name: "sessionStart", session_id: "card-nolaunch" },
-    { stateDir: freshStateDir() }
-  );
-  assert.deepEqual(unlaunched, {});
+  const before = allStubCalls().length;
+  run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-order" }, { stateDir });
+  const calls = allStubCalls().slice(before);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["version", "--json"],
+    ["participant", "bind", "--harness", "cursor", "--key", "bind-order", "--json"],
+    ["watch", "--snapshot"],
+    ["participant", "show", "--json"],
+  ]);
+  assert.ok(calls.every((call) => call.cwd === fs.realpathSync(CWD)));
+});
+
+test("unaffiliated participant gets a neutral binding line", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } } });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "unaffiliated" }, { stateDir });
+  assert.equal(out.additional_context, "[post] participant cursor-abc12345; prefix Post commands with POST_PARTICIPANT=cursor-abc12345");
+});
+
+test("affiliated participant gets binding and identity lines", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "ember" } } });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "affiliated" }, { stateDir });
+  assert.equal(out.additional_context, "[post] participant cursor-abc12345; prefix Post commands with POST_PARTICIPANT=cursor-abc12345\n[post] participant cursor-abc12345, continuing lineage ember; voices on request: post identity show 'ember' --voices");
+});
+
+test("setup retry emits the binding line again", () => {
+  const stateDir = freshStateDir();
+  setStub({ exit: 1, bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-retry123", participant: { id: "cursor-retry123", lineage: null } }) });
+  const failed = run({ ...BASE, hook_event_name: "sessionStart", session_id: "retry-binding" }, { stateDir });
+  assert.match(failed.additional_context, /UNKNOWN/);
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-retry123", participant: { id: "cursor-retry123", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-retry123", participant: { id: "cursor-retry123", lineage: null } } });
+  const recovered = run({ ...BASE, hook_event_name: "sessionStart", session_id: "retry-binding" }, { stateDir });
+  assert.equal(recovered.additional_context, "[post] participant cursor-retry123; prefix Post commands with POST_PARTICIPANT=cursor-retry123");
+});
+
+test("payload session key mints and reuses one participant across lifecycle events", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [] });
+  run({ ...BASE, hook_event_name: "sessionStart", session_id: "payload-key" }, { stateDir, env: { CODEX_THREAD_ID: "outer-key" } });
+  const first = allStubCalls();
+  const participant = first.find((call) => call.args[0] === "participant" && call.args[1] === "bind");
+  assert.deepEqual(participant.args.slice(2), ["--harness", "cursor", "--key", "payload-key", "--json"]);
+  const id = first.find((call) => call.args[0] === "watch").participant;
+  setStub({ events: [] });
+  run({ ...BASE, hook_event_name: "beforeSubmitPrompt", session_id: "payload-key" }, { stateDir, env: { CODEX_THREAD_ID: "different-native-key" } });
+  assert.equal(allStubCalls().at(-1).participant, id);
+});
+
+test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
+  const stateDir = freshStateDir();
+  fs.writeFileSync(CALLS, "");
+  setStub({ events: [] });
+  run({ ...BASE, hook_event_name: "sessionStart", session_id: "payload-key" }, { stateDir, env: { POST_PARTICIPANT: "cursor-9922f537" } });
+  const calls = allStubCalls();
+  assert.deepEqual(calls[1].args, ["participant", "bind", "--json"]);
+  assert.equal(calls.find((call) => call.args[0] === "watch").participant, "cursor-9922f537");
+});
+
+test("bind failure emits one setup diagnostic and leaves state retryable", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
+  const failed = run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-failure" }, { stateDir });
+  assert.match(failed.additional_context, /participant setup failed/);
+  assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
+  setStub({ events: [] });
+  assert.match(run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-failure" }, { stateDir }).additional_context, /prefix Post commands with POST_PARTICIPANT=test-participant/);
+});
+
+test("lineage names are shell-quoted in the voice command", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: "Ember Grove!" } } });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "quoted-lineage" }, { stateDir });
+  assert.match(out.additional_context, /post identity show 'Ember Grove!' --voices/);
+});
+
+test("long affiliated lineage omits a truncated executable command", () => {
+  const stateDir = freshStateDir();
+  const lineage = "x".repeat(255);
+  setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage: null } }), show: { ok: true, status: "bound", id: "cursor-abc12345", participant: { id: "cursor-abc12345", lineage } } });
+  const out = run({ ...BASE, hook_event_name: "sessionStart", session_id: "long-lineage" }, { stateDir });
+  const lines = out.additional_context.split("\n");
+  assert.equal(lines[0], "[post] participant cursor-abc12345; prefix Post commands with POST_PARTICIPANT=cursor-abc12345");
+  assert.match(lines[1], /voices on request: post identity show --help$/);
+  assert.ok(!lines[1].includes("--voices"));
+  assert.ok(Buffer.byteLength(lines[1], "utf8") <= 256);
+});
+
+test("unsupported participant touch emits one bounded warning", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [], touch_exit: 1 });
+  const first = run({ ...BASE, hook_event_name: "beforeSubmitPrompt", session_id: "touch-warning" }, { stateDir });
+  assert.match(first.additional_context, /participant lifecycle update unavailable/);
+  const second = run({ ...BASE, hook_event_name: "beforeSubmitPrompt", session_id: "touch-warning" }, { stateDir });
+  assert.deepEqual(second, {});
 });

@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import { stableNodePath } from "./stable-node-path.mjs";
 
@@ -265,70 +265,62 @@ test("atomic writes refuse a planted predictable legacy temp symlink", () => {
   assert.deepEqual(fs.readFileSync(ADAPTER, "utf8"), fs.readFileSync(SOURCE, "utf8"));
 });
 
-test("installed adapter executes standalone and injects a card (M5 helper ships alongside)", () => {
+test("installer and installed adapter no longer reference identity-card.mjs", () => {
   const target = freshTarget();
-  const installed = run(target);
-  assert.equal(installed.status, 0, installed.stderr);
-  const helper = path.join(INSTALL_DIR, "identity-card.mjs");
-  assert.ok(fs.existsSync(helper), "identity-card.mjs must install beside the adapter");
-
-  const data = fs.mkdtempSync(path.join(ROOT, "cards-"));
-  const dir = path.join(data, "agent-identities", "claude", "post-1a2b3c4d");
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "identity.md"), "installed card\n");
-
-  // Execute the INSTALLED copy, not the source adapter: empty mail (stub
-  // prints no events) plus a card must inject the card context.
-  const result = spawnSync(process.execPath, [ADAPTER], {
-    input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "installed", cwd: ROOT }),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      POST_CODEX_HOOK_BIN: GOOD_POST,
-      POST_CODEX_HOOK_STATE_DIR: path.join(ROOT, "installed-state"),
-      XDG_DATA_HOME: data,
-      POST_HARNESS: "claude",
-      POST_REPO_KEY: "post-1a2b3c4d",
-    },
-  });
-  assert.equal(result.status, 0, `installed adapter must run standalone: ${result.stderr}`);
-  const out = JSON.parse(result.stdout);
-  assert.match(out.hookSpecificOutput.additionalContext, /Identity card stored/);
-  assert.match(out.hookSpecificOutput.additionalContext, /installed card/);
+  const result = run(target);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(path.join(INSTALL_DIR, "identity-card.mjs")), false);
+  assert.ok(!fs.readFileSync(path.join(INSTALL_DIR, path.basename(ADAPTER)), "utf8").includes("identity-card.mjs"));
+  assert.ok(!fs.readFileSync(INSTALLER, "utf8").includes("identity-card.mjs"));
 });
 
-test("a failed helper copy leaves the prior adapter bytes untouched (upgrade cannot brick)", () => {
-  // Fresh private dir simulating an EXISTING pre-M5 install: an old runnable
-  // adapter, and the helper path blocked by a directory so the helper copy
-  // fails. Dependency ordering means the installer must die BEFORE touching
-  // the adapter.
-  const installDir = fs.mkdtempSync(path.join(ROOT, "upgrade-"));
-  const adapterPath = path.join(installDir, path.basename(ADAPTER));
-  const oldAdapter = "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({}));\n";
-  fs.writeFileSync(adapterPath, oldAdapter, { mode: 0o755 });
-  fs.mkdirSync(path.join(installDir, "identity-card.mjs"));
-
-  const target = freshTarget();
-  const result = spawnSync(process.execPath, [INSTALLER, target], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      POST_CODEX_HOOK_INSTALL_DIR: installDir,
-      POST_CODEX_HOOK_BIN: GOOD_POST,
-    },
-  });
-  assert.notEqual(result.status, 0, "blocked helper copy must fail the install");
-  assert.equal(
-    fs.readFileSync(adapterPath, "utf8"),
-    oldAdapter,
-    "the prior adapter must not be replaced after a failed helper copy"
-  );
-  const rerun = spawnSync(process.execPath, [adapterPath], {
-    input: "{}",
-    encoding: "utf8",
-    timeout: 5000,
-  });
-  assert.equal(rerun.status, 0, "the prior adapter must still execute");
+test("installed adapter copy runs end-to-end with the release CLI", () => {
+  const releaseBin = execFileSync(
+    process.execPath,
+    [path.join(DIR, "../../../scripts/cargo-release-bin.mjs")],
+    { encoding: "utf8" }
+  ).trim();
+  assert.ok(fs.existsSync(releaseBin), `release binary missing: ${releaseBin}`);
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-installed-proof-"));
+  try {
+    const runtimeHome = path.join(runtimeRoot, "home");
+    const runtimeInstallDir = path.join(runtimeHome, ".codex", "hooks");
+    const target = path.join(runtimeRoot, "hooks.json");
+    const installed = spawnSync(process.execPath, [INSTALLER, target], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        POST_CODEX_HOOK_INSTALL_DIR: runtimeInstallDir,
+        POST_CODEX_HOOK_BIN: releaseBin,
+      },
+    });
+    assert.equal(installed.status, 0, installed.stderr);
+    const installedAdapter = path.join(runtimeInstallDir, "post-codex-mail.mjs");
+    assert.ok(fs.existsSync(installedAdapter));
+    assert.ok(!fs.readFileSync(installedAdapter, "utf8").includes("identity-card.mjs"));
+    const cwd = path.join(runtimeRoot, "workspace");
+    const mailRoot = path.join(runtimeRoot, "mail");
+    const stateDir = path.join(runtimeRoot, "state");
+    fs.mkdirSync(cwd, { recursive: true });
+    const result = spawnSync(process.execPath, [installedAdapter], {
+      input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "installed-proof", cwd }),
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        HOME: runtimeHome,
+        POST_CODEX_HOOK_BIN: releaseBin,
+        POST_CODEX_HOOK_STATE_DIR: stateDir,
+        POST_MAIL_ROOT: mailRoot,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {});
+    const participantDirs = fs.readdirSync(path.join(mailRoot, "participants"))
+      .filter((entry) => entry.startsWith("codex-"));
+    assert.equal(participantDirs.length, 1);
+  } finally {
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  }
 });
 
 test("the emitted node path is upgrade-durable, not version-pinned", () => {
