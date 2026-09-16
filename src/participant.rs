@@ -1299,11 +1299,11 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_lease_boundary_legacy_and_end_are_explicit() {
+    fn lifecycle_lease_boundary_missing_record_and_end_are_explicit() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let inside = lifecycle_participant(Some("2023-11-13T22:13:21Z"), 24, None);
         let outside = lifecycle_participant(Some("2023-11-13T22:13:19Z"), 24, None);
-        let legacy = lifecycle_participant(None, 24, None);
+        let missing_lease = lifecycle_participant(None, 24, None);
         let ended = lifecycle_participant(
             Some("2023-11-14T22:13:20Z"),
             24,
@@ -1311,7 +1311,8 @@ mod tests {
         );
         assert!(inside.is_active(now));
         assert!(!outside.is_active(now));
-        assert!(legacy.is_active(now), "legacy records remain active");
+        assert_eq!(missing_lease.state(now), super::ParticipantState::Stale);
+        assert!(!missing_lease.is_active(now));
         assert!(!ended.is_active(now));
     }
 
@@ -1325,14 +1326,21 @@ mod tests {
     }
 
     #[test]
-    fn list_active_filters_stale_and_ended_without_dropping_legacy() {
+    fn list_active_requires_a_current_lease_record() {
         let root = test_root("participant-list-active");
         let context = Context {
             root: root.clone(),
             home: root.clone(),
         };
         for (id, lifecycle) in [
-            ("test-legacy", serde_json::json!({})),
+            ("test-missing-lease", serde_json::json!({})),
+            (
+                "test-active",
+                serde_json::json!({
+                    "last_seen": "2099-01-01T00:00:00Z",
+                    "lease_hours": 24
+                }),
+            ),
             (
                 "test-stale",
                 serde_json::json!({
@@ -1373,7 +1381,7 @@ mod tests {
             .into_iter()
             .map(|participant| participant.id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["test-legacy"]);
+        assert_eq!(ids, vec!["test-active"]);
         trash_test_root(&root);
     }
 }
