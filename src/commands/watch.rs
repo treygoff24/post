@@ -715,7 +715,7 @@ fn touch_admitted_heartbeats(
     targets: &[WatchTarget],
     interval_ms: u64,
     warned_failures: &mut HashSet<String>,
-) {
+) -> usize {
     let warnings = touch_admitted_heartbeats_with(
         context,
         targets,
@@ -723,12 +723,14 @@ fn touch_admitted_heartbeats(
         warned_failures,
         |participant| crate::participant::touch(context, participant).map(|_| ()),
     );
+    let warning_count = warnings.len();
     for error in warnings {
         eprintln!(
             "post: warning: participant activity refresh failed (watch continues): {}",
             error.message
         );
     }
+    warning_count
 }
 
 fn touch_admitted_heartbeats_with(
@@ -1755,6 +1757,57 @@ mod tests {
             touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
                 .len(),
             1
+        );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn production_touch_wrapper_preserves_warning_episode_state() {
+        let root = crate::test_support::test_root("watch-touch-wrapper-warning-episodes");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let record = participant.dir.join("participant.json");
+        let valid_record = fs::read(&record).expect("read valid participant record");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant),
+            address: None,
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut warned = HashSet::new();
+
+        fs::write(&record, b"{corrupt").expect("corrupt participant record");
+        assert_eq!(
+            touch_admitted_heartbeats(&context, &targets, 100, &mut warned),
+            1,
+            "first wrapper failure must warn"
+        );
+        assert_eq!(
+            touch_admitted_heartbeats(&context, &targets, 100, &mut warned),
+            0,
+            "same wrapper failure episode must stay quiet"
+        );
+
+        fs::write(&record, &valid_record).expect("restore participant record");
+        assert_eq!(
+            touch_admitted_heartbeats(&context, &targets, 100, &mut warned),
+            0,
+            "successful wrapper refresh must reset the episode"
+        );
+        fs::write(&record, b"{corrupt-again").expect("corrupt participant record again");
+        assert_eq!(
+            touch_admitted_heartbeats(&context, &targets, 100, &mut warned),
+            1,
+            "a later wrapper failure episode must warn again"
         );
         crate::test_support::trash_test_root(&root);
     }

@@ -5,7 +5,7 @@
 //! consuming callers migrate to Delta directly.
 
 use crate::cursor_state;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{atomic_replace, Context};
 use crate::model::BlockingRule;
 use crate::participant::Participant;
@@ -234,12 +234,13 @@ pub(crate) fn participants_for_join_validation(
         let participant = match crate::participant::load(context, &id) {
             Ok(Some(participant)) => participant,
             Ok(None) => {
-                let path = entry.path().join("participant.json");
+                let participant_dir = entry.path();
                 if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
-                    return Err(crate::error::AppError::config(
-                        &path,
+                    return Err(invalid_join_participant_record(
+                        &id,
+                        &participant_dir,
                         format!(
-                            "participant record is missing, so membership in channel '{channel}' cannot be validated against a blocked route; restore or remove the record, then retry"
+                            "participant record is missing, so membership in channel '{channel}' cannot be validated against a blocked route"
                         ),
                     ));
                 }
@@ -249,11 +250,13 @@ pub(crate) fn participants_for_join_validation(
                 continue;
             }
             Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                let participant_dir = entry.path();
                 if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
-                    return Err(crate::error::AppError::config(
-                        &entry.path().join("participant.json"),
+                    return Err(invalid_join_participant_record(
+                        &id,
+                        &participant_dir,
                         format!(
-                            "participant record cannot be validated for possible membership in channel '{channel}': {}; repair or remove the record, then retry",
+                            "participant record cannot be validated for possible membership in channel '{channel}': {}",
                             error.message
                         ),
                     ));
@@ -371,6 +374,30 @@ fn invalid_record_could_block(
                 || rule.from == actor.id
                 || rule.to == actor.id
         })
+}
+
+fn invalid_join_participant_record(
+    participant_id: &str,
+    participant_dir: &std::path::Path,
+    reason: impl Into<String>,
+) -> AppError {
+    let record = participant_dir.join("participant.json");
+    let reason = format!(
+        "participant '{participant_id}': {}; participant record path is '{}'",
+        reason.into(),
+        record.display()
+    );
+    AppError::new(
+        ErrorCode::ConfigInvalid,
+        format!("configuration '{}' is invalid: {reason}", record.display()),
+        format!(
+            "Restore or repair participant.json at '{}' for participant '{}' (for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable), then retry.",
+            record.display(),
+            participant_id
+        ),
+    )
+    .path(record.display().to_string())
+    .reason(reason)
 }
 
 fn has_blocked_pair(
