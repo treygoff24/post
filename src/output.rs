@@ -844,7 +844,7 @@ impl WatchAddress {
     }
 }
 
-fn typed_watch_room(room: &String) -> bool {
+fn typed_watch_room(room: &str) -> bool {
     room.starts_with("participant:") || room.starts_with("lineage:")
 }
 

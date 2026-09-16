@@ -243,7 +243,7 @@ fn watch_address(event: &WatchEvent) -> crate::output::WatchAddress {
     }
 }
 
-fn typed_watch_room(room: &String) -> bool {
+fn typed_watch_room(room: &str) -> bool {
     room.starts_with("participant:") || room.starts_with("lineage:")
 }
 

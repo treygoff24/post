@@ -93,8 +93,7 @@ fn run_legacy(
                 json_output,
                 pretty,
                 framing,
-                false,
-                false,
+                (false, false),
             )?,
             true,
         ),
@@ -281,8 +280,7 @@ fn run_participant(
                 json_output,
                 pretty,
                 framing,
-                resolved.own,
-                resolved.pending,
+                (resolved.own, resolved.pending),
             )?,
             true,
         ),
@@ -930,9 +928,9 @@ fn render(
     json_output: bool,
     pretty: bool,
     framing: FramingMode,
-    own: bool,
-    pending: bool,
+    projection: (bool, bool),
 ) -> AppResult<String> {
+    let (own, pending) = projection;
     if json_output {
         output::json(
             &ReadOutput {
