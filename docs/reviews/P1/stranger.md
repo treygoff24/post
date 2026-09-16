@@ -41,6 +41,6 @@ Fix: Thread existing `args.subject`, `args.body`, and `args.body_file` into the 
 **Position: Error-with-exact-fix is the correct design.**
 
 Routing `post send --to '#channel'` directly into the channel send path would break core domain invariants:
-- **Flag semantics**: Direct mail carries `--kind` (`letter`, `note`, `signal`) and `--allow-self`, neither of which exists in channel storage. A router would have to silently discard `--kind`, violating the Kind preservation law. Conversely, channel sends enforce `crossed_send` unread guards, which `post send` has no flags (`--anyway`) to manage.
+- **Flag semantics**: Direct mail carries `--kind` (`letter`, `note`, `signal`) and formerly carried a self-mail opt-in control, neither of which exists in channel storage. A router would have to silently discard `--kind`, violating the Kind preservation law. Conversely, channel sends enforce `crossed_send` unread guards, which `post send` has no flags (`--anyway`) to manage.
 - **Identity invariants**: `post send` allows arbitrary `--from <alias>` from unregistered directories. Channel operations strictly require membership and CWD containment within a registered room. Transparent routing would either fail deeper in the stack on identity checks or create an unauthorized route into group state.
 - **Protocol honesty**: Clear refusal with `post chat <CHANNEL> --send` teaches the caller the real operational boundary immediately without masking channel consensus and cursor behaviors behind a point-to-point verb.

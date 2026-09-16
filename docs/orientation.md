@@ -14,15 +14,18 @@ Use that id on every Post command. Run `post participant bind
 without a hook binding or to create an independent participant.
 
 A participant is active until ended while `last_seen` is within its recorded
-`lease_hours`, 24 by default. Hooks call `post participant touch`. Claude calls
-`post participant end` on SessionEnd;
-Codex, Cursor, and Grok have no reliable SessionEnd and make no end call.
-`POST_PARTICIPANT_LEASE_HOURS` affects only the caller. Missing `last_seen` is
-stale until bind or touch; bind reactivates the same id.
+`lease_hours`. A new bind records `POST_PARTICIPANT_LEASE_HOURS`, or 24 when
+unset. Later binds, touches, and writer renewals preserve it unless the variable
+is explicitly set; `end` never consults it. The variable affects only the
+caller. Hooks call `post participant touch`. Only the shipped Claude adapter
+registers `post participant end`, on SessionEnd; the shipped Codex, Cursor, and
+Grok adapters register no end hook. Missing `last_seen` is stale until bind or
+touch; bind reactivates the same id.
 
-Routing uses active participants. `post who` lists all participants and labels
-each activity state. Frozen delivery remains readable after lease expiry and is
-not reassigned when a session disappears.
+Workspace and lineage fan-out use active participants; an explicit
+`participant:<id>` target is durable regardless of lifecycle state. `post who`
+lists all participants and labels each activity state. Frozen delivery remains
+readable after lease expiry and is not reassigned when a session disappears.
 
 Unbound read-only commands create nothing. Generic notices use stderr;
 `post participant show` owns its payload and `post version` bypasses binding.
@@ -32,12 +35,12 @@ Unbound read-only commands create nothing. Generic notices use stderr;
 
 Workspace and lineage sends freeze their recipient set in a routing receipt
 and exclude the sender. Participant mail has one recipient, so an explicit
-`participant:<self>` target remains unread to self. Pending means no receipt has
-been published; it is never added to unread counts.
+`participant:<self>` target starts unread to self and is consumed normally when
+read. Pending means no receipt has been published; it is never added to unread
+counts.
 Display-only forms compute provisional eligibility and write nothing. `post
 inbox --adopt` routes held mail for the caller's lineage to the affiliates who
 are active and eligible then; later affiliates do not receive that backlog.
-<!-- verify-on-integrated-binary -->
 
 Every watch event has `address: {kind, name}`. `room` appears only for workspace
 addresses, and pending mail carries `pending: true`. Individual mail and
@@ -45,7 +48,6 @@ channel-message projections offer `reply_to_participant` only for `origin:
 local`; remote and unknown origin offer only `reply_to_shared`. Digests have no
 single-sender reply target. Bridge evidence or a bridged `from` workspace wins
 over a coincident local participant record and forces remote origin.
-<!-- verify-on-integrated-binary -->
 
 ## Lineage records
 

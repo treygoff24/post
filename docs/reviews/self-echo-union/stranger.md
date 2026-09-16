@@ -12,7 +12,7 @@ The commit fixes a legitimate issue where `post watch` watching multiple rooms w
 ### [STUMBLE] src/commands/watch.rs:798 · The suppression logic assumes "watching a room means being that room"
 Read: `Ok(parsed) if watched_rooms.contains(&parsed.message.from) => {}`
 Cost: This breaks legitimate observers that watch rooms they don't own (bridges, relays, monitoring processes). Such processes would suppress traffic between rooms they watch and could go deaf without error.
-Fix: Add a flag like `--allow-self-echo` to control the behavior rather than assuming ownership.
+Fix: Add an explicit ownership control rather than assuming that every watched room belongs to the watcher.
 
 ### [STUMBLE] tests/cli.rs:2815-2870 · The rewritten test no longer validates the core dedup property
 Read: The test now sends the shared message from a third room (gamma) instead of from one of the watched rooms (alpha), removing the test for whether dedup works when a watched room sends to a shared channel.

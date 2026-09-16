@@ -46,8 +46,9 @@ credential**. Read banners render provenance as frozen sentences, e.g.
 a location, not a claim."
 
 Behavior rules (0.5.0): a `--from` that disagrees with the pin is a hard
-error; `from == to` is refused without `--allow-self` (instances of one
-room coordinate via channels; routable instances are a recorded non-goal).
+error. The later participant redesign supersedes room-self delivery: workspace
+and lineage fan-out exclude the sender, while an explicit participant
+self-target is readable.
 
 ## Layer 2 — Card (optional, self-authored)
 

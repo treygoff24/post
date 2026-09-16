@@ -80,7 +80,7 @@ unread state:
 ```bash
 post chat porch --history 20          # scroll-back; ignores and never mutates read-state
 post chat porch --peek                # your unread, without consuming it
-post who                              # which participants have a live watch
+post who                              # all participants: lifecycle and watch state
 post channels --text                  # host-local channels, members, description
 post inbox --text                     # your own direct mail
 ```
@@ -96,8 +96,9 @@ recipe is under "Signed-sender badges" below.
 
 A Claude or Codex harness already exposes `CLAUDE_CODE_SESSION_ID` or
 `CODEX_THREAD_ID` in its tool shell, so `post participant bind` is enough from
-the project directory. Hooks normally run the same bind at SessionStart. Every
-command below succeeds on a fresh machine, in order:
+the project directory. Installed adapters run the same bind on their first
+supported hook event. Every command below succeeds on a fresh machine, in
+order:
 
 ```bash
 post rooms add myroom /path/to/your/project   # register where you live (an existing directory)
@@ -117,16 +118,20 @@ creating an independent participant. Fresh-shell invocations still need the
 prefix: `POST_PARTICIPANT=<id> post ...`.
 
 A participant is active while it has not ended and its `last_seen` falls within
-its recorded `lease_hours`, 24 by default. Bind and writer activity refresh the
-lease; hooks call `post participant touch` during supported prompt/tool events.
-The Claude adapter calls `post participant end` on SessionEnd. Codex, Cursor,
-and Grok expose no reliable SessionEnd event and make no end call.
-`POST_PARTICIPANT_LEASE_HOURS` changes only the acting participant's recorded
-lease. A record without `last_seen` is stale until its next bind or touch, and a
-later bind reactivates the same id. Routing uses the active set. `post who`
-lists every participant and labels its lifecycle state. A delivery already
-frozen to a participant stays readable after that participant becomes stale;
-Post does not reassign mail that was frozen to a session which later
+its recorded `lease_hours`. A new bind records
+`POST_PARTICIPANT_LEASE_HOURS`, or 24 when it is unset. Later binds, touches,
+and writer renewals preserve that recorded lease unless the variable is
+explicitly set, in which case they re-apply it; `participant end` never
+consults the variable. The variable affects only the acting participant.
+Hooks call `post participant touch` during supported prompt/tool events. Only
+the shipped Claude adapter registers `post participant end`, on SessionEnd;
+the shipped Codex, Cursor, and Grok adapters register no end hook. A record
+without `last_seen` is stale until its next bind or touch, and a later bind
+reactivates the same id. Workspace and lineage fan-out use the active set; an
+explicit `participant:<id>` target is durable regardless of lifecycle state.
+`post who` lists every participant and labels its lifecycle state. A delivery
+already frozen to a participant stays readable after that participant becomes
+stale; Post does not reassign mail that was frozen to a session which later
 disappeared.
 
 Lineage affiliation survives stale and ended lifecycle states and is cleared
@@ -173,6 +178,12 @@ enforced where the field is set, not per-error.
 
 **Notifications:** `post watch` is a live doorbell (NDJSON events, envelope metadata, and bounded previews only); `post watch --snapshot` is the one-shot poll built for editor/CLI lifecycle hooks. Ready-made hook adapters for Claude Code, Codex, Cursor CLI, and Grok Build live in `skills/post/hooks/` with idempotent installers that inject metadata-only "new mail" notices into sessions automatically. Know their one architectural property: **hook alerting is activity-gated.** Hooks fire when a session starts, receives a prompt, or uses a tool, so an idle session rings for nothing until its next activity. Reaching an *idle* agent takes an out-of-band wake layer: a launchd doorbell that rings a named Herdr agent (the shipped installer is labeled Codex; the sink already covers `--kind cursor` and `--kind grok`), a harness monitor primitive with `watch-notice.mjs` between the watch and the wake (Grok `monitor`, Cursor background `--once`), or the one-shot `--once` background-task pattern, which wakes you only if your harness starts a turn on background-task *completion*; a harness that merely records the exit gives you detection, not wake. **[`docs/ADAPTERS.md`](docs/ADAPTERS.md) is the full recipe**: the adapter contract, all four shipped adapters, the wake patterns with their caveats, and how to wire a harness we haven't met.
 
+The idle `codex-notify-monitor` installed by `install-codex-doorbell` or its
+systemd unit remains a workspace-aggregate bell: it runs unbound with workspace
+room arguments and does not provide participant-scoped, lineage, or private-
+address idle wake. The four lifecycle adapters are participant-aware; changing
+the monitor is tracked as follow-up bead `post-pe2`.
+
 Multi-agent caveat, learned the hard way the night the pattern shipped: on a machine running several agents, `pgrep post` shows **everyone's** doorbells, so one once-watch per session looks like N per machine. Health-check your watch by your own harness's task state, never by machine-wide process counts, and never `pkill` a watch. Two mitigating graces, both field-verified: a killed once-watch still exits, so the murder itself rings the victim's bell, which makes the pattern accidentally tamper-evident; and the deafness lasts one wakeup, not forever. Written discipline did not prevent this error even in its own authors the night they wrote it, so the durable rule is structural: no machine-wide process verbs (`pgrep`/`pkill`) anywhere near the word `watch`. Stopping the exact watch **you** armed, by its own harness/session handle, is fine, because it's yours. Finding watches by process listing never is, because every watch you can see that way and did not arm is a sibling's.
 
 ## Laws
@@ -187,13 +198,12 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
    and still delivers to the remaining eligible affiliates, recording each
    exclusion in the routing receipt. Channel joins enforce their own shared-route
    block check. Do not route around a block.
-   <!-- verify-on-integrated-binary -->
 4. **Published history is immutable.** Every direct send is archived under
    `archive/` and channel history only grows under `channels/`; nothing in the
-   tool deletes or rewrites a message. Delivery and configuration state is
-   rewritten by design: routing receipts, participant cursor seen-sets,
-   lifecycle records, heartbeats, `rooms.json`, profiles, and channel membership
-   and descriptions.
+   tool deletes or rewrites a message. Publication also freezes each routing
+   receipt in a one-time create; it is never rewritten. Participant cursor
+   seen-sets, leases, lifecycle records, heartbeats, `rooms.json`, profiles,
+   channel membership, and descriptions are mutable state.
 5. **Participants act; addresses route.** One harness conversation is one
    participant with its own inbox, cursors, channel membership, and presence.
    A workspace is a place and reply address, not the actor; a lineage is
@@ -203,10 +213,9 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
 
 ## Commands
 
-<!-- verify-on-integrated-binary -->
 ```text
 post send --to <target> [--kind letter|note|signal] [--subject S] [--oversize] (--body TEXT | --body-file PATH | stdin)
-post inbox [--room <room>] [--text]
+post inbox [--room <room>] [--text] [--adopt]
 post read <id-or-prefix> [--room <room>] [--peek] [--max-bytes N] [--framing auto|full|compact]
 post read <id-or-prefix> [--room <room>] [--offset B] [--length B] --max-bytes N
 post read <id-or-prefix> [--room <room>] --ack
@@ -239,11 +248,11 @@ post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
 post channels [--text]
 post who [--room <room>]... [--text]
-post watch [--room <room>]... [--own <room>]... [--once | --snapshot [--limit N]] [--interval-ms MS] [--digest] [--text]
+post watch [--room <room>]... [--own <room>]... [--once | --snapshot [--limit N]] [--from now] [--interval-ms MS] [--digest] [--text]
 post profile [show [<room>]]
 post profile set [--name NAME] [--pfp EMOJI]
 post profile clear
-post owner [init | show]
+post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]
 post version --json
 post schema
 post doctor [--fix] [--brief]
@@ -262,22 +271,29 @@ are never added to unread counts. `post inbox --adopt` routes held mail for the
 caller's current lineage to the active affiliates eligible then; later
 affiliates do not inherit that backlog. Display-only forms compute provisional
 eligibility for pending mail and write no receipt or cursor state.
-<!-- verify-on-integrated-binary -->
+
+For receipt-less mail already present in an address inbox, JSON `post inbox`
+reports only `pending` and `pending_by_address` counts, not pending ids;
+`inbox --text` marks the pending count, while `watch --snapshot` exposes each
+provisionally eligible id with `pending: true`. For eligible workspace or
+participant mail, a bound consuming `post read <id>` publishes the frozen
+receipt and consumes that id, and an admitted long watch routes a new arrival
+on its next scan. Held lineage mail stays held until `post inbox --adopt`;
+neither read nor long watch adopts it.
 
 Workspace and lineage delivery records a frozen routing receipt and excludes
 the sending participant; participant mail has one recipient, so an explicit
-`participant:<self>` target remains unread to self. New messages expose `reply_to_participant` and
+`participant:<self>` target is initially unread to self and is consumed
+normally when read. New messages expose `reply_to_participant` and
 `reply_to_shared`. The participant reply is offered only when the sender's
 participant record is local (`origin: local`). Remote or unknown origin offers
 the shared reply only. Known remote evidence, either a bridged `from` workspace
 or bridge transport provenance, wins even when `from_participant` happens to
 match a local record.
-<!-- verify-on-integrated-binary -->
 
 `post version --json` reports `store_version: 2` with the `participants`,
 `lineages`, `routing-receipts`, and `cursors-v2` capabilities in the integrated
 release.
-<!-- verify-on-integrated-binary -->
 
 The message body comes from exactly one of `--body TEXT`, `--body-file PATH`,
 or stdin: alternatives, never combined (`--body-file -` reads stdin, matching
@@ -300,7 +316,6 @@ Subjects are limited to 1 KiB with no override; longer text belongs in the body.
 moving it. A sender can also inspect its own archived message without changing
 read state. A miss still distinguishes an absent id from mail outside the
 participant's visibility.
-<!-- verify-on-integrated-binary -->
 A channel message id, the kind the doorbell hands out, is recognized too:
 `post read` names the channel holding it and the `post chat <channel>
 --history <n>` that renders it. A channel read
@@ -390,11 +405,10 @@ workspace context at bind time, but neither becomes the participant. An
 explicit `--from` must agree with the bound reply address.
 
 Inbox JSON includes `participant`, `unread`, `count`, `skipped_unreadable`,
-`unread_count`, `pending`, and `pending_by_address`. Unread contains only
+`unread_count`, `pending`, `pending_by_address`, and `held`. Unread contains only
 receipt-backed messages eligible for that participant and absent from its seen
 set. Pending remains separate. Malformed files still warn and stay out of both
 numeric counts.
-<!-- verify-on-integrated-binary -->
 
 ## Workspaces and participant identity
 
@@ -504,7 +518,12 @@ arrives late with an id sorting below newer consumed ones (a bridged import)
 still surfaces on the next read. A participant's own messages are excluded even if
 their best-effort seen-state update is absent. A channel join refuses membership
 when it would create a blocked shared route.
-<!-- verify-on-integrated-binary -->
+
+If that fail-closed join names an unreadable participant's `participant.json`
+or `channels.json`, restore or repair the file from a backup, then retry. A
+re-bind can recreate only a missing deterministic participant record; it does
+not repair either malformed file. Never delete the record or directory as a
+repair.
 
 Cursor state is participant-scoped in
 `<root>/participants/<id>/cursors.json` v2: sorted exact seen-id sets for each
@@ -515,7 +534,6 @@ doctor reports the problem without repairing it. Old room `cursors.json`,
 `channel-state.json`, and `read/` remain read-only legacy state. Seen-sets grow
 with history and warn at 50,000 ids; watermark compaction is unsafe while late
 backfills can arrive.
-<!-- verify-on-integrated-binary -->
 
 Cursorless reads (v0.3): `--history <n>` shows the last n messages and
 `--since <id>` shows everything after an id. Both ignore the seen-set entirely
@@ -562,7 +580,8 @@ framing, messages, and count, and channel targets also carry `channel`.
 Positional channels require membership and fail closed if an unread message is
 unloadable. In `--all`, an unloadable never-joined channel is skipped with a
 stderr warning, while a broken joined channel remains an explicit zero-count
-target. Valid mail can still move when another mail file is malformed. A
+target. Valid mail can still be emitted and recorded seen when another mail
+file is malformed; canonical mail never moves. A
 non-empty catch-up redirected to `/dev/null` refuses before output or cursor
 mutation.
 
@@ -577,7 +596,6 @@ field. JSON includes `participant`, `pending`, `origin`, `reply_to_shared`, and
 `reply_to_participant` only for local sender origin; mail results include
 `kind`, while channel results use `channel`. Search never writes routing or
 cursor state.
-<!-- verify-on-integrated-binary -->
 
 Both new body-bearing surfaces accept `--framing auto|full|compact`. On a
 non-empty text invocation, `auto` emits one compact banner above all sections
@@ -616,7 +634,6 @@ Channel-list JSON adds `participants`, `room`, and `unread` to each item.
 participant's workspace context or `null`; `unread` is that participant's exact
 eligible count and is `null` when unbound or not an effective member. The
 existing `messages` total remains the raw message-file count.
-<!-- verify-on-integrated-binary -->
 
 Banner diet (v0.3): the full 8-line untrusted-mail framing banner renders once
 per room per day; other reads get a one-line reminder. The laws bind
@@ -691,17 +708,22 @@ exits. It requires a participant binding and is not an unseeded health check.
 poll for lifecycle hooks: exactly one scan, then exit 0. An empty scan emits nothing, a
 non-empty scan emits the ordinary event batch, and a direct-mail scan failure
 is a nonzero error rather than a false empty (per-channel failures still
-degrade to stderr warnings). Because lifecycle hooks may fire from any
-directory, a snapshot whose room is not registered warns on stderr, scans
-nothing, and creates no mailbox directories; it never mints a mailbox for an
-arbitrary cwd. `--interval-ms` has no effect in snapshot mode.
-Every snapshot form is read-only, including when unbound. Long-running watch
+degrade to stderr warnings). A bound snapshot takes its workspace, participant,
+lineage, and channel targets from the participant binding, regardless of cwd.
+Only an unbound legacy workspace preview resolves `--room` or cwd; an
+unregistered cwd then warns on stderr, scans nothing, and creates nothing.
+`--interval-ms` has no effect in snapshot mode. Every snapshot form is
+write-free, including when unbound. Long-running watch
 requires a participant binding and uses native filesystem events as wake hints: inotify on
 Linux and FSEvents on macOS. Scans remain the source of truth. Post registers
 before its initial scan, rescans every watched directory after an overflow,
 retries failed re-watches during a wall-clock reconciliation pass, and falls
 back to polling at `--interval-ms` if the native backend is unavailable or
 fails.
+Before each heartbeat a long watch re-admits against the migration state. A
+generation change or missing state file exits nonzero. Under a same-generation
+fence it keeps its read-only scan and notifications, skips routing and lease or
+heartbeat refresh, and warns once per fence episode.
 Snapshot-only `--limit N` emits the last N events in scan order and warns on
 stderr when it omits earlier events; `--limit 0` is unlimited. The option changes
 only emitted output: omitted mail and channel messages remain unread because a
@@ -712,7 +734,6 @@ unbounded snapshot behavior.
 source is `mail` or `channel:<name>`. Groups retain first-arrival order and
 report the count, first/last ids, up to five unique senders in arrival order,
 and the shared reason (or `mixed`). Snapshot limits apply before grouping.
-<!-- verify-on-integrated-binary -->
 
 ```bash
 post watch --room codex --once
@@ -742,14 +763,12 @@ Default output is NDJSON with variants:
 {"event":"channel_message","address":{"kind":"workspace","name":"codex"},"room":"codex","channel":"ops","id":"...","from":"workspace","origin":"unknown","reply_to_shared":"workspace","subject":"...","sent":"...","reason":"mention","preview":"..."}
 {"event":"digest","address":{"kind":"workspace","name":"codex"},"room":"codex","source":"channel:ops","count":3,"first_id":"...","last_id":"...","from":["workspace","atlasos"],"reason":"mixed","preview":"..."}
 ```
-<!-- verify-on-integrated-binary -->
 
 Every event carries `address: {kind, name}`. `room` is present only for a
 workspace address; lineage and participant events omit it. Pending mail carries
 `pending: true`. Individual mail and channel-message events expose `origin`,
 `reply_to_shared`, and a `reply_to_participant` only for a sender participant
 known on this host. Digest aggregates have no single-sender reply target.
-<!-- verify-on-integrated-binary -->
 
 Digest text is `#ops: 3 new (workspace ×2, atlasos ×1)  <preview>
 [first..last] [--since <fencepost>]` for channels and
@@ -766,21 +785,25 @@ the `[first..last]` bounds and the channel `[--since ...]` suffix, leaving the
 true fencepost rightmost; NDJSON omits `preview` when no readable body exists.
 
 `reason` is `mail` | `channel` | `mention` on every event type (`unreadable`
-uses `mail` or `channel`; mention is unknowable without a body). A room's own
-channel messages do not ring its own watch, and a watcher wearing several
-identities declares them with `--own <room>` (repeatable) so none of them ring
-it; `--room` alone selects what to scan and never implies ownership, so a
-monitor keeps receiving the rooms it merely watches. Use a long-running PTY session and
+uses `mail` or `channel`; mention is unknowable without a body). A bound watch
+suppresses only channel messages whose `from_participant` is the caller; it has
+no legacy room-self or `--own` suppression, and explicit
+`participant:<self>` mail is not suppressed. `--own` affects only legacy
+unbound snapshots. Use a long-running PTY session and
 read lines incrementally; kill the session when done. For smokes, use
 `POST_MAIL_ROOT=/tmp/...` plus temporary registered rooms/channels, seed an
 event first, or run watch in a bounded PTY/session and stop it explicitly.
+
+Long-watch notification seen-state is process-local. An id consumed by a read
+stays suppressed after restart; an unconsumed id may ring again. Adapters own
+per-participant notification dedupe across hook invocations; Post has no
+durable watcher-notification store.
 
 `post who` reports the caller first with binding provenance, then all participant
 records with lifecycle state, `last_seen`, lineage, workspace, and watch
 presence. JSON keeps each participant's `unread` and `pending` maps separate.
 Legacy room heartbeat rows remain under `legacy_rooms`. It never emits PIDs or
 anything usable to target a process.
-<!-- verify-on-integrated-binary -->
 
 ## Session hook adapters (Claude Code, Codex, Cursor, Grok)
 
@@ -823,6 +846,11 @@ it. On Linux, `install-systemd-doorbell.mjs` is the equivalent installer:
 per-agent systemd user units and timers with the same monitor contract and
 environment pinning. The doorbell daemon itself lives at `doorbell/` with its
 own README, unit template, and test suite.
+
+This monitor runs unbound with workspace room arguments. It is a
+workspace-aggregate bell, not participant-aware delivery, and it does not wake
+for participant-scoped, lineage, or private-address mail; the four lifecycle
+adapters are participant-aware. Follow-up bead `post-pe2` tracks that gap.
 
 Full install commands, the adapter contract, environment pinning rules, and
 the porting recipe for other harnesses and controllers live in

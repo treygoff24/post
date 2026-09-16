@@ -22,7 +22,6 @@ The public language is model-neutral; the default root remains
    remaining eligible affiliates; if none remain, the message stays pending.
    Channel joins separately refuse a forbidden shared route. The tool never
    edits `rules.json`; humans manage it deliberately.
-   <!-- verify-on-integrated-binary -->
 3. **The participant is the actor.** A binding, never cwd, selects the sender,
    channel member, cursor, and lifecycle record. The bound workspace supplies
    the shared `from` reply address; a session-only participant uses its id.
@@ -32,10 +31,10 @@ The public language is model-neutral; the default root remains
 4. **Published history is immutable.** Every direct send also writes an
    immutable copy to `~/.claude-mail/archive/`. Canonical address inbox files
    and channel messages never move on read. A successful consuming read records
-   exact ids in the acting participant's cursor after stdout succeeds. Routing
-   receipts, participant cursor and channel state, lifecycle records,
+   exact ids in the acting participant's cursor after stdout succeeds. A
+   routing receipt is published once and freezes delivery; it is never
+   rewritten. Participant cursor and channel state, leases, lifecycle records,
    heartbeats, and `rooms.json` are mutable delivery or configuration state.
-   <!-- verify-on-integrated-binary -->
 5. **Registers stay distinct.** Direct-mail `kind` ∈ {letter, note, signal}.
    Channel messages have no `kind`, so a signal structurally cannot occur in a
    channel; anything gate-grade stays one-to-one room mail.
@@ -59,11 +58,13 @@ The public language is model-neutral; the default root remains
   read-only protection; `.post-arx.lock` is its solitary regular-file flock
   anchor. Legacy writes with no state and no generation skip that lock, while
   enrolled writers require the existing trusted lock; refusal never creates it.
-  Enrolled ordinary writes hold the root flock through mutation. A long
-  non-snapshot watch holds it only around each heartbeat. The lock inode is
-  never unlinked or recreated. External cutover must quiesce and drain legacy
-  writers, take the same flock, fence, wait out enrolled writers by lock
-  ownership, then copy and activate; a writer's slow stdout and its
+  Enrolled ordinary writes hold the root flock through mutation. Each long
+  non-snapshot watch iteration re-admits under that flock before its heartbeat
+  and holds it through lease/heartbeat renewal, pending routing, and the full
+  read-only projection scan; stdout is written only after release. The lock
+  inode is never unlinked or recreated. External cutover must quiesce and drain
+  legacy writers, take the same flock, fence, wait out enrolled writers by
+  lock ownership, then copy and activate; a writer's slow stdout and its
   after-stdout cursor update remain inside the same lock hold, so slow
   stdout can block the lock; operator quiesce and timeout handling must bound
   that drain. Post exposes no enrollment or cutover CLI; external cutover
@@ -88,9 +89,12 @@ The public language is model-neutral; the default root remains
 - Consuming reads, exact `--ack` forms, `catchup`, long-running `watch`, and
   every send or state change are admitted as writers and are refused without a
   matching generation. Admitted read-only forms create no root/room directory,
-  banner-day, heartbeat, or cursor writes. A long
-  non-snapshot watch re-admits before every heartbeat and exits nonzero if the
-  fence or generation changes. Every snapshot form is read-only and never
+  banner-day, heartbeat, or cursor writes. A long non-snapshot watch re-admits
+  before every heartbeat. It exits nonzero if the store generation changes or
+  the state file disappears. Under a same-generation fence or transient
+  admission error it keeps scanning and notifying read-only, skips routing and
+  lease/heartbeat refresh, warns once per episode, and retries. Every snapshot
+  form is read-only and never
   touches a heartbeat, lease, routing receipt, cursor, or mailbox directory.
 - `post rooms add` takes an advisory exclusive flock on `.rooms.lock`, then
   reloads, validates, and atomically replaces `rooms.json` while preserving its
@@ -108,10 +112,10 @@ The public language is model-neutral; the default root remains
 - Envelope JSON is indented with two spaces and ASCII-escapes non-ASCII
   characters with lowercase `\u` escapes.
 - Each canonical address store has `routing/<id>.json` receipts beside its
-  inbox. A receipt freezes the recipient ids and message digest. Missing
-  receipt means pending. The archive copy remains `archive/<id>.mail`.
+  inbox. A receipt freezes the recipient ids and message digest in a one-time
+  publication and is never rewritten. Missing receipt means pending. The
+  archive copy remains `archive/<id>.mail`.
   Canonical mail never moves on read; `<room>/read/` is read-only legacy state.
-  <!-- verify-on-integrated-binary -->
 - Mail writes are atomic. New mail files are published with an exclusive final
   create after a synced temporary write, so an existing inbox or archive file
   is never replaced. The exclusive hard-link is the commit point: later temp
@@ -120,7 +124,6 @@ The public language is model-neutral; the default root remains
   an inbox failure cannot strand an archive-only message. Routing receipt
   publication is atomic under `.participants.lock`. Default config creation is
   exclusive and never replaces existing content.
-  <!-- verify-on-integrated-binary -->
 - Channel root: `channels/`. Each channel lives at `channels/<name>/` with
   `channel.json`, `members.json`, and `messages/<id>.msg`. Message ids sort
   chronologically and use `YYYYmmdd-HHMMSS-UUUUUU-<6 hex>` so cursor ordering
@@ -137,14 +140,13 @@ The public language is model-neutral; the default root remains
   participant. Legacy `members.json` workspace membership supplies a default
   that one participant may leave without removing a sibling. Sending and
   reading require effective membership; non-members fail with `not_a_member`.
-  <!-- verify-on-integrated-binary -->
 - Cursor state is separate from message history: exact seen sets for every mail
   address and channel the participant consumed. Workspace and lineage fan-out
   exclude the sending participant. An explicit `participant:<self>` delivery
-  is the exception and remains visible as unread to self. Channel messages from
-  the participant itself are excluded. Plain bounded reads consume only ids
-  actually emitted after stdout succeeds; peeks and watch never mutate state.
-  <!-- verify-on-integrated-binary -->
+  is the exception: it is initially unread to self and is consumed normally
+  when read. Channel messages from the participant itself are excluded. Plain
+  bounded reads consume only ids actually emitted after stdout succeeds; peeks
+  and watch never mutate state.
 - The canonical file is `<root>/participants/<id>/cursors.json`, version 2:
 
   ```json
@@ -165,7 +167,6 @@ The public language is model-neutral; the default root remains
   Values are sorted, duplicate-free arrays of canonical ids; maps and sets
   serialize lexically, pretty-printed, with one trailing newline. State is mode
   `0600` and every replacement is atomic.
-  <!-- verify-on-integrated-binary -->
 - Every cursor mutation holds an exclusive `flock` on
   `<root>/participants/<id>/.cursors.lock` across reload, exact-set union, and
   atomic replacement. The lock is a solitary regular inode checked after
@@ -183,7 +184,6 @@ The public language is model-neutral; the default root remains
 - Room-level `cursors.json`, `channel-state.json`, and `read/` are legacy,
   read-only evidence. Participant reads do not import or materialize them.
   `doctor` labels them as legacy state.
-  <!-- verify-on-integrated-binary -->
 
 ## Commands
 
@@ -209,11 +209,13 @@ their existing success semantics.
   alternatives; a bare positional FILE
   remains accepted as the deprecated spelling of `--body-file`, and a
   body-file path that does not exist is `invalid_argument` (a usage error)
-  rather than a retryable `io_error`. Refuses: unknown
-  recipient or ambiguous bare target, a blocked direct target (quotes reason),
-  reserved-name impersonation, subjects over 1 KiB, empty body, and bodies over
-  32 KiB unless `--oversize` records explicit intent. A complete Post watch-event NDJSON line
-  warns on stderr but does not block legitimate forensic traffic. `--body`
+  rather than a retryable `io_error`. Bare targets resolve deterministically in
+  workspace → lineage → participant priority; typed `kind:name` addresses bypass
+  that priority. Refuses: unknown recipient, a blocked direct target (quotes
+  reason), reserved-name impersonation, subjects over 1 KiB, empty body, and
+  bodies over 32 KiB unless `--oversize` records explicit intent. A complete
+  Post watch-event NDJSON line warns on stderr but does not block legitimate
+  forensic traffic. `--body`
   exists so agents don't need heredocs (the first real mail shipped the literal
   word "placeholder" via a botched heredoc — design against that). Success
   (text): `post: sent <kind> <id> <from> -> <to>` followed by a participant
@@ -225,16 +227,22 @@ their existing success semantics.
   participant; an explicit `participant:<self>` target is readable by self.
   Lineage sends instead exclude blocked affiliates and route to any remaining
   eligible recipients, recording exclusions in the receipt.
-  <!-- verify-on-integrated-binary -->
 - `post inbox [--room <name>] [--text] [--adopt]`: read-only listing, oldest
   first. Bound JSON is `{ok, participant, room, unread, count,
-  skipped_unreadable, unread_count, pending, pending_by_address}`. `pending` is
+  skipped_unreadable, unread_count, pending, pending_by_address, held}`. `pending` is
   separate from `unread_count` and is never added to it. An unbound listing
   returns no unread items, reports provisional pending workspace mail, writes
   nothing, and puts its notice on stderr. `--adopt` is the writer form: it
   routes held mail for the caller's current lineage to the active affiliates
   eligible then, without giving later affiliates that backlog.
-  <!-- verify-on-integrated-binary -->
+  Receipt-less mail already in an address inbox appears here only through the
+  `pending` and `pending_by_address` counts, never as pending ids; `--text`
+  marks the pending count. `watch --snapshot` lists each provisionally eligible
+  id with `pending: true`. For eligible workspace or participant mail, a bound
+  consuming `post read <id>` publishes the frozen receipt and consumes that id,
+  while an admitted long watch routes a new arrival on its next scan. Held
+  lineage mail stays held until `post inbox --adopt`; neither read nor long
+  watch adopts it.
 - `post read <id-or-prefix> [--room <name>] [--peek] [--max-bytes <n>] [--framing auto|full|compact]`
   — prints framing banner
   + envelope + body (text default; `--json` gives `{ok, framing, envelope,
@@ -255,7 +263,6 @@ their existing success semantics.
   sent; that inspection is cursorless and reports the appropriate already-read
   or own-message state. Legacy room `read/` is not a participant delivery
   source.
-  <!-- verify-on-integrated-binary -->
   `--max-bytes <n>` is opt-in and caps actual final stdout bytes, including
   UTF-8, JSON escaping, pretty whitespace, framing, omission metadata, and the
   trailing newline. A complete body is returned and consumed normally only if
@@ -362,9 +369,8 @@ their existing success semantics.
   Mail results use `source: "mail"`, `channel: null`, and add `kind`; channel
   results use `source: "channel"`, a channel name, and no `kind`. Reply fields
   follow the origin rules, and provisional mail is labeled pending. No-match is
-  exit 0 with an empty result array. Search never writes routing receipts or
-  cursors, moves mail, stamps banner-day state, or affects watch.
-  <!-- verify-on-integrated-binary -->
+  exit 0 with an empty result array. Search writes no routing receipt, cursor,
+  or banner-day state, never moves mail, and does not affect watch.
 - `post rooms` — rooms with paths, each with any blocking rules that name it.
 - `post rooms add <name> <path>` — registers an existing workspace directory
   (absolute or `~/...`) and returns the updated rooms listing. Workspace
@@ -452,7 +458,6 @@ their existing success semantics.
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
   is `delivered_output_failure` and must not be blindly retried.
-  <!-- verify-on-integrated-binary -->
 - `post chat <channel> [--peek] [--max-bytes <n>] [--framing auto|full|compact]` — reads new channel
   messages as the bound participant. Requires effective membership; otherwise
   `not_a_member`. Text
@@ -501,7 +506,6 @@ their existing success semantics.
   `verification_scope: stored_full_body`; the slice itself is not independently
   signed. `body_slice`, byte-range, progress, EOF, and minimum-scaffold rules
   match direct mail.
-  <!-- verify-on-integrated-binary -->
 - `post channels [--text]` — read-only listing of channels, members, creation metadata,
   descriptions, and message counts: `{ok, channels, count}`. Each JSON channel
   item keeps `name`, `created`, `created_by`, `description?`, `members`, and
@@ -510,7 +514,6 @@ their existing success semantics.
   participant eligibility count, or `null` when unbound or not an effective
   member. `messages` remains the raw message-file count. Listing is read-only
   and never creates cursor state.
-  <!-- verify-on-integrated-binary -->
 - `post who [--room <name>]... [--text]`: read-only participant directory.
   JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count}`.
   The caller is first and carries binding provenance. Every participant row
@@ -519,7 +522,6 @@ their existing success semantics.
   address maps. A legacy row without `last_seen` reports `state: "no lease
   record"` and is stale for recipient selection. `legacy_rooms` retains old
   room heartbeat rows. It never reports PIDs or process information.
-  <!-- verify-on-integrated-binary -->
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix] [--brief]` — validates root exists, rooms.json/rules.json parse
@@ -531,10 +533,11 @@ their existing success semantics.
   invalid-id, unsafe, or non-regular cursor state; `cursor_lock.<room>.invalid`
   is a warning for a missing lock alongside a cursor or a non-solitary/non-0600
   lock; and `cursor_state.<room>.legacy` is an info check when a valid legacy
-  `channel-state.json` remains to be imported. Once `cursors.json` exists, an
+  `channel-state.json` remains as read-only history. Participant cursors never
+  import or materialize legacy room cursor state. Once `cursors.json` exists, an
   invalid legacy file is inert rollback evidence and the existing
   `channel_state.<room>.invalid` check is downgraded from error to warning.
-  Suggested fixes direct an operator to inspect or remove state by hand.
+  Suggested fixes direct an operator to inspect or repair cursor state by hand.
   `--fix` creates missing dirs/defaults only — never touches rules content,
   mail, channel history, membership, cursor state, or cursor locks. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
@@ -549,6 +552,12 @@ their existing success semantics.
   non-string registries remain `config.rooms_invalid` errors. `--brief` prints
   exactly one human-readable summary line, conflicts with `--json`, and
   preserves the doctor exit dictionary: 0 healthy / 1 findings / 3 fix-failed.
+  Fail-closed channel checks that name an unreadable participant's
+  `participant.json` or `channels.json` require restoring or repairing that
+  file from a backup, then retrying. A re-bind can recreate only a missing
+  deterministic participant record; it does not repair either malformed file.
+  Deleting the participant record or directory is not a repair; retirement is
+  a separate operator decision after copying the state aside.
 - `post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--from now]
   [--interval-ms <ms>] [--digest] [--text]` — the
   doorbell: blocks and streams one event per arriving direct mail or joined
@@ -593,8 +602,8 @@ their existing success semantics.
   With `--digest`, each batch instead emits one object per `(address, source)`
   group, ordered by the first underlying event:
   `{"event":"digest", address, room?, source, count, first_id, last_id, from,
-  reason, preview?}`. A digest aggregate has no origin or reply target.
-  <!-- verify-on-integrated-binary -->
+  reason, pending?, preview?}`. `pending: true` is present when the group is
+  provisional. A digest aggregate has no origin or reply target.
   `source` is `mail` or `channel:<name>`; `from` de-duplicates senders in
   arrival order and caps them at five followed by `"+N more"`; `reason` is the
   shared per-event reason or `mixed`. Readable ring lines carry a trailing
@@ -629,13 +638,20 @@ their existing success semantics.
   blips) degrade to an empty scan with one stderr warning per outage and
   polling continues; corrupt or unreadable channel stores warn on stderr and do
   not suppress healthy joined channels. A dead event backend falls back to
-  polling; stdout failure and migration-fence re-admission failure remain
-  fatal, because either means the watch can no longer uphold its contract.
+  polling. A same-generation fence or transient admission error keeps the scan
+  read-only, pauses routing and lease/heartbeat refresh, warns once per episode,
+  and retries. Only a missing enrolled state file or generation mismatch is a
+  fatal admission error (`config_invalid`, exit 78); stdout failure is also
+  fatal (`io_error`, exit 75).
   Caveat: all watch warnings (unregistered room, scan outages, channel-store
   diagnostics) are stderr-only; a consumer that captures just stdout will not
-  see them. Never moves, alters, or deletes mail; keeps delivery dedupe only in
-  process memory; never mutates channel seen-sets. The heartbeat is presence
-  state, not delivery state. Known accepted window: direct mail arriving AND
+  see them. Never moves, alters, or deletes mail; keeps notification seen-state
+  only in process memory; never mutates channel seen-sets. An id consumed by a
+  read stays suppressed after a watcher restart; an unconsumed id may ring
+  again. Adapter-level per-participant notification dedupe across hook
+  invocations is the adapter's responsibility; Post has no durable watcher-
+  notification store. The heartbeat is presence state, not delivery state.
+  Known accepted window: direct mail arriving AND
   consumed by a concurrent reader within one interval is never emitted because
   it was never observed unread. Channel messages are append-only; watch holds
   its startup seen-set snapshot in memory (read-only), so a channel read
@@ -647,16 +663,16 @@ their existing success semantics.
   emits nothing; a non-empty scan emits the ordinary NDJSON/text batch. A
   direct-mail scan failure is a nonzero error envelope — never a false empty —
   while per-channel failures keep the watch posture (stderr warning, healthy
-  channels still ring). Because lifecycle hooks may invoke it from any cwd, a
-  snapshot whose resolved room is unregistered warns on stderr, scans nothing,
+  channels still ring). Bound targets come from the participant binding,
+  regardless of cwd. Only an unbound legacy workspace preview resolves
+  `--room` or cwd; an unregistered cwd then warns on stderr, scans nothing,
   creates no mailbox directories, and exits 0. Snapshot mode shares every
   other watch invariant: envelope metadata plus sanitized previews only, no
-  full body, mail moves, or cursor writes. Snapshot-only `--limit <n>` admits the last `n` underlying events in scan order
+  full body, mail movement, or cursor writes. Snapshot-only `--limit <n>` admits the last `n` underlying events in scan order
   and warns on stderr when earlier events are omitted; `--limit 0` is unlimited.
   Optional digest grouping happens after that limit. The flag affects emission
   only — omitted events remain unread — and omitting it preserves the unbounded
   snapshot behavior.
-  <!-- verify-on-integrated-binary -->
 
 ## Read-layer notes (amendment, 2026-09-01)
 
@@ -668,15 +684,14 @@ their existing success semantics.
   An absent cursor, lock, room, participant, or banner-day file is never created
   by those commands. Watch captures its participant channel floor at startup
   and never writes cursor state.
-  <!-- verify-on-integrated-binary -->
 - Channel unread counts use the participant's exact seen set and effective
   membership. Inbox `unread_count` includes only receipt-backed messages whose
   frozen recipient set contains that participant and whose id is not in its
   address seen set. Workspace and lineage mail from that participant is
-  excluded; explicit `participant:<self>` mail remains unread to self. Pending
-  is counted separately. Malformed or unreadable files remain excluded and are
+  excluded; explicit `participant:<self>` mail starts unread to self and stops
+  counting after an ordinary consuming read. Pending is counted separately.
+  Malformed or unreadable files remain excluded and are
   reported through existing warnings.
-  <!-- verify-on-integrated-binary -->
 - Search is a linear scan of visible history plus party-visible mail. The
   default result cap is 100 and the hard cap is 1000; matching is literal,
   case-insensitive Unicode substring over body, subject, sender id, and message
@@ -692,28 +707,27 @@ their existing success semantics.
 ## Participant lifecycle and read-only projection (amendment, 2026-09-16)
 
 - A participant is active iff `ended_at` is absent and `last_seen` falls within
-  its recorded `lease_hours`. The default lease is 24 hours. A record with no
-  `last_seen` is stale until bind or touch. `POST_PARTICIPANT_LEASE_HOURS` is
-  consulted only for the acting participant's renewal and never reclassifies a
-  peer.
-- `post participant bind` and writer activity refresh `last_seen`; bind and
-  `post participant touch` record the acting participant's lease. Adapters call
-  touch during supported prompt/tool events. Claude calls `post participant
-  end` on SessionEnd. Codex, Cursor, and Grok expose no reliable SessionEnd and
-  make no end call. End is idempotent. A later bind clears `ended_at`,
-  reactivates the same id, and preserves its historical affiliation.
+  its recorded `lease_hours`. A new bind records
+  `POST_PARTICIPANT_LEASE_HOURS`, or 24 hours when it is unset. Later binds,
+  touches, and writer renewals refresh `last_seen` while preserving the
+  recorded lease unless the variable is explicitly set, in which case they
+  re-apply it. The variable applies only to the acting participant; `end`
+  never consults it. A record with no `last_seen` is stale until bind or touch.
+- Adapters call `post participant touch` during supported prompt/tool events.
+  Only the shipped Claude adapter registers `post participant end`, on
+  SessionEnd; the shipped Codex, Cursor, and Grok adapters register no end
+  hook. End is idempotent. A later bind clears `ended_at`, reactivates the same
+  id, and preserves its historical affiliation.
 - Routing selects from the active set. Workspace fan-out uses active
   participants bound there; lineage fan-out uses active affiliates. `post who`
   lists every participant and labels each activity state.
   Lineage affiliation survives stale and ended states and is cleared only by
   explicit leave. `post identity show <name>` lists those historical affiliates
   and gives each an `active` flag.
-  <!-- verify-on-integrated-binary -->
 - Activity affects new recipient selection only. A frozen recipient keeps read
   access after its lease expires. Mail frozen to an abandoned session during
   its remaining lease is not reassigned at expiry; only later sends use the new
   active set. Participant-targeted mail remains durable regardless of state.
-  <!-- verify-on-integrated-binary -->
 
 ## Lineage voice withdrawal (amendment, 2026-09-16)
 
@@ -841,12 +855,13 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   affects routing, blocks, cursors, membership, profiles, or signed-message
   verification. Old mail and old stores keep reading; old binaries ignore the
   new fields.
-- For bind-time workspace context and legacy unbound read-only forms, resolution
-  precedence is explicit `--room` > `POST_FROM` pin > registered workspace
-  containing cwd > cwd basename. None selects the actor. A bound participant
-  supplies the sender and channel identity; an explicit `--from` must agree
-  with its reply address. Session-only participants may join channels without a
-  registered workspace.
+- Bind-time workspace precedence is explicit `--workspace` > `POST_FROM` pin >
+  the registered workspace containing cwd > no workspace. An unregistered cwd
+  never becomes a basename workspace. None of these selects the actor. Legacy
+  unbound read-only forms resolve only their documented `--room`/cwd context. A
+  bound participant supplies the sender and channel identity; an explicit
+  `--from` must agree with its reply address. Session-only participants may join
+  channels without a registered workspace.
 - A set-but-invalid `POST_FROM` or `POST_SENDER_ADDRESS` is a loud error,
   never a silent fallback to inference. The pin's grammar is `--from`'s;
   the address must be ≤256 bytes with no control or whitespace characters.
@@ -880,9 +895,10 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
 Sequenced deliberately AFTER the additive identity fields (M4 of the signed
 identity spec), with the version bump carrying the change:
 
-- **Before 0.10, room-self mail was opt-in.** The participant model supersedes
-  that rule. Workspace and lineage fan-out exclude the sending participant;
-  an explicit participant self-target is routable and readable.
+- **Before the participant redesign, room-self mail was opt-in.** Participants
+  and lineages supersede that rule. Workspace and lineage fan-out exclude the
+  sending participant; an explicit participant self-target is routable and
+  readable.
 - **Pin/flag conflict is a hard error.** `--from` that DISAGREES with a
   POST_FROM pin refuses loudly (a prepared command carrying `--from` inside a
   pinned session is exactly the ambiguity the identity layer eliminates). An
