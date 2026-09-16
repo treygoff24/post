@@ -537,6 +537,17 @@ fn routing_legacy_workspace_member_blocks_participant_join_and_lists_both_projec
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let alpha_participant = sandbox.test_participant("alpha");
     let beta_participant = sandbox.test_participant("beta");
+    let legacy_remote = sandbox.path.join("legacy-remote");
+    fs::create_dir_all(&legacy_remote).expect("legacy remote workspace");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms")).expect("rooms JSON");
+    rooms["legacy-remote"] = json!(legacy_remote);
+    fs::write(
+        &rooms_path,
+        format!("{}\n", serde_json::to_string_pretty(&rooms).expect("rooms")),
+    )
+    .expect("add legacy remote without participant");
     let channel = sandbox.mail_root.join("channels/legacy-block");
     fs::create_dir_all(channel.join("messages")).expect("legacy channel messages");
     fs::write(
@@ -544,10 +555,14 @@ fn routing_legacy_workspace_member_blocks_participant_join_and_lists_both_projec
         r#"{"name":"legacy-block","created":"2026-09-16 04:31:00 -0500","created_by":"beta"}"#,
     )
     .expect("legacy channel info");
-    fs::write(channel.join("members.json"), r#"{"beta":"joined"}"#).expect("legacy members");
+    fs::write(
+        channel.join("members.json"),
+        r#"{"beta":"joined","legacy-remote":"joined"}"#,
+    )
+    .expect("legacy members");
     fs::write(
         sandbox.mail_root.join("rules.json"),
-        r#"{"blocked":[{"from":"alpha","to":"beta","reason":"legacy member block"}]}"#,
+        r#"{"blocked":[{"from":"alpha","to":"legacy-remote","reason":"legacy member block"}]}"#,
     )
     .expect("blocked rule");
 
@@ -570,7 +585,7 @@ fn routing_legacy_workspace_member_blocks_participant_join_and_lists_both_projec
         .iter()
         .find(|item| item["name"] == "legacy-block")
         .expect("legacy channel");
-    assert_eq!(legacy["members"], json!(["beta"]));
+    assert_eq!(legacy["members"], json!(["beta", "legacy-remote"]));
     assert_eq!(legacy["participants"], json!([beta_participant]));
 }
 
@@ -618,11 +633,7 @@ fn routing_workspace_less_chat_state_stays_under_participant_directory() {
         &other,
         &sandbox.home.join("claude-space"),
     ));
-    let read = sandbox.run_as_participant(
-        &["chat", "session-only", "--framing", "compact"],
-        &id,
-        &sandbox.path,
-    );
+    let read = sandbox.run_as_participant(&["chat", "session-only"], &id, &sandbox.path);
     assert_success(&read);
     assert!(!sandbox.mail_root.join(&id).exists());
     assert!(sandbox
@@ -631,6 +642,12 @@ fn routing_workspace_less_chat_state_stays_under_participant_directory() {
         .join(&id)
         .join("cursors.json")
         .exists());
+    assert!(sandbox
+        .mail_root
+        .join("participants")
+        .join(&id)
+        .join("banner-day")
+        .is_file());
 }
 
 #[test]
