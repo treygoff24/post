@@ -494,6 +494,7 @@ post: continue with {}\n",
     Ok((omitted, false))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_budgeted_read_json(
     mail: &ParsedMail,
     already_read: bool,
