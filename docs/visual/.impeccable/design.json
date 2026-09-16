@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-16T03:10:51-05:00",
+  "title": "Design System: Post Participants Explainer",
+  "extensions": {
+    "colorMeta": {
+      "chart-stock": { "role": "neutral", "displayName": "Chart Stock", "canonical": "#f2ede3" },
+      "inset-stock": { "role": "neutral", "displayName": "Inset Stock", "canonical": "#e8e1d3" },
+      "deep-stock": { "role": "neutral", "displayName": "Deep Stock", "canonical": "#ded5c3" },
+      "record-ink": { "role": "neutral", "displayName": "Record Ink", "canonical": "#181713" },
+      "secondary-ink": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#565049" },
+      "tertiary-ink": { "role": "neutral", "displayName": "Tertiary Ink", "canonical": "#645d4f" },
+      "hairline-rule": { "role": "neutral", "displayName": "Hairline Rule", "canonical": "#d3cabb" },
+      "major-rule": { "role": "neutral", "displayName": "Major Rule", "canonical": "#b6ab96" },
+      "astra-vermilion": { "role": "primary", "displayName": "Astra Vermilion", "canonical": "#b03a1e" },
+      "astra-wash": { "role": "primary", "displayName": "Astra Wash", "canonical": "#f6e4dd" },
+      "fable-prussian": { "role": "primary", "displayName": "Fable Prussian", "canonical": "#1c4d6a" },
+      "fable-wash": { "role": "primary", "displayName": "Fable Wash", "canonical": "#dde8ef" },
+      "lineage-moss": { "role": "tertiary", "displayName": "Lineage Moss", "canonical": "#47591f" },
+      "lineage-wash": { "role": "tertiary", "displayName": "Lineage Wash", "canonical": "#e6ead7" },
+      "evidence-ochre": { "role": "secondary", "displayName": "Evidence Ochre", "canonical": "#7a5709" },
+      "evidence-wash": { "role": "secondary", "displayName": "Evidence Wash", "canonical": "#f4e9cf" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Opening Display", "purpose": "The opening defect statement only." },
+      "headline": { "displayName": "Section Headline", "purpose": "Major section statements." },
+      "title": { "displayName": "Mechanism Title", "purpose": "Register, limit, and explanatory subsection titles." },
+      "body": { "displayName": "Editorial Body", "purpose": "Sustained explanation on a 66ch measure." },
+      "label": { "displayName": "Record Label", "purpose": "Condensed uppercase captions, metadata, and control context." },
+      "mono": { "displayName": "Machine Data", "purpose": "Message ids, participant ids, paths, commands, and evidence." }
+    },
+    "shadows": [
+      {
+        "name": "focus-rings",
+        "value": "0 0 0 2px var(--paper), 0 0 0 4px var(--ink)",
+        "purpose": "Keyboard focus visibility only; this is not elevation."
+      }
+    ],
+    "motion": [
+      { "name": "event-land", "value": "420ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Settles a newly dispatched event mark from 0.9rem above." },
+      { "name": "control-state", "value": "120ms linear", "purpose": "Button color changes and the reading-rail cursor." },
+      { "name": "mode-state", "value": "140ms linear", "purpose": "Mode segment background and text changes." },
+      { "name": "reduced-motion", "value": "1ms", "purpose": "Collapses animations and transitions when reduced motion is requested." }
+    ],
+    "breakpoints": [
+      { "name": "phone", "value": "40rem" },
+      { "name": "choice-two-column", "value": "46rem" },
+      { "name": "voice-and-limit-rows", "value": "52rem" },
+      { "name": "compact-rail-pitch", "value": "56rem" },
+      { "name": "content-grids", "value": "58rem" },
+      { "name": "opening-split", "value": "64rem" },
+      { "name": "choice-five-column", "value": "72rem" },
+      { "name": "reading-rail", "value": "1180px" },
+      { "name": "field-mode-stack", "value": "44rem", "context": "container" },
+      { "name": "field-label-stack", "value": "34rem", "context": "container" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Neutral Action Button",
+      "kind": "button",
+      "refersTo": "button-neutral",
+      "description": "The default outlined action for dispatch and ordinary controls.",
+      "html": "<button class=\"ds-btn\" type=\"button\">Send to tower</button>",
+      "css": ".ds-btn { font-family: var(--sans); font-variation-settings: 'wdth' 96, 'wght' 600; font-size: 0.8125rem; letter-spacing: 0.015em; padding: 0.45rem 0.8rem; border: 1px solid var(--ink); border-radius: 0; background: var(--paper); color: var(--ink); cursor: pointer; transition: background 120ms linear, color 120ms linear, transform 120ms var(--ease-out); } .ds-btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); } .ds-btn:focus-visible { outline: none; box-shadow: var(--focus); } .ds-btn:active:not(:disabled) { transform: translateY(1px); } .ds-btn:disabled { opacity: 0.4; cursor: not-allowed; border-style: dashed; }"
+    },
+    {
+      "name": "Astra Action Button",
+      "kind": "button",
+      "refersTo": "button-astra",
+      "description": "A participant-owned read action in Astra vermilion.",
+      "html": "<button class=\"ds-btn-astra\" type=\"button\">Read oldest as Astra</button>",
+      "css": ".ds-btn-astra { font-family: var(--sans); font-variation-settings: 'wdth' 96, 'wght' 600; font-size: 0.8125rem; letter-spacing: 0.015em; padding: 0.45rem 0.8rem; border: 1px solid var(--ch-a); border-radius: 0; background: var(--paper); color: var(--ch-a); cursor: pointer; transition: background 120ms linear, color 120ms linear, transform 120ms var(--ease-out); } .ds-btn-astra:hover:not(:disabled) { background: var(--ch-a); color: var(--paper); } .ds-btn-astra:focus-visible { outline: none; box-shadow: var(--focus); } .ds-btn-astra:active:not(:disabled) { transform: translateY(1px); } .ds-btn-astra:disabled { opacity: 0.4; cursor: not-allowed; border-style: dashed; }"
+    },
+    {
+      "name": "Fable Action Button",
+      "kind": "button",
+      "refersTo": "button-fable",
+      "description": "A participant-owned dispatch or read action in Fable prussian.",
+      "html": "<button class=\"ds-btn-fable\" type=\"button\">Read oldest as Fable</button>",
+      "css": ".ds-btn-fable { font-family: var(--sans); font-variation-settings: 'wdth' 96, 'wght' 600; font-size: 0.8125rem; letter-spacing: 0.015em; padding: 0.45rem 0.8rem; border: 1px solid var(--ch-b); border-radius: 0; background: var(--paper); color: var(--ch-b); cursor: pointer; transition: background 120ms linear, color 120ms linear, transform 120ms var(--ease-out); } .ds-btn-fable:hover:not(:disabled) { background: var(--ch-b); color: var(--paper); } .ds-btn-fable:focus-visible { outline: none; box-shadow: var(--focus); } .ds-btn-fable:active:not(:disabled) { transform: translateY(1px); } .ds-btn-fable:disabled { opacity: 0.4; cursor: not-allowed; border-style: dashed; }"
+    },
+    {
+      "name": "Read-State Mode Control",
+      "kind": "custom",
+      "refersTo": "mode-selected",
+      "description": "A native two-option radio group rendered as a printed segmented control.",
+      "html": "<fieldset class=\"ds-mode\"><legend class=\"ds-vh\">Read-state model</legend><label><input type=\"radio\" name=\"ds-mode\"><span>0.9.0 · one cursor per room</span></label><label><input type=\"radio\" name=\"ds-mode\" checked><span>Participants · one cursor each</span></label></fieldset>",
+      "css": ".ds-mode { display: flex; border: 1px solid var(--ink); background: var(--paper); padding: 0; margin: 0; } .ds-mode label { position: relative; display: flex; flex: 1 1 50%; } .ds-mode label + label span { border-left: 1px solid var(--rule-major); } .ds-mode input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; } .ds-mode span { width: 100%; font-family: var(--sans); font-variation-settings: 'wdth' 88, 'wght' 600; font-size: 0.6875rem; line-height: 1.3; letter-spacing: 0.1em; text-transform: uppercase; text-align: center; padding: 0.45rem 0.5rem; color: var(--ink-2); transition: background 140ms linear, color 140ms linear; } .ds-mode input:checked + span { background: var(--ink); color: var(--paper); } .ds-mode input:focus-visible + span { box-shadow: inset var(--focus); } .ds-mode label:hover input:not(:checked) + span { background: var(--paper-deep); } .ds-vh { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }"
+    },
+    {
+      "name": "Unread Event Mark",
+      "kind": "custom",
+      "description": "A solid participant-owned event with an explicit unread word and raised tick.",
+      "html": "<div class=\"ds-event ds-event-unread\"><span class=\"ds-event-tick\"></span><span class=\"ds-event-id\">4f21</span><span class=\"ds-event-state\">Unread</span></div>",
+      "css": ".ds-event { --ds-channel: var(--ch-a); position: relative; width: 3.6rem; min-height: 2.4rem; border: 1.5px solid var(--ds-channel); border-radius: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 0.2rem 0.1rem; } .ds-event-unread { background: var(--ds-channel); color: var(--paper); } .ds-event-tick { position: absolute; top: -0.55rem; left: 50%; width: 1px; height: 0.5rem; background: var(--ds-channel); transform: translateX(-50%); } .ds-event-id { font-family: var(--mono); font-size: 0.6875rem; font-variation-settings: 'wght' 400; letter-spacing: -0.03em; } .ds-event-state { font-family: var(--sans); font-variation-settings: 'wdth' 84, 'wght' 700; font-size: 0.625rem; letter-spacing: 0.06em; text-transform: uppercase; }"
+    },
+    {
+      "name": "Read Event Mark",
+      "kind": "custom",
+      "description": "A hollow participant-owned event struck through to encode read state without hue alone.",
+      "html": "<div class=\"ds-event ds-event-read\"><span class=\"ds-event-tick\"></span><span class=\"ds-event-id\">4f21</span><span class=\"ds-event-state\">Read</span></div>",
+      "css": ".ds-event { --ds-channel: var(--ch-b); position: relative; width: 3.6rem; min-height: 2.4rem; border: 1.5px solid var(--ds-channel); border-radius: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 0.2rem 0.1rem; background: var(--paper); } .ds-event-read::after { content: ''; position: absolute; left: -0.3rem; right: -0.3rem; top: 50%; border-top: 1.5px solid var(--ds-channel); } .ds-event-tick { position: absolute; top: -0.55rem; left: 50%; width: 1px; height: 0.5rem; background: var(--ds-channel); transform: translateX(-50%); } .ds-event-id { font-family: var(--mono); font-size: 0.6875rem; font-variation-settings: 'wght' 500; letter-spacing: -0.03em; color: var(--ink-2); } .ds-event-state { font-family: var(--sans); font-variation-settings: 'wdth' 84, 'wght' 700; font-size: 0.625rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ds-channel); }"
+    },
+    {
+      "name": "Evidence Stamp",
+      "kind": "custom",
+      "refersTo": "evidence-pending",
+      "description": "A compact outlined status stamp whose color follows the computed evidence state.",
+      "html": "<span class=\"ds-stamp ds-stamp-pending\">Acceptance pending</span>",
+      "css": ".ds-stamp { display: inline-block; font-family: var(--sans); font-variation-settings: 'wdth' 86, 'wght' 720; font-size: 0.6875rem; line-height: 1.2; letter-spacing: 0.13em; text-transform: uppercase; padding: 0.28rem 0.6rem; border: 1.5px solid currentColor; border-radius: 0; } .ds-stamp-pending { color: var(--alert); } .ds-stamp-pass { color: var(--ch-c); } .ds-stamp-fail { color: var(--ch-a); }"
+    },
+    {
+      "name": "Definition Register",
+      "kind": "custom",
+      "description": "A ruled term-and-definition block used instead of a card.",
+      "html": "<section class=\"ds-register\"><h3>Participant</h3><dl><dt>Can</dt><dd>Own a sender id and an exact-message seen set.</dd><dt>Cannot</dt><dd>Share another participant's inbox by name.</dd></dl></section>",
+      "css": ".ds-register { border-top: 2px solid var(--ink); padding-top: 0.6rem; color: var(--ink); } .ds-register h3 { margin: 0 0 0.9rem; font-family: var(--serif); font-variation-settings: 'opsz' 28, 'wght' 560; font-size: clamp(1.3rem, 1.1rem + 0.8vw, 1.65rem); line-height: 1.18; letter-spacing: -0.015em; color: var(--ch-a); } .ds-register dl { margin: 0; } .ds-register dt { border-top: 1px solid var(--rule); padding-top: 0.55rem; margin-top: 0.9rem; font-family: var(--sans); font-variation-settings: 'wdth' 86, 'wght' 620; font-size: 0.6875rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3); } .ds-register dd { margin: 0.3rem 0 0; font-family: var(--serif); font-variation-settings: 'opsz' 15, 'wght' 400; font-size: 0.9375rem; line-height: 1.55; color: var(--ink-2); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Trace: a printed channel record",
+    "overview": "The explainer is a warm, exacting instrument record rather than a terminal costume. A ruled channel field owns the mechanism; editorial serif text owns the argument. Thin rules, event ticks, rail marks, condensed captions, and explicit state words make routing and read state inspectable without turning the page into a dashboard.\n\nThe visual density is deliberate but orderly. Chart-stock surfaces and saturated channel inks keep the mechanism legible, while long passages retain a comfortable editorial measure. Every built mark has a job: location, attribution, state, boundary, or evidence. Acceptance is currently pending in every receipt row; the visual system reports that state and does not imply an installed or working runtime.",
+    "keyCharacteristics": [
+      "Warm printed stock with dark record ink and fine functional rulings.",
+      "One channel grammar at three scales: working field, inline glyph, and section mark.",
+      "Editorial Newsreader prose paired with condensed Archivo captions and narrowly scoped JetBrains Mono data.",
+      "State communicated by fill, strike, border pattern, words, and hue together.",
+      "Flat, exposed structure with no decorative shadows or ornamental cards."
+    ],
+    "rules": [
+      { "name": "The Redundant State Rule", "body": "Hue identifies a participant; unread, read, self, gone, and held are also distinguished by fill, strike, border treatment, and words.", "section": "colors" },
+      { "name": "The Evidence Color Rule", "body": "Ochre describes pending or constrained states; it is not a success color. Moss is the built passing state, and vermilion is the built failing state.", "section": "colors" },
+      { "name": "The Three-Voice Rule", "body": "Serif explains, condensed sans labels, and mono identifies machine data; do not let mono become the page's atmosphere.", "section": "typography" },
+      { "name": "The Flat Record Rule", "body": "Separate levels with stock tone and rulings; do not lift panels with decorative shadows.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do preserve redundant state encoding: words and marks must remain meaningful without hue or motion.",
+      "Do keep acceptance language derived from `assets/receipts.js`, and leave a row pending until a real observed check supplies evidence.",
+      "Do retain full-size event marks on narrow fields and reduce visible slots instead of shrinking the marks.",
+      "Do use the participant inks for attribution and action ownership, not as the only signal of read state.",
+      "Do keep every rule, tick, and gap tied to information or navigation."
+    ],
+    "donts": [
+      "Don't claim installation, runtime acceptance, or passing evidence while the receipt rows remain pending.",
+      "Don't turn the printed record into a terminal theme or spread monospace beyond ids, paths, commands, and evidence.",
+      "Don't introduce decorative shadows, rounded cards, texture, or uninformative rules.",
+      "Don't infer the mechanism from animation alone; every state transition also needs visible words.",
+      "Don't collapse participant, lineage, and address into one visual or conceptual unit."
+    ]
+  }
+}
