@@ -508,7 +508,10 @@ fn run_watch_loop(
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
 ) -> AppResult<CommandResult> {
-    touch_heartbeats(context, targets, interval_ms)?;
+    // The caller completed the initial hard admission before registering the
+    // backend. A fence may land in that gap; from here on admission failures
+    // are transient scan failures and the long-running watch must recover.
+    refresh_heartbeats(context, targets, interval_ms);
     let mut batch = scan_targets(context, targets, owned_rooms, emitted_channel_ids, |_| true);
     if !batch.is_empty() {
         emit(&batch, text, digest)?;
@@ -543,13 +546,13 @@ fn run_watch_loop(
                 Vec::new()
             }
             Some(Wake::TimedOut) => {
-                touch_heartbeats(context, targets, interval_ms)?;
+                refresh_heartbeats(context, targets, interval_ms);
                 last_beat = Instant::now();
                 Vec::new()
             }
             Some(Wake::Events(dirs)) => {
                 if last_beat.elapsed() >= Duration::from_millis(interval_ms) {
-                    touch_heartbeats(context, targets, interval_ms)?;
+                    refresh_heartbeats(context, targets, interval_ms);
                     last_beat = Instant::now();
                 }
                 // Rescan every affected target through the full existing scan
@@ -583,6 +586,15 @@ fn run_watch_loop(
                 return Ok(CommandResult::success(String::new()));
             }
         }
+    }
+}
+
+fn refresh_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) {
+    if let Err(error) = touch_heartbeats(context, targets, interval_ms) {
+        eprintln!(
+            "post: warning: watch heartbeat admission failed (watch keeps polling): {}",
+            error.message
+        );
     }
 }
 
@@ -1453,6 +1465,102 @@ mod tests {
             .expect("participant exists");
         assert!(refreshed.last_seen.is_some());
         assert!(refreshed.is_active(std::time::SystemTime::now()));
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn malformed_participant_channel_rings_once_then_repaired_file_delivers() {
+        let root = crate::test_support::test_root("watch-channel-repair");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let channel = "repair";
+        let id = "20260916-050000-000001-acde01";
+        let messages = root.join(CHANNELS_DIR).join(channel).join("messages");
+        fs::create_dir_all(&messages).expect("create messages");
+        let path = messages.join(format!("{id}.msg"));
+        fs::write(&path, "malformed").expect("write malformed message");
+        let mut seen = HashSet::new();
+        let mut reported = HashSet::new();
+        let mut emitted = HashSet::new();
+        let mut batch = Vec::new();
+
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            "alpha",
+            channel,
+            &mut seen,
+            &mut reported,
+            &mut emitted,
+            &mut batch,
+        )
+        .expect("scan malformed message");
+        assert!(matches!(
+            batch.as_slice(),
+            [WatchDelivery {
+                event: WatchEvent::Unreadable { id: event_id, .. },
+                ..
+            }] if event_id == id
+        ));
+        batch.clear();
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            "alpha",
+            channel,
+            &mut seen,
+            &mut reported,
+            &mut emitted,
+            &mut batch,
+        )
+        .expect("rescan unchanged malformed message");
+        assert!(batch.is_empty(), "unchanged corruption rings only once");
+
+        let repaired = ChannelMessage {
+            id: id.to_owned(),
+            from: "beta".to_owned(),
+            channel: channel.to_owned(),
+            subject: "repaired".to_owned(),
+            sent: "2026-09-16 05:00:00 -0500".to_owned(),
+            from_participant: Some("peer-acde01".to_owned()),
+            from_lineage: None,
+            address_kind: Some("channel".to_owned()),
+            event: None,
+            display_name: None,
+            pfp: None,
+            re: None,
+            mentions: Vec::new(),
+            signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
+        };
+        fs::write(
+            &path,
+            encode_message(&repaired, "repaired body").expect("encode repaired message"),
+        )
+        .expect("repair message");
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            "alpha",
+            channel,
+            &mut seen,
+            &mut reported,
+            &mut emitted,
+            &mut batch,
+        )
+        .expect("scan repaired message");
+        assert!(matches!(
+            batch.as_slice(),
+            [WatchDelivery {
+                event: WatchEvent::ChannelMessage { id: event_id, .. },
+                ..
+            }] if event_id == id
+        ));
+        assert!(seen.contains(&path));
         crate::test_support::trash_test_root(&root);
     }
 

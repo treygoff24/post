@@ -105,12 +105,10 @@ fn list_bound(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let addresses = if let Some(room) = args.room {
-        let rooms = context.load_rooms()?;
-        let room = context.resolved_room(Some(room), &rooms)?;
-        vec![Address {
-            kind: AddressKind::Workspace,
-            name: room,
-        }]
+        vec![crate::participant::resolve_target(
+            context,
+            &format!("workspace:{room}"),
+        )?]
     } else {
         visible_addresses(context, participant)?
     };

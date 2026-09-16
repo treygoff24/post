@@ -88,6 +88,51 @@ fn direct_mail_snapshot_never_consumes_or_moves_canonical_file() {
 }
 
 #[test]
+fn restarted_live_watch_rings_again_without_advancing_participant_seen_state() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "restart", &alpha);
+    join_channel(&sandbox, "restart", &beta);
+    let sent = sandbox.run_in(
+        &[
+            "chat",
+            "restart",
+            "--send",
+            "--anyway",
+            "--body",
+            "restart ring",
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_success(&sent);
+    let sent: Value = from_stdout(&sent);
+    let id = sent["message"]["id"].as_str().expect("message id");
+    let participant = sandbox.test_participant("beta");
+    let cursor = sandbox
+        .mail_root
+        .join("participants")
+        .join(&participant)
+        .join("cursors.json");
+    let before = std::fs::read(&cursor).ok();
+
+    for attempt in 0..2 {
+        let watched = sandbox.run_as_participant(
+            &["watch", "--once", "--interval-ms", "100"],
+            &participant,
+            &beta,
+        );
+        assert_success(&watched);
+        assert!(
+            common::stdout(&watched).contains(id),
+            "restart attempt {attempt} did not ring"
+        );
+        assert_eq!(std::fs::read(&cursor).ok(), before);
+    }
+}
+
+#[test]
 fn live_participant_watch_routes_bridge_arrival_and_emits_without_consuming() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);

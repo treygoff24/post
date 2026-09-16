@@ -5039,7 +5039,8 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         assert!(!broken.mail_root.join("archive").exists());
     }
 
-    // A running watch must stop at the next admission check after cutover.
+    // A running watch must stop writes while fenced, keep polling, and resume
+    // its heartbeat after the same generation becomes active again.
     let watched = Sandbox::new_unseeded();
     seed_fence_store(&watched, r#"{"state":"active","generation":7}"#);
     fs::create_dir_all(watched.mail_root.join("dest")).expect("existing enrolled room");
@@ -5050,7 +5051,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         .env("POST_MAIL_ROOT", &watched.mail_root)
         .env("POST_ARX_GENERATION", "7")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn watch");
     let heartbeat = watched
@@ -5078,19 +5079,16 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         "heartbeat admission blocked an ordinary writer"
     );
     let fence_mtime = fence_under_external_lock(&watched, 7);
-    let mut status = None;
-    for _ in 0..100 {
-        if let Some(value) = child.try_wait().expect("poll watch") {
-            status = Some(value);
-            break;
-        }
+    for _ in 0..15 {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    if status.is_none() {
-        child.kill().expect("stop stuck watch");
-        let _ = child.wait();
+    if let Some(status) = child.try_wait().expect("poll fenced watch") {
+        let output = child.wait_with_output().expect("collect fenced watch");
+        panic!(
+            "fenced watch exited {status}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
-    assert!(status.is_some_and(|value| !value.success()));
     assert_eq!(
         fs::metadata(&heartbeat)
             .expect("heartbeat remains")
@@ -5098,6 +5096,33 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             .expect("heartbeat mtime"),
         fence_mtime,
         "watch heartbeat landed after fence commit"
+    );
+    let active_tmp = watched.mail_root.join("..post-arx.json.reactivate.tmp");
+    fs::write(
+        &active_tmp,
+        r#"{"state":"active","generation":7}
+"#,
+    )
+    .expect("write active fence temp");
+    fs::rename(&active_tmp, watched.mail_root.join(".post-arx.json")).expect("reactivate fence");
+    let mut resumed = false;
+    for _ in 0..100 {
+        let modified = fs::metadata(&heartbeat)
+            .expect("heartbeat remains")
+            .modified()
+            .expect("heartbeat mtime");
+        if modified > fence_mtime {
+            resumed = true;
+            break;
+        }
+        assert!(child.try_wait().expect("poll recovering watch").is_none());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.kill().expect("stop recovered watch");
+    let _ = child.wait();
+    assert!(
+        resumed,
+        "watch heartbeat did not recover after reactivation"
     );
 }
 

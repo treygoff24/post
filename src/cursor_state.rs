@@ -1139,6 +1139,45 @@ mod tests {
         trash_test_root(&root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn participant_cursor_lock_refuses_symlink_hardlink_and_fifo_without_mutation() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        for kind in ["symlink", "hardlink", "fifo"] {
+            let (root, context) = context(&format!("hostile-lock-{kind}"));
+            let participant = crate::participant::bind_test_actor(&context, "alpha");
+            let lock = participant.dir.join(CURSORS_LOCK_FILE);
+            let victim = root.join("victim");
+            fs::write(&victim, b"untouched").expect("seed victim");
+            match kind {
+                "symlink" => symlink(&victim, &lock).expect("plant symlink"),
+                "hardlink" => fs::hard_link(&victim, &lock).expect("plant hard link"),
+                "fifo" => {
+                    let raw = CString::new(lock.as_os_str().as_bytes()).expect("fifo path");
+                    assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+                }
+                _ => unreachable!(),
+            }
+            let error = ParticipantCursors::consume_mail(
+                &context,
+                &participant,
+                &Address {
+                    kind: crate::participant::AddressKind::Workspace,
+                    name: "alpha".to_owned(),
+                },
+                &[MAIL_ID.to_owned()],
+            )
+            .expect_err("hostile cursor lock must be refused");
+            assert_eq!(error.code, ErrorCode::ConfigInvalid, "{kind}");
+            assert_eq!(fs::read(&victim).expect("victim survives"), b"untouched");
+            assert!(!participant.dir.join("cursors.json").exists());
+            trash_test_root(&root);
+        }
+    }
+
     #[test]
     fn exact_v1_serialization_round_trips_mail_and_channels() {
         let (root, context) = context("roundtrip");

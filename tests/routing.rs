@@ -532,6 +532,49 @@ fn routing_blocked_pending_is_held_without_stalling_catchup_or_bind() {
 }
 
 #[test]
+fn routing_legacy_workspace_member_blocks_participant_join_and_lists_both_projections() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    let channel = sandbox.mail_root.join("channels/legacy-block");
+    fs::create_dir_all(channel.join("messages")).expect("legacy channel messages");
+    fs::write(
+        channel.join("channel.json"),
+        r#"{"name":"legacy-block","created":"2026-09-16 04:31:00 -0500","created_by":"beta"}"#,
+    )
+    .expect("legacy channel info");
+    fs::write(channel.join("members.json"), r#"{"beta":"joined"}"#).expect("legacy members");
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"alpha","to":"beta","reason":"legacy member block"}]}"#,
+    )
+    .expect("blocked rule");
+
+    let refused = sandbox.run_as_participant(
+        &["chat", "legacy-block", "--join", "--json"],
+        &alpha_participant,
+        &alpha,
+    );
+    assert_eq!(refused.status.code(), Some(77));
+    let error: post::output::ErrorEnvelope = common::from_stderr(&refused);
+    assert_eq!(error.error.code, "blocked_route");
+    assert!(error.error.message.contains("legacy member block"));
+
+    let listed = sandbox.run_as_participant(&["channels"], &beta_participant, &beta);
+    assert_success(&listed);
+    let listed: Value = from_stdout(&listed);
+    let legacy = listed["channels"]
+        .as_array()
+        .expect("channels")
+        .iter()
+        .find(|item| item["name"] == "legacy-block")
+        .expect("legacy channel");
+    assert_eq!(legacy["members"], json!(["beta"]));
+    assert_eq!(legacy["participants"], json!([beta_participant]));
+}
+
+#[test]
 fn routing_workspace_less_chat_state_stays_under_participant_directory() {
     let sandbox = Sandbox::new();
     let actor = sandbox.run(&[
@@ -624,6 +667,32 @@ fn routing_skips_corrupt_participant_and_delivers_to_valid_sibling() {
         .unwrap()
         .iter()
         .any(|value| value == &valid));
+}
+
+#[test]
+fn routing_doctor_keeps_reporting_when_pending_projection_hits_a_bad_receipt() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let actor = bind(&sandbox, "doctor-projection", &alpha, "alpha");
+    let routing = sandbox.mail_root.join("alpha/routing");
+    fs::create_dir_all(&routing).expect("routing directory");
+    fs::write(
+        routing.join("20260916-043100-acde01.json"),
+        b"{not a receipt",
+    )
+    .expect("malformed receipt");
+
+    let doctor = sandbox.run_as_participant(&["doctor"], &actor, &alpha);
+    assert!(matches!(doctor.status.code(), Some(0 | 1)));
+    let doctor: Value = from_stdout(&doctor);
+    assert_eq!(doctor["participant"]["id"], actor);
+    assert!(doctor["projection_errors"]
+        .as_array()
+        .expect("projection errors")
+        .iter()
+        .any(|error| error
+            .as_str()
+            .is_some_and(|message| message.contains("invalid routing receipt"))));
 }
 
 #[test]
@@ -732,18 +801,92 @@ fn routing_display_only_forms_leave_routing_and_cursor_tree_untouched() {
         }),
         "display only",
     );
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "display-only", "--join", "--json"],
+        &a,
+        &alpha,
+    ));
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "display-only", "--join", "--json"],
+        &c,
+        &beta,
+    ));
+    let channel_send = sandbox.run_as_participant(
+        &[
+            "chat",
+            "display-only",
+            "--send",
+            "--anyway",
+            "--body",
+            "display channel",
+            "--json",
+        ],
+        &c,
+        &beta,
+    );
+    assert_success(&channel_send);
+    let channel_send: Value = from_stdout(&channel_send);
+    let channel_id = channel_send["message"]["id"]
+        .as_str()
+        .expect("channel id")
+        .to_owned();
     let before = tree(&sandbox.mail_root);
-    for args in [
+    for args in vec![
         vec!["inbox"],
         vec!["read", id, "--peek", "--json"],
         vec!["watch", "--snapshot", "--json"],
         vec!["channels"],
         vec!["search", "display", "--mail", "--json"],
+        vec!["who"],
+        vec!["doctor"],
+        vec!["chat", "display-only", "--peek", "--json"],
+        vec!["chat", "display-only", "--history", "10", "--json"],
+        vec![
+            "chat",
+            "display-only",
+            "--since",
+            channel_id.as_str(),
+            "--json",
+        ],
     ] {
         let output = sandbox.run_as_participant(&args, &a, &alpha);
-        assert_success(&output);
+        if args == ["doctor"] {
+            assert_eq!(output.status.code(), Some(1));
+        } else {
+            assert_success(&output);
+        }
     }
     assert_eq!(tree(&sandbox.mail_root), before);
+}
+
+#[test]
+fn routing_bound_room_overrides_reject_reserved_and_traversal_names_without_mutation() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let actor = bind(&sandbox, "room-override", &alpha, "alpha");
+    let before = tree(&sandbox.mail_root);
+    for args in [
+        vec!["inbox", "--room", "participants"],
+        vec![
+            "read",
+            "20260916-000000-acde01",
+            "--room",
+            "../alpha",
+            "--peek",
+        ],
+    ] {
+        let output = sandbox.run_as_participant(&args, &actor, &alpha);
+        assert!(
+            !output.status.success(),
+            "reserved override was admitted: {args:?}"
+        );
+        let error: post::output::ErrorEnvelope = common::from_stderr(&output);
+        assert!(matches!(
+            error.error.code.as_str(),
+            "invalid_argument" | "not_found"
+        ));
+        assert_eq!(tree(&sandbox.mail_root), before, "{args:?} mutated state");
+    }
 }
 
 #[test]
@@ -1082,6 +1225,12 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         for entry in entries {
             let path = entry.path();
             if path.is_dir() {
+                out.insert(
+                    path.strip_prefix(root)
+                        .expect("relative directory")
+                        .to_path_buf(),
+                    b"<dir>".to_vec(),
+                );
                 walk(root, &path, out);
             } else if path.is_file() {
                 out.insert(

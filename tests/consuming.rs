@@ -87,7 +87,13 @@ fn failed_emit_records_no_participant_seen_id() {
     let sent: Value = from_stdout(&sent);
     let id = sent["envelope"]["id"].as_str().expect("mail id");
     let failed = sandbox.run_in_broken_stdout(&["read", id, "--json"], &beta);
-    assert_ne!(failed.status.code(), Some(0));
+    assert_eq!(failed.status.code(), Some(75));
+    let error: post::output::ErrorEnvelope = common::from_stderr(&failed);
+    assert_eq!(error.error.code, "io_error");
+    assert_eq!(
+        error.error.details.operation.as_deref(),
+        Some("write stdout")
+    );
     let participant = sandbox.test_participant("beta");
     let cursor = sandbox
         .mail_root
