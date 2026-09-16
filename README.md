@@ -123,11 +123,12 @@ Multi-agent caveat, learned the hard way the night the pattern shipped: on a mac
    tool deletes or rewrites a message. Delivery and configuration state is
    rewritten by design: inbox placement, cursor seen-sets, heartbeats, `rooms.json`,
    profiles, and channel membership and descriptions.
-5. **Identity stays bound to rooms.** Direct `--from` may use free-form names,
-   but registered room names can only be claimed from inside that room's tree
-   (or by a `POST_FROM` launch pin, which is recorded as `declared-env`
-   evidence on every envelope). Channel identity has no `--from` or `--room`:
-   it is the pinned or cwd-resolved registered room.
+5. **Participants act; addresses route.** One harness conversation is one
+   participant with its own inbox, cursors, channel membership, and presence.
+   A workspace is a place and reply address, not the actor; a lineage is
+   optional named standing that several participants may continue without
+   sharing read state or authority. Post records attribution and authored
+   voices, but asserts nothing about sameness, experience, or welfare.
 
 ## Commands
 
