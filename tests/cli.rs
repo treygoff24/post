@@ -5940,6 +5940,19 @@ fn threads_lite_stamps_re_and_renders_marker() {
     );
 }
 
+fn wait_for_live_watch(sandbox: &Sandbox, room: &str) -> WhoOutput {
+    let mut latest = None;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", room]));
+        if who.legacy_rooms[0].live_watch {
+            return who;
+        }
+        latest = Some(who);
+    }
+    latest.expect("at least one presence sample")
+}
+
 #[test]
 fn who_reports_live_watch_without_pids() {
     let sandbox = Sandbox::new();
@@ -5959,8 +5972,7 @@ fn who_reports_live_watch_without_pids() {
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn watch");
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    let during = wait_for_live_watch(&sandbox, "alpha");
     assert!(during.legacy_rooms[0].live_watch);
     assert!(during.legacy_rooms[0].last_seen.is_some());
     let raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
@@ -6251,9 +6263,9 @@ fn who_reports_live_for_ten_second_interval_watch() {
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn watch");
-    // Wait past the old LIVE_SECS=5 window but well inside interval*2+slack.
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    // Poll until the first heartbeat instead of assuming process startup fits
+    // within one fixed sleep under a parallel full-suite load.
+    let during = wait_for_live_watch(&sandbox, "alpha");
     assert!(
         during.legacy_rooms[0].live_watch,
         "10s-interval watch must read live shortly after first poll"
@@ -8579,6 +8591,7 @@ const FROZEN_DECLARED_FLAG: &str =
 const FROZEN_INFERRED_CWD: &str = "sender identity was inferred from the directory this was sent from — it is a location, not a claim.";
 const FROZEN_INFERRED_BASENAME: &str =
     "sender identity was taken from the directory name — it is a location, not a claim.";
+const FROZEN_PARTICIPANT_BINDING: &str = "sender identity was taken from the participant binding — it is local routing context, not a credential.";
 
 /// Hand-write a mail fixture with an arbitrary envelope, the way an old (or
 /// foreign) binary would have. Returns the id.
@@ -8979,7 +8992,12 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
             Some(FROZEN_INFERRED_BASENAME),
             "aaaa04",
         ),
-        ("declared-quantum", None, "aaaa05"),
+        (
+            "participant-binding",
+            Some(FROZEN_PARTICIPANT_BINDING),
+            "aaaa05",
+        ),
+        ("declared-quantum", None, "aaaa06"),
     ];
     for (value, expected, suffix) in cases {
         let id = write_mail_fixture(

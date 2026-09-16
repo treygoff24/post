@@ -197,11 +197,11 @@ fn routing_lifecycle_excludes_stale_and_ended_fanout_but_not_participant_target(
     let ended = bind(&sandbox, "life-ended", &alpha, "alpha");
     let sender = bind(&sandbox, "life-sender", &beta, "beta");
     patch_participant(&sandbox, &stale, |record| {
-        record["last_seen"] = json!("2000-01-01 00:00:00 +0000");
+        record["last_seen"] = json!("2000-01-01T00:00:00Z");
         record["lease_hours"] = json!(1);
     });
     patch_participant(&sandbox, &ended, |record| {
-        record["ended_at"] = json!("2026-09-16 03:00:00 -0500");
+        record["ended_at"] = json!("2026-09-16T08:00:00Z");
     });
 
     let sent = send_as(&sandbox, &sender, &beta, "workspace:alpha", "active only");
@@ -215,6 +215,11 @@ fn routing_lifecycle_excludes_stale_and_ended_fanout_but_not_participant_target(
     assert!(recipients.iter().any(|value| value == &active));
     assert!(!recipients.iter().any(|value| value == &stale));
     assert!(!recipients.iter().any(|value| value == &ended));
+    patch_participant(&sandbox, &active, |record| {
+        record["ended_at"] = json!("2026-09-16T08:01:00Z");
+    });
+    let frozen_read = sandbox.run_as_participant(&["read", id, "--json"], &active, &alpha);
+    assert_success(&frozen_read);
 
     let direct = send_as(
         &sandbox,
@@ -263,6 +268,102 @@ fn routing_sender_only_workspace_stays_pending_until_another_participant_arrives
     let read = sandbox.run_as_participant(&["read", id, "--json"], &b, &solo);
     assert_success(&read);
     assert!(receipt.is_file());
+}
+
+#[test]
+fn routing_lineage_receipt_names_blocked_exclusion_and_allowed_affiliate() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let allowed_path = sandbox.home.join("claude-space");
+    let blocked = bind(&sandbox, "lineage-blocked", &alpha, "alpha");
+    let allowed = bind(&sandbox, "lineage-allowed", &allowed_path, "claude-space");
+    let sender = bind(&sandbox, "lineage-sender", &beta, "beta");
+    for id in [&blocked, &allowed] {
+        patch_participant(&sandbox, id, |record| {
+            record["lineage"] = json!("ember");
+            record["lineage_since"] = json!("2026-09-16T08:00:00Z");
+        });
+    }
+    let lineage = sandbox.mail_root.join("lineages/ember");
+    fs::create_dir_all(&lineage).expect("lineage directory");
+    fs::write(
+        lineage.join("lineage.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "name": "ember",
+                "founder": blocked,
+                "created": "2026-09-16T08:00:00Z",
+                "host": "test"
+            }))
+            .expect("lineage JSON")
+        ),
+    )
+    .expect("write lineage");
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"beta","to":"alpha","reason":"lineage block"}]}"#,
+    )
+    .expect("blocked rule");
+
+    let sent = send_as(&sandbox, &sender, &beta, "lineage:ember", "lineage fanout");
+    let id = sent["envelope"]["id"].as_str().expect("lineage id");
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(lineage.join(format!("routing/{id}.json"))).expect("lineage receipt"),
+    )
+    .expect("lineage receipt JSON");
+    assert_eq!(receipt["recipients"], json!([allowed]));
+    assert_eq!(
+        receipt["excluded"],
+        json!([{"participant": blocked, "reason": "blocked-route"}])
+    );
+}
+
+#[test]
+fn routing_workspace_less_participants_use_explicit_channel_membership() {
+    let sandbox = Sandbox::new();
+    let a = sandbox.bind_claude("session-only-a", &sandbox.path, None)["id"]
+        .as_str()
+        .expect("A id")
+        .to_owned();
+    let b = sandbox.bind_claude("session-only-b", &sandbox.path, None)["id"]
+        .as_str()
+        .expect("B id")
+        .to_owned();
+    for participant in [&a, &b] {
+        let joined = sandbox.run_as_participant(
+            &["chat", "session-only", "--join", "--json"],
+            participant,
+            &sandbox.path,
+        );
+        assert_success(&joined);
+    }
+    let sent = sandbox.run_as_participant(
+        &[
+            "chat",
+            "session-only",
+            "--send",
+            "--body",
+            "session-only message",
+            "--json",
+        ],
+        &a,
+        &sandbox.path,
+    );
+    assert_success(&sent);
+    let peek = sandbox.run_as_participant(
+        &["chat", "session-only", "--peek", "--json"],
+        &b,
+        &sandbox.path,
+    );
+    assert_success(&peek);
+    let peek: Value = from_stdout(&peek);
+    assert!(peek["count"].as_u64().is_some_and(|count| count >= 1));
+    assert!(peek["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .any(|message| message["body"] == "session-only message"));
 }
 
 fn patch_participant(sandbox: &Sandbox, id: &str, patch: impl FnOnce(&mut Value)) {

@@ -30,15 +30,26 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         return version::run(json, pretty);
     }
     let context = Context::from_env()?;
-    let resolved_participant = crate::participant::resolve(&context)?;
     let writes = migration_fence::classify_write(&cli.command);
     let long_watch = matches!(&cli.command, Command::Watch(args) if !args.snapshot);
+    let explicit_bootstrap = explicit_participant_bootstrap(&cli.command);
+    let participant_is_required = participant_required(&cli.command);
+    let resolution_required = participant_is_required || plain_participant_bind(&cli.command);
+    let (resolved_participant, resolution_error) = if explicit_bootstrap {
+        (crate::participant::Resolved::Unbound, None)
+    } else {
+        match crate::participant::resolve(&context) {
+            Ok(resolved) => (resolved, None),
+            Err(error) if resolution_required => return Err(error),
+            Err(error) => (crate::participant::Resolved::Unbound, Some(error.message)),
+        }
+    };
     let mut admission = if writes {
         Some(migration_fence::admit(&context, true)?)
     } else {
         None
     };
-    if participant_required(&cli.command) && resolved_participant.participant().is_none() {
+    if participant_is_required && resolved_participant.participant().is_none() {
         return Err(AppError::no_participant(
             crate::participant::bind_key_available()?,
         ));
@@ -54,19 +65,23 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;
     }
+    if writes && !participant_command_manages_activity(&cli.command) {
+        if let Some(participant) = resolved_participant.participant() {
+            crate::participant::touch(&context, &participant.id)?;
+        }
+    }
     // Startup admission only proves that the watch may enter its setup phase;
     // heartbeat admissions must be able to take the lock independently.
     if long_watch {
         drop(admission.take());
     }
     let report_unbound = resolved_participant.participant().is_none()
-        && matches!(
+        && !writes
+        && !matches!(
             &cli.command,
-            Command::Inbox(_)
-                | Command::Channels(_)
-                | Command::Doctor(_)
-                | Command::Schema
-                | Command::Rooms(_)
+            Command::Participant(crate::cli::ParticipantArgs {
+                command: crate::cli::ParticipantCommand::Show,
+            })
         );
     // clap enforces `conflicts_with = "json"` only when the global flag
     // FOLLOWS the subcommand; `post --json <cmd> --text` parses fine. Every
@@ -107,7 +122,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Version => unreachable!("version dispatches before mailbox context resolution"),
     }?;
     if report_unbound {
-        annotate_unbound(&mut result, pretty)?;
+        annotate_unbound(&mut result, pretty, resolution_error.as_deref())?;
     }
     if !long_watch && writes {
         let admission = admission.expect("writer admission exists");
@@ -120,9 +135,34 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     Ok(result)
 }
 
+fn explicit_participant_bootstrap(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Participant(crate::cli::ParticipantArgs {
+            command: crate::cli::ParticipantCommand::Bind(args),
+        }) if args.fresh || args.key.is_some()
+    )
+}
+
+fn plain_participant_bind(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Participant(crate::cli::ParticipantArgs {
+            command: crate::cli::ParticipantCommand::Bind(args),
+        }) if !args.fresh && args.key.is_none()
+    )
+}
+
+fn participant_command_manages_activity(command: &Command) -> bool {
+    matches!(command, Command::Participant(_))
+}
+
 fn participant_required(command: &Command) -> bool {
     use crate::cli::{IdentityCommand, ProfileCommand};
     match command {
+        Command::Participant(crate::cli::ParticipantArgs {
+            command: crate::cli::ParticipantCommand::Touch | crate::cli::ParticipantCommand::End,
+        }) => true,
         Command::Send(_) | Command::Catchup(_) => true,
         Command::Read(args) => {
             args.ack || (!args.peek && args.offset.is_none() && args.length.is_none())
@@ -142,24 +182,44 @@ fn participant_required(command: &Command) -> bool {
     }
 }
 
-fn annotate_unbound(result: &mut CommandResult, pretty: bool) -> AppResult<()> {
+fn annotate_unbound(
+    result: &mut CommandResult,
+    pretty: bool,
+    resolution_error: Option<&str>,
+) -> AppResult<()> {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result.stdout) else {
-        result
-            .stdout
-            .insert_str(0, "participant: unbound (run: post participant bind)\n");
+        let mut annotation = "participant: unbound (run: post participant bind)\n".to_owned();
+        if let Some(error) = resolution_error {
+            annotation.push_str(&format!("participant resolution error: {error}\n"));
+        }
+        result.stdout.insert_str(0, &annotation);
         return Ok(());
     };
     let Some(object) = value.as_object_mut() else {
         return Ok(());
     };
-    object.insert(
-        "participant".to_owned(),
-        serde_json::Value::String("unbound".to_owned()),
-    );
-    object.insert(
-        "participant_fix".to_owned(),
-        serde_json::Value::String("run: post participant bind".to_owned()),
-    );
-    result.stdout = crate::output::json(&value, pretty)?;
+    let ok = object.remove("ok").unwrap_or(serde_json::Value::Bool(true));
+    let participant_present = object.contains_key("participant");
+    let payload: std::collections::BTreeMap<String, serde_json::Value> =
+        std::mem::take(object).into_iter().collect();
+    #[derive(serde::Serialize)]
+    struct AnnotatedUnbound {
+        ok: serde_json::Value,
+        #[serde(flatten)]
+        payload: std::collections::BTreeMap<String, serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        participant: Option<&'static str>,
+        participant_fix: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        participant_error: Option<String>,
+    }
+    let output = AnnotatedUnbound {
+        ok,
+        payload,
+        participant: (!participant_present).then_some("unbound"),
+        participant_fix: "run: post participant bind",
+        participant_error: resolution_error.map(str::to_owned),
+    };
+    result.stdout = crate::output::json(&output, pretty)?;
     Ok(())
 }

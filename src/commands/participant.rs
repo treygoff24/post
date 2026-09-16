@@ -17,6 +17,8 @@ struct ParticipantOutput {
     provenance: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fix: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    participant_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -91,9 +93,13 @@ pub(super) fn run(
                     participant.id
                 )));
             }
-            let provenance = participant::resolve(context)?
-                .provenance()
-                .map(|p| p.as_str());
+            let provenance = if bootstrap.is_some() {
+                Some("explicit-bootstrap")
+            } else {
+                participant::resolve(context)?
+                    .provenance()
+                    .map(|p| p.as_str())
+            };
             let id = participant.id.clone();
             CommandResult::json(
                 &ParticipantOutput {
@@ -103,10 +109,13 @@ pub(super) fn run(
                     participant: Some(participant),
                     provenance,
                     fix: None,
+                    participant_error: None,
                 },
                 pretty,
             )
         }
+        ParticipantCommand::Touch => lifecycle(context, false, pretty),
+        ParticipantCommand::End => lifecycle(context, true, pretty),
         ParticipantCommand::List => {
             let participants = participant::list(context)?;
             let count = participants.len();
@@ -122,26 +131,59 @@ pub(super) fn run(
     }
 }
 
+fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandResult> {
+    let (current, provenance) = participant::require(context)?;
+    let participant = if end {
+        participant::end(context, &current.id)?
+    } else {
+        participant::touch(context, &current.id)?
+    };
+    let id = participant.id.clone();
+    CommandResult::json(
+        &ParticipantOutput {
+            ok: true,
+            status: if end { "ended" } else { "bound" },
+            id: Some(id),
+            participant: Some(participant),
+            provenance: Some(provenance.as_str()),
+            fix: None,
+            participant_error: None,
+        },
+        pretty,
+    )
+}
+
 fn show(context: &Context, pretty: bool) -> AppResult<CommandResult> {
-    let output = match participant::resolve(context)? {
-        Resolved::Bound {
+    let output = match participant::resolve(context) {
+        Ok(Resolved::Bound {
             participant,
             provenance,
-        } => ParticipantOutput {
+        }) => ParticipantOutput {
             ok: true,
             status: "bound",
             id: Some(participant.id.clone()),
             participant: Some(*participant),
             provenance: Some(provenance.as_str()),
             fix: None,
+            participant_error: None,
         },
-        Resolved::Unbound => ParticipantOutput {
+        Ok(Resolved::Unbound) => ParticipantOutput {
             ok: true,
             status: "unbound",
             id: None,
             participant: None,
             provenance: None,
             fix: Some("run: post participant bind"),
+            participant_error: None,
+        },
+        Err(error) => ParticipantOutput {
+            ok: true,
+            status: "unbound",
+            id: None,
+            participant: None,
+            provenance: None,
+            fix: Some("run: post participant bind"),
+            participant_error: Some(error.message),
         },
     };
     CommandResult::json(&output, pretty)

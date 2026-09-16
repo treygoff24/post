@@ -554,14 +554,13 @@ pub(crate) fn shell_quote(value: &str) -> String {
 }
 
 pub(crate) fn validate_room_name(value: &str) -> Result<(), String> {
-    validate_component(value)?;
-    if ["workspace:", "lineage:", "participant:"]
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
-    {
-        return Err(format!(
-            "name '{value}' collides with the typed address namespace"
-        ));
+    validate_component(value)
+}
+
+pub(crate) fn validate_new_room_name(value: &str) -> Result<(), String> {
+    validate_room_name(value)?;
+    if value.contains(':') {
+        return Err("name must not contain ':' (reserved for typed addresses)".to_owned());
     }
     let folded = value.to_ascii_lowercase();
     if RESERVED_ROOM_NAMES.contains(&folded.as_str())
@@ -571,14 +570,6 @@ pub(crate) fn validate_room_name(value: &str) -> Result<(), String> {
         return Err(format!(
             "name '{value}' is reserved by mailbox storage or wildcard semantics"
         ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_new_room_name(value: &str) -> Result<(), String> {
-    validate_room_name(value)?;
-    if value.contains(':') {
-        return Err("name must not contain ':' (reserved for typed addresses)".to_owned());
     }
     Ok(())
 }

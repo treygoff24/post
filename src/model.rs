@@ -56,10 +56,11 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_address: Option<String>,
     /// How the `from` field was determined at send time: `declared-env`,
-    /// `declared-flag`, `inferred-cwd`, or `inferred-basename`. Evidence, not
+    /// `declared-flag`, `inferred-cwd`, `inferred-basename`, or
+    /// `participant-binding`. Evidence, not
     /// a credential — kept as a plain string so an unknown future value can
     /// never break message parse (the signature_ref lesson). Renderers only
-    /// speak the four known values; anything else renders silence.
+    /// speak known values; anything else renders silence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_provenance: Option<String>,
 }
@@ -166,6 +167,9 @@ pub(crate) enum SenderProvenance {
     InferredCwd,
     /// `from` fell back to the cwd basename (no registered room matched).
     InferredBasename,
+    /// `from` came from a bound participant whose reply address differs from
+    /// the current directory's legacy room inference.
+    ParticipantBinding,
 }
 
 impl SenderProvenance {
@@ -175,6 +179,7 @@ impl SenderProvenance {
             Self::DeclaredFlag => "declared-flag",
             Self::InferredCwd => "inferred-cwd",
             Self::InferredBasename => "inferred-basename",
+            Self::ParticipantBinding => "participant-binding",
         }
     }
 }

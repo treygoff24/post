@@ -64,6 +64,8 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
                 "--harness",
                 "--key",
                 "--new",
+                "touch",
+                "end",
                 "list",
             ],
         ),
@@ -103,15 +105,24 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
         .find(|command| command.name == "inbox")
         .expect("inbox schema command");
     assert!(inbox.usage.contains("--adopt"));
-    assert_eq!(schema.store_version, 2);
-    assert!(schema
-        .capabilities
+    assert!(!inbox.side_effects.contains("P.2"));
+    assert!(!inbox.side_effects.contains("not_yet"));
+    let identity = schema
+        .commands
         .iter()
-        .any(|value| value == "participants"));
+        .find(|command| command.name == "identity")
+        .expect("identity schema command");
+    assert!(!identity.side_effects.contains("P.3"));
+    assert!(!identity.side_effects.contains("not_yet"));
+    assert!(!schema.output_shapes.identity.join("\n").contains("not_yet"));
+    assert_eq!(schema.store_version, 1);
+    assert_eq!(schema.capabilities, vec!["participants"]);
 
     for args in [
         &["participant", "--help"] as &[&str],
         &["participant", "bind", "--help"],
+        &["participant", "touch", "--help"],
+        &["participant", "end", "--help"],
         &["identity", "--help"],
         &["identity", "show", "--help"],
         &["identity", "continue", "--help"],

@@ -46,15 +46,15 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "participant",
-            "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant list",
+            "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant touch | post participant end | post participant list",
             "JSON",
-            "show/list are read-only; bind is the only participant minting path and commits participant.json before its by-session index under .participants.lock",
+            "show/list are read-only; bind is the only participant minting path and refreshes last_seen, records the participant's lease_hours, clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen/lease_hours; end sets ended_at idempotently",
         ),
         command(
             "identity",
             "post identity list | post identity show <name> [--voices] | post identity new <name> | post identity continue <name> [--acknowledge] | post identity leave | post identity voice add --body-file <path> | post identity voice withdraw | post identity terms set --body-file <path>",
             "JSON",
-            "CLI surface is complete; command bodies are implemented by P.3. list/show are read-only and voice bodies load only with --voices",
+            "list/show are read-only and voice bodies load only with --voices; new/continue/leave change only the acting participant's historical affiliation; continue requires --acknowledge when terms exist; voice and terms bodies come only from the named files",
         ),
         command(
             "send",
@@ -78,7 +78,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "inbox",
             "post inbox [--room <name>] [--text] [--adopt]",
             "JSON; text with --text",
-            "creates missing mailbox inbox/read directories; does not alter mail; JSON adds unread_count while unread/count retain their physical-inbox meanings",
+            "listing is read-only; --adopt is a writer that routes held lineage mail to the current eligible affiliates without making later affiliates retroactive recipients; JSON keeps unread and pending counts distinct",
         ),
         command(
             "read",
@@ -149,15 +149,20 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
-            "show/bind: ok, status=bound|unbound, id?, participant?, provenance?, fix?",
+            "show/bind/touch/end: ok, status=bound|unbound|ended, id?, participant? (last_seen?, lease_hours, ended_at?), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
             "list: ok, participants, count",
         ]),
-        identity: fields(&["declared surface; P.3 bodies currently return not_yet"]),
+        identity: fields(&[
+            "list: ok, lineages without voice bodies",
+            "show: lineage metadata and affiliates; voice bodies only with --voices",
+            "new/continue/leave: acting participant affiliation and acknowledgement state",
+            "voice add/withdraw and terms set: lineage content state",
+        ]),
         version: fields(&[
             "ok",
             "version",
             "build_sha",
-            "store_version=2",
+            "store_version=1",
             "capabilities",
         ]),
         doctor: fields(&[
@@ -219,6 +224,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "store_version",
             "capabilities",
             "participant=unbound and participant_fix (when no participant is bound)",
+            "participant_error (when ambient participant resolution failed but this read-only command remained available)",
             "global_flags",
             "commands",
             "output_shapes",
@@ -326,9 +332,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         who: fields(&[
             "ok",
-            "participant (status, id?, harness?, provenance?, workspace?, lineage?, fix?)",
-            "participants (id, harness, lineage?, workspace?, live_watch, last_seen?)",
+            "participant (status, state=active|stale|ended?, last_seen?, id?, harness?, provenance?, workspace?, lineage?, fix?)",
+            "participants (id, harness, state=active|stale|ended, last_seen?, lineage?, workspace?, live_watch, watch_last_seen?)",
             "legacy_rooms (room, live_watch, last_seen?)",
+            "activity_note? (stale-delivery crash gap: frozen mail is not reassigned)",
             "count",
         ]),
     };
@@ -344,7 +351,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ok: true,
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
-        store_version: 2,
+        store_version: 1,
         capabilities: version::CAPABILITIES
             .iter()
             .map(|value| (*value).to_owned())
@@ -371,7 +378,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             exit(2, "usage or argument error"),
             exit(65, "validation error"),
             exit(66, "message not found"),
-            exit(69, "declared surface whose body belongs to a later task"),
+            exit(69, "command unavailable"),
             exit(70, "non-retryable post-commit or internal failure"),
             exit(75, "retryable I/O failure"),
             exit(77, "blocked route"),
@@ -418,7 +425,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Budgeted chat auto framing inspects banner-day without mutating during admission: first-day output is full, same-day output compact, fenced read-only output remains always-full, and a consuming stamp occurs only after successful stdout; cursorless, zero-admission, null-sink and failed-output paths do not stamp. Banner state uses the raw validated acting-room id, never sanitized presentation text. Omission continuations use a measured fixed-point cap covering the exact stored envelope at the body's widest later offsets plus its costliest encoded UTF-8 scalar, so the unchanged-message chain crosses decimal/scalar boundaries; this cap may exceed the original byte_limit without changing it.",
             "Channel sends bounce with crossed_send when unseen ordinary messages from others exist in the channel; --anyway delivers regardless. Direct mail is unaffected.",
             "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
-            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; authority comes only from signature verification, and post never synthesizes either field.",
+            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; participant-binding means the bound reply address differed from cwd inference; authority comes only from signature verification, and post never synthesizes either field.",
+            "Participant activity affects new recipient selection only. Legacy records without last_seen remain active; read-only commands never refresh last_seen. Mail already frozen to a participant is durable and is not reassigned when that participant becomes stale.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override — a supported first-class root (r2.1); must be absolute, defaults to $HOME/.claude-mail",
@@ -427,6 +435,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "POST_FRAMING: presentation preference (auto|full|compact) consulted ONLY by body-returning reads (post read, post chat reads) when --framing is absent — send/join/discard/discard-through/seen-by never consult it; an explicit --framing always wins; set-but-invalid or non-UTF-8 warns on stderr and falls back to auto (presentation never breaks a read; deliberately weaker than the POST_FROM identity pin)",
             "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
             "POST_PARTICIPANT: explicit acting participant id; highest resolution precedence and never mints a missing record",
+            "POST_PARTICIPANT_LEASE_HOURS: positive integer lease recorded on the acting participant by bind/touch and writer activity; defaults to 24 and never reclassifies peer records",
             "CLAUDE_CODE_SESSION_ID: Claude conversation key used by post participant bind",
             "CODEX_THREAD_ID / CODEX_SESSION_ID: Codex conversation key (both present and different is an error, never a guess)",
             "CLAUDE_PID: marks a Claude ancestor when nested Claude/Codex harness keys are both inherited; nearest harness ancestor wins and unresolved ancestry fails naming POST_PARTICIPANT",

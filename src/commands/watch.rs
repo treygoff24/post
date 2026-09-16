@@ -251,7 +251,6 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     let resolved = crate::participant::resolve(context)?;
     if let Resolved::Bound { participant, .. } = &resolved {
         if !snapshot {
-            crate::cursor_state::routing::touch_participant(context, participant)?;
             crate::cursor_state::routing::route_for_participant(context, participant)?;
         }
     }
@@ -288,7 +287,11 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                     ))
                 })?;
             }
-            let room = super::inbox::address_label(&address);
+            let room = if address.kind == AddressKind::Workspace {
+                address.name.clone()
+            } else {
+                super::inbox::address_label(&address)
+            };
             let inbox = crate::cursor_state::routing::inbox_path(context, &address);
             if !snapshot
                 && crate::mailbox::read_only_command()
@@ -540,6 +543,7 @@ fn run_watch_loop(
         // Slow pass: due whenever the wall clock says so, after EVERY wake.
         if Instant::now() >= slow_deadline {
             slow_deadline = Instant::now() + slow_period;
+            refresh_participant_activity(context, targets)?;
             // Re-derive the watched-dir set (new channel dirs, dirs replaced
             // by rm+mkdir) and hand deltas to the backend before the
             // unconditional rescan (r2).
@@ -558,6 +562,19 @@ fn run_watch_loop(
             }
         }
     }
+}
+
+fn refresh_participant_activity(context: &Context, targets: &[WatchTarget]) -> AppResult<()> {
+    let mut refreshed = HashSet::new();
+    for participant in targets
+        .iter()
+        .filter_map(|target| target.participant.as_ref())
+    {
+        if refreshed.insert(participant.id.clone()) {
+            crate::participant::touch(context, &participant.id)?;
+        }
+    }
+    Ok(())
 }
 
 fn touch_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) -> AppResult<()> {
@@ -1202,7 +1219,16 @@ fn target_dirs(context: &Context, room: &str, inbox: &Path) -> BTreeSet<PathBuf>
         .into_iter()
         .map(|(_, dir)| std::fs::canonicalize(&dir).unwrap_or(dir))
         .collect();
-    dirs.insert(std::fs::canonicalize(inbox).unwrap_or_else(|_| inbox.to_path_buf()));
+    let inbox_watch = if inbox.is_dir() {
+        inbox.to_path_buf()
+    } else {
+        inbox
+            .parent()
+            .filter(|parent| parent.is_dir())
+            .unwrap_or(inbox)
+            .to_path_buf()
+    };
+    dirs.insert(std::fs::canonicalize(&inbox_watch).unwrap_or(inbox_watch));
     dirs
 }
 
@@ -1312,6 +1338,36 @@ mod tests {
     use crate::output::InboxItem;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
+
+    #[test]
+    fn participant_watch_heartbeat_refresh_renews_activity_lease() {
+        let root = crate::test_support::test_root("watch-participant-lease");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant.clone()),
+            address: Some(Address {
+                kind: AddressKind::Workspace,
+                name: "alpha".to_owned(),
+            }),
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            scan_failing: false,
+        }];
+        refresh_participant_activity(&context, &targets).expect("refresh activity");
+        let refreshed = crate::participant::load(&context, &participant.id)
+            .expect("load participant")
+            .expect("participant exists");
+        assert!(refreshed.last_seen.is_some());
+        assert!(refreshed.is_active(std::time::SystemTime::now()));
+        crate::test_support::trash_test_root(&root);
+    }
 
     fn mail_delivery(room: &str, id: &str, from: &str) -> WatchDelivery {
         WatchDelivery::mail(

@@ -16,8 +16,16 @@ pub(crate) struct Receipt {
     pub digest: String,
     pub address: Address,
     pub recipients: Vec<String>,
+    #[serde(default)]
+    pub excluded: Vec<ExcludedRecipient>,
     pub routed_at: String,
     pub routed_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExcludedRecipient {
+    pub participant: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -94,8 +102,8 @@ pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<R
             Ok(None) => report.pending += 1,
             Err(error) if error.code == ErrorCode::ConfigInvalid => {
                 eprintln!(
-                    "post: warning: left malformed mail '{}' pending: {}",
-                    path.display(),
+                    "post: warning: left malformed mail {:?} pending: {:?}",
+                    path.display().to_string(),
                     error.message
                 );
                 report.pending += 1;
@@ -134,47 +142,6 @@ pub(crate) fn route_for_participant(
         )?,
     );
     Ok(report)
-}
-
-pub(crate) fn touch_participant(context: &Context, participant: &Participant) -> AppResult<()> {
-    let lease_hours = match std::env::var("POST_PARTICIPANT_LEASE_HOURS") {
-        Ok(raw) => raw
-            .parse::<u64>()
-            .ok()
-            .filter(|hours| *hours > 0)
-            .ok_or_else(|| {
-                AppError::invalid_argument(
-                    "POST_PARTICIPANT_LEASE_HOURS must be a positive whole number of hours",
-                )
-            })?,
-        Err(std::env::VarError::NotPresent) => 24,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(AppError::invalid_argument(
-                "POST_PARTICIPANT_LEASE_HOURS is not valid UTF-8",
-            ));
-        }
-    };
-    let _lock = participant::lock(context)?;
-    let path = participant.dir.join("participant.json");
-    let bytes = fs::read(&path)
-        .map_err(|error| AppError::io("read participant for lifecycle touch", &path, error))?;
-    let mut value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| AppError::config(&path, format!("invalid participant JSON: {error}")))?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| AppError::config(&path, "participant record is not a JSON object"))?;
-    let (_, now) = crate::mailbox::local_timestamp()?;
-    object.insert("last_seen".to_owned(), serde_json::Value::String(now));
-    object.insert("lease_hours".to_owned(), serde_json::json!(lease_hours));
-    let mut encoded = serde_json::to_vec_pretty(&value).map_err(|error| {
-        AppError::config(
-            &path,
-            format!("cannot serialize participant lifecycle: {error}"),
-        )
-    })?;
-    encoded.push(b'\n');
-    atomic_replace(&path, &encoded)
-        .map_err(|error| AppError::io("update participant lifecycle", &path, error))
 }
 
 pub(crate) fn pending_count(context: &Context, address: &Address) -> AppResult<usize> {
@@ -239,10 +206,15 @@ fn route_message_locked(
             recipients.retain(|recipient| recipient != sender);
         }
     }
+    let excluded = if address.kind == AddressKind::Lineage {
+        exclude_blocked_lineage_recipients(context, &parsed.envelope.from, &mut recipients)?
+    } else {
+        Vec::new()
+    };
     if recipients.is_empty() {
         return Ok(None);
     }
-    ensure_resolved_routes_allowed(context, &parsed.envelope.from, address, &recipients)?;
+    ensure_resolved_routes_allowed(context, &parsed.envelope.from, address)?;
     let (_, routed_at) = crate::mailbox::local_timestamp()?;
     let routed_by = participant::resolve(context)?
         .participant()
@@ -254,6 +226,7 @@ fn route_message_locked(
         digest: hex_sha256(&bytes),
         address: address.clone(),
         recipients,
+        excluded,
         routed_at,
         routed_by,
     };
@@ -272,25 +245,20 @@ fn route_message_locked(
 
 pub(crate) fn resolved_recipients(context: &Context, address: &Address) -> AppResult<Vec<String>> {
     let mut recipients = match address.kind {
-        AddressKind::Workspace => participant::list(context)?
+        AddressKind::Workspace => participant::list_active(context)?
             .into_iter()
-            .filter(|candidate| {
-                candidate.workspace.as_deref() == Some(address.name.as_str())
-                    && participant_is_active(candidate)
-            })
+            .filter(|candidate| candidate.workspace.as_deref() == Some(address.name.as_str()))
             .map(|candidate| candidate.id)
             .collect(),
         AddressKind::Lineage => match lineage::load(context, &address.name)? {
-            Some(lineage) => lineage
-                .members(context)?
-                .into_keys()
-                .filter(|id| {
-                    participant::load(context, id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|candidate| participant_is_active(&candidate))
-                })
-                .collect(),
+            Some(lineage) => {
+                let members = lineage.members(context)?;
+                participant::list_active(context)?
+                    .into_iter()
+                    .filter(|candidate| members.contains_key(&candidate.id))
+                    .map(|candidate| candidate.id)
+                    .collect()
+            }
             None => Vec::new(),
         },
         AddressKind::Participant => participant::load(context, &address.name)?
@@ -302,111 +270,30 @@ pub(crate) fn resolved_recipients(context: &Context, address: &Address) -> AppRe
     Ok(recipients)
 }
 
-fn participant_is_active(participant: &Participant) -> bool {
-    let path = participant.dir.join("participant.json");
-    let Ok(bytes) = fs::read(path) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return false;
-    };
-    if value.get("ended_at").is_some_and(|ended| !ended.is_null()) {
-        return false;
-    }
-    let Some(last_seen) = value.get("last_seen").and_then(serde_json::Value::as_str) else {
-        return true;
-    };
-    let lease_hours = value
-        .get("lease_hours")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|hours| *hours > 0)
-        .unwrap_or(24);
-    let Some(last_seen) = parse_timestamp(last_seen) else {
-        return false;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
-    now.is_some_and(|now| {
-        now >= last_seen
-            && now.saturating_sub(last_seen)
-                <= i64::try_from(lease_hours.saturating_mul(3600)).unwrap_or(i64::MAX)
-    })
-}
-
-fn parse_timestamp(value: &str) -> Option<i64> {
-    let mut fields = value.split_ascii_whitespace();
-    let date = fields.next()?;
-    let time = fields.next()?;
-    let offset = fields.next()?;
-    if fields.next().is_some() {
-        return None;
-    }
-    let mut date = date.split('-');
-    let year = date.next()?.parse::<i64>().ok()?;
-    let month = date.next()?.parse::<i64>().ok()?;
-    let day = date.next()?.parse::<i64>().ok()?;
-    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let mut time = time.split(':');
-    let hour = time.next()?.parse::<i64>().ok()?;
-    let minute = time.next()?.parse::<i64>().ok()?;
-    let second = time.next()?.parse::<i64>().ok()?;
-    if time.next().is_some() || hour > 23 || minute > 59 || second > 60 {
-        return None;
-    }
-    let sign = match offset.as_bytes().first().copied()? {
-        b'+' => 1_i64,
-        b'-' => -1_i64,
-        _ => return None,
-    };
-    if offset.len() != 5 {
-        return None;
-    }
-    let offset_hour = offset.get(1..3)?.parse::<i64>().ok()?;
-    let offset_minute = offset.get(3..5)?.parse::<i64>().ok()?;
-    if offset_hour > 23 || offset_minute > 59 {
-        return None;
-    }
-    let days = days_from_civil(year, month, day)?;
-    Some(
-        days.saturating_mul(86_400)
-            .saturating_add(hour * 3600 + minute * 60 + second)
-            .saturating_sub(sign * (offset_hour * 3600 + offset_minute * 60)),
-    )
-}
-
-fn days_from_civil(mut year: i64, month: i64, day: i64) -> Option<i64> {
-    year -= i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let adjusted_month = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-    // Reject impossible dates by round-tripping the coarse month bounds most
-    // likely to be hand-edited incorrectly. Production timestamps come from
-    // Post itself; this parser's job is fail-closed lifecycle classification.
-    let month_lengths = [31_i64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    (day <= month_lengths[usize::try_from(month - 1).ok()?]).then_some(days)
-}
-
 fn ensure_resolved_routes_allowed(
     context: &Context,
     sender: &str,
     address: &Address,
-    recipients: &[String],
 ) -> AppResult<()> {
+    if address.kind == AddressKind::Lineage {
+        return Ok(());
+    }
     let rooms = context.load_rooms()?;
     let rules = context.load_rules(&rooms)?;
-    if let Some(rule) = rules.blocked.iter().find(|rule| {
-        rule.matches_route(sender, &address.name)
-            || recipients
-                .iter()
-                .any(|recipient| rule.matches_route(sender, recipient))
-    }) {
+    let recipient = match address.kind {
+        AddressKind::Workspace => Some(address.name.clone()),
+        AddressKind::Participant => {
+            participant::load(context, &address.name)?.and_then(|participant| participant.workspace)
+        }
+        AddressKind::Lineage => None,
+    };
+    let rule = rules.blocked.iter().find(|rule| {
+        recipient.as_deref().map_or(
+            rule.to == "*" && rule.matches_route(sender, "*"),
+            |recipient| rule.matches_route(sender, recipient),
+        )
+    });
+    if let Some(rule) = rule {
         return Err(AppError::new(
             crate::error::ErrorCode::BlockedRoute,
             format!(
@@ -420,6 +307,37 @@ fn ensure_resolved_routes_allowed(
         .rule(rule.clone()));
     }
     Ok(())
+}
+
+fn exclude_blocked_lineage_recipients(
+    context: &Context,
+    sender: &str,
+    recipients: &mut Vec<String>,
+) -> AppResult<Vec<ExcludedRecipient>> {
+    let rooms = context.load_rooms()?;
+    let rules = context.load_rules(&rooms)?;
+    let mut excluded = Vec::new();
+    recipients.retain(|id| {
+        let workspace = participant::load(context, id)
+            .ok()
+            .flatten()
+            .and_then(|participant| participant.workspace);
+        let blocked = rules.blocked.iter().any(|rule| {
+            workspace.as_deref().map_or(
+                rule.to == "*" && (rule.from == "*" || rule.from == sender),
+                |workspace| rule.matches_route(sender, workspace),
+            )
+        });
+        if blocked {
+            excluded.push(ExcludedRecipient {
+                participant: id.clone(),
+                reason: "blocked-route".to_owned(),
+            });
+        }
+        !blocked
+    });
+    excluded.sort_by(|left, right| left.participant.cmp(&right.participant));
+    Ok(excluded)
 }
 
 fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
@@ -452,6 +370,13 @@ fn validate_receipt(path: &Path, address: &Address, id: &str, receipt: &Receipt)
         || receipt.message != id
         || &receipt.address != address
         || receipt.recipients.windows(2).any(|pair| pair[0] >= pair[1])
+        || receipt
+            .excluded
+            .windows(2)
+            .any(|pair| pair[0].participant >= pair[1].participant)
+        || receipt.excluded.iter().any(|excluded| {
+            excluded.reason != "blocked-route" || receipt.recipients.contains(&excluded.participant)
+        })
     {
         return Err(AppError::config(
             path,

@@ -91,7 +91,6 @@ where
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
     let actor = context.sender()?;
-    crate::cursor_state::routing::touch_participant(context, &actor.participant)?;
     let (sender, provenance) = {
         if let Some(declared) = args.sender.as_deref() {
             if let Some(pinned) = identity.pin.as_deref() {
@@ -143,12 +142,10 @@ where
         } else if identity.pin.is_some() {
             SenderProvenance::DeclaredEnv
         } else {
-            // Kept as legacy transport evidence only. This result never
-            // selects `from`; the participant binding above already did.
-            context
-                .infer_from_cwd(&rooms)
-                .map(|(_, provenance)| provenance)
-                .unwrap_or(SenderProvenance::InferredBasename)
+            match context.infer_from_cwd(&rooms) {
+                Ok((inferred, provenance)) if inferred == actor.from => provenance,
+                _ => SenderProvenance::ParticipantBinding,
+            }
         };
         if identity.pin.is_some() {
             eprintln!(

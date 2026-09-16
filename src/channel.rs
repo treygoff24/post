@@ -147,28 +147,34 @@ fn lock_channels(context: &Context) -> AppResult<File> {
     Ok(file)
 }
 
-/// Resolve the acting room for channel operations. Identity comes from the
-/// POST_FROM pin when the launch helper set one, else from cwd — there is
-/// deliberately no --from/--room override on channel commands. Membership
-/// additionally requires the room to be registered: cursors and join records
-/// need a durable identity, and the cwd-basename fallback is not one.
+/// Resolve the acting room for channel operations. A bound participant's
+/// workspace is authoritative; unbound read-only commands retain the legacy
+/// POST_FROM-or-cwd lookup. There is deliberately no --from/--room override
+/// on channel commands. Membership additionally requires a registered room.
 pub(crate) fn acting_room(
     context: &Context,
     rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
-    let (room, provenance) = match context.sender() {
-        Ok(actor) => {
+    let (room, provenance) = match crate::participant::resolve(context) {
+        Ok(crate::participant::Resolved::Bound { participant, .. }) => {
+            let room = participant
+                .workspace
+                .clone()
+                .unwrap_or_else(|| participant.id.clone());
             let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
                 SenderProvenance::DeclaredEnv
             } else {
-                context
-                    .infer_from_cwd(rooms)
-                    .map(|(_, provenance)| provenance)
-                    .unwrap_or(SenderProvenance::InferredBasename)
+                match context.infer_from_cwd(rooms) {
+                    Ok((inferred, provenance)) if inferred == room => provenance,
+                    _ => SenderProvenance::ParticipantBinding,
+                }
             };
-            (actor.from, provenance)
+            (room, provenance)
         }
-        Err(error) if error.code == ErrorCode::NoParticipant => {
+        Ok(crate::participant::Resolved::Unbound) => {
+            context.resolved_room_with_provenance(None, rooms)?
+        }
+        Err(_) if crate::mailbox::read_only_command() => {
             context.resolved_room_with_provenance(None, rooms)?
         }
         Err(error) => return Err(error),

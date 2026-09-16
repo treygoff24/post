@@ -111,6 +111,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT_LEASE_HOURS")
             .env("POST_PARTICIPANT", self.test_participant_for_cwd(cwd))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -131,6 +132,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT_LEASE_HOURS")
             .env("POST_PARTICIPANT", self.test_participant_for_cwd(cwd))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -156,6 +158,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT_LEASE_HOURS")
             .env("POST_PARTICIPANT", self.test_participant_for_cwd(cwd))
             .stdout(Stdio::from(read_only))
             .stderr(Stdio::piped())
@@ -197,6 +200,7 @@ impl Sandbox {
             .env_remove("POST_FRAMING")
             .env_remove("POST_SENDER_ADDRESS")
             .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT_LEASE_HOURS")
             .env_remove("POST_PARTICIPANT")
             .env_remove("POST_HARNESS")
             .env_remove("CLAUDE_CODE_SESSION_ID")
@@ -274,6 +278,32 @@ impl Sandbox {
             cwd,
             &[("POST_PARTICIPANT", "missing-test-participant")],
         )
+    }
+
+    /// Run with every participant/harness identity variable absent. Unlike
+    /// `run_in`, this never seeds or exports a fixture participant.
+    pub fn run_without_identity(&self, args: &[&str], cwd: &Path) -> Output {
+        post_command()
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("POST_MAIL_ROOT", &self.mail_root)
+            .env_remove("POST_FROM")
+            .env_remove("POST_FRAMING")
+            .env_remove("POST_SENDER_ADDRESS")
+            .env_remove("POST_ARX_GENERATION")
+            .env_remove("POST_PARTICIPANT_LEASE_HOURS")
+            .env_remove("POST_PARTICIPANT")
+            .env_remove("POST_HARNESS")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_PID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run post without participant identity")
     }
 
     pub fn run_as_participant(&self, args: &[&str], participant: &str, cwd: &Path) -> Output {
@@ -628,6 +658,7 @@ pub fn post_command() -> Command {
         .env_remove("POST_FROM")
         .env_remove("POST_SENDER_ADDRESS")
         .env_remove("POST_ARX_GENERATION")
+        .env_remove("POST_PARTICIPANT_LEASE_HOURS")
         .env_remove("POST_HARNESS")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CLAUDE_PID")
@@ -679,6 +710,7 @@ pub fn is_identity_notice(line: &str) -> bool {
     line.contains("(identity inferred from cwd)")
         || line.contains("(POST_FROM pin")
         || line.contains("(bound participant ")
+        || line.contains("(participant binding)")
 }
 
 fn argument_value<'a>(args: &'a [&str], flag: &str) -> Option<&'a str> {

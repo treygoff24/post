@@ -15,15 +15,6 @@ pub(super) fn run(
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
-    let read_only = args.peek
-        || args.history.is_some()
-        || args.since.is_some()
-        || args.seen_by.is_some()
-        || args.message.is_some();
-    if !read_only {
-        let participant = context.sender()?.participant;
-        cursor_state::routing::touch_participant(context, &participant)?;
-    }
     if args.join {
         return join(
             context,
@@ -2021,6 +2012,7 @@ fn acting_notice(provenance: crate::model::SenderProvenance) -> &'static str {
         P::DeclaredEnv => "POST_FROM pin",
         P::DeclaredFlag => "explicit flag",
         P::InferredCwd | P::InferredBasename => "identity inferred from cwd",
+        P::ParticipantBinding => "participant binding",
     }
 }
 

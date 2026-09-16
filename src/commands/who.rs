@@ -6,6 +6,8 @@ use crate::output::{self, WhoActingParticipant, WhoOutput, WhoParticipant, WhoRo
 use crate::participant::Resolved;
 use crate::presence;
 
+const STALE_DELIVERY_NOTE: &str = "mail already frozen to a stale participant is not reassigned when its lease expires; activity affects new recipient selection only";
+
 pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let selected: Vec<String> = if args.room.is_empty() {
@@ -31,16 +33,22 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     }
     legacy_rooms.sort_by(|a, b| a.room.cmp(&b.room));
 
-    let resolved = crate::participant::resolve(context)?;
+    let (resolved, resolution_failed) = match crate::participant::resolve(context) {
+        Ok(resolved) => (resolved, false),
+        Err(_) => (Resolved::Unbound, true),
+    };
     let acting_id = resolved
         .participant()
         .map(|participant| participant.id.clone());
+    let now = std::time::SystemTime::now();
     let acting = match &resolved {
         Resolved::Bound {
             participant,
             provenance,
         } => WhoActingParticipant {
             status: "bound".to_owned(),
+            state: Some(participant.state(now).as_str().to_owned()),
+            last_seen: participant.last_seen.clone(),
             id: Some(participant.id.clone()),
             harness: Some(participant.harness.clone()),
             provenance: Some(provenance.as_str().to_owned()),
@@ -50,6 +58,8 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         },
         Resolved::Unbound => WhoActingParticipant {
             status: "unbound".to_owned(),
+            state: None,
+            last_seen: None,
             id: None,
             harness: None,
             provenance: None,
@@ -63,15 +73,23 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         home: context.home.clone(),
     };
     let mut participants = Vec::new();
-    for participant in crate::participant::list(context)? {
+    let participant_records = match crate::participant::list(context) {
+        Ok(participants) => participants,
+        Err(_) if resolution_failed => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    for participant in participant_records {
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
+        let state = participant.state(now).as_str().to_owned();
         participants.push(WhoParticipant {
             id: participant.id,
             harness: participant.harness,
+            state,
+            last_seen: participant.last_seen,
             lineage: participant.lineage,
             workspace: participant.workspace,
             live_watch: presence.live_watch,
-            last_seen: presence.last_seen,
+            watch_last_seen: presence.last_seen,
         });
     }
     participants.sort_by(|left, right| {
@@ -85,8 +103,10 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             rendered.push_str("participant: unbound (run: post participant bind)\n");
         } else {
             rendered.push_str(&format!(
-                "participant: {}  harness={}  provenance={}  workspace={}  lineage={}\n",
+                "participant: {}  state={}  last-seen={}  harness={}  provenance={}  workspace={}  lineage={}\n",
                 acting.id.as_deref().unwrap_or("unbound"),
+                acting.state.as_deref().unwrap_or("unbound"),
+                acting.last_seen.as_deref().unwrap_or("legacy"),
                 acting.harness.as_deref().unwrap_or("unbound"),
                 acting.provenance.as_deref().unwrap_or("unbound"),
                 acting.workspace.as_deref().unwrap_or("none"),
@@ -95,14 +115,22 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         }
         for entry in &participants {
             let live = if entry.live_watch { "yes" } else { "no" };
-            let seen = entry.last_seen.as_deref().unwrap_or("never");
+            let seen = entry.last_seen.as_deref().unwrap_or("legacy");
+            let watch_seen = entry.watch_last_seen.as_deref().unwrap_or("never");
             rendered.push_str(&format!(
-                "participant {}  harness={}  lineage={}  workspace={}  live-watch={live}  last-seen={seen}\n",
+                "participant {}  state={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}\n",
                 output::sanitize_text_header(&entry.id),
+                entry.state,
                 output::sanitize_text_header(&entry.harness),
                 entry.lineage.as_deref().map(output::sanitize_text_header).unwrap_or_else(|| "none".to_owned()),
                 entry.workspace.as_deref().map(output::sanitize_text_header).unwrap_or_else(|| "none".to_owned()),
             ));
+        }
+        if participants
+            .iter()
+            .any(|participant| participant.state == "stale")
+        {
+            rendered.push_str(&format!("activity-note: {STALE_DELIVERY_NOTE}\n"));
         }
         for entry in &legacy_rooms {
             let live = if entry.live_watch { "yes" } else { "no" };
@@ -115,6 +143,10 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         return Ok(CommandResult::success(rendered));
     }
     let count = participants.len();
+    let activity_note = participants
+        .iter()
+        .any(|participant| participant.state == "stale")
+        .then(|| STALE_DELIVERY_NOTE.to_owned());
     CommandResult::json(
         &WhoOutput {
             ok: true,
@@ -122,6 +154,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             participants,
             legacy_rooms,
             count,
+            activity_note,
         },
         pretty,
     )

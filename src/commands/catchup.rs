@@ -18,7 +18,6 @@ pub(super) fn run(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let participant = context.sender()?.participant;
-    cursor_state::routing::touch_participant(context, &participant)?;
     let room = participant
         .workspace
         .clone()

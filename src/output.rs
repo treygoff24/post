@@ -166,6 +166,9 @@ pub(crate) fn provenance_sentence(value: &str) -> Option<&'static str> {
         "inferred-basename" => Some(
             "sender identity was taken from the directory name — it is a location, not a claim.",
         ),
+        "participant-binding" => Some(
+            "sender identity was taken from the participant binding — it is local routing context, not a credential.",
+        ),
         _ => None,
     }
 }
@@ -420,6 +423,10 @@ pub struct WhoRoom {
 pub struct WhoActingParticipant {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
@@ -437,13 +444,17 @@ pub struct WhoActingParticipant {
 pub struct WhoParticipant {
     pub id: String,
     pub harness: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     pub live_watch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_seen: Option<String>,
+    pub watch_last_seen: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -453,6 +464,8 @@ pub struct WhoOutput {
     pub participants: Vec<WhoParticipant>,
     pub legacy_rooms: Vec<WhoRoom>,
     pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
