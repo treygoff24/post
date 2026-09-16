@@ -208,3 +208,28 @@ pub(crate) type RoomMap = BTreeMap<String, String>;
 pub(crate) struct RulesConfig {
     pub blocked: Vec<BlockingRule>,
 }
+
+#[cfg(test)]
+mod participant_review_tests {
+    use super::Envelope;
+
+    #[test]
+    fn participant_review_actor_fields_round_trip_in_unit_schema() {
+        let envelope: Envelope = serde_json::from_value(serde_json::json!({
+            "id": "20260916-010203-abcdef",
+            "from": "alpha",
+            "to": "beta",
+            "kind": "note",
+            "subject": "review",
+            "sent": "2026-09-16 01:02:03 +0000",
+            "from_participant": "codex-12345678",
+            "from_lineage": "ember",
+            "address_kind": "workspace"
+        }))
+        .expect("parse participant envelope");
+        let round_trip = serde_json::to_value(envelope).expect("serialize participant envelope");
+        assert_eq!(round_trip["from_participant"], "codex-12345678");
+        assert_eq!(round_trip["from_lineage"], "ember");
+        assert_eq!(round_trip["address_kind"], "workspace");
+    }
+}

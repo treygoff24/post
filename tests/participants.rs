@@ -519,3 +519,206 @@ fn participant_codex_conflict_is_an_error_not_a_guess() {
     assert_eq!(error.error.code, "invalid_argument");
     assert!(error.error.message.contains("differ"));
 }
+
+#[test]
+fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree() {
+    let commands: Vec<Vec<&str>> = vec![
+        vec!["version", "--json"],
+        vec!["participant", "show"],
+        vec!["participant", "list"],
+        vec!["inbox", "--room", "alpha"],
+        vec!["who"],
+        vec!["channels"],
+        vec!["doctor"],
+        vec!["schema"],
+        vec!["rooms"],
+        vec!["read", "missing", "--room", "alpha", "--peek"],
+        vec!["chat", "missing", "--peek"],
+        vec!["watch", "--snapshot", "--room", "alpha"],
+        vec!["profile", "show", "alpha"],
+        vec!["owner", "show"],
+        vec!["search", "needle", "--mail", "--json"],
+    ];
+    for bound in [false, true] {
+        for args in &commands {
+            let sandbox = Sandbox::new();
+            let (alpha, _beta) = register_alpha_beta(&sandbox);
+            let actor = sandbox.test_participant("alpha");
+            let before = tree(&sandbox.mail_root);
+            let output = if bound {
+                sandbox.run_as_participant(args, &actor, &alpha)
+            } else {
+                sandbox.run_unbound(args, &alpha)
+            };
+            let _ = output;
+            assert_eq!(
+                tree(&sandbox.mail_root),
+                before,
+                "{} read-only command mutated the store: {args:?}",
+                if bound { "bound" } else { "unbound" }
+            );
+        }
+    }
+}
+
+#[test]
+fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
+    let broken = Sandbox::new();
+    let dir = broken.mail_root.join("participants/broken-id");
+    fs::create_dir_all(&dir).expect("broken participant dir");
+    fs::write(dir.join("participant.json"), b"{not json").expect("broken participant");
+    let before = tree(&broken.mail_root);
+    let output = broken.run_in_env(
+        &["version", "--json"],
+        None,
+        &broken.path,
+        &[("POST_PARTICIPANT", "broken-id")],
+    );
+    assert_success(&output);
+    let value: Value = from_stdout(&output);
+    assert_eq!(value["store_version"], 2);
+    assert_eq!(tree(&broken.mail_root), before);
+
+    let ambiguous = Sandbox::new_unseeded();
+    let before = tree(&ambiguous.mail_root);
+    let output = ambiguous.run_in_env(
+        &["version", "--json"],
+        None,
+        &ambiguous.path,
+        &[
+            ("CLAUDE_CODE_SESSION_ID", "claude-key"),
+            ("CODEX_THREAD_ID", "codex-key"),
+            ("PATH", "/definitely/missing"),
+        ],
+    );
+    assert_success(&output);
+    let value: Value = from_stdout(&output);
+    assert!(value["capabilities"]
+        .as_array()
+        .expect("capabilities")
+        .iter()
+        .any(|value| value == "participants"));
+    assert_eq!(tree(&ambiguous.mail_root), before);
+}
+
+#[test]
+fn participant_review_no_key_diagnostic_names_real_bootstrap_sequence() {
+    let sandbox = Sandbox::new_unseeded();
+    let output = sandbox.run_unbound(
+        &["send", "--to", "nowhere", "--body", "body"],
+        &sandbox.path,
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "no_participant");
+    assert!(error.error.details.exact_fix.is_none());
+    assert!(error.error.message.contains("post participant bind --new"));
+    assert!(error.error.message.contains("export POST_PARTICIPANT="));
+
+    let keyed = Sandbox::new_unseeded();
+    let output = keyed.run_as_claude(
+        &["send", "--to", "nowhere", "--body", "body"],
+        "usable-key",
+        &keyed.path,
+    );
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post participant bind")
+    );
+}
+
+#[test]
+fn participant_review_existing_colon_room_loads_but_typed_namespace_collision_fails() {
+    let sandbox = Sandbox::new();
+    let workspace = sandbox.home.join("legacy-colon");
+    fs::create_dir_all(&workspace).expect("legacy workspace");
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        format!(r#"{{"legacy:room":"{}"}}"#, workspace.display()),
+    )
+    .expect("legacy rooms");
+    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked":[]}"#).expect("rules");
+    let output = sandbox.run(&["rooms"]);
+    assert_success(&output);
+    let value: Value = from_stdout(&output);
+    assert_eq!(value["rooms"][0]["name"], "legacy:room");
+
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        format!(r#"{{"participant:foo":"{}"}}"#, workspace.display()),
+    )
+    .expect("colliding rooms");
+    let output = sandbox.run(&["rooms"]);
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(error
+        .error
+        .details
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("typed address namespace")));
+}
+
+#[test]
+fn participant_review_lineage_load_survives_later_room_collision() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let actor = sandbox.test_participant("alpha");
+    let lineage = sandbox.mail_root.join("lineages/ember");
+    fs::create_dir_all(&lineage).expect("lineage dir");
+    fs::write(
+        lineage.join("lineage.json"),
+        r#"{"name":"ember","founder":"founder","created":"2026-09-16","host":"test"}"#,
+    )
+    .expect("lineage record");
+    let room_path = sandbox.home.join("later-ember-room");
+    fs::create_dir_all(&room_path).expect("later room");
+    let mut rooms: serde_json::Map<String, Value> =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms"))
+            .expect("rooms JSON");
+    rooms.insert(
+        "ember".to_owned(),
+        Value::String(room_path.display().to_string()),
+    );
+    fs::write(
+        sandbox.mail_root.join("rooms.json"),
+        serde_json::to_vec_pretty(&rooms).expect("rooms bytes"),
+    )
+    .expect("colliding room registry");
+
+    let output = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "lineage:ember",
+            "--body",
+            "typed lineage remains addressable",
+        ],
+        &actor,
+        &alpha,
+    );
+    assert_success(&output);
+}
+
+#[test]
+fn participant_review_rooms_add_rejects_existing_lineage_name() {
+    let sandbox = Sandbox::new();
+    let lineage = sandbox.mail_root.join("lineages/ember");
+    fs::create_dir_all(&lineage).expect("lineage dir");
+    fs::write(
+        lineage.join("lineage.json"),
+        r#"{"name":"ember","founder":"founder","created":"2026-09-16","host":"test"}"#,
+    )
+    .expect("lineage record");
+    let workspace = sandbox.home.join("ember-room");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "ember",
+        workspace.to_str().expect("workspace utf8"),
+    ]);
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("lineage"));
+}

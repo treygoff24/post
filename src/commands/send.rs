@@ -1096,4 +1096,33 @@ mod tests {
         );
         trash_test_root(&root);
     }
+
+    #[test]
+    fn participant_review_unit_send_stamps_actor_fields() {
+        let (root, context) = test_context("participant-fields");
+        let result = run_with_body(
+            &context,
+            SendArgs {
+                to: "claude-space".to_owned(),
+                sender: Some("unit-sender".to_owned()),
+                kind: MailKind::Note,
+                subject: String::new(),
+                body: Some("body".to_owned()),
+                body_file: None,
+                oversize: false,
+                allow_self: false,
+                file: None,
+            },
+            true,
+            false,
+            EnvIdentity::none(),
+            |source| Ok(source.inline.expect("inline body")),
+        )
+        .expect("unit send");
+        let receipt: serde_json::Value =
+            serde_json::from_str(&result.stdout).expect("send receipt JSON");
+        assert!(receipt["envelope"]["from_participant"].is_string());
+        assert_eq!(receipt["envelope"]["address_kind"], "workspace");
+        trash_test_root(&root);
+    }
 }

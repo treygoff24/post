@@ -1765,4 +1765,34 @@ mod tests {
             .expect_err("non-canonical re must be refused");
         assert_eq!(error.code.as_str(), "config_invalid");
     }
+
+    #[test]
+    fn participant_review_unit_channel_send_stamps_actor_fields() {
+        let (root, context) = test_context("participant-fields", "{}", r#"{"blocked":[]}"#);
+        fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
+        let paths = ChannelPaths::new(&context, "tax").expect("paths");
+        fs::create_dir_all(&paths.messages).expect("messages dir");
+        let id = write_message(
+            &context,
+            &paths,
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "",
+                body: "body",
+                event: None,
+                re: None,
+                mentions: Vec::new(),
+                signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
+            },
+        )
+        .expect("channel send");
+        let raw = fs::read_to_string(paths.messages.join(format!("{id}.msg"))).expect("message");
+        let head = raw.split_once("\n---\n").expect("separator").0;
+        let message: serde_json::Value = serde_json::from_str(head).expect("message JSON");
+        assert!(message["from_participant"].is_string());
+        assert_eq!(message["address_kind"], "channel");
+        trash_test_root(&root);
+    }
 }
