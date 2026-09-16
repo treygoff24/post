@@ -119,6 +119,33 @@ fn routing_reply_origin_distinguishes_local_unknown_and_remote_with_collision() 
     assert_eq!(remote_read["envelope"]["origin"], "remote");
     assert!(remote_read["envelope"]["reply_to_participant"].is_null());
     assert_eq!(remote_read["envelope"]["reply_to_shared"], "remote-room");
+
+    let missing_remote = sandbox.mail_root.join("remote/peer-host/missing-remote");
+    let mut rooms: Value = serde_json::from_slice(&fs::read(&rooms_path).expect("rooms registry"))
+        .expect("rooms JSON");
+    rooms["missing-remote"] = json!(missing_remote);
+    fs::write(
+        &rooms_path,
+        format!("{}\n", serde_json::to_string_pretty(&rooms).unwrap()),
+    )
+    .expect("register missing remote placeholder");
+    let missing = "20990916-040102-aa0003";
+    write_custom_mail(
+        &inbox,
+        missing,
+        &json!({"id":missing,"from":"missing-remote","to":"alpha","kind":"note","subject":"missing remote","sent":"2026-09-16 04:01:02 -0500","from_participant":colliding_local,"address_kind":"workspace"}),
+        "missing remote",
+    );
+    let missing_read =
+        sandbox.run_as_participant(&["read", missing, "--peek", "--json"], &recipient, &alpha);
+    assert_success(&missing_read);
+    let missing_read: Value = from_stdout(&missing_read);
+    assert_eq!(missing_read["envelope"]["origin"], "remote");
+    assert!(missing_read["envelope"]["reply_to_participant"].is_null());
+    assert_eq!(
+        missing_read["envelope"]["reply_to_shared"],
+        "missing-remote"
+    );
 }
 
 #[test]

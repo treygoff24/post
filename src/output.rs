@@ -128,11 +128,14 @@ fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool 
         return false;
     };
     let remote_root = context.root.join("remote");
-    let Ok(remote_root) = remote_root.canonicalize() else {
+    let Ok(relative) = path.strip_prefix(&remote_root) else {
         return false;
     };
-    path.canonicalize()
-        .is_ok_and(|path| path.starts_with(&remote_root) && path != remote_root)
+    let components = relative.components().collect::<Vec<_>>();
+    components.len() >= 2
+        && components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
