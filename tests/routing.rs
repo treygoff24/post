@@ -674,15 +674,12 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
         &gamma_actor,
         &gamma,
     ));
-    fs::write(
-        sandbox
-            .mail_root
-            .join("participants")
-            .join(&gamma_actor)
-            .join("channels.json"),
-        b"{corrupt",
-    )
-    .expect("corrupt gamma membership");
+    let channels_path = sandbox
+        .mail_root
+        .join("participants")
+        .join(&gamma_actor)
+        .join("channels.json");
+    fs::write(&channels_path, b"{corrupt").expect("corrupt gamma membership");
     fs::write(
         sandbox.mail_root.join("rules.json"),
         r#"{"blocked":[{"from":"alpha","to":"gamma","reason":"separate workspaces"}]}"#,
@@ -695,8 +692,20 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
     let error: post::output::ErrorEnvelope = common::from_stderr(&join);
     assert_eq!(error.error.code, "config_invalid");
     assert!(error.error.message.contains(&gamma_actor));
-    assert!(error.error.message.contains("channels.json"));
-    assert!(error.error.suggested_fix.contains("fix the named file"));
+    assert!(error
+        .error
+        .message
+        .contains(&channels_path.display().to_string()));
+    assert_eq!(
+        error.error.suggested_fix,
+        format!(
+            "Restore or repair channels.json at '{}' for participant '{}' (for example, from a backup), then retry.",
+            channels_path.display(),
+            gamma_actor
+        )
+    );
+    assert!(!error.error.message.to_lowercase().contains("remove"));
+    assert!(!error.error.suggested_fix.to_lowercase().contains("remove"));
     let alpha_channels = sandbox
         .mail_root
         .join("participants")
@@ -731,15 +740,14 @@ fn routing_join_refuses_unknown_participant_records_without_breaking_listing() {
         &gamma_actor,
         &gamma,
     ));
-    fs::write(
-        sandbox
-            .mail_root
-            .join("participants")
-            .join(&gamma_actor)
-            .join("participant.json"),
-        b"{corrupt",
-    )
-    .expect("corrupt gamma participant record");
+    let participant_dir = sandbox.mail_root.join("participants").join(&gamma_actor);
+    let record = participant_dir.join("participant.json");
+    let expected_fix = format!(
+        "Restore or repair participant.json at '{}' for participant '{}' (for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable), then retry.",
+        record.display(),
+        gamma_actor
+    );
+    fs::write(&record, b"{corrupt").expect("corrupt gamma participant record");
     fs::write(
         sandbox.mail_root.join("rules.json"),
         r#"{"blocked":[{"from":"alpha","to":"gamma","reason":"separate workspaces"}]}"#,
@@ -753,7 +761,12 @@ fn routing_join_refuses_unknown_participant_records_without_breaking_listing() {
     assert_eq!(error.error.code, "config_invalid");
     assert!(error.error.message.contains(&gamma_actor));
     assert!(error.error.message.contains("participant.json"));
-    assert!(error.error.suggested_fix.contains("fix the named file"));
+    assert!(
+        error.error.message.contains(&record.display().to_string()),
+        "missing participant record path in message: {}",
+        error.error.message
+    );
+    assert_eq!(error.error.suggested_fix, expected_fix);
     assert!(!sandbox
         .mail_root
         .join("participants")
@@ -764,6 +777,30 @@ fn routing_join_refuses_unknown_participant_records_without_breaking_listing() {
     let listed = sandbox.run_as_participant(&["channels"], &alpha_actor, &alpha);
     assert!(listed.status.success(), "{}", common::stderr(&listed));
     assert!(common::stderr(&listed).contains("skipped corrupt participant"));
+
+    fs::remove_file(&record).expect("delete only corrupt participant record");
+    let missing =
+        sandbox.run_as_participant(&["chat", "tax", "--join", "--json"], &alpha_actor, &alpha);
+    assert!(
+        !missing.status.success(),
+        "missing record unexpectedly admitted"
+    );
+    let missing: post::output::ErrorEnvelope = common::from_stderr(&missing);
+    assert_eq!(missing.error.code, "config_invalid");
+    assert!(
+        missing
+            .error
+            .message
+            .contains("participant record is missing"),
+        "{}",
+        missing.error.message
+    );
+    assert!(missing
+        .error
+        .message
+        .contains(&record.display().to_string()));
+    assert!(missing.error.message.contains(&gamma_actor));
+    assert_eq!(missing.error.suggested_fix, expected_fix);
 }
 
 #[test]
@@ -830,7 +867,14 @@ fn routing_join_corrupt_rebound_member_fails_closed_on_actor_block() {
         assert_eq!(error.error.code, "config_invalid");
         assert!(error.error.message.contains(&gamma_actor));
         assert!(error.error.message.contains("participant.json"));
-        assert!(error.error.suggested_fix.contains("fix the named file"));
+        assert!(error
+            .error
+            .suggested_fix
+            .contains("Restore or repair participant.json"));
+        assert!(error
+            .error
+            .suggested_fix
+            .contains("re-running `post participant bind`"));
     }
 
     fs::write(

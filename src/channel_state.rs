@@ -5,7 +5,7 @@
 //! consuming callers migrate to Delta directly.
 
 use crate::cursor_state;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{atomic_replace, Context};
 use crate::model::BlockingRule;
 use crate::participant::Participant;
@@ -234,13 +234,15 @@ pub(crate) fn participants_for_join_validation(
         let participant = match crate::participant::load(context, &id) {
             Ok(Some(participant)) => participant,
             Ok(None) => {
-                let path = entry.path().join("participant.json");
+                let participant_dir = entry.path();
                 if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
-                    return Err(crate::error::AppError::config(
-                        &path,
+                    return Err(invalid_join_participant_state(
+                        &id,
+                        &participant_dir.join("participant.json"),
                         format!(
-                            "participant record is missing, so membership in channel '{channel}' cannot be validated against a blocked route; restore or remove the record, then retry"
+                            "participant record is missing, so membership in channel '{channel}' cannot be validated against a blocked route"
                         ),
+                        "for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable",
                     ));
                 }
                 eprintln!(
@@ -249,13 +251,16 @@ pub(crate) fn participants_for_join_validation(
                 continue;
             }
             Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                let participant_dir = entry.path();
                 if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
-                    return Err(crate::error::AppError::config(
-                        &entry.path().join("participant.json"),
+                    return Err(invalid_join_participant_state(
+                        &id,
+                        &participant_dir.join("participant.json"),
                         format!(
-                            "participant record cannot be validated for possible membership in channel '{channel}': {}; repair or remove the record, then retry",
+                            "participant record cannot be validated for possible membership in channel '{channel}': {}",
                             error.message
                         ),
+                        "for example, from a backup or by re-running `post participant bind` as that participant if the identity is recoverable",
                     ));
                 }
                 eprintln!(
@@ -284,12 +289,14 @@ pub(crate) fn participants_for_join_validation(
                         blocked,
                     )
                 {
-                    return Err(crate::error::AppError::config(
+                    return Err(invalid_join_participant_state(
+                        &participant.id,
                         &participant.dir.join("channels.json"),
                         format!(
-                            "participant '{}' may belong to channel '{channel}', but its membership record is unreadable and a blocked route could apply: {}; repair or remove the record, then retry",
-                            participant.id, error.message
+                            "participant may belong to channel '{channel}', but its membership record is unreadable and a blocked route could apply: {}",
+                            error.message
                         ),
+                        "for example, from a backup",
                     ));
                 }
                 eprintln!(
@@ -371,6 +378,33 @@ fn invalid_record_could_block(
                 || rule.from == actor.id
                 || rule.to == actor.id
         })
+}
+
+fn invalid_join_participant_state(
+    participant_id: &str,
+    state_path: &std::path::Path,
+    reason: impl Into<String>,
+    recovery_example: &str,
+) -> AppError {
+    let file_name = state_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("participant state file");
+    let reason = format!(
+        "participant '{participant_id}': {}; {file_name} path is '{}'",
+        reason.into(),
+        state_path.display()
+    );
+    AppError::new(
+        ErrorCode::ConfigInvalid,
+        format!("configuration '{}' is invalid: {reason}", state_path.display()),
+        format!(
+            "Restore or repair {file_name} at '{}' for participant '{}' ({recovery_example}), then retry.",
+            state_path.display(), participant_id
+        ),
+    )
+    .path(state_path.display().to_string())
+    .reason(reason)
 }
 
 fn has_blocked_pair(
