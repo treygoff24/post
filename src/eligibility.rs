@@ -88,10 +88,10 @@ pub(crate) fn visible_mail(
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        let bytes =
-            fs::read(&path).map_err(|error| AppError::io("read routed mail", &path, error))?;
         let receipt = routing::receipt(context, address, id)?;
         if let Some(receipt) = receipt.as_ref() {
+            let bytes =
+                fs::read(&path).map_err(|error| AppError::io("read routed mail", &path, error))?;
             if sha256(&bytes) != receipt.digest {
                 return Err(AppError::config(
                     &path,
