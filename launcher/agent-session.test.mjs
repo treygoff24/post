@@ -33,17 +33,6 @@ function sandbox() {
   return { work, home, mail, roomDir };
 }
 
-function participantRecords(sb) {
-  const root = path.join(sb.mail, "participants");
-  if (!fs.existsSync(root)) return [];
-  return fs
-    .readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && entry.name !== "by-session")
-    .map((entry) => path.join(root, entry.name, "participant.json"))
-    .filter((record) => fs.existsSync(record))
-    .map((record) => JSON.parse(fs.readFileSync(record, "utf8")));
-}
-
 /// Launch `agent-session <args> -- node -e <print env>` and return the child
 /// process's identity environment plus the helper's stderr.
 function launch(args, { cwd, env = {}, sb }) {
@@ -54,7 +43,7 @@ function launch(args, { cwd, env = {}, sb }) {
       "--",
       process.execPath,
       "-e",
-      'const keys=["POST_FROM","POST_SENDER_ADDRESS","POST_HARNESS","POST_REPO_KEY","POST_PARTICIPANT"];console.log(JSON.stringify(Object.fromEntries(keys.map(k=>[k,process.env[k]??null]))))',
+      'const keys=["POST_FROM","POST_SENDER_ADDRESS","POST_HARNESS","POST_REPO_KEY"];console.log(JSON.stringify(Object.fromEntries(keys.map(k=>[k,process.env[k]??null]))))',
     ],
     {
       cwd,
@@ -91,73 +80,6 @@ test("pins the registered room containing the launch cwd", () => {
     assert.ok(env.POST_SENDER_ADDRESS.startsWith("claude-code."));
     assert.ok(env.POST_SENDER_ADDRESS.length <= 256);
     assert.match(stderr, /pinned room 'pinned-room'/);
-  } finally {
-    fs.rmSync(sb.work, { recursive: true, force: true });
-  }
-});
-
-test("bootstrap binds exactly one participant and exports it to the child", () => {
-  const sb = sandbox();
-  try {
-    const { status, env, stderr } = launch(["--harness", "claude-code"], {
-      cwd: sb.roomDir,
-      sb,
-    });
-    assert.equal(status, 0, stderr);
-    assert.match(env.POST_PARTICIPANT, /^claude-code-[0-9a-f]{8}(?:[0-9a-f]{4})?$/);
-    const records = participantRecords(sb);
-    assert.equal(records.length, 1, JSON.stringify(records));
-    assert.equal(records[0].id, env.POST_PARTICIPANT);
-    assert.equal(records[0].harness, "claude-code");
-    assert.equal(records[0].workspace, "pinned-room");
-  } finally {
-    fs.rmSync(sb.work, { recursive: true, force: true });
-  }
-});
-
-test("relaunching the same uuid reuses one participant record", () => {
-  const sb = sandbox();
-  try {
-    const shadow = path.join(sb.work, "fixed-uuid-bin");
-    fs.mkdirSync(shadow);
-    fs.writeFileSync(
-      path.join(shadow, "uuidgen"),
-      "#!/bin/sh\necho 01234567-89ab-4cde-8f01-23456789abcd\n"
-    );
-    fs.chmodSync(path.join(shadow, "uuidgen"), 0o755);
-    const env = { PATH: `${shadow}:${process.env.PATH}` };
-    const first = launch(["--harness", "codex"], { cwd: sb.roomDir, sb, env });
-    const second = launch(["--harness", "codex"], { cwd: sb.roomDir, sb, env });
-    assert.equal(first.status, 0, first.stderr);
-    assert.equal(second.status, 0, second.stderr);
-    assert.equal(first.env.POST_PARTICIPANT, second.env.POST_PARTICIPANT);
-    const records = participantRecords(sb);
-    assert.equal(records.length, 1, JSON.stringify(records));
-    assert.equal(records[0].id, first.env.POST_PARTICIPANT);
-    assert.equal(records[0].harness, "codex");
-  } finally {
-    fs.rmSync(sb.work, { recursive: true, force: true });
-  }
-});
-
-test("participant bind failure is one diagnostic and still execs the child", () => {
-  const sb = sandbox();
-  try {
-    const broken = path.join(sb.work, "broken-post");
-    fs.writeFileSync(broken, "#!/bin/sh\nexit 9\n");
-    fs.chmodSync(broken, 0o755);
-    const { status, env, stderr } = launch(
-      ["--harness", "grok", "--room", "pinned-room"],
-      { cwd: sb.roomDir, sb, env: { AGENT_SESSION_POST_BIN: broken } }
-    );
-    assert.equal(status, 0, stderr);
-    assert.equal(env.POST_PARTICIPANT, null);
-    const diagnostics = stderr
-      .split("\n")
-      .filter((line) => line.includes("participant bind failed"));
-    assert.deepEqual(diagnostics, [
-      "agent-session: participant bind failed; continuing without POST_PARTICIPANT",
-    ]);
   } finally {
     fs.rmSync(sb.work, { recursive: true, force: true });
   }
@@ -384,7 +306,7 @@ test("boundary: a very long launch path still mints a <=256-byte address that se
     fs.mkdirSync(path.join(sb.home, "receiver-room"), { recursive: true });
     fs.writeFileSync(
       path.join(sb.mail, "rooms.json"),
-      JSON.stringify({ receiver: "~/receiver-room", "long-sender": longDir }) + "\n"
+      JSON.stringify({ receiver: "~/receiver-room" }) + "\n"
     );
     const result = spawnSync(
       HELPER,
