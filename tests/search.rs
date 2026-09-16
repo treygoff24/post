@@ -48,7 +48,7 @@ fn channel_fixture(sandbox: &Sandbox, name: &str, members: &str) {
 }
 
 #[test]
-fn search_matches_the_same_participant_eligibility_as_inbox_and_is_cursorless() {
+fn search_mail_is_visible_history_for_recipient_and_sender_after_consumption() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let alpha_participant = sandbox.test_participant("alpha");
@@ -71,16 +71,6 @@ fn search_matches_the_same_participant_eligibility_as_inbox_and_is_cursorless() 
         sandbox.run_as_participant(&["read", &ids[0], "--json"], &beta_participant, &beta);
     assert_success(&consumed);
 
-    let inbox = sandbox.run_as_participant(&["inbox", "--json"], &beta_participant, &beta);
-    assert_success(&inbox);
-    let inbox: serde_json::Value = from_stdout(&inbox);
-    let inbox_ids: Vec<String> = inbox["unread"]
-        .as_array()
-        .expect("inbox unread")
-        .iter()
-        .map(|item| item["id"].as_str().expect("inbox id").to_owned())
-        .collect();
-
     let before = tree_bytes(&sandbox.mail_root);
     let output = sandbox.run_as_participant(
         &["search", marker, "--mail", "--json"],
@@ -95,14 +85,92 @@ fn search_matches_the_same_participant_eligibility_as_inbox_and_is_cursorless() 
         .map(|result| result.id.clone())
         .collect();
 
-    assert_eq!(search_ids, inbox_ids);
-    assert_eq!(search_ids, vec![ids[1].clone()]);
+    assert_eq!(search_ids, vec![ids[1].clone(), ids[0].clone()]);
+    let read = parsed
+        .results
+        .iter()
+        .find(|result| result.id == ids[0])
+        .expect("consumed mail remains searchable");
+    assert!(read.already_read);
+    assert!(!read.own);
+    assert!(!read.pending);
     assert_eq!(
-        parsed.results[0].reply_to_participant,
+        read.reply_to_participant,
         Some(format!("participant:{alpha_participant}"))
     );
-    assert_eq!(parsed.results[0].reply_to_shared, "alpha");
+    assert_eq!(read.reply_to_shared, "alpha");
     assert_eq!(before, tree_bytes(&sandbox.mail_root));
+
+    let own = sandbox.run_as_participant(
+        &["search", &format!("{marker} first"), "--mail", "--json"],
+        &alpha_participant,
+        &alpha,
+    );
+    assert_success(&own);
+    let own: SearchOutput = from_stdout(&own);
+    assert_eq!(own.count, 1);
+    assert_eq!(own.results[0].id, ids[0]);
+    assert!(own.results[0].own);
+    assert!(!own.results[0].pending);
+}
+
+#[test]
+fn search_channel_is_member_history_after_read_and_for_the_sender() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    for (participant, cwd) in [(&alpha_participant, &alpha), (&beta_participant, &beta)] {
+        assert_success(&sandbox.run_as_participant(
+            &["chat", "history-search", "--join", "--json"],
+            participant,
+            cwd,
+        ));
+    }
+    let sent = sandbox.run_as_participant(
+        &[
+            "chat",
+            "history-search",
+            "--send",
+            "--anyway",
+            "--body",
+            "channel-history-proof",
+            "--json",
+        ],
+        &alpha_participant,
+        &alpha,
+    );
+    assert_success(&sent);
+    let sent: serde_json::Value = from_stdout(&sent);
+    let id = sent["message"]["id"].as_str().expect("channel id");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "history-search", "--json"],
+        &beta_participant,
+        &beta,
+    ));
+
+    for (participant, cwd, own, already_read) in [
+        (&beta_participant, &beta, false, true),
+        (&alpha_participant, &alpha, true, true),
+    ] {
+        let output = sandbox.run_as_participant(
+            &[
+                "search",
+                "channel-history-proof",
+                "--channel",
+                "history-search",
+                "--json",
+            ],
+            participant,
+            cwd,
+        );
+        assert_success(&output);
+        let output: SearchOutput = from_stdout(&output);
+        assert_eq!(output.count, 1);
+        assert_eq!(output.results[0].id, id);
+        assert_eq!(output.results[0].own, own);
+        assert_eq!(output.results[0].already_read, already_read);
+    }
 }
 
 #[test]

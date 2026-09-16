@@ -1,10 +1,14 @@
 mod common;
 
-use common::{assert_success, from_stdout, register_alpha_beta, write_custom_mail, Sandbox};
+use common::{
+    assert_success, from_stdout, register_alpha_beta, write_channel_message, write_custom_mail,
+    Sandbox,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 fn bind(sandbox: &Sandbox, key: &str, cwd: &Path, workspace: &str) -> String {
     sandbox.bind_claude(key, cwd, Some(workspace))["id"]
@@ -36,6 +40,35 @@ fn assert_reply_targets(value: &Value, participant: &str, shared: &str) {
         format!("participant:{participant}")
     );
     assert_eq!(value["reply_to_shared"], shared);
+}
+
+fn printed_readback(text: &str) -> &str {
+    text.lines()
+        .find_map(|line| line.strip_prefix("post: read it back with: "))
+        .expect("send text readback command")
+}
+
+fn run_printed_readback(
+    sandbox: &Sandbox,
+    command: &str,
+    participant: &str,
+    cwd: &Path,
+) -> std::process::Output {
+    let script = command.replacen("post ", &format!("'{}' ", env!("CARGO_BIN_EXE_post")), 1);
+    Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", participant)
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("POST_ARX_GENERATION")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run printed readback")
 }
 
 #[test]
@@ -417,6 +450,285 @@ fn routing_explicit_own_read_succeeds_without_changing_unread() {
 }
 
 #[test]
+fn routing_direct_self_read_consumes_because_sender_is_a_frozen_recipient() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let actor = sandbox.test_participant("alpha");
+    let sent = send_as(
+        &sandbox,
+        &actor,
+        &alpha,
+        &format!("participant:{actor}"),
+        "direct self consumes",
+    );
+    let id = sent["envelope"]["id"].as_str().expect("mail id");
+    assert_eq!(inbox_as(&sandbox, &actor, &alpha)["unread_count"], 1);
+
+    let read = sandbox.run_as_participant(&["read", id, "--json"], &actor, &alpha);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    assert_eq!(read["own"], true);
+    assert!(read.get("pending").is_none());
+    assert_eq!(inbox_as(&sandbox, &actor, &alpha)["unread_count"], 0);
+}
+
+#[test]
+fn routing_pending_own_read_succeeds_and_excluded_own_ack_is_a_noop() {
+    let pending = Sandbox::new_unseeded();
+    let solo = pending.path.join("solo");
+    fs::create_dir_all(&solo).expect("solo workspace");
+    assert_success(&pending.run(&["rooms", "add", "solo", solo.to_string_lossy().as_ref()]));
+    let actor = pending.bind_claude("solo-own", &solo, Some("solo"))["id"]
+        .as_str()
+        .expect("solo actor")
+        .to_owned();
+    let sent = send_as(&pending, &actor, &solo, "workspace:solo", "pending own");
+    let id = sent["envelope"]["id"].as_str().expect("pending id");
+    assert!(!pending
+        .mail_root
+        .join(format!("solo/routing/{id}.json"))
+        .exists());
+    let read = pending.run_as_participant(&["read", id, "--json"], &actor, &solo);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    assert_eq!(read["own"], true);
+    assert_eq!(read["pending"], true);
+
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let sender = bind(&sandbox, "excluded-ack-sender", &alpha, "alpha");
+    let _sibling = bind(&sandbox, "excluded-ack-sibling", &alpha, "alpha");
+    let sent = send_as(
+        &sandbox,
+        &sender,
+        &alpha,
+        "workspace:alpha",
+        "ack inspection",
+    );
+    let id = sent["envelope"]["id"].as_str().expect("mail id");
+    let cursor = sandbox
+        .mail_root
+        .join("participants")
+        .join(&sender)
+        .join("cursors.json");
+    let seeded = b"{\"version\":2,\"mail\":{},\"channels\":{}}\n";
+    fs::write(&cursor, seeded).expect("seed cursor");
+    let ack = sandbox.run_as_participant(&["read", id, "--ack", "--json"], &sender, &alpha);
+    assert_success(&ack);
+    let ack: Value = from_stdout(&ack);
+    assert_eq!(ack["acknowledged"], false);
+    assert_eq!(fs::read(&cursor).expect("cursor after ack"), seeded);
+}
+
+#[test]
+fn routing_send_text_prints_a_runnable_readback_for_routed_and_pending_own_mail() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let actor = sandbox.test_participant("alpha");
+    let sent = sandbox.run_as_participant(
+        &["send", "--to", "workspace:beta", "--body", "printed routed"],
+        &actor,
+        &alpha,
+    );
+    assert_success(&sent);
+    let command = printed_readback(&common::stdout(&sent)).to_owned();
+    let read = run_printed_readback(&sandbox, &command, &actor, &alpha);
+    assert_success(&read);
+    assert!(common::stdout(&read).contains("own: true"));
+
+    let pending = Sandbox::new_unseeded();
+    let solo = pending.path.join("solo");
+    fs::create_dir_all(&solo).expect("solo workspace");
+    assert_success(&pending.run(&["rooms", "add", "solo", solo.to_string_lossy().as_ref()]));
+    let actor = pending.bind_claude("printed-pending", &solo, Some("solo"))["id"]
+        .as_str()
+        .expect("pending actor")
+        .to_owned();
+    let sent = pending.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:solo",
+            "--body",
+            "printed pending",
+        ],
+        &actor,
+        &solo,
+    );
+    assert_success(&sent);
+    let command = printed_readback(&common::stdout(&sent)).to_owned();
+    let read = run_printed_readback(&pending, &command, &actor, &solo);
+    assert_success(&read);
+    let text = common::stdout(&read);
+    assert!(text.contains("own: true"), "{text}");
+    assert!(text.contains("pending: true"), "{text}");
+}
+
+#[test]
+fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_origin() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let actor = bind(&sandbox, "unknown-renderer", &alpha, "alpha");
+    let peer = bind(&sandbox, "unknown-renderer-peer", &beta, "beta");
+    let id = "20990916-044000-acde40";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        id,
+        &json!({"id":id,"from":"mystery","to":"alpha","kind":"note","subject":"unknown","sent":"2026-09-16 04:40:00 -0500","from_participant":"missing-local","address_kind":"workspace"}),
+        "unknown-renderer-proof",
+    );
+    assert_success(&sandbox.run_as_participant(
+        &["participant", "bind", "--workspace", "alpha", "--json"],
+        &actor,
+        &alpha,
+    ));
+
+    for args in [
+        vec!["inbox", "--text"],
+        vec!["read", id, "--peek"],
+        vec!["search", "unknown-renderer-proof", "--mail"],
+        vec!["watch", "--snapshot", "--text"],
+    ] {
+        let output = sandbox.run_as_participant(&args, &actor, &alpha);
+        assert_success(&output);
+        let text = common::stdout(&output);
+        assert!(
+            !text.contains("participant:missing-local"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("crossed the bridge"), "{args:?}: {text}");
+    }
+    let catchup = sandbox.run_as_participant(&["catchup", "--mail"], &actor, &alpha);
+    assert_success(&catchup);
+    let text = common::stdout(&catchup);
+    assert!(!text.contains("participant:missing-local"), "{text}");
+    assert!(!text.contains("crossed the bridge"), "{text}");
+
+    for (participant, cwd) in [(&actor, &alpha), (&peer, &beta)] {
+        assert_success(&sandbox.run_as_participant(
+            &["chat", "unknown-renderer", "--join", "--json"],
+            participant,
+            cwd,
+        ));
+    }
+    let channel_id = "20990916-044001-000001-acde41";
+    write_channel_message(
+        &sandbox,
+        "unknown-renderer",
+        channel_id,
+        "mystery",
+        "unknown",
+        "unknown-channel-proof",
+    );
+    for args in [
+        vec!["chat", "unknown-renderer", "--peek"],
+        vec![
+            "search",
+            "unknown-channel-proof",
+            "--channel",
+            "unknown-renderer",
+        ],
+        vec!["watch", "--snapshot", "--text"],
+    ] {
+        let output = sandbox.run_as_participant(&args, &actor, &alpha);
+        assert_success(&output);
+        let text = common::stdout(&output);
+        assert!(!text.contains("crossed the bridge"), "{args:?}: {text}");
+    }
+    let catchup = sandbox.run_as_participant(&["catchup", "unknown-renderer"], &actor, &alpha);
+    assert_success(&catchup);
+    assert!(!common::stdout(&catchup).contains("crossed the bridge"));
+}
+
+#[test]
+fn routing_read_modes_share_context_projection_and_pending_own_state() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let sender = sandbox.test_participant("alpha");
+    let recipient = sandbox.test_participant("beta");
+    let sent = send_as(
+        &sandbox,
+        &sender,
+        &alpha,
+        "workspace:beta",
+        "project every mode",
+    );
+    let id = sent["envelope"]["id"].as_str().expect("mail id");
+    let mut projections = Vec::new();
+    for args in [
+        vec!["read", id, "--peek", "--json"],
+        vec!["read", id, "--peek", "--max-bytes", "20000", "--json"],
+        vec![
+            "read",
+            id,
+            "--offset",
+            "0",
+            "--length",
+            "7",
+            "--max-bytes",
+            "20000",
+            "--json",
+        ],
+    ] {
+        let output = sandbox.run_as_participant(&args, &recipient, &beta);
+        assert_success(&output);
+        let output: Value = from_stdout(&output);
+        projections.push(output);
+    }
+    for projection in &projections {
+        assert_eq!(projection["envelope"]["origin"], "local");
+        assert_eq!(
+            projection["envelope"]["reply_to_participant"],
+            format!("participant:{sender}")
+        );
+        assert_eq!(
+            projection["envelope"]["address"],
+            json!({"kind":"workspace","name":"beta"})
+        );
+        assert!(projection.get("own").is_none());
+        assert!(projection.get("pending").is_none());
+    }
+
+    let pending = Sandbox::new_unseeded();
+    let solo = pending.path.join("solo");
+    fs::create_dir_all(&solo).expect("solo workspace");
+    assert_success(&pending.run(&["rooms", "add", "solo", solo.to_string_lossy().as_ref()]));
+    let actor = pending.bind_claude("pending-projection", &solo, Some("solo"))["id"]
+        .as_str()
+        .expect("actor")
+        .to_owned();
+    let sent = send_as(
+        &pending,
+        &actor,
+        &solo,
+        "workspace:solo",
+        "pending projection",
+    );
+    let id = sent["envelope"]["id"].as_str().expect("pending id");
+    for args in [
+        vec!["read", id, "--peek", "--max-bytes", "20000", "--json"],
+        vec![
+            "read",
+            id,
+            "--offset",
+            "0",
+            "--length",
+            "7",
+            "--max-bytes",
+            "20000",
+            "--json",
+        ],
+    ] {
+        let output = pending.run_as_participant(&args, &actor, &solo);
+        assert_success(&output);
+        let output: Value = from_stdout(&output);
+        assert_eq!(output["own"], true);
+        assert_eq!(output["pending"], true);
+        assert_eq!(output["envelope"]["pending"], true);
+    }
+}
+
+#[test]
 fn routing_participant_watch_ignores_legacy_own_room_suppression() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
@@ -444,6 +756,115 @@ fn routing_participant_watch_ignores_legacy_own_room_suppression() {
         sandbox.run_as_participant(&["watch", "--snapshot", "--own", "alpha"], &b, &alpha);
     assert_success(&watched);
     assert!(String::from_utf8_lossy(&watched.stdout).contains(id));
+}
+
+#[test]
+fn routing_workspace_less_channel_watch_uses_participant_address_even_with_lineage_target() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.run(&[
+        "participant",
+        "bind",
+        "--harness",
+        "shell",
+        "--key",
+        "workspace-less-watch",
+        "--json",
+    ]);
+    assert_success(&actor);
+    let actor: Value = from_stdout(&actor);
+    let id = actor["participant"]["id"]
+        .as_str()
+        .expect("actor id")
+        .to_owned();
+    patch_participant(&sandbox, &id, |record| {
+        record["lineage"] = json!("ember");
+        record["lineage_since"] = json!("2026-09-16T04:41:00Z");
+    });
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "typed-watch", "--join", "--json"],
+        &id,
+        &sandbox.path,
+    ));
+    let channel_id = "20990916-044100-000001-acde42";
+    write_channel_message(
+        &sandbox,
+        "typed-watch",
+        channel_id,
+        "mystery",
+        "typed",
+        "typed watch body",
+    );
+    let malformed_id = "20990916-044101-000001-acde43";
+    fs::write(
+        sandbox
+            .mail_root
+            .join(format!("channels/typed-watch/messages/{malformed_id}.msg")),
+        b"malformed sibling",
+    )
+    .expect("malformed channel sibling");
+
+    let watched = sandbox.run_as_participant(&["watch", "--snapshot"], &id, &sandbox.path);
+    assert!(watched.status.success(), "watch failed: {watched:?}");
+    assert!(
+        common::stderr(&watched).contains("unreadable channel message"),
+        "malformed sibling was not diagnosed: {}",
+        common::stderr(&watched)
+    );
+    let events: Vec<Value> = common::stdout(&watched)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("watch event"))
+        .collect();
+    for event in events
+        .iter()
+        .filter(|event| event["id"] == channel_id || event["id"] == malformed_id)
+    {
+        assert_eq!(
+            event["address"],
+            json!({"kind":"participant","name":id}),
+            "channel event borrowed a direct-mail target: {event}"
+        );
+        assert!(event.get("room").is_none());
+    }
+    assert!(events.iter().any(|event| event["id"] == channel_id));
+    assert!(events.iter().any(|event| event["id"] == malformed_id));
+}
+
+#[test]
+fn routing_watch_digest_keeps_pending_separate_from_delivered() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let recipient = bind(&sandbox, "digest-recipient", &alpha, "alpha");
+    let sender = bind(&sandbox, "digest-sender", &beta, "beta");
+    send_as(
+        &sandbox,
+        &sender,
+        &beta,
+        "workspace:alpha",
+        "delivered digest",
+    );
+    let pending_id = "20990916-044200-acde44";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        pending_id,
+        &json!({"id":pending_id,"from":"beta","to":"alpha","kind":"note","subject":"pending digest","sent":"2026-09-16 04:42:00 -0500","from_participant":sender,"address_kind":"workspace"}),
+        "pending digest",
+    );
+
+    let watched =
+        sandbox.run_as_participant(&["watch", "--snapshot", "--digest"], &recipient, &alpha);
+    assert_success(&watched);
+    let digests: Vec<Value> = common::stdout(&watched)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("digest"))
+        .filter(|digest: &Value| digest["source"] == "mail")
+        .collect();
+    assert_eq!(digests.len(), 2, "delivered and pending must not merge");
+    assert!(digests
+        .iter()
+        .any(|digest| digest["pending"] == true && digest["count"] == 1));
+    assert!(digests
+        .iter()
+        .any(|digest| digest.get("pending").is_none() && digest["count"] == 1));
 }
 
 #[test]

@@ -155,6 +155,7 @@ fn list_bound(
             ));
             render_reply_targets(
                 &mut rendered,
+                &mail.origin,
                 mail.reply_to_participant.as_deref(),
                 &mail.reply_to_shared,
             );
@@ -270,20 +271,13 @@ pub(crate) fn address_label(address: &Address) -> String {
     format!("{}:{}", address.kind.as_str(), address.name)
 }
 
-pub(crate) fn render_reply_targets(rendered: &mut String, participant: Option<&str>, shared: &str) {
-    match participant {
-        Some(participant) => rendered.push_str(&format!(
-            "  reply_to_participant: {} (local, sender only)\n",
-            output::sanitize_text_header(participant)
-        )),
-        None => {
-            rendered.push_str("  reply_to_participant: unavailable (message crossed the bridge)\n")
-        }
-    }
-    rendered.push_str(&format!(
-        "  reply_to_shared: {} (shared fan-out)\n",
-        output::sanitize_text_header(shared)
-    ));
+pub(crate) fn render_reply_targets(
+    rendered: &mut String,
+    origin: &str,
+    participant: Option<&str>,
+    shared: &str,
+) {
+    output::render_reply_metadata(rendered, origin, participant, shared);
 }
 
 #[cfg(test)]

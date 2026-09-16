@@ -61,6 +61,30 @@ pub(crate) struct ReplyMetadata {
     pub shared: String,
 }
 
+/// Render the reply choices from already-resolved metadata. Renderers must not
+/// reconstruct a private target from an unvalidated participant id.
+pub(crate) fn render_reply_metadata(
+    rendered: &mut String,
+    origin: &str,
+    participant: Option<&str>,
+    shared: &str,
+) {
+    match (origin, participant) {
+        ("local", Some(participant)) => rendered.push_str(&format!(
+            "  reply_to_participant: {} (local, sender only)\n",
+            sanitize_text_header(participant)
+        )),
+        ("remote", _) => {
+            rendered.push_str("  reply_to_participant: unavailable (message crossed the bridge)\n")
+        }
+        _ => rendered.push_str("  reply_to_participant: unavailable (sender origin unknown)\n"),
+    }
+    rendered.push_str(&format!(
+        "  reply_to_shared: {} (shared fan-out)\n",
+        sanitize_text_header(shared)
+    ));
+}
+
 pub(crate) fn reply_metadata(
     context: &crate::mailbox::Context,
     from: &str,
@@ -276,6 +300,8 @@ pub struct MessageEnvelope {
     pub reply_to_shared: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<WatchAddress>,
 }
 
 impl From<Envelope> for MessageEnvelope {
@@ -291,6 +317,7 @@ impl From<Envelope> for MessageEnvelope {
             reply_to_participant,
             reply_to_shared,
             pending: false,
+            address: None,
         }
     }
 }
@@ -300,6 +327,7 @@ impl MessageEnvelope {
         context: &crate::mailbox::Context,
         envelope: Envelope,
         pending: bool,
+        address: Option<&crate::participant::Address>,
     ) -> Self {
         let reply = reply_metadata(
             context,
@@ -313,6 +341,7 @@ impl MessageEnvelope {
             reply_to_participant: reply.participant,
             reply_to_shared: reply.shared,
             pending,
+            address: address.map(WatchAddress::from_address),
         }
     }
 }
@@ -524,6 +553,12 @@ pub struct SearchResult {
     pub preview: String,
     /// Fields that matched, in stable body/subject/from/id order.
     pub matched: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_read: bool,
     /// Present only for direct-mail results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<MailKind>,
@@ -842,6 +877,26 @@ impl WatchAddress {
             }
         }
     }
+
+    pub(crate) fn from_address(address: &crate::participant::Address) -> Self {
+        Self {
+            kind: address.kind.as_str().to_owned(),
+            name: address.name.clone(),
+        }
+    }
+
+    pub(crate) fn to_address(&self) -> Option<crate::participant::Address> {
+        let kind = match self.kind.as_str() {
+            "workspace" => crate::participant::AddressKind::Workspace,
+            "lineage" => crate::participant::AddressKind::Lineage,
+            "participant" => crate::participant::AddressKind::Participant,
+            _ => return None,
+        };
+        Some(crate::participant::Address {
+            kind,
+            name: self.name.clone(),
+        })
+    }
 }
 
 fn typed_watch_room(room: &str) -> bool {
@@ -1089,6 +1144,10 @@ pub struct ReadBudgetOutput {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub already_read: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     pub count: usize,
     pub selected_count: usize,
     pub has_more: bool,
@@ -1111,6 +1170,10 @@ pub struct MailBodySliceOutput {
     pub continuation: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub already_read: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     pub verification_scope: String,
     pub byte_limit: usize,
 }

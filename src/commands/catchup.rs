@@ -123,7 +123,7 @@ pub(super) fn run(
         let selected_count = targets.iter().map(CatchupTarget::count).sum();
         let rendered = match args.max_bytes {
             Some(max_bytes) => {
-                let remainders = CatchupRemainderIndex::new(&targets, &room, max_bytes)?;
+                let remainders = CatchupRemainderIndex::new(context, &targets, &room, max_bytes)?;
                 let admission = if json_output {
                     let json_sizes = CatchupJsonSizes::new(&targets, framing, pretty)?;
                     super::byte_budget::admit_prefix_measured(
@@ -710,7 +710,12 @@ struct CatchupRemainderIndex {
 }
 
 impl CatchupRemainderIndex {
-    fn new(targets: &[CatchupTarget], room: &str, max_bytes: usize) -> AppResult<Self> {
+    fn new(
+        context: &Context,
+        targets: &[CatchupTarget],
+        room: &str,
+        max_bytes: usize,
+    ) -> AppResult<Self> {
         let mut remaining_by_target = vec![0usize; targets.len()];
         let mut remaining_targets = 0usize;
         for (index, target) in targets.iter().enumerate().rev() {
@@ -724,6 +729,22 @@ impl CatchupRemainderIndex {
             match target {
                 CatchupTarget::Mail { messages, .. } => {
                     for item in messages {
+                        let address = item
+                            .envelope
+                            .address
+                            .as_ref()
+                            .and_then(output::WatchAddress::to_address);
+                        let projection = address.as_ref().map_or_else(
+                            || super::read::ReadProjection::legacy(context),
+                            |address| {
+                                super::read::ReadProjection::participant(
+                                    context,
+                                    address,
+                                    false,
+                                    item.envelope.pending,
+                                )
+                            },
+                        );
                         items.push(CatchupRemainderItem {
                             source: CatchupRemainderSource::Mail,
                             id: item.envelope.id.clone(),
@@ -736,6 +757,7 @@ impl CatchupRemainderIndex {
                                 &item.body,
                                 false,
                                 max_bytes,
+                                projection,
                             )?,
                         });
                     }
@@ -828,7 +850,12 @@ fn collect_mail(
         for item in cursor_state::eligibility::unread_mail(context, participant, &address)? {
             let id = item.envelope.id.clone();
             messages.push(CatchupMailItem {
-                envelope: output::MessageEnvelope::new(context, item.envelope, false),
+                envelope: output::MessageEnvelope::new(
+                    context,
+                    item.envelope,
+                    false,
+                    Some(&address),
+                ),
                 body: item.body,
             });
             moves.push(MailMove {
@@ -1057,13 +1084,12 @@ fn render_mail_item(rendered: &mut String, item: &CatchupMailItem) {
             output::sanitize_text_header(address)
         ));
     }
-    if envelope.from_participant.is_some() || envelope.address_kind.is_some() {
-        let participant_reply = envelope
-            .from_participant
-            .as_ref()
-            .map(|id| format!("participant:{id}"));
-        super::inbox::render_reply_targets(rendered, participant_reply.as_deref(), &envelope.from);
-    }
+    super::inbox::render_reply_targets(
+        rendered,
+        &item.envelope.origin,
+        item.envelope.reply_to_participant.as_deref(),
+        &item.envelope.reply_to_shared,
+    );
     output::render_gutter_body(rendered, &item.body);
 }
 
@@ -1105,13 +1131,12 @@ fn render_channel_item(rendered: &mut String, item: &ChatMessageItem) {
             output::sanitize_text_header(address)
         ));
     }
-    if message.from_participant.is_some() || message.address_kind.is_some() {
-        let participant_reply = message
-            .from_participant
-            .as_ref()
-            .map(|id| format!("participant:{id}"));
-        super::inbox::render_reply_targets(rendered, participant_reply.as_deref(), &message.from);
-    }
+    super::inbox::render_reply_targets(
+        rendered,
+        &item.origin,
+        item.reply_to_participant.as_deref(),
+        &item.reply_to_shared,
+    );
     output::render_gutter_body(rendered, &item.body);
 }
 

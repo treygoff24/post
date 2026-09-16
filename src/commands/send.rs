@@ -368,13 +368,14 @@ where
         )?
     } else {
         format!(
-            "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; unread is recipient-specific and suppresses the sender\n",
+            "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; unread is recipient-specific and suppresses the sender\npost: read it back with: post read {}\n",
             envelope.kind,
             envelope.id,
             envelope.from,
             envelope.to,
             target.kind.as_str(),
             target.name,
+            crate::mailbox::shell_quote(&envelope.id),
         )
     };
     Ok(CommandResult::committed(rendered))

@@ -81,6 +81,10 @@ impl WatchDelivery {
             | WatchEvent::ChannelMessage { reason, .. } => *reason,
         }
     }
+
+    fn pending(&self) -> bool {
+        matches!(&self.event, WatchEvent::Mail { item, .. } if item.pending)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +99,8 @@ struct WatchDigest {
     last_id: String,
     from: Vec<String>,
     reason: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pending: bool,
     /// Sanitized preview of the group's most recent previewable body —
     /// additive in NDJSON, and rendered BEFORE the `[first..last] [--since ...]`
     /// suffix in text so the true fencepost group stays rightmost.
@@ -126,7 +132,11 @@ impl WatchDigest {
             .as_ref()
             .map_or_else(String::new, |p| format!("  {p}"));
         if self.sender_counts.is_empty() {
-            return format!("{label}: {} new{preview}{bounds}{action}\n", self.count);
+            let pending = if self.pending { " pending" } else { "" };
+            return format!(
+                "{label}: {} new{pending}{preview}{bounds}{action}\n",
+                self.count
+            );
         }
         let show_counts = self.sender_counts.iter().any(|(_, count)| *count > 1);
         let mut senders = self
@@ -147,8 +157,9 @@ impl WatchDigest {
             senders.push(format!("+{omitted} more"));
         }
         format!(
-            "{label}: {} new ({}){preview}{bounds}{action}\n",
+            "{label}: {} new{} ({}){preview}{bounds}{action}\n",
             self.count,
+            if self.pending { " pending" } else { "" },
             senders.join(", ")
         )
     }
@@ -168,10 +179,14 @@ fn digest_since_fencepost(first_id: &str) -> String {
 }
 
 fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
-    let mut group_indexes = HashMap::<(String, String), usize>::new();
+    let mut group_indexes = HashMap::<(String, String, bool), usize>::new();
     let mut digests = Vec::<WatchDigest>::new();
     for delivery in batch {
-        let key = (delivery.room.clone(), delivery.source.clone());
+        let key = (
+            delivery.room.clone(),
+            delivery.source.clone(),
+            delivery.pending(),
+        );
         let index = match group_indexes.get(&key) {
             Some(index) => *index,
             None => {
@@ -193,6 +208,7 @@ fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
                     last_id: delivery.id().to_owned(),
                     from: Vec::new(),
                     reason: delivery.reason().as_str().to_owned(),
+                    pending: delivery.pending(),
                     preview: None,
                     sender_counts: Vec::new(),
                 });
@@ -897,10 +913,12 @@ fn scan_watch_target(
         crate::cursor_state::routing::route_pending(context, address)?;
     }
     let mut batch = Vec::new();
-    let watching_address = participant
-        .workspace
-        .as_deref()
-        .unwrap_or(participant.id.as_str());
+    let channel_context = participant.workspace.clone().unwrap_or_else(|| {
+        format!(
+            "participant:{}",
+            crate::output::sanitize_text_header(&participant.id)
+        )
+    });
 
     let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
     let pending =
@@ -914,11 +932,14 @@ fn scan_watch_target(
             path,
             envelope: parsed.envelope,
             body: parsed.body,
+            recipient: false,
+            own: false,
+            pending: true,
         });
     }
     mail.sort_by(|left, right| left.envelope.id.cmp(&right.envelope.id));
     for item in mail {
-        let pending = pending_ids.contains(&item.envelope.id);
+        let pending = item.pending || pending_ids.contains(&item.envelope.id);
         if !target.seen.insert(item.path) {
             continue;
         }
@@ -972,7 +993,7 @@ fn scan_watch_target(
                 scan_unreadable_participant_channel(
                     context,
                     participant,
-                    &target.room,
+                    &channel_context,
                     &channel,
                     &mut target.seen,
                     &mut target.reported_unreadable,
@@ -999,12 +1020,12 @@ fn scan_watch_target(
             }
             emitted_channel_ids.insert(dedupe_id);
             batch.push(WatchDelivery::channel(
-                &target.room,
+                &channel_context,
                 &channel,
                 WatchEvent::channel_message(
                     context,
                     item.message,
-                    watching_address,
+                    &channel_context,
                     Some(sanitize_preview(&item.body)),
                 ),
             ));
@@ -1017,7 +1038,7 @@ fn scan_watch_target(
 fn scan_unreadable_participant_channel(
     context: &Context,
     participant: &Participant,
-    room: &str,
+    channel_context: &str,
     channel: &str,
     seen_paths: &mut HashSet<PathBuf>,
     reported_unreadable: &mut HashSet<PathBuf>,
@@ -1048,15 +1069,12 @@ fn scan_unreadable_participant_channel(
                 seen_paths.insert(path);
                 emitted_channel_ids.insert(dedupe);
                 batch.push(WatchDelivery::channel(
-                    room,
+                    channel_context,
                     channel,
                     WatchEvent::channel_message(
                         context,
                         parsed.message,
-                        participant
-                            .workspace
-                            .as_deref()
-                            .unwrap_or(participant.id.as_str()),
+                        channel_context,
                         Some(sanitize_preview(&parsed.body)),
                     ),
                 ));
@@ -1072,9 +1090,9 @@ fn scan_unreadable_participant_channel(
                     .any(|delivery| delivery.source == source && delivery.id() == id)
                 {
                     batch.push(WatchDelivery::channel(
-                        room,
+                        channel_context,
                         channel,
-                        WatchEvent::unreadable_channel(room, channel, id.to_owned()),
+                        WatchEvent::unreadable_channel(channel_context, channel, id.to_owned()),
                     ));
                 }
             }

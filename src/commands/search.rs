@@ -229,7 +229,11 @@ fn collect_mail(
     pattern: &LiteralPattern,
     matches: &mut MatchAccumulator,
 ) -> AppResult<()> {
-    for item in crate::cursor_state::eligibility::unread_mail(context, participant, address)? {
+    let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    for item in crate::cursor_state::eligibility::visible_mail(context, participant, address)? {
+        let already_read = item.recipient && cursors.mail_has_seen(address, &item.envelope.id);
+        let own = item.own;
+        let pending = item.pending;
         let envelope = item.envelope;
         let matched = matched_fields(
             pattern,
@@ -260,6 +264,9 @@ fn collect_mail(
             subject: envelope.subject,
             preview: preview(&item.body),
             matched,
+            own,
+            pending,
+            already_read,
             kind: Some(envelope.kind),
         };
         matches.push(SearchHit {
@@ -278,8 +285,10 @@ fn collect_channel(
     matches: &mut MatchAccumulator,
 ) -> AppResult<()> {
     for item in
-        crate::cursor_state::eligibility::unread_channel(context, participant, channel_name)?
+        crate::cursor_state::eligibility::visible_channel(context, participant, channel_name)?
     {
+        let own = item.own;
+        let already_read = item.already_read;
         let message = item.message;
         let matched = matched_fields(
             pattern,
@@ -310,6 +319,9 @@ fn collect_channel(
             subject: message.subject,
             preview: preview(&item.body),
             matched,
+            own,
+            pending: false,
+            already_read,
             kind: None,
         };
         matches.push(SearchHit {
@@ -418,13 +430,22 @@ fn render_text(
             |channel| format!("channel #{}", output::sanitize_text_header(channel)),
         );
         rendered.push_str(&format!(
-            "{source} {} from {} at {} subject={:?} preview={}\n",
+            "{source} {} from {} at {} subject={:?} preview={} own={} pending={} already_read={}\n",
             output::sanitize_text_header(&result.id),
             output::sanitize_text_header(&result.from),
             output::sanitize_text_header(&result.sent),
             output::sanitize_text_header(&result.subject),
             output::sanitize_text_body(&result.preview),
+            result.own,
+            result.pending,
+            result.already_read,
         ));
+        output::render_reply_metadata(
+            &mut rendered,
+            &result.origin,
+            result.reply_to_participant.as_deref(),
+            &result.reply_to_shared,
+        );
     }
     rendered.push_str(&format!("post: {} match(es)\n", results.len()));
     rendered
