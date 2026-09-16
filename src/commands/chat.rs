@@ -24,6 +24,9 @@ pub(super) fn run(
             pretty,
         );
     }
+    if args.leave {
+        return leave(context, &args.name, json_output, pretty);
+    }
     if let Some(msg_id) = args.seen_by.as_deref() {
         return seen_by(context, &args.name, msg_id, json_output, pretty);
     }
@@ -2072,6 +2075,53 @@ fn join(
         format!("post: joined #{name} as {}\n", outcome.room)
     };
     Ok(CommandResult::committed(rendered))
+}
+
+fn leave(
+    context: &Context,
+    name: &str,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let participant = context.sender()?.participant;
+    let paths = channel::ChannelPaths::new(context, name)?;
+    if !paths.exists() {
+        return Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("channel '{name}' does not exist"),
+            format!(
+                "List channels with `post channels`, or join with `post chat {} --join`.",
+                crate::mailbox::shell_quote(name)
+            ),
+        ));
+    }
+    let left = crate::channel_state::ParticipantChannels::leave(context, &participant, name)?;
+    #[derive(Serialize)]
+    struct LeaveOutput<'a> {
+        ok: bool,
+        channel: &'a str,
+        participant: &'a str,
+        left: bool,
+    }
+    let rendered = if json_output {
+        output::json(
+            &LeaveOutput {
+                ok: true,
+                channel: name,
+                participant: &participant.id,
+                left,
+            },
+            pretty,
+        )?
+    } else if left {
+        format!("post: participant {} left #{name}\n", participant.id)
+    } else {
+        format!(
+            "post: participant {} was not a member of #{name}\n",
+            participant.id
+        )
+    };
+    Ok(CommandResult::success(rendered))
 }
 
 fn send(

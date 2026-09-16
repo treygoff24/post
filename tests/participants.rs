@@ -495,11 +495,14 @@ fn participant_version_json_advertises_store_and_capabilities() {
     let output = sandbox.run_unbound(&["version", "--json"], &sandbox.path);
     assert_success(&output);
     let version: Value = from_stdout(&output);
-    assert_eq!(version["store_version"], 1);
+    assert_eq!(version["store_version"], 2);
     assert!(version["build_sha"]
         .as_str()
         .is_some_and(|sha| !sha.is_empty()));
-    assert_eq!(version["capabilities"], serde_json::json!(["participants"]));
+    assert_eq!(
+        version["capabilities"],
+        serde_json::json!(["participants", "routing-receipts", "cursors-v2"])
+    );
     assert!(tree(&sandbox.mail_root).is_empty());
 }
 

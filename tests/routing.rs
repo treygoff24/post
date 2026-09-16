@@ -265,6 +265,10 @@ fn routing_sender_only_workspace_stays_pending_until_another_participant_arrives
     assert!(!receipt.exists(), "sender-only fanout must remain pending");
 
     let b = bind(&sandbox, "solo-b", &solo, "solo");
+    assert!(
+        receipt.is_file(),
+        "second participant bind must route pending mail"
+    );
     let read = sandbox.run_as_participant(&["read", id, "--json"], &b, &solo);
     assert_success(&read);
     assert!(receipt.is_file());
@@ -351,11 +355,7 @@ fn routing_workspace_less_participants_use_explicit_channel_membership() {
         &sandbox.path,
     );
     assert_success(&sent);
-    let peek = sandbox.run_as_participant(
-        &["chat", "session-only", "--peek", "--json"],
-        &b,
-        &sandbox.path,
-    );
+    let peek = sandbox.run_as_participant(&["chat", "session-only", "--json"], &b, &sandbox.path);
     assert_success(&peek);
     let peek: Value = from_stdout(&peek);
     assert!(peek["count"].as_u64().is_some_and(|count| count >= 1));
@@ -364,6 +364,96 @@ fn routing_workspace_less_participants_use_explicit_channel_membership() {
         .expect("messages")
         .iter()
         .any(|message| message["body"] == "session-only message"));
+    let cursor = sandbox
+        .mail_root
+        .join("participants")
+        .join(&b)
+        .join("cursors.json");
+    let before = fs::read(&cursor).expect("B cursor before leave");
+    let left = sandbox.run_as_participant(
+        &["chat", "session-only", "--leave", "--json"],
+        &b,
+        &sandbox.path,
+    );
+    assert_success(&left);
+    assert_eq!(fs::read(&cursor).expect("B cursor after leave"), before);
+    let still_member = sandbox.run_as_participant(
+        &[
+            "chat",
+            "session-only",
+            "--send",
+            "--body",
+            "A still posts",
+            "--json",
+        ],
+        &a,
+        &sandbox.path,
+    );
+    assert_success(&still_member);
+    let refused = sandbox.run_as_participant(
+        &[
+            "chat",
+            "session-only",
+            "--send",
+            "--body",
+            "B cannot post",
+            "--json",
+        ],
+        &b,
+        &sandbox.path,
+    );
+    assert_eq!(refused.status.code(), Some(65));
+}
+
+#[test]
+fn routing_lineage_mail_waits_for_adopt_and_excludes_later_affiliate() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let adopter = bind(&sandbox, "adopt-a", &alpha, "alpha");
+    let later = bind(&sandbox, "adopt-later", &alpha, "alpha");
+    let sender = bind(&sandbox, "adopt-sender", &beta, "beta");
+    let lineage = sandbox.mail_root.join("lineages/ember");
+    fs::create_dir_all(&lineage).expect("lineage directory");
+    fs::write(
+        lineage.join("lineage.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "name": "ember",
+                "founder": adopter,
+                "created": "2026-09-16T08:00:00Z",
+                "host": "test"
+            }))
+            .expect("lineage JSON")
+        ),
+    )
+    .expect("write lineage");
+    let sent = send_as(
+        &sandbox,
+        &sender,
+        &beta,
+        "lineage:ember",
+        "held lineage mail",
+    );
+    let id = sent["envelope"]["id"].as_str().expect("lineage id");
+    let receipt = lineage.join(format!("routing/{id}.json"));
+    assert!(!receipt.exists());
+
+    patch_participant(&sandbox, &adopter, |record| {
+        record["lineage"] = json!("ember");
+        record["lineage_since"] = json!("2026-09-16T08:01:00Z");
+    });
+    let adopted = sandbox.run_as_participant(&["inbox", "--adopt"], &adopter, &alpha);
+    assert_success(&adopted);
+    let frozen: Value = serde_json::from_slice(&fs::read(&receipt).expect("adopt receipt"))
+        .expect("adopt receipt JSON");
+    assert_eq!(frozen["recipients"], json!([adopter]));
+
+    patch_participant(&sandbox, &later, |record| {
+        record["lineage"] = json!("ember");
+        record["lineage_since"] = json!("2026-09-16T08:02:00Z");
+    });
+    assert_eq!(inbox_as(&sandbox, &later, &alpha)["unread_count"], 0);
 }
 
 fn patch_participant(sandbox: &Sandbox, id: &str, patch: impl FnOnce(&mut Value)) {

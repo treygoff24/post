@@ -115,8 +115,11 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
     assert!(!identity.side_effects.contains("P.3"));
     assert!(!identity.side_effects.contains("not_yet"));
     assert!(!schema.output_shapes.identity.join("\n").contains("not_yet"));
-    assert_eq!(schema.store_version, 1);
-    assert_eq!(schema.capabilities, vec!["participants"]);
+    assert_eq!(schema.store_version, 2);
+    assert_eq!(
+        schema.capabilities,
+        vec!["participants", "routing-receipts", "cursors-v2"]
+    );
 
     for args in [
         &["participant", "--help"] as &[&str],

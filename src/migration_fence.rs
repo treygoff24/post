@@ -490,6 +490,7 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         }
         Command::Chat(args) => {
             args.join
+                || args.leave
                 || args.send
                 || args.body.is_some()
                 || args.body_file.is_some()
