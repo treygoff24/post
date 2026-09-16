@@ -409,6 +409,8 @@ impl Sandbox {
             "harness": "test",
             "conversation_key_digest": digest,
             "created": "2026-09-16 00:00:00 +0000",
+            "last_seen": "2099-01-01T00:00:00Z",
+            "lease_hours": 24,
             "workspace": workspace,
             "workspace_path": serde_json::Value::Null,
             "lineage": serde_json::Value::Null,

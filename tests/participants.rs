@@ -1833,6 +1833,9 @@ fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
     let stale_id = participant_id(&stale).to_owned();
     let ended_id = participant_id(&ended).to_owned();
     let missing_lease_id = sandbox.test_participant("alpha");
+    edit_participant(&sandbox, &missing_lease_id, |record| {
+        record.remove("last_seen");
+    });
     edit_participant(&sandbox, &stale_id, |record| {
         record.insert(
             "last_seen".to_owned(),

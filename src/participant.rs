@@ -72,7 +72,7 @@ impl Participant {
             return ParticipantState::Ended;
         }
         let Some(last_seen) = self.last_seen.as_deref() else {
-            return ParticipantState::Active;
+            return ParticipantState::Stale;
         };
         let Some(last_seen) = parse_rfc3339(last_seen) else {
             return ParticipantState::Stale;
@@ -83,6 +83,16 @@ impl Participant {
             }
             Err(_) => ParticipantState::Active,
             _ => ParticipantState::Stale,
+        }
+    }
+
+    pub(crate) fn state_label(&self, now: SystemTime) -> &'static str {
+        if self.ended_at.is_some() {
+            "ended"
+        } else if self.last_seen.is_none() {
+            "no lease record"
+        } else {
+            self.state(now).as_str()
         }
     }
 }
@@ -374,9 +384,8 @@ pub(crate) fn end(context: &Context, id: &str) -> AppResult<Participant> {
     if participant.ended_at.is_some() {
         return Ok(participant);
     }
-    let (ended_at, lease_hours) = activity_from_env()?;
+    let ended_at = format_rfc3339(SystemTime::now())?;
     participant.last_seen = Some(ended_at.clone());
-    participant.lease_hours = lease_hours;
     participant.ended_at = Some(ended_at);
     write_record(&participant)?;
     Ok(participant)
@@ -1063,8 +1072,8 @@ fn parse_rfc3339(value: &str) -> Option<SystemTime> {
 fn parse_digits(bytes: &[u8], start: usize, length: usize) -> Option<i64> {
     let digits = bytes.get(start..start.checked_add(length)?)?;
     digits.iter().try_fold(0_i64, |value, byte| {
-        byte.is_ascii_digit()
-            .then_some(value * 10 + i64::from(byte - b'0'))
+        let digit = (*byte).checked_sub(b'0').filter(|digit| *digit <= 9)?;
+        value.checked_mul(10)?.checked_add(i64::from(digit))
     })
 }
 
