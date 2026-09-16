@@ -122,7 +122,7 @@ The bridge binary is unchanged. It moves message files between hosts' room store
 
 ## 11. Version and capabilities
 
-`post version --json` → `{version, build_sha, store_version: 2, capabilities: ["participants","lineages","routing-receipts","cursors-v2"]}`; `build_sha` from `build.rs` (`git rev-parse --short HEAD`, else `"unknown"`). `post doctor` reports the acting participant, its resolution provenance, pending counts, and labels legacy room state. `scripts/smoke-installed.sh` gains the two-participant scenario (§13) and runs against the installed binary on both hosts.
+`post version --json` → `{version, build_sha, store_version, capabilities}`. Capabilities are advertised only when built, so an installed binary never claims what it cannot do: P.1 advertises `["participants"]` with `store_version: 1`; P.3 adds `"lineages"`; P.2 adds `"routing-receipts"` and `"cursors-v2"` and raises `store_version` to 2. The integrated release reports all four with `store_version: 2`. `build_sha` from `build.rs` (`git rev-parse --short HEAD`, else `"unknown"`). `post doctor` reports the acting participant, its resolution provenance, pending counts, and labels legacy room state. `scripts/smoke-installed.sh` gains the two-participant scenario (§13) and runs against the installed binary on both hosts.
 
 ## 12. The three layers, restated
 
