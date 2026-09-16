@@ -52,7 +52,15 @@ fn channel_catchup_returns_full_slice_then_fresh_invocation_is_empty() {
         &second.targets[..],
         [CatchupTarget::Channel { messages, count: 0, .. }] if messages.is_empty()
     ));
-    assert!(fs::read_to_string(sandbox.mail_root.join("beta/cursors.json")).is_ok());
+    let participant = sandbox.test_participant("beta");
+    assert!(fs::read_to_string(
+        sandbox
+            .mail_root
+            .join("participants")
+            .join(participant)
+            .join("cursors.json")
+    )
+    .is_ok());
 }
 
 #[test]
@@ -167,7 +175,7 @@ fn all_skips_corrupt_unjoined_channel_and_delivers_mail() {
     assert!(common::stderr(&output).contains("warning"));
     assert!(sandbox
         .mail_root
-        .join(format!("beta/read/{id}.mail"))
+        .join(format!("beta/inbox/{id}.mail"))
         .exists());
 }
 
@@ -221,14 +229,22 @@ fn all_warns_and_zeroes_joined_channel_with_malformed_message() {
     ));
     assert!(sandbox
         .mail_root
-        .join(format!("beta/read/{mail_id}.mail"))
+        .join(format!("beta/inbox/{mail_id}.mail"))
         .exists());
+    let participant = sandbox.test_participant("beta");
     let cursor: serde_json::Value = serde_json::from_slice(
-        &fs::read(sandbox.mail_root.join("beta/cursors.json")).expect("cursor state"),
+        &fs::read(
+            sandbox
+                .mail_root
+                .join("participants")
+                .join(participant)
+                .join("cursors.json"),
+        )
+        .expect("cursor state"),
     )
     .expect("valid cursor state");
     assert_eq!(
-        cursor["mail"]["seen"]
+        cursor["mail"]["workspace:beta"]["seen"]
             .as_array()
             .expect("mail seen set")
             .iter()
@@ -311,12 +327,8 @@ fn malformed_mail_warns_and_valid_mail_moves() {
     assert_eq!(output.status.code(), Some(0), "stderr: {:?}", output.stderr);
     let parsed: CatchupOutput = from_stdout(&output);
     assert_eq!(parsed.count, 1);
-    assert!(common::stderr(&output).contains("skipped malformed mail"));
-    assert!(!inbox.join(format!("{valid_id}.mail")).exists());
-    assert!(sandbox
-        .mail_root
-        .join(format!("beta/read/{valid_id}.mail"))
-        .exists());
+    assert!(common::stderr(&output).contains("left malformed mail"));
+    assert!(inbox.join(format!("{valid_id}.mail")).exists());
     assert!(inbox.join(format!("{malformed_id}.mail")).exists());
 }
 

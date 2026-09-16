@@ -91,7 +91,12 @@ fn follow_continuation_chain(
 }
 
 fn seen_ids(sandbox: &Sandbox, room: &str, channel: &str) -> Vec<String> {
-    let path = sandbox.mail_root.join(room).join("cursors.json");
+    let participant = sandbox.test_participant(room);
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(participant)
+        .join("cursors.json");
     if !path.exists() {
         return Vec::new();
     }
@@ -287,6 +292,7 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     let inbox = sandbox.mail_root.join("beta/inbox");
+    let beta_participant = sandbox.test_participant("beta");
     fs::create_dir_all(&inbox).expect("inbox");
     let ids = [
         "20990906-115959-aaaaa1",
@@ -314,7 +320,7 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
         );
     }
 
-    let bounded = sandbox.run_in(
+    let bounded = sandbox.run_as_participant(
         &[
             "read",
             ids[1],
@@ -324,7 +330,7 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
             "1200",
             "--json",
         ],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&bounded);
@@ -339,7 +345,7 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
     let mut reconstructed = String::new();
     loop {
         let offset_arg = offset.to_string();
-        let sliced = sandbox.run_in(
+        let sliced = sandbox.run_as_participant(
             &[
                 "read",
                 ids[1],
@@ -351,7 +357,7 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
                 "1200",
                 "--json",
             ],
-            None,
+            &beta_participant,
             &beta,
         );
         assert_success(&sliced);
@@ -369,24 +375,27 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
     assert_eq!(reconstructed.as_bytes(), body.as_bytes());
     assert!(inbox.join(format!("{}.mail", ids[1])).exists());
 
-    let ack = sandbox.run_in(
+    let ack = sandbox.run_as_participant(
         &["read", ids[1], "--room", "beta", "--ack", "--json"],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&ack);
-    assert!(!inbox.join(format!("{}.mail", ids[1])).exists());
-    assert!(sandbox
-        .mail_root
-        .join(format!("beta/read/{}.mail", ids[1]))
-        .exists());
+    assert!(inbox.join(format!("{}.mail", ids[1])).exists());
     assert!(inbox.join(format!("{}.mail", ids[0])).exists());
     assert!(inbox.join(format!("{}.mail", ids[2])).exists());
     let state: Value = serde_json::from_slice(
-        &fs::read(sandbox.mail_root.join("beta/cursors.json")).expect("cursor"),
+        &fs::read(
+            sandbox
+                .mail_root
+                .join("participants")
+                .join(&beta_participant)
+                .join("cursors.json"),
+        )
+        .expect("cursor"),
     )
     .expect("cursor JSON");
-    assert_eq!(state["mail"]["seen"], json!([ids[1]]));
+    assert_eq!(state["mail"]["workspace:beta"]["seen"], json!([ids[1]]));
 
     let malformed_id = "20990906-120002-aaaaa4";
     fs::write(inbox.join(format!("{malformed_id}.mail")), "malformed")
@@ -399,10 +408,17 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
     assert_eq!(malformed_ack.status.code(), Some(78));
     assert!(malformed_ack.stdout.is_empty());
     let state: Value = serde_json::from_slice(
-        &fs::read(sandbox.mail_root.join("beta/cursors.json")).expect("cursor"),
+        &fs::read(
+            sandbox
+                .mail_root
+                .join("participants")
+                .join(&beta_participant)
+                .join("cursors.json"),
+        )
+        .expect("cursor"),
     )
     .expect("cursor JSON");
-    assert_eq!(state["mail"]["seen"], json!([ids[1]]));
+    assert_eq!(state["mail"]["workspace:beta"]["seen"], json!([ids[1]]));
 }
 
 #[test]
@@ -576,7 +592,7 @@ fn catchup_uses_one_budget_across_targets_and_consumes_only_complete_prefixes() 
     assert_eq!(value["omitted"]["first_id"], channel_ids[1]);
     assert!(sandbox
         .mail_root
-        .join(format!("beta/read/{mail_id}.mail"))
+        .join(format!("beta/inbox/{mail_id}.mail"))
         .exists());
     assert_eq!(seen_ids(&sandbox, "beta", "mixed"), vec![channel_ids[0]]);
 
@@ -1000,7 +1016,7 @@ fn budgeted_peek_keeps_mention_rescue_order_and_reports_omitted_mentions() {
 #[test]
 fn omission_continuations_measure_large_slice_scaffolds_for_chat_read_and_catchup() {
     let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let (alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, "metadata", "beta");
     let channel_id = "20990906-120425-000001-abcd01";
     let mentions: Vec<String> = (0..240).map(|index| format!("room-{index:03}")).collect();
@@ -1070,33 +1086,74 @@ fn omission_continuations_measure_large_slice_scaffolds_for_chat_read_and_catchu
     assert!(seen_ids(&sandbox, "beta", "metadata").is_empty());
 
     let inbox = sandbox.mail_root.join("beta/inbox");
-    fs::create_dir_all(&inbox).expect("inbox");
-    let mail_id = "20990906-120425-abcd02";
-    write_custom_mail(
-        &inbox,
-        mail_id,
-        &json!({
-            "id": mail_id,
-            "from": "alpha",
-            "to": "beta",
-            "kind": "note",
-            "subject": "m".repeat(1024),
-            "sent": "2026-09-06 12:04:25 +0000",
-        }),
-        &format!("{}é🙂\"\\\n\u{1f}mail-tail", "m".repeat(8_000)),
+    let beta_participant = sandbox.test_participant("beta");
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_record = sandbox
+        .mail_root
+        .join("participants")
+        .join(&beta_participant)
+        .join("participant.json");
+    let mut beta_json: Value =
+        serde_json::from_slice(&fs::read(&beta_record).expect("beta participant"))
+            .expect("beta participant JSON");
+    beta_json
+        .as_object_mut()
+        .expect("participant object")
+        .remove("last_seen");
+    fs::write(
+        &beta_record,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&beta_json).expect("serialize beta participant")
+        ),
+    )
+    .expect("restore legacy-active beta participant");
+    let expected_mail = format!("{}é🙂\"\\\n\u{1f}mail-tail", "m".repeat(8_000));
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--subject",
+            &"m".repeat(1024),
+            "--body",
+            &expected_mail,
+            "--json",
+        ],
+        &alpha_participant,
+        &alpha,
     );
-    let read = sandbox.run_in(
+    assert_success(&sent);
+    let sent: Value = from_stdout(&sent);
+    let mail_id = sent["envelope"]["id"].as_str().expect("mail id");
+    let receipt_path = sandbox
+        .mail_root
+        .join(format!("beta/routing/{mail_id}.json"));
+    assert!(
+        inbox.join(format!("{mail_id}.mail")).is_file(),
+        "canonical mail missing"
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).expect("routing receipt"))
+        .expect("routing receipt JSON");
+    assert!(
+        receipt["recipients"]
+            .as_array()
+            .expect("recipients")
+            .iter()
+            .any(|recipient| recipient == &beta_participant),
+        "beta recipient missing: {receipt}"
+    );
+    let read = sandbox.run_as_participant(
         &[
             "read",
             mail_id,
             "--room",
             "beta",
-            "--peek",
             "--max-bytes",
             "3000",
             "--json",
         ],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&read);
@@ -1104,7 +1161,6 @@ fn omission_continuations_measure_large_slice_scaffolds_for_chat_read_and_catchu
     let read_command = read["omitted"]["continuation"]
         .as_str()
         .expect("read continuation");
-    let expected_mail = format!("{}é🙂\"\\\n\u{1f}mail-tail", "m".repeat(8_000));
     let (mail_body, mail_ranges) = follow_continuation_chain(&sandbox, &beta, read_command);
     assert_eq!(mail_body.as_bytes(), expected_mail.as_bytes());
     assert!(mail_ranges
@@ -1123,12 +1179,12 @@ fn omission_continuations_measure_large_slice_scaffolds_for_chat_read_and_catchu
         &beta,
     ));
     assert_eq!(seen_ids(&sandbox, "beta", "metadata"), vec![channel_id]);
-    assert_success(&sandbox.run_in(
+    assert_success(&sandbox.run_as_participant(
         &["read", mail_id, "--room", "beta", "--ack", "--json"],
-        None,
+        &beta_participant,
         &beta,
     ));
-    assert!(!inbox.join(format!("{mail_id}.mail")).exists());
+    assert!(inbox.join(format!("{mail_id}.mail")).exists());
 }
 
 #[test]
@@ -1288,11 +1344,7 @@ fn complete_budgeted_direct_read_consumes_after_full_body_output() {
     let value: Value = from_stdout(&output);
     assert_eq!(value["count"], 1);
     assert_eq!(value["body"], "complete");
-    assert!(!inbox.join(format!("{id}.mail")).exists());
-    assert!(sandbox
-        .mail_root
-        .join(format!("beta/read/{id}.mail"))
-        .exists());
+    assert!(inbox.join(format!("{id}.mail")).exists());
 }
 
 #[test]

@@ -184,7 +184,11 @@ fn run_participant(
         .input(args.id)
         .reason("no routed or provisionally visible canonical mail matches"));
     };
-    let room = super::inbox::address_label(&address);
+    let room = if address.kind == AddressKind::Workspace {
+        address.name.clone()
+    } else {
+        super::inbox::address_label(&address)
+    };
     let resolved = ResolvedMail {
         mail,
         source: None,

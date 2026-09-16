@@ -159,9 +159,19 @@ pub(crate) fn effective_channels(
             names.remove(&name);
             continue;
         }
+        if state.joined_names().contains(&name) {
+            continue;
+        }
         if let Some(workspace) = participant.workspace.as_ref() {
-            if paths.load_members()?.contains_key(workspace) {
-                names.insert(name);
+            match paths.load_members() {
+                Ok(members) if members.contains_key(workspace) => {
+                    names.insert(name);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!(
+                    "post: warning: skipped channel with invalid legacy membership: {}",
+                    error.message
+                ),
             }
         }
     }
