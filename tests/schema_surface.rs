@@ -50,6 +50,102 @@ fn assert_keys_are_documented(actual: &BTreeSet<String>, shape: &[String]) {
     }
 }
 
+#[test]
+fn participant_identity_adopt_and_version_schema_surface_is_complete() {
+    let sandbox = Sandbox::new();
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    for (name, required) in [
+        (
+            "participant",
+            vec![
+                "show",
+                "bind",
+                "--workspace",
+                "--harness",
+                "--key",
+                "--new",
+                "touch",
+                "end",
+                "list",
+            ],
+        ),
+        (
+            "identity",
+            vec![
+                "list",
+                "show <name>",
+                "--voices",
+                "new <name>",
+                "continue <name>",
+                "--acknowledge",
+                "voice add",
+                "voice withdraw",
+                "terms set",
+                "--body-file",
+            ],
+        ),
+        ("version", vec!["--json"]),
+    ] {
+        let command = schema
+            .commands
+            .iter()
+            .find(|command| command.name == name)
+            .unwrap_or_else(|| panic!("missing {name} schema command"));
+        for token in required {
+            assert!(
+                command.usage.contains(token),
+                "{name} omitted {token}: {}",
+                command.usage
+            );
+        }
+    }
+    let inbox = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "inbox")
+        .expect("inbox schema command");
+    assert!(inbox.usage.contains("--adopt"));
+    assert!(!inbox.side_effects.contains("P.2"));
+    assert!(!inbox.side_effects.contains("not_yet"));
+    let identity = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "identity")
+        .expect("identity schema command");
+    assert!(!identity.side_effects.contains("P.3"));
+    assert!(!identity.side_effects.contains("not_yet"));
+    assert!(!schema.output_shapes.identity.join("\n").contains("not_yet"));
+    assert_eq!(schema.store_version, 1);
+    assert_eq!(schema.capabilities, vec!["participants"]);
+    let watch = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "watch")
+        .expect("watch schema command");
+    assert!(!watch.side_effects.contains("creates missing mailbox"));
+    assert!(watch.side_effects.contains("empty scan emits nothing"));
+
+    for args in [
+        &["participant", "--help"] as &[&str],
+        &["participant", "bind", "--help"],
+        &["participant", "touch", "--help"],
+        &["participant", "end", "--help"],
+        &["identity", "--help"],
+        &["identity", "show", "--help"],
+        &["identity", "continue", "--help"],
+        &["identity", "voice", "add", "--help"],
+        &["identity", "terms", "set", "--help"],
+        &["inbox", "--help"],
+        &["version", "--help"],
+    ] {
+        assert_success(&sandbox.run(args));
+    }
+    let participant_help = common::stdout(&sandbox.run(&["participant", "--help"]));
+    assert!(!participant_help
+        .lines()
+        .any(|line| line.trim_start().starts_with("new ")));
+}
+
 fn option_names(text: &str) -> BTreeSet<String> {
     text.split_whitespace()
         .filter_map(|token| {

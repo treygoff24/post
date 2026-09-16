@@ -1869,7 +1869,7 @@ fn budget_banner_plan(
         crate::cli::FramingMode::Auto => {
             let due = banner_due_today(context, room);
             BudgetBannerPlan {
-                show_wall: due || crate::mailbox::read_only_command(),
+                show_wall: due || crate::migration_fence::conservative_read_mode(context),
                 stamp_after_stdout: due && consuming,
             }
         }
@@ -1917,6 +1917,7 @@ fn acting_notice(provenance: crate::model::SenderProvenance) -> &'static str {
         P::DeclaredEnv => "POST_FROM pin",
         P::DeclaredFlag => "explicit flag",
         P::InferredCwd | P::InferredBasename => "identity inferred from cwd",
+        P::ParticipantBinding => "participant binding",
     }
 }
 
@@ -2186,6 +2187,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: Some(display_name.to_owned()),
             pfp: Some(pfp.to_owned()),
@@ -2206,6 +2210,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -2621,6 +2628,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -2711,6 +2721,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -2795,6 +2808,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: Some(channel::JOIN_EVENT.to_owned()),
             display_name: None,
             pfp: None,

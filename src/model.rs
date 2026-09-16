@@ -34,6 +34,14 @@ pub struct Envelope {
     pub kind: MailKind,
     pub subject: String,
     pub sent: String,
+    /// Acting participant and optional lineage. These additive keys are
+    /// omitted on 0.9.0 mail, which remains parseable unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_participant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lineage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_kind: Option<String>,
     /// Sender's display name as of send time (presentation only; identity
     /// is always `from`). Absent when the sender had no profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,10 +56,11 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_address: Option<String>,
     /// How the `from` field was determined at send time: `declared-env`,
-    /// `declared-flag`, `inferred-cwd`, or `inferred-basename`. Evidence, not
+    /// `declared-flag`, `inferred-cwd`, `inferred-basename`, or
+    /// `participant-binding`. Evidence, not
     /// a credential — kept as a plain string so an unknown future value can
     /// never break message parse (the signature_ref lesson). Renderers only
-    /// speak the four known values; anything else renders silence.
+    /// speak known values; anything else renders silence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_provenance: Option<String>,
 }
@@ -91,6 +100,12 @@ pub struct ChannelMessage {
     #[serde(default)]
     pub subject: String,
     pub sent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_participant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lineage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_kind: Option<String>,
     /// "join" on membership events; absent on ordinary messages. Set only
     /// by the CLI's join path — sends never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,6 +167,8 @@ pub(crate) enum SenderProvenance {
     InferredCwd,
     /// `from` fell back to the cwd basename (no registered room matched).
     InferredBasename,
+    /// `from` came from the bound participant rather than a caller assertion.
+    ParticipantBinding,
 }
 
 impl SenderProvenance {
@@ -161,6 +178,7 @@ impl SenderProvenance {
             Self::DeclaredFlag => "declared-flag",
             Self::InferredCwd => "inferred-cwd",
             Self::InferredBasename => "inferred-basename",
+            Self::ParticipantBinding => "participant-binding",
         }
     }
 }
@@ -187,4 +205,29 @@ pub(crate) type RoomMap = BTreeMap<String, String>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RulesConfig {
     pub blocked: Vec<BlockingRule>,
+}
+
+#[cfg(test)]
+mod participant_review_tests {
+    use super::Envelope;
+
+    #[test]
+    fn participant_review_actor_fields_round_trip_in_unit_schema() {
+        let envelope: Envelope = serde_json::from_value(serde_json::json!({
+            "id": "20260916-010203-abcdef",
+            "from": "alpha",
+            "to": "beta",
+            "kind": "note",
+            "subject": "review",
+            "sent": "2026-09-16 01:02:03 +0000",
+            "from_participant": "codex-12345678",
+            "from_lineage": "ember",
+            "address_kind": "workspace"
+        }))
+        .expect("parse participant envelope");
+        let round_trip = serde_json::to_value(envelope).expect("serialize participant envelope");
+        assert_eq!(round_trip["from_participant"], "codex-12345678");
+        assert_eq!(round_trip["from_lineage"], "ember");
+        assert_eq!(round_trip["address_kind"], "workspace");
+    }
 }

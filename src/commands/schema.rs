@@ -1,3 +1,4 @@
+use super::version;
 use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
 use crate::mailbox::{load_owner, Context, OwnerResolution};
@@ -44,8 +45,20 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     };
     let commands = vec![
         command(
+            "participant",
+            "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant touch | post participant end | post participant list",
+            "JSON",
+            "show/list are read-only; bind is the only participant minting path and refreshes last_seen, records the participant's lease_hours, clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen/lease_hours; end sets ended_at idempotently",
+        ),
+        command(
+            "identity",
+            "post identity list | post identity show <name> [--voices] | post identity new <name> | post identity continue <name> [--acknowledge] | post identity leave | post identity voice add --body-file <path> | post identity voice withdraw | post identity terms set --body-file <path>",
+            "JSON",
+            "list/show are read-only and voice bodies load only with --voices; new/continue/leave change only the acting participant's historical affiliation; continue requires --acknowledge when terms exist; voice and terms bodies come only from the named files",
+        ),
+        command(
             "send",
-            "post send --to <room> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] [--allow-self] (--body <text> | --body-file <path> | --body-file - | stdin)",
+            "post send --to <workspace:<room>|lineage:<name>|participant:<id>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] [--allow-self] (--body <text> | --body-file <path> | --body-file - | stdin)",
             "text; JSON with --json",
             "atomically writes <room>/inbox/<id>.mail then archive/<id>.mail; subjects over 1 KiB fail, the three body forms are mutually exclusive alternatives, omitting all of them reads stdin, bodies over 32 KiB require --oversize, from==to requires --allow-self (instances of one room coordinate via channels), and --from that disagrees with a POST_FROM pin is a hard conflict error",
         ),
@@ -63,9 +76,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "inbox",
-            "post inbox [--room <name>] [--text]",
+            "post inbox [--room <name>] [--text] [--adopt]",
             "JSON; text with --text",
-            "creates missing mailbox inbox/read directories; does not alter mail; JSON adds unread_count while unread/count retain their physical-inbox meanings",
+            "listing is read-only; --adopt is a writer that routes held lineage mail to the current eligible affiliates without making later affiliates retroactive recipients; JSON keeps unread and pending counts distinct",
         ),
         command(
             "read",
@@ -119,16 +132,39 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "watch",
             "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--digest] [--text]",
             "NDJSON event union (mail | unreadable | channel_message), one per line; --digest emits one digest per room/source group; text with --text",
-            "creates missing mailbox inbox/read directories for registered rooms; a multi-room watch merges direct mail and deduplicates channel messages in one stream; --own <room> (repeatable, default empty) declares identities the watcher IS, whose channel messages never ring it in any scanned room -- watching a room never implies owning it, so an observer keeps receiving rooms it selected but did not declare; reads envelopes only — never moves or alters mail, never emits body content, never mutates channel seen-sets; scans are the truth source and a native filesystem watcher (inotify/FSEvents) only supplies wake hints, with a slow periodic re-registration pass and poll fallback at --interval-ms; each long-running poll touches <room>/watch.heartbeat for presence (snapshot never does); events carry reason mail|channel|mention on every type (unreadable: mail|channel); --digest groups each batch by room and source (mail or channel:<name>) in first-arrival order; --snapshot scans exactly once (unread direct mail plus joined-channel messages outside the seen-set) and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories); snapshot-only --limit <n> admits the last n underlying events before optional digest grouping and warns when earlier events are omitted, while --limit 0 is unlimited",
+            "a multi-room watch merges direct mail and deduplicates channel messages in one stream; --own <room> (repeatable, default empty) declares identities the watcher IS, whose channel messages never ring it in any scanned room -- watching a room never implies owning it, so an observer keeps receiving rooms it selected but did not declare; reads envelopes only — never moves or alters mail, never emits body content, never mutates channel seen-sets; scans are the truth source and a native filesystem watcher (inotify/FSEvents) only supplies wake hints, with a slow periodic re-registration pass and poll fallback at --interval-ms; each long-running poll may create mailbox directories and touches <room>/watch.heartbeat for presence, while snapshot is wholly read-only and never does either; events carry reason mail|channel|mention on every type (unreadable: mail|channel); --digest groups each batch by room and source (mail or channel:<name>) in first-arrival order; --snapshot scans exactly once (unread direct mail plus joined-channel messages outside the seen-set) and exits 0 (empty scan emits nothing; direct-mail scan failure is a nonzero error, never a false empty; an unregistered room warns on stderr, scans nothing, and creates no directories); snapshot-only --limit <n> admits the last n underlying events before optional digest grouping and warns when earlier events are omitted, while --limit 0 is unlimited",
         ),
         command(
             "who",
             "post who [--room <name>]... [--text]",
             "JSON; text with --text",
-            "read-only presence: for each registered room, whether a watch heartbeat is live and the last-seen stamp; never reports PIDs or process info. A live heartbeat means SOME local process is watching that room, not that the room's own agent is alive: any caller may watch any room, so this answers 'is anyone watching' and cannot answer 'is that agent up'",
+            "read-only participant directory: acting participant/provenance first, then all participants with lineage/workspace/watch presence, then legacy room heartbeat rows under legacy_rooms; provenance never claims to detect subagency and no PID is reported",
+        ),
+        command(
+            "version",
+            "post version [--json]",
+            "one text line; JSON with --json",
+            "read-only build/store/capability receipt",
         ),
     ];
     let output_shapes = OutputShapes {
+        participant: fields(&[
+            "show/bind/touch/end: ok, status=bound|unbound|ended, id?, participant? (last_seen?, lease_hours, ended_at?), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
+            "list: ok, participants, count",
+        ]),
+        identity: fields(&[
+            "list: ok, lineages without voice bodies",
+            "show: lineage metadata and affiliates; voice bodies only with --voices",
+            "new/continue/leave: acting participant affiliation and acknowledgement state",
+            "voice add/withdraw and terms set: lineage content state",
+        ]),
+        version: fields(&[
+            "ok",
+            "version",
+            "build_sha",
+            "store_version=1",
+            "capabilities",
+        ]),
         doctor: fields(&[
             "ok",
             "status",
@@ -185,6 +221,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "ok",
             "name",
             "contract_version",
+            "store_version",
+            "capabilities",
+            "participant=unbound and participant_fix (when no participant is bound)",
+            "participant_error (when ambient participant resolution failed but this read-only command remained available)",
             "global_flags",
             "commands",
             "output_shapes",
@@ -290,7 +330,14 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "channel_message: event, channel, id, from, subject, sent, reason=channel|mention, preview? [, display_name, pfp, sender_address, sender_provenance]",
             "digest: event=digest, room, source=mail|channel:<name>, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]),
-        who: fields(&["ok", "rooms (room, live_watch, last_seen?)", "count"]),
+        who: fields(&[
+            "ok",
+            "participant (status, state=active|stale|ended?, last_seen?, id?, harness?, provenance?, workspace?, lineage?, fix?)",
+            "participants (id, harness, state=active|stale|ended, last_seen?, lineage?, workspace?, live_watch, watch_last_seen?)",
+            "legacy_rooms (room, live_watch, last_seen?)",
+            "activity_note? (stale-delivery crash gap: frozen mail is not reassigned)",
+            "count",
+        ]),
     };
     let errors = ErrorCode::ALL
         .iter()
@@ -304,6 +351,11 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ok: true,
         name: "post".to_owned(),
         contract_version: "1".to_owned(),
+        store_version: 1,
+        capabilities: version::CAPABILITIES
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
         global_flags: fields(&[
             "--json: switch send/read/chat/catchup/search from text to JSON; inbox/rooms/channels/profile/schema/doctor/who are already JSON",
             "--pretty: pretty-print JSON",
@@ -326,6 +378,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             exit(2, "usage or argument error"),
             exit(65, "validation error"),
             exit(66, "message not found"),
+            exit(69, "command unavailable"),
             exit(70, "non-retryable post-commit or internal failure"),
             exit(75, "retryable I/O failure"),
             exit(77, "blocked route"),
@@ -343,10 +396,14 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Every successful send has an immutable archive copy.",
             "delivered_output_failure is non-retryable after a committed direct send or channel mutation; committed room registration stdout failure is reported as success with best-effort diagnostics.",
             "Mail kinds are exactly letter, note, and signal.",
+            "Only post participant bind mints a participant; read-only commands never mint or initialize mailbox state.",
+            "A shell without a harness key bootstraps with participant bind --harness <slug> --key <conversation-key> or participant bind --new [--harness <slug>]; text prints one export POST_PARTICIPANT line.",
+            "A participant binding, never cwd, determines the sender. Workspace context supplies the shared reply address; otherwise the participant id is the reply address.",
+            "Bare send targets resolve registered workspace, then lineage, then participant; typed workspace:, lineage:, and participant: targets remove ambiguity without changing --kind.",
             "Channel messages are not mail: they carry no kind, so a signal structurally cannot occur in a channel; anything gate-grade stays 1:1 room mail.",
             "Blocked routes bar shared channel membership at join time; channels never carry what a route may not.",
             "Channel history is append-only and is its own immutable archive; nothing in messages/ is ever moved or deleted.",
-            "Channel identity is inferred from cwd; membership and per-room channel state require a registered room, and joins are recorded in the channel history itself.",
+            "A bound participant determines channel identity; an unbound read-only channel form retains legacy pin-or-cwd lookup. Membership and per-room channel state require a registered room, and joins are recorded in the channel history itself.",
             "Watch emits channel events as notifications only and never marks channel messages seen; only a read consumes, and only after a successful emit.",
             "A room's own channel messages are never news to it: they never ring its own watch, and a send records the sender's own message id as seen unconditionally. Selecting a room to watch is not the same as being it: a watcher may declare identities with --own (repeatable), and a message from any declared-own room is suppressed across every room that watch scans, while a room that is only watched still rings.",
             "A message body comes from exactly one of --body, --body-file, or stdin; a body-file path that does not exist is a usage error, never a retryable I/O fault.",
@@ -368,7 +425,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Budgeted chat auto framing inspects banner-day without mutating during admission: first-day output is full, same-day output compact, fenced read-only output remains always-full, and a consuming stamp occurs only after successful stdout; cursorless, zero-admission, null-sink and failed-output paths do not stamp. Banner state uses the raw validated acting-room id, never sanitized presentation text. Omission continuations use a measured fixed-point cap covering the exact stored envelope at the body's widest later offsets plus its costliest encoded UTF-8 scalar, so the unchanged-message chain crosses decimal/scalar boundaries; this cap may exceed the original byte_limit without changing it.",
             "Channel sends bounce with crossed_send when unseen ordinary messages from others exist in the channel; --anyway delivers regardless. Direct mail is unaffected.",
             "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
-            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; authority comes only from signature verification, and post never synthesizes either field.",
+            "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; participant-binding means the bound participant supplied the reply address without a --from or POST_FROM assertion; authority comes only from signature verification, and post never synthesizes either field.",
+            "Participant activity affects new recipient selection only. A record without last_seen has no lease record and remains stale until bind or touch; read-only commands never refresh last_seen. Mail already frozen to a participant is durable and is not reassigned when that participant becomes stale.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override — a supported first-class root (r2.1); must be absolute, defaults to $HOME/.claude-mail",
@@ -376,6 +434,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "POST_FROM: stable room pin set by the launch helper; beats cwd inference for sender/acting-room resolution (an explicit --room still wins; an explicit --from must agree with the pin or the send is refused), recorded as sender_provenance=declared-env; set-but-invalid is a loud error, never a silent fallback",
             "POST_FRAMING: presentation preference (auto|full|compact) consulted ONLY by body-returning reads (post read, post chat reads) when --framing is absent — send/join/discard/discard-through/seen-by never consult it; an explicit --framing always wins; set-but-invalid or non-UTF-8 warns on stderr and falls back to auto (presentation never breaks a read; deliberately weaker than the POST_FROM identity pin)",
             "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
+            "POST_PARTICIPANT: explicit acting participant id; highest resolution precedence and never mints a missing record",
+            "POST_PARTICIPANT_LEASE_HOURS: positive integer lease recorded on the acting participant by bind/touch and writer activity; defaults to 24 and never reclassifies peer records",
+            "CLAUDE_CODE_SESSION_ID: Claude conversation key used by post participant bind",
+            "CODEX_THREAD_ID / CODEX_SESSION_ID: Codex conversation key (both present and different is an error, never a guess)",
+            "CLAUDE_PID: marks a Claude ancestor when nested Claude/Codex harness keys are both inherited; nearest harness ancestor wins and unresolved ancestry fails naming POST_PARTICIPANT",
+            "POST_HARNESS: optional harness label for POST_SENDER_ADDRESS and participant bind --new only; native Claude/Codex labels are canonical",
             "POST_ARX_GENERATION: positive migration generation for writers only; reads never parse or reject it. Missing/zero/stale/malformed declarations refuse enrolled writers before mutation; absent state plus an unset declaration preserves legacy writes. Enrolled reads are non-mutating. The enrollment-owned .post-arx.json state, existing solitary .post-arx.lock flock anchor, and actual ..post-arx.json.<pid>.<nonce>.tmp atomic temp namespace are reserved room names; no lock temp namespace is produced; the lock inode is never unlinked or recreated. Cursor state is a fence boundary: catchup requires writer admission, while search and listings remain read-only; valid legacy channel-state.json imports in memory on read and materializes only on the first admitted cursor write, remaining untouched as rollback evidence.",
         ]),
     };

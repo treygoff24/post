@@ -149,18 +149,50 @@ fn lock_channels(context: &Context) -> AppResult<File> {
     Ok(file)
 }
 
-/// Resolve the acting room for channel operations. Identity comes from the
-/// POST_FROM pin when the launch helper set one, else from cwd — there is
-/// deliberately no --from/--room override on channel commands. Membership
-/// additionally requires the room to be registered: cursors and join records
-/// need a durable identity, and the cwd-basename fallback is not one.
+/// Resolve the acting room for channel operations. A bound participant's
+/// workspace is authoritative; unbound read-only commands retain the legacy
+/// POST_FROM-or-cwd lookup. There is deliberately no --from/--room override
+/// on channel commands. Membership additionally requires a registered room.
 pub(crate) fn acting_room(
     context: &Context,
     rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
-    let (room, provenance) = match crate::mailbox::declared_env_pin()? {
-        Some(pinned) => (pinned, SenderProvenance::DeclaredEnv),
-        None => context.infer_from_cwd(rooms)?,
+    let (room, provenance) = match crate::participant::resolve(context) {
+        Ok(crate::participant::Resolved::Bound { participant, .. }) => {
+            let Some(room) = participant.workspace.clone() else {
+                return Err(missing_participant_workspace(
+                    context,
+                    rooms,
+                    &participant.id,
+                ));
+            };
+            let provenance = match crate::mailbox::declared_env_pin()? {
+                Some(pin) => {
+                    if pin != room {
+                        return Err(AppError::new(
+                            ErrorCode::InvalidArgument,
+                            format!(
+                                "POST_FROM workspace pin '{pin}' conflicts with bound participant '{}' reply address '{room}'",
+                                participant.id
+                            ),
+                            "Run `post participant bind --workspace <room>` to change workspace context deliberately.",
+                        )
+                        .input(pin)
+                        .reason("workspace pin disagrees with bound participant"));
+                    }
+                    SenderProvenance::DeclaredEnv
+                }
+                None => SenderProvenance::ParticipantBinding,
+            };
+            (room, provenance)
+        }
+        Ok(crate::participant::Resolved::Unbound) => {
+            context.resolved_room_with_provenance(None, rooms)?
+        }
+        Err(_) if crate::mailbox::read_only_command() => {
+            context.resolved_room_with_provenance(None, rooms)?
+        }
+        Err(error) => return Err(error),
     };
     if rooms.contains_key(&room) {
         return Ok((room, provenance));
@@ -243,6 +275,39 @@ pub(crate) fn acting_room(
         error = error.exact_fix(command);
     }
     Err(error)
+}
+
+fn missing_participant_workspace(context: &Context, rooms: &RoomMap, id: &str) -> AppError {
+    let inferred = context
+        .infer_from_cwd(rooms)
+        .ok()
+        .map(|(room, _)| room)
+        .filter(|room| rooms.contains_key(room));
+    let (suggested_fix, exact_fix) = match inferred {
+        Some(room) => {
+            let command = format!("post participant bind --workspace {}", shell_quote(&room));
+            (
+                format!("Bind this participant to the current workspace with `{command}`."),
+                Some(command),
+            )
+        }
+        None => (
+            "Choose a registered room, then run `post participant bind --workspace <room>`."
+                .to_owned(),
+            None,
+        ),
+    };
+    let mut error = AppError::new(
+        ErrorCode::UnknownRoom,
+        format!("bound participant '{id}' has no workspace for channel operations"),
+        suggested_fix,
+    )
+    .input(id)
+    .reason("bound participant has no workspace context");
+    if let Some(command) = exact_fix {
+        error = error.exact_fix(command);
+    }
+    error
 }
 
 pub(crate) struct JoinOutcome {
@@ -1020,6 +1085,17 @@ fn write_message(
     let rooms = context.load_rooms()?;
     let profile = crate::profile::stamp_for(context, opts.room, &rooms);
     let sender_address = crate::mailbox::declared_sender_address()?;
+    let actor = context.sender()?;
+    if actor.from != opts.room {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "channel sender '{}' disagrees with bound participant '{}' reply address '{}'",
+                opts.room, actor.participant.id, actor.from
+            ),
+            "Re-bind with the intended workspace before writing to a channel.",
+        ));
+    }
     for attempt in 0..256 {
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
@@ -1029,6 +1105,9 @@ fn write_message(
             channel: opts.channel.to_owned(),
             subject: opts.subject.to_owned(),
             sent,
+            from_participant: Some(actor.participant.id.clone()),
+            from_lineage: actor.lineage.clone(),
+            address_kind: Some("channel".to_owned()),
             event: opts.event.map(str::to_owned),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
@@ -1348,13 +1427,12 @@ mod tests {
         let root = test_root(&format!("channel-{label}"));
         fs::write(root.join("rooms.json"), rooms).expect("write rooms config");
         fs::write(root.join("rules.json"), rules).expect("write rules config");
-        (
-            root.clone(),
-            Context {
-                root: root.clone(),
-                home: root,
-            },
-        )
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        crate::participant::bind_test_actor(&context, "alpha");
+        (root, context)
     }
 
     fn rooms_json(root: &Path) -> String {
@@ -1382,6 +1460,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:00:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1405,6 +1486,9 @@ mod tests {
             channel: "tax\nFORGED".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1427,6 +1511,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:20:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1719,6 +1806,9 @@ mod tests {
             channel: "tax".to_owned(),
             subject: String::new(),
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
             event: None,
             display_name: None,
             pfp: None,
@@ -1731,5 +1821,35 @@ mod tests {
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("non-canonical re must be refused");
         assert_eq!(error.code.as_str(), "config_invalid");
+    }
+
+    #[test]
+    fn participant_review_unit_channel_send_stamps_actor_fields() {
+        let (root, context) = test_context("participant-fields", "{}", r#"{"blocked":[]}"#);
+        fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
+        let paths = ChannelPaths::new(&context, "tax").expect("paths");
+        fs::create_dir_all(&paths.messages).expect("messages dir");
+        let id = write_message(
+            &context,
+            &paths,
+            WriteMessage {
+                room: "alpha",
+                channel: "tax",
+                subject: "",
+                body: "body",
+                event: None,
+                re: None,
+                mentions: Vec::new(),
+                signature_tag: None,
+                provenance: SenderProvenance::InferredCwd,
+            },
+        )
+        .expect("channel send");
+        let raw = fs::read_to_string(paths.messages.join(format!("{id}.msg"))).expect("message");
+        let head = raw.split_once("\n---\n").expect("separator").0;
+        let message: serde_json::Value = serde_json::from_str(head).expect("message JSON");
+        assert!(message["from_participant"].is_string());
+        assert_eq!(message["address_kind"], "channel");
+        trash_test_root(&root);
     }
 }

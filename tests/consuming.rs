@@ -67,6 +67,7 @@ fn read_link_failure_leaves_mail_unmarked_and_inbox_intact() {
         .mail_root
         .join("claude-space/read")
         .join(format!("{}.mail", sent.envelope.id));
+    fs::create_dir_all(read.parent().expect("read directory")).expect("create read directory");
     fs::write(&read, b"pre-existing destination").expect("plant destination collision");
 
     let output = sandbox.run(&[

@@ -75,6 +75,10 @@ pub(crate) struct Cli {
 // indirection through every command classifier for no runtime leverage.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
+    /// Show, bind, or list conversation participants.
+    Participant(ParticipantArgs),
+    /// Inspect or change optional persistent lineages.
+    Identity(IdentityArgs),
     /// Send mail from --body, FILE, or stdin.
     Send(SendArgs),
     /// Join, send to, or read a shared channel (group chat).
@@ -103,6 +107,131 @@ pub(crate) enum Command {
     Watch(WatchArgs),
     /// Report which rooms have a live watch and when they were last seen (no PIDs).
     Who(WhoArgs),
+    /// Print build, store, and capability information.
+    Version,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ParticipantArgs {
+    #[command(subcommand)]
+    pub command: ParticipantCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ParticipantCommand {
+    /// Show the acting participant, or unbound when none is bound.
+    Show,
+    /// Bind this harness conversation, minting its deterministic participant only when absent.
+    Bind(ParticipantBindArgs),
+    /// Refresh the acting participant's activity lease.
+    Touch,
+    /// Explicitly end the acting participant session.
+    End,
+    /// List every participant record in this local store.
+    List,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ParticipantBindArgs {
+    /// Pin workspace context to a registered room instead of inferring it from cwd.
+    #[arg(long, value_name = "ROOM", value_parser = nonempty_without_controls)]
+    pub workspace: Option<String>,
+
+    /// Harness slug for --key, or an optional label for --new (default: shell).
+    #[arg(long, value_name = "SLUG", value_parser = nonempty_without_controls)]
+    pub harness: Option<String>,
+
+    /// Deterministic conversation key for a shell without harness-provided identity.
+    #[arg(
+        long,
+        value_name = "CONVERSATION_KEY",
+        value_parser = nonempty_without_controls,
+        requires = "harness",
+        conflicts_with = "fresh"
+    )]
+    pub key: Option<String>,
+
+    /// Mint from a fresh UUID conversation key (default harness: shell).
+    #[arg(long = "new", conflicts_with = "key")]
+    pub fresh: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityArgs {
+    #[command(subcommand)]
+    pub command: IdentityCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum IdentityCommand {
+    /// List lineages without loading voice bodies.
+    List,
+    /// Show one lineage; voice bodies load only with --voices.
+    Show(IdentityShowArgs),
+    /// Found a lineage and affiliate the acting participant.
+    New(IdentityNameArgs),
+    /// Affiliate the acting participant with an existing lineage.
+    Continue(IdentityContinueArgs),
+    /// Leave the acting participant's current lineage.
+    Leave,
+    /// Add or withdraw the acting participant's lineage voice.
+    Voice(IdentityVoiceArgs),
+    /// Set lineage terms.
+    Terms(IdentityTermsArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityShowArgs {
+    #[arg(value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub name: String,
+    #[arg(long)]
+    pub voices: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityNameArgs {
+    #[arg(value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityContinueArgs {
+    #[arg(value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub name: String,
+    #[arg(long)]
+    pub acknowledge: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityVoiceArgs {
+    #[command(subcommand)]
+    pub command: IdentityVoiceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum IdentityVoiceCommand {
+    /// Add or replace this participant's current voice from a UTF-8 file.
+    Add(IdentityBodyFileArgs),
+    /// Withdraw this participant's voice.
+    Withdraw,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityTermsArgs {
+    #[command(subcommand)]
+    pub command: IdentityTermsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum IdentityTermsCommand {
+    /// Set the current lineage terms from a UTF-8 file.
+    Set(IdentityBodyFileArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityBodyFileArgs {
+    #[arg(long = "body-file", value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
+    pub body_file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -451,6 +580,10 @@ pub(crate) struct InboxArgs {
     /// Emit human-readable text instead of the default JSON.
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
+
+    /// Adopt held lineage-addressed mail for current affiliates (implemented by P.2).
+    #[arg(long)]
+    pub adopt: bool,
 }
 
 #[derive(Debug, Args)]

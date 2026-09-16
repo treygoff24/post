@@ -86,7 +86,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 14);
+    assert_eq!(schema.commands.len(), 17);
     assert!(schema
         .error_codes
         .iter()
@@ -140,8 +140,23 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     let expected_commands = vec![
-        "send", "chat", "channels", "inbox", "read", "catchup", "search", "rooms", "profile",
-        "owner", "schema", "doctor", "watch", "who",
+        "participant",
+        "identity",
+        "send",
+        "chat",
+        "channels",
+        "inbox",
+        "read",
+        "catchup",
+        "search",
+        "rooms",
+        "profile",
+        "owner",
+        "schema",
+        "doctor",
+        "watch",
+        "who",
+        "version",
     ];
     let command_names: Vec<&str> = schema
         .commands
@@ -206,8 +221,8 @@ fn help_and_schema_keep_command_contract_visible() {
 #[test]
 fn inbox_publication_failure_never_creates_an_orphan_archive_copy() {
     let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
     let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     fs::set_permissions(&inbox, fs::Permissions::from_mode(0o500)).expect("make inbox unwritable");
 
     let output = sandbox.run(&[
@@ -300,7 +315,7 @@ fn armed_route_refusal_quotes_the_rule_reason_before_writing() {
 }
 
 #[test]
-fn reserved_sender_refuses_but_free_form_and_cwd_basename_work() {
+fn reserved_sender_refuses_but_free_form_and_participant_binding_work() {
     let sandbox = Sandbox::new();
     let reserved = sandbox.run(&[
         "send",
@@ -337,7 +352,8 @@ fn reserved_sender_refuses_but_free_form_and_cwd_basename_work() {
         &project,
     );
     assert_success(&inferred);
-    assert!(stdout(&inferred).contains("my-project -> claude-space"));
+    assert!(stdout(&inferred).contains("test-30e38191 -> claude-space"));
+    assert!(!stdout(&inferred).contains("my-project -> claude-space"));
 
     let registered_workspace = sandbox.home.join("claude-space");
     fs::create_dir_all(&registered_workspace).expect("create registered room workspace");
@@ -554,7 +570,7 @@ fn compact_framing_chat_read_carries_laws_and_is_rejected_on_non_reads() {
 }
 
 #[test]
-fn full_framing_forces_the_wall_on_chat_even_after_the_daily_stamp() {
+fn read_only_chat_peeks_keep_the_full_wall_even_after_the_daily_stamp() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let joined: ChatJoinOutput =
@@ -578,17 +594,32 @@ fn full_framing_forces_the_wall_on_chat_even_after_the_daily_stamp() {
     ));
     assert!(sent.ok);
 
-    // First default (auto) read consumes the day's wall and stamps banner-day.
-    let first = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
+    // First default (auto) consuming read stamps banner-day.
+    let first = sandbox.run_in(&["chat", "tax"], None, &beta);
     assert_success(&first);
     assert!(stdout(&first).contains("READ THIS FRAMING FIRST"));
 
-    // A later auto read gets the legacy one-line reminder...
+    let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "second channel body",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    assert!(sent.ok);
+
+    // A later auto peek stays stateless and gets the full safety wall.
     let auto_again = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
     assert_success(&auto_again);
-    assert!(!stdout(&auto_again).contains("READ THIS FRAMING FIRST"));
+    assert!(stdout(&auto_again).contains("READ THIS FRAMING FIRST"));
 
-    // ...but explicit full still gets the wall: full means full.
+    // Explicit full gets the wall too: full means full.
     let full = sandbox.run_in(&["chat", "tax", "--peek", "--framing", "full"], None, &beta);
     assert_success(&full);
     assert!(stdout(&full).contains("READ THIS FRAMING FIRST"));
@@ -607,6 +638,7 @@ fn read_collision_preserves_both_unread_and_read_copies() {
         .join("claude-space/read")
         .join(format!("{}.mail", sent.envelope.id));
     let unread_bytes = fs::read(&inbox).expect("read unread collision fixture");
+    fs::create_dir_all(read.parent().expect("read directory")).expect("create read directory");
     fs::write(&read, "existing read copy").expect("create read collision fixture");
 
     let output = sandbox.run(&[
@@ -1254,8 +1286,10 @@ fn sent_mail_ascii_escapes_non_ascii_envelopes_like_python_json_dumps() {
     assert_success(&output);
     let sent: SendOutput = from_stdout(&output);
     let expected = format!(
-        "{{\n  \"id\": \"{}\",\n  \"from\": \"python-compatible\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"caf\\u00e9 \\u2615 \\ud83d\\ude00\",\n  \"sent\": \"{}\",\n  \"sender_provenance\": \"declared-flag\"\n}}\n---\nbody",
-        sent.envelope.id, sent.envelope.sent
+        "{{\n  \"id\": \"{}\",\n  \"from\": \"python-compatible\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"caf\\u00e9 \\u2615 \\ud83d\\ude00\",\n  \"sent\": \"{}\",\n  \"from_participant\": \"{}\",\n  \"address_kind\": \"workspace\",\n  \"sender_provenance\": \"declared-flag\"\n}}\n---\nbody",
+        sent.envelope.id,
+        sent.envelope.sent,
+        sent.envelope.from_participant.as_deref().expect("participant stamp")
     );
 
     assert_eq!(
@@ -1322,7 +1356,7 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
 #[test]
 fn unregistered_cwd_names_the_directory_and_lists_the_rooms_that_exist() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run(&["chat", "some-channel", "--peek"]);
+    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
     assert_eq!(output.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "unknown_room");
@@ -1388,7 +1422,7 @@ fn unregistered_cwd_exact_fix_shell_quotes_the_directory() {
         let hostile = sandbox.path.join(dirname);
         fs::create_dir_all(&hostile).expect("create hostile cwd");
 
-        let output = sandbox.run_in(&["chat", "some-channel", "--peek"], None, &hostile);
+        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
         let error: ErrorEnvelope = from_stderr(&output);
         let fix = error
             .error
@@ -1430,7 +1464,7 @@ fn many_rooms_are_summarized_inline_but_complete_in_matches() {
     )
     .expect("seed many rooms");
 
-    let output = sandbox.run(&["chat", "some-channel", "--peek"]);
+    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
     let error: ErrorEnvelope = from_stderr(&output);
     assert!(
         error.error.message.contains("+4 more"),
@@ -3631,11 +3665,13 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
         .iter()
         .zip(&targets)
         .map(|(channel, target)| {
+            let participant = sandbox.test_participant("beta");
             post_command()
                 .args(["chat", channel, "--discard-through", target, "--json"])
                 .current_dir(&beta)
                 .env("HOME", &sandbox.home)
                 .env("POST_MAIL_ROOT", &sandbox.mail_root)
+                .env("POST_PARTICIPANT", participant)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::null())
@@ -4458,8 +4494,8 @@ fn watch_limit_requires_snapshot_mode() {
 #[test]
 fn watch_snapshot_direct_scan_failure_is_a_nonzero_error_not_a_false_empty() {
     let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["inbox", "--room", "claude-space"]));
     let inbox = sandbox.mail_root.join("claude-space/inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     fs::set_permissions(&inbox, fs::Permissions::from_mode(0o000)).expect("make inbox unreadable");
 
     let output = sandbox.run(&["watch", "--room", "claude-space", "--snapshot"]);
@@ -4480,9 +4516,8 @@ fn watch_snapshot_direct_scan_failure_is_a_nonzero_error_not_a_false_empty() {
 fn watch_rings_for_malformed_mail_without_quoting_its_content() {
     let sandbox = Sandbox::new();
     // Prepare the mailbox tree, then hand-write a malformed delivery.
-    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
-    assert_success(&output);
     let inbox = sandbox.mail_root.join("claude-space").join("inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     fs::write(
         inbox.join("20260721-010101-abcdef.mail"),
         "MALICIOUS-INJECTED-CONTENT no separator here",
@@ -4528,9 +4563,8 @@ fn watch_rings_for_malformed_mail_without_quoting_its_content() {
 #[test]
 fn watch_text_mode_escapes_control_characters_in_subjects() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run(&["inbox", "--room", "claude-space"]);
-    assert_success(&output);
     let inbox = sandbox.mail_root.join("claude-space").join("inbox");
+    fs::create_dir_all(&inbox).expect("create inbox fixture");
     // send's clap validation refuses control chars, so a crafted subject can
     // only arrive via a hand-written file; watch must render it escaped.
     let envelope = "{\n  \"id\": \"20260721-020202-abc123\",\n  \"from\": \"crafty\",\n  \"to\": \"claude-space\",\n  \"kind\": \"note\",\n  \"subject\": \"line one\\nFAKE BANNER\",\n  \"sent\": \"2026-07-21 02:02:02 -0500\"\n}";
@@ -4740,13 +4774,14 @@ fn watch_survives_the_mailbox_disappearing_and_rings_after_it_returns() {
 
 #[test]
 fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
-    // A fresh legacy read still performs the original first-run setup, so a
-    // later ordinary send sees the normal defaults and never creates a fence
-    // lock.
+    // Participant spec §4 + CONTRACT.md: a fresh read-only listing never
+    // bootstraps the store. Seed the legacy defaults explicitly before the
+    // later writer portion of this migration-fence test.
     let fresh = Sandbox::new_unseeded();
     assert_success(&fresh.run(&["inbox", "--room", "dest"]));
-    assert!(fresh.mail_root.join("rooms.json").is_file());
-    assert!(fresh.mail_root.join("rules.json").is_file());
+    assert!(!fresh.mail_root.exists());
+    fs::create_dir_all(&fresh.mail_root).expect("fresh legacy root");
+    fs::write(fresh.mail_root.join("rules.json"), r#"{"blocked":[]}"#).expect("fresh rules");
     fs::create_dir_all(fresh.home.join("dest")).expect("fresh room path");
     fs::write(
         fresh.mail_root.join("rooms.json"),
@@ -4920,8 +4955,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             "send",
             "--to",
             "dest",
-            "--from",
-            "sender",
+            "--allow-self",
             "--body",
             "active exact",
         ],
@@ -5103,8 +5137,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             "send",
             "--to",
             "dest",
-            "--from",
-            "sender",
+            "--allow-self",
             "--body",
             "concurrent admitted send",
         ],
@@ -5909,6 +5942,19 @@ fn threads_lite_stamps_re_and_renders_marker() {
     );
 }
 
+fn wait_for_live_watch(sandbox: &Sandbox, room: &str) -> WhoOutput {
+    let mut latest = None;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", room]));
+        if who.legacy_rooms[0].live_watch {
+            return who;
+        }
+        latest = Some(who);
+    }
+    latest.expect("at least one presence sample")
+}
+
 #[test]
 fn who_reports_live_watch_without_pids() {
     let sandbox = Sandbox::new();
@@ -5916,8 +5962,8 @@ fn who_reports_live_watch_without_pids() {
     // Ensure room dirs exist so heartbeats can land.
     assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
     let before: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
-    assert_eq!(before.rooms.len(), 1);
-    assert!(!before.rooms[0].live_watch);
+    assert_eq!(before.legacy_rooms.len(), 1);
+    assert!(!before.legacy_rooms[0].live_watch);
     let mut child = post_command()
         .args(["watch", "--room", "alpha", "--interval-ms", "100"])
         .current_dir(&alpha)
@@ -5928,11 +5974,17 @@ fn who_reports_live_watch_without_pids() {
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn watch");
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
-    assert!(during.rooms[0].live_watch);
-    assert!(during.rooms[0].last_seen.is_some());
-    let raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
+    let during = wait_for_live_watch(&sandbox, "alpha");
+    assert!(during.legacy_rooms[0].live_watch);
+    assert!(during.legacy_rooms[0].last_seen.is_some());
+    let mut raw = String::new();
+    for _ in 0..40 {
+        raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
+        if raw.contains("live-watch=yes") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(raw.contains("live-watch=yes"));
     assert!(!raw.to_ascii_lowercase().contains("pid"));
     child.kill().expect("stop watch");
@@ -6198,7 +6250,7 @@ fn snapshot_does_not_leave_a_live_heartbeat() {
     assert_success(&sandbox.run(&["watch", "--room", "alpha", "--snapshot"]));
     let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
     assert!(
-        !who.rooms[0].live_watch,
+        !who.legacy_rooms[0].live_watch,
         "snapshot must not mint a live presence heartbeat"
     );
     let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
@@ -6220,11 +6272,11 @@ fn who_reports_live_for_ten_second_interval_watch() {
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn watch");
-    // Wait past the old LIVE_SECS=5 window but well inside interval*2+slack.
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let during: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    // Poll until the first heartbeat instead of assuming process startup fits
+    // within one fixed sleep under a parallel full-suite load.
+    let during = wait_for_live_watch(&sandbox, "alpha");
     assert!(
-        during.rooms[0].live_watch,
+        during.legacy_rooms[0].live_watch,
         "10s-interval watch must read live shortly after first poll"
     );
     child.kill().expect("stop watch");
@@ -6234,7 +6286,7 @@ fn who_reports_live_for_ten_second_interval_watch() {
     fs::write(&hb, "1 10000\n").expect("stale stamp");
     let after: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
     assert!(
-        !after.rooms[0].live_watch,
+        !after.legacy_rooms[0].live_watch,
         "post-exit stale stamp is not live"
     );
 }
@@ -8548,6 +8600,7 @@ const FROZEN_DECLARED_FLAG: &str =
 const FROZEN_INFERRED_CWD: &str = "sender identity was inferred from the directory this was sent from — it is a location, not a claim.";
 const FROZEN_INFERRED_BASENAME: &str =
     "sender identity was taken from the directory name — it is a location, not a claim.";
+const FROZEN_PARTICIPANT_BINDING: &str = "sender identity was taken from the participant binding — it is local routing context, not a credential.";
 
 /// Hand-write a mail fixture with an arbitrary envelope, the way an old (or
 /// foreign) binary would have. Returns the id.
@@ -8948,7 +9001,12 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
             Some(FROZEN_INFERRED_BASENAME),
             "aaaa04",
         ),
-        ("declared-quantum", None, "aaaa05"),
+        (
+            "participant-binding",
+            Some(FROZEN_PARTICIPANT_BINDING),
+            "aaaa05",
+        ),
+        ("declared-quantum", None, "aaaa06"),
     ];
     for (value, expected, suffix) in cases {
         let id = write_mail_fixture(

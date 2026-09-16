@@ -303,10 +303,7 @@ fn read_state(context: &Context) -> AppResult<Option<FenceState>> {
     parsed.into_state(&path).map(Some)
 }
 
-pub(crate) fn read_only_must_not_mutate(context: &Context) -> bool {
-    // Presence is enough for reads: never parse or reject a writer-only
-    // declaration on a read path. A set declaration also protects a missing
-    // root/state pair from legacy first-run initialization.
+pub(crate) fn conservative_read_mode(context: &Context) -> bool {
     if std::env::var_os(GENERATION_ENV).is_some() {
         return true;
     }
@@ -314,6 +311,11 @@ pub(crate) fn read_only_must_not_mutate(context: &Context) -> bool {
         read_state(context),
         Ok(Some(FenceState::Fenced { .. } | FenceState::Active { .. })) | Err(_)
     )
+}
+
+#[cfg(test)]
+fn read_only_must_not_mutate(context: &Context) -> bool {
+    conservative_read_mode(context)
 }
 
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {
@@ -461,6 +463,21 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
     match command {
         Command::Doctor(DoctorArgs { fix: true, .. })
         | Command::Send(_)
+        | Command::Participant(crate::cli::ParticipantArgs {
+            command:
+                crate::cli::ParticipantCommand::Bind(_)
+                | crate::cli::ParticipantCommand::Touch
+                | crate::cli::ParticipantCommand::End,
+        })
+        | Command::Identity(crate::cli::IdentityArgs {
+            command:
+                crate::cli::IdentityCommand::New(_)
+                | crate::cli::IdentityCommand::Continue(_)
+                | crate::cli::IdentityCommand::Leave
+                | crate::cli::IdentityCommand::Voice(_)
+                | crate::cli::IdentityCommand::Terms(_),
+        })
+        | Command::Inbox(crate::cli::InboxArgs { adopt: true, .. })
         | Command::Rooms(crate::cli::RoomsArgs {
             command: Some(crate::cli::RoomsCommand::Add(_)),
         })
@@ -524,6 +541,30 @@ mod tests {
         for args in [
             &["post", "doctor", "--fix"] as &[&str],
             &["post", "send", "--to", "beta", "--body", "x"],
+            &["post", "participant", "bind"],
+            &["post", "participant", "touch"],
+            &["post", "participant", "end"],
+            &["post", "identity", "new", "ember"],
+            &["post", "identity", "continue", "ember"],
+            &["post", "identity", "leave"],
+            &[
+                "post",
+                "identity",
+                "voice",
+                "add",
+                "--body-file",
+                "/tmp/voice",
+            ],
+            &["post", "identity", "voice", "withdraw"],
+            &[
+                "post",
+                "identity",
+                "terms",
+                "set",
+                "--body-file",
+                "/tmp/terms",
+            ],
+            &["post", "inbox", "--adopt"],
             &["post", "read", "id"],
             &["post", "read", "id", "--ack"],
             &["post", "chat", "tax", "--join"],
@@ -544,6 +585,11 @@ mod tests {
         for args in [
             &["post", "doctor"] as &[&str],
             &["post", "schema"],
+            &["post", "version"],
+            &["post", "participant", "show"],
+            &["post", "participant", "list"],
+            &["post", "identity", "list"],
+            &["post", "identity", "show", "ember"],
             &["post", "channels"],
             &["post", "inbox"],
             &["post", "read", "id", "--peek"],

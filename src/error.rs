@@ -76,12 +76,14 @@ pub enum ErrorCode {
     DeliveredOutputFailure,
     DeliveredUnarchived,
     NotAMember,
+    NoParticipant,
+    NotYet,
     /// Unseen messages from other rooms exist in the channel; send was not delivered.
     CrossedSend,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -95,6 +97,8 @@ impl ErrorCode {
         Self::DeliveredOutputFailure,
         Self::DeliveredUnarchived,
         Self::NotAMember,
+        Self::NoParticipant,
+        Self::NotYet,
         Self::CrossedSend,
     ];
 
@@ -113,6 +117,8 @@ impl ErrorCode {
             Self::DeliveredOutputFailure => "delivered_output_failure",
             Self::DeliveredUnarchived => "delivered_unarchived",
             Self::NotAMember => "not_a_member",
+            Self::NoParticipant => "no_participant",
+            Self::NotYet => "not_yet",
             Self::CrossedSend => "crossed_send",
         }
     }
@@ -126,7 +132,9 @@ impl ErrorCode {
             | Self::AmbiguousId
             | Self::DuplicateWorkspace
             | Self::NotAMember
+            | Self::NoParticipant
             | Self::CrossedSend => 65,
+            Self::NotYet => 69,
             Self::NotFound => 66,
             Self::BlockedRoute => 77,
             Self::ConfigInvalid => 78,
@@ -253,6 +261,33 @@ impl AppError {
             message,
             "Run `post --help` or `post schema` and retry with the documented syntax.",
         )
+    }
+
+    pub fn no_participant(bind_key_available: bool) -> Self {
+        let error = if bind_key_available {
+            Self::new(
+                ErrorCode::NoParticipant,
+                "participant: unbound (run: post participant bind)",
+                "Bind this conversation first (run: post participant bind).",
+            )
+            .exact_fix("post participant bind")
+        } else {
+            Self::new(
+                ErrorCode::NoParticipant,
+                "participant: unbound (run: post participant bind --new, then run the printed export POST_PARTICIPANT=... command)",
+                "Create a participant with `post participant bind --new`, then run the printed `export POST_PARTICIPANT=...` command before retrying.",
+            )
+        };
+        error.reason("no bound participant record")
+    }
+
+    pub fn not_yet(task: &str) -> Self {
+        Self::new(
+            ErrorCode::NotYet,
+            format!("this command surface is declared but its body belongs to {task}"),
+            format!("Complete and integrate task {task}, then retry the same command."),
+        )
+        .reason(format!("implementation deferred to {task}"))
     }
 
     pub fn config(path: &std::path::Path, reason: impl Into<String>) -> Self {

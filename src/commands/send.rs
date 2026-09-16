@@ -90,64 +90,88 @@ where
     // Built before `sender` is consumed, so a body-input fix can echo the
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
-    let (sender, provenance) = match args.sender {
-        Some(sender) => {
-            // Pin vs flag DISAGREEMENT is a hard error (M4): a prepared
-            // command carrying --from inside a pinned session is exactly the
-            // ambiguity the identity layer exists to eliminate. An AGREEING
-            // flag is not a conflict and proceeds as declared-flag.
+    let actor = context.sender()?;
+    let (sender, provenance) = {
+        if let Some(declared) = args.sender.as_deref() {
             if let Some(pinned) = identity.pin.as_deref() {
-                if pinned != sender {
+                if pinned != declared {
                     return Err(AppError::new(
                         ErrorCode::InvalidArgument,
                         format!(
-                            "--from '{sender}' conflicts with the POST_FROM pin '{pinned}' set by this session's launcher"
+                            "--from '{declared}' conflicts with the POST_FROM pin '{pinned}' set by this session's launcher"
                         ),
-                        "Drop --from to send as the pinned identity, or unset POST_FROM if this shell should not be pinned.",
+                        "Drop --from to send as the pinned workspace, or re-bind the participant deliberately.",
                     )
-                    .input(sender)
+                    .input(declared)
                     .reason("explicit sender disagrees with the environment pin"));
                 }
             }
-            (sender, SenderProvenance::DeclaredFlag)
+            if declared != actor.from {
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "--from '{declared}' conflicts with bound participant '{}' reply address '{}'",
+                        actor.participant.id, actor.from
+                    ),
+                    "Drop --from; participant binding determines the sender reply address.",
+                )
+                .input(declared)
+                .reason("explicit sender disagrees with bound participant"));
+            }
+            // `--from` is now only an assertion about the bound reply
+            // address, but retains its legacy anti-impersonation location
+            // guard. Omitting it is the normal participant-native path.
+            context.ensure_sender_allowed(declared, &rooms)?;
         }
-        None => match identity.pin {
-            Some(pinned) => {
-                // M4 made a disagreeing --from a hard error, so the old
-                // "pass --from to send as someone else" advice would name a
-                // command guaranteed to fail. Tell the truth instead.
-                eprintln!(
-                    "post: sending as '{pinned}' (POST_FROM pin; the pin governs this session — to send as another identity, use a shell without POST_FROM set)"
-                );
-                (pinned, SenderProvenance::DeclaredEnv)
+        if let Some(pinned) = identity.pin.as_deref() {
+            if pinned != actor.from {
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "POST_FROM workspace pin '{pinned}' conflicts with bound participant '{}' reply address '{}'",
+                        actor.participant.id, actor.from
+                    ),
+                    "Run `post participant bind --workspace <room>` to change workspace context deliberately.",
+                )
+                .input(pinned)
+                .reason("workspace pin disagrees with bound participant"));
             }
-            None => {
-                let (inferred, provenance) = context.infer_from_cwd(&rooms)?;
-                // Sender identity is derived from cwd, so a prepared command run
-                // from the wrong tree posts as that tree's room. Name the resolved
-                // sender on stderr before anything is written; the success receipt
-                // is otherwise the first place it appears, which is too late.
-                eprintln!(
-                    "post: sending as '{inferred}' (identity inferred from cwd); pass --from <NAME> to send as someone else"
-                );
-                (inferred, provenance)
-            }
-        },
+        }
+        let provenance = if args.sender.is_some() {
+            SenderProvenance::DeclaredFlag
+        } else if identity.pin.is_some() {
+            SenderProvenance::DeclaredEnv
+        } else {
+            SenderProvenance::ParticipantBinding
+        };
+        if identity.pin.is_some() {
+            eprintln!(
+                "post: sending as '{}' (POST_FROM pin; bound participant {})",
+                actor.from, actor.participant.id
+            );
+        } else {
+            eprintln!(
+                "post: sending as '{}' (bound participant {})",
+                actor.from, actor.participant.id
+            );
+        }
+        (actor.from.clone(), provenance)
     };
-    // The POST_FROM pin deliberately bypasses the cwd-containment
-    // reservation: the pin exists precisely so identity survives a cwd
-    // outside the room's tree (specimen 21). It is still only a declaration —
-    // recorded as `declared-env` and rendered as evidence at read time, never
-    // as a credential. Flag and inference keep the location guard unchanged.
-    if provenance != SenderProvenance::DeclaredEnv {
-        context.ensure_sender_allowed(&sender, &rooms)?;
-    }
     let sender_address = identity.address;
+    let resolved_target = match crate::participant::resolve_target(context, &args.to) {
+        Ok(target) => Some(target),
+        Err(error) if error.code == ErrorCode::UnknownRoom => None,
+        Err(error) => return Err(error),
+    };
 
     // Self-mail refusal (M4): instances of one room coordinate via channels;
     // routable instances are a recorded non-goal. --allow-self is the
     // deliberate exception for doorbell probes and smoke tests.
-    if sender == args.to && !args.allow_self {
+    if resolved_target
+        .as_ref()
+        .is_some_and(|target| sender == target.name)
+        && !args.allow_self
+    {
         // Reproduce the caller's own invocation with the one change that makes
         // it succeed, INCLUDING the body when the body is knowable from argv or
         // a file. The old fix said `--body '<text>'`; the test that ran it
@@ -170,7 +194,7 @@ where
         .reason("from == to without --allow-self"));
     }
 
-    if !rooms.contains_key(&args.to) {
+    if resolved_target.is_none() {
         // Rooms and channels are disjoint namespaces, so a channel name reaching
         // --to used to produce a flat "room is unknown" that never mentioned the
         // destination exists under a different verb. Three papercuts are that
@@ -249,6 +273,7 @@ where
         }
         return Err(error);
     }
+    let target = resolved_target.expect("known target was checked above");
 
     validate_subject(&args.subject)?;
     let inline = args.body.take();
@@ -289,10 +314,13 @@ where
         let envelope = Envelope {
             id: id.clone(),
             from: sender.clone(),
-            to: args.to.clone(),
+            to: target.name.clone(),
             kind: args.kind,
             subject: args.subject.clone(),
             sent: sent.clone(),
+            from_participant: Some(actor.participant.id.clone()),
+            from_lineage: actor.lineage.clone(),
+            address_kind: Some(target.kind.as_str().to_owned()),
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
             sender_address: sender_address.clone(),
@@ -301,15 +329,19 @@ where
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;
         if inbox.is_none() {
-            ensure_route_allowed(context, &rooms, &sender, &args.to)?;
+            ensure_route_allowed(context, &rooms, &sender, &target)?;
             fs::create_dir_all(&archive)
                 .map_err(|error| AppError::io("create archive directory", &archive, error))?;
-            inbox = Some(context.mailbox_dirs(&args.to)?.0);
+            let target_inbox = target.inbox(context)?;
+            fs::create_dir_all(&target_inbox).map_err(|error| {
+                AppError::io("create canonical target inbox", &target_inbox, error)
+            })?;
+            inbox = Some(target_inbox);
         }
         let inbox = inbox.as_ref().expect("mailbox was initialized");
         let archive_path = archive.join(format!("{id}.mail"));
         let inbox_path = inbox.join(format!("{id}.mail"));
-        ensure_route_allowed(context, &rooms, &sender, &args.to)?;
+        ensure_route_allowed(context, &rooms, &sender, &target)?;
         match exclusive_atomic_write(&inbox_path, &payload) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -382,16 +414,39 @@ fn ensure_route_allowed(
     context: &Context,
     rooms: &RoomMap,
     sender: &str,
-    recipient: &str,
+    target: &crate::participant::Address,
 ) -> AppResult<()> {
     let rules = context.load_rules(rooms)?;
-    let Some(rule) = rules
-        .blocked
-        .iter()
-        .find(|rule| rule.matches_route(sender, recipient))
-    else {
+    let participant = if target.kind == crate::participant::AddressKind::Participant {
+        Some(
+            crate::participant::load(context, &target.name)?.ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::NotFound,
+                    format!("participant target '{}' no longer exists", target.name),
+                    "Run `post participant list`, then retry with an existing target.",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let Some(rule) = rules.blocked.iter().find(|rule| {
+        let recipient = participant
+            .as_ref()
+            .and_then(|participant| participant.workspace.as_deref())
+            .unwrap_or(&target.name);
+        if participant
+            .as_ref()
+            .is_some_and(|participant| participant.workspace.is_none())
+        {
+            (rule.from == "*" || rule.from == sender) && rule.to == "*"
+        } else {
+            rule.matches_route(sender, recipient)
+        }
+    }) else {
         return Ok(());
     };
+    let recipient = format!("{}:{}", target.kind.as_str(), target.name);
     Err(AppError::new(
         ErrorCode::BlockedRoute,
         format!("route {sender} -> {recipient} is blocked: {}", rule.reason),
@@ -648,6 +703,11 @@ mod tests {
         )
     }
 
+    fn test_identity(context: &Context, workspace: &str) -> EnvIdentity {
+        crate::participant::bind_test_actor(context, workspace);
+        EnvIdentity::none()
+    }
+
     #[test]
     fn body_after_rule_add_is_refused_before_any_mail_write() {
         let (root, context) = test_context("order");
@@ -666,7 +726,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "race-test"),
             |_| {
                 fs::write(
                     root.join("rules.json"),
@@ -713,7 +773,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "collision-test"),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(ids.next().expect("test provides two ids").to_owned()),
         )
@@ -757,7 +817,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "rule-race"),
             |source| Ok(source.inline.expect("inline body")),
             |_, attempt| {
                 if attempt == 1 {
@@ -814,7 +874,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "archive-collision"),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
@@ -858,7 +918,7 @@ mod tests {
             },
             false,
             false,
-            EnvIdentity::none(),
+            test_identity(&context, "exhaustion-test"),
             |source| Ok(source.inline.expect("inline body")),
             |_, _| Ok(id.to_owned()),
         );
@@ -880,6 +940,35 @@ mod tests {
                 .count(),
             0
         );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_review_unit_send_stamps_actor_fields() {
+        let (root, context) = test_context("participant-fields");
+        let result = run_with_body(
+            &context,
+            SendArgs {
+                to: "claude-space".to_owned(),
+                sender: Some("unit-sender".to_owned()),
+                kind: MailKind::Note,
+                subject: String::new(),
+                body: Some("body".to_owned()),
+                body_file: None,
+                oversize: false,
+                allow_self: false,
+                file: None,
+            },
+            true,
+            false,
+            test_identity(&context, "unit-sender"),
+            |source| Ok(source.inline.expect("inline body")),
+        )
+        .expect("unit send");
+        let receipt: serde_json::Value =
+            serde_json::from_str(&result.stdout).expect("send receipt JSON");
+        assert!(receipt["envelope"]["from_participant"].is_string());
+        assert_eq!(receipt["envelope"]["address_kind"], "workspace");
         trash_test_root(&root);
     }
 }
