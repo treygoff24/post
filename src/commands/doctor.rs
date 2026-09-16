@@ -30,18 +30,19 @@ pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResul
                 suggested_fix: error.suggested_fix,
             }];
             let output = report(context, checks, fixed);
-            return finish(output, args.brief, pretty, 3);
+            return finish(context, output, args.brief, pretty, 3);
         }
     }
     let checks = detect(context);
     let output = report(context, checks, fixed);
     let exit_code = if output.count == 0 { 0 } else { 1 };
-    finish(output, args.brief, pretty, exit_code)
+    finish(context, output, args.brief, pretty, exit_code)
 }
 
 /// Emit the doctor result: the full JSON report by default, or a single
 /// summary line under --brief. Exit codes are identical either way.
 fn finish(
+    context: &Context,
     output: DoctorOutput,
     brief: bool,
     pretty: bool,
@@ -50,7 +51,66 @@ fn finish(
     let mut result = if brief {
         CommandResult::success(brief_line(&output))
     } else {
-        CommandResult::json(&output, pretty)?
+        let mut value = serde_json::to_value(&output).map_err(|error| {
+            AppError::invalid_argument(format!("serialize doctor report: {error}"))
+        })?;
+        let resolved = crate::participant::resolve(context)?;
+        let (participant, pending) = match &resolved {
+            crate::participant::Resolved::Bound {
+                participant,
+                provenance,
+            } => {
+                let mut pending = BTreeMap::new();
+                for address in super::inbox::visible_addresses(participant) {
+                    pending.insert(
+                        super::inbox::address_label(&address),
+                        crate::cursor_state::routing::provisional_pending_for(
+                            context,
+                            participant,
+                            &address,
+                        )?
+                        .len(),
+                    );
+                }
+                (
+                    serde_json::json!({
+                        "status": "bound",
+                        "id": participant.id,
+                        "provenance": provenance.as_str(),
+                        "workspace": participant.workspace,
+                        "lineage": participant.lineage,
+                    }),
+                    pending,
+                )
+            }
+            crate::participant::Resolved::Unbound => {
+                let mut pending = BTreeMap::new();
+                for room in context.load_rooms()?.into_keys() {
+                    let address = crate::participant::Address {
+                        kind: crate::participant::AddressKind::Workspace,
+                        name: room,
+                    };
+                    pending.insert(
+                        super::inbox::address_label(&address),
+                        crate::cursor_state::routing::pending_count(context, &address)?,
+                    );
+                }
+                (
+                    serde_json::json!({
+                        "status": "unbound",
+                        "fix": "run: post participant bind"
+                    }),
+                    pending,
+                )
+            }
+        };
+        let object = value.as_object_mut().expect("doctor output is an object");
+        object.insert("participant".to_owned(), participant);
+        object.insert(
+            "pending".to_owned(),
+            serde_json::to_value(pending).expect("pending map"),
+        );
+        CommandResult::json(&value, pretty)?
     };
     result.exit_code = exit_code;
     Ok(result)

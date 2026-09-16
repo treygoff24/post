@@ -6,6 +6,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::migration_fence;
 use crate::output::{InboxItem, WatchEvent, WatchReason};
+use crate::participant::{Address, AddressKind, Participant, Resolved};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -18,6 +19,8 @@ use std::time::{Duration, Instant};
 struct WatchTarget {
     room: String,
     inbox: PathBuf,
+    participant: Option<Participant>,
+    address: Option<Address>,
     /// Dirs this target watches: its inbox plus every membership channel's
     /// messages dir. Registered up front, re-derived on the slow pass (r2:
     /// re-register when a new channel dir appears or a watched dir is
@@ -245,8 +248,17 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
     } = args;
     let rooms = context.load_rooms()?;
+    let resolved = crate::participant::resolve(context)?;
+    if let Resolved::Bound { participant, .. } = &resolved {
+        if !snapshot {
+            crate::cursor_state::routing::route_for_participant(context, participant)?;
+        }
+    }
     let requested_rooms = if requested_rooms.is_empty() {
-        vec![context.resolved_room(None, &rooms)?]
+        match &resolved {
+            Resolved::Bound { .. } => Vec::new(),
+            Resolved::Unbound => vec![context.resolved_room(None, &rooms)?],
+        }
     } else {
         requested_rooms
             .into_iter()
@@ -255,45 +267,76 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     };
     let mut unique_rooms = HashSet::new();
     let mut targets = Vec::new();
-    for room in requested_rooms {
-        if !unique_rooms.insert(room.clone()) {
-            continue;
+    if let Resolved::Bound { participant, .. } = &resolved {
+        let mut addresses = super::inbox::visible_addresses(participant);
+        for room in &requested_rooms {
+            let address = Address {
+                kind: AddressKind::Workspace,
+                name: room.clone(),
+            };
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
         }
-        if !rooms.contains_key(&room) {
-            // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
-            // unregistered room means "this directory has no mailbox", so scan
-            // nothing and, critically, create nothing (a machine-wide hook would
-            // otherwise mint a junk mailbox per project directory ever visited).
-            if snapshot {
-                eprintln!(
-                    "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
-                );
+        for address in addresses {
+            let room = super::inbox::address_label(&address);
+            let inbox = crate::cursor_state::routing::inbox_path(context, &address);
+            let dirs = participant_target_dirs(context, participant, &inbox);
+            targets.push(WatchTarget {
+                channel_seen: HashMap::new(),
+                room,
+                inbox,
+                participant: Some((**participant).clone()),
+                address: Some(address),
+                dirs,
+                seen: HashSet::new(),
+                scan_failing: false,
+            });
+        }
+    }
+    if matches!(resolved, Resolved::Unbound) {
+        for room in requested_rooms {
+            if !unique_rooms.insert(room.clone()) {
                 continue;
             }
-            // A typo'd --room silently watches a fresh empty mailbox forever, so
-            // unlike inbox (whose empty listing is immediately visible) watch warns.
-            eprintln!(
-                "post: warning: room {room:?} is not registered; watching a new empty mailbox"
-            );
-        }
-        let (inbox, _) = context.mailbox_dirs(&room)?;
-        let room_dir = context.root.join(&room);
-        if !snapshot && crate::mailbox::read_only_command() && !room_dir.is_dir() {
-            return Err(AppError::new(
+            if !rooms.contains_key(&room) {
+                // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
+                // unregistered room means "this directory has no mailbox", so scan
+                // nothing and, critically, create nothing (a machine-wide hook would
+                // otherwise mint a junk mailbox per project directory ever visited).
+                if snapshot {
+                    eprintln!(
+                    "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
+                );
+                    continue;
+                }
+                // A typo'd --room silently watches a fresh empty mailbox forever, so
+                // unlike inbox (whose empty listing is immediately visible) watch warns.
+                eprintln!(
+                    "post: warning: room {room:?} is not registered; watching a new empty mailbox"
+                );
+            }
+            let (inbox, _) = context.mailbox_dirs(&room)?;
+            let room_dir = context.root.join(&room);
+            if !snapshot && crate::mailbox::read_only_command() && !room_dir.is_dir() {
+                return Err(AppError::new(
                 ErrorCode::NotFound,
                 format!("room directory '{}' does not exist", room_dir.display()),
                 "Enrolled long watch does not create mailboxes; create or initialize the room directory before watching.",
             ));
+            }
+            let dirs = target_dirs(context, &room, &inbox);
+            targets.push(WatchTarget {
+                channel_seen: load_channel_seen(context, &room),
+                room,
+                inbox,
+                participant: None,
+                address: None,
+                dirs,
+                seen: HashSet::new(),
+                scan_failing: false,
+            });
         }
-        let dirs = target_dirs(context, &room, &inbox);
-        targets.push(WatchTarget {
-            channel_seen: load_channel_seen(context, &room),
-            room,
-            inbox,
-            dirs,
-            seen: HashSet::new(),
-            scan_failing: false,
-        });
     }
     // Rooms this watcher IS, declared with --own. Scanning is per-room, so a
     // session watching two of its own identities used to deliver room A's send
@@ -341,13 +384,10 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         // Per-channel degradation stays inside scan_batch, unchanged.
         let mut batch = Vec::new();
         for target in &mut targets {
-            batch.extend(scan_batch(
+            batch.extend(scan_watch_target(
                 context,
-                &target.room,
+                target,
                 &owned_rooms,
-                &target.inbox,
-                &target.channel_seen,
-                &mut target.seen,
                 &mut emitted_channel_ids,
             )?);
         }
@@ -502,9 +542,16 @@ fn run_watch_loop(
 }
 
 fn touch_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) -> AppResult<()> {
+    let mut participants = HashSet::new();
     for target in targets {
         let _admission = migration_fence::admit(context, true)?;
-        crate::presence::touch_heartbeat(context, &target.room, interval_ms);
+        if let Some(participant) = target.participant.as_ref() {
+            if participants.insert(participant.id.clone()) {
+                crate::presence::touch_participant_heartbeat(participant, interval_ms);
+            }
+        } else {
+            crate::presence::touch_heartbeat(context, &target.room, interval_ms);
+        }
     }
     Ok(())
 }
@@ -521,15 +568,7 @@ fn scan_targets(
 ) -> Vec<WatchDelivery> {
     let mut batch = Vec::new();
     for target in targets.iter_mut().filter(|target| selected(target)) {
-        match scan_batch(
-            context,
-            &target.room,
-            owned_rooms,
-            &target.inbox,
-            &target.channel_seen,
-            &mut target.seen,
-            emitted_channel_ids,
-        ) {
+        match scan_watch_target(context, target, owned_rooms, emitted_channel_ids) {
             Ok(events) => {
                 if target.scan_failing {
                     target.scan_failing = false;
@@ -556,7 +595,10 @@ fn scan_targets(
 
 fn refresh_target_dirs(context: &Context, targets: &mut [WatchTarget]) {
     for target in targets {
-        target.dirs = target_dirs(context, &target.room, &target.inbox);
+        target.dirs = target.participant.as_ref().map_or_else(
+            || target_dirs(context, &target.room, &target.inbox),
+            |participant| participant_target_dirs(context, participant, &target.inbox),
+        );
     }
 }
 
@@ -748,6 +790,83 @@ fn dir_id(path: &Path) -> Option<(u64, u64)> {
         .ok()
         .map(|meta| (meta.dev(), meta.ino()))
 }
+
+fn scan_watch_target(
+    context: &Context,
+    target: &mut WatchTarget,
+    owned_rooms: &BTreeSet<String>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
+) -> AppResult<Vec<WatchDelivery>> {
+    let (Some(participant), Some(address)) = (target.participant.as_ref(), target.address.as_ref())
+    else {
+        return scan_batch(
+            context,
+            &target.room,
+            owned_rooms,
+            &target.inbox,
+            &target.channel_seen,
+            &mut target.seen,
+            emitted_channel_ids,
+        );
+    };
+    let mut batch = Vec::new();
+    let watching_address = participant
+        .workspace
+        .as_deref()
+        .unwrap_or(participant.id.as_str());
+
+    let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
+    let pending =
+        crate::cursor_state::routing::provisional_pending_for(context, participant, address)?;
+    for id in pending {
+        let path =
+            crate::cursor_state::routing::inbox_path(context, address).join(format!("{id}.mail"));
+        let parsed = parse_mail(&path)?;
+        mail.push(crate::cursor_state::eligibility::EligibleMail {
+            path,
+            envelope: parsed.envelope,
+            body: parsed.body,
+        });
+    }
+    mail.sort_by(|left, right| left.envelope.id.cmp(&right.envelope.id));
+    for item in mail {
+        if !target.seen.insert(item.path) {
+            continue;
+        }
+        let preview = Some(sanitize_preview(&item.body));
+        batch.push(WatchDelivery::mail(
+            &target.room,
+            WatchEvent::mail(&target.room, InboxItem::from(item.envelope), preview),
+        ));
+    }
+
+    for channel in crate::channel_state::effective_channels(context, participant)? {
+        for item in
+            crate::cursor_state::eligibility::unread_channel(context, participant, &channel)?
+        {
+            if !target.seen.insert(item.path.clone()) {
+                continue;
+            }
+            let dedupe_id = (channel.clone(), item.message.id.clone());
+            if emitted_channel_ids.contains(&dedupe_id) || owned_rooms.contains(&item.message.from)
+            {
+                continue;
+            }
+            emitted_channel_ids.insert(dedupe_id);
+            batch.push(WatchDelivery::channel(
+                &target.room,
+                &channel,
+                WatchEvent::channel_message(
+                    item.message,
+                    watching_address,
+                    Some(sanitize_preview(&item.body)),
+                ),
+            ));
+        }
+    }
+    Ok(batch)
+}
+
 fn scan_batch(
     context: &Context,
     room: &str,
@@ -973,6 +1092,24 @@ fn target_dirs(context: &Context, room: &str, inbox: &Path) -> BTreeSet<PathBuf>
         .into_iter()
         .map(|(_, dir)| std::fs::canonicalize(&dir).unwrap_or(dir))
         .collect();
+    dirs.insert(std::fs::canonicalize(inbox).unwrap_or_else(|_| inbox.to_path_buf()));
+    dirs
+}
+
+fn participant_target_dirs(
+    context: &Context,
+    participant: &Participant,
+    inbox: &Path,
+) -> BTreeSet<PathBuf> {
+    let mut dirs = BTreeSet::new();
+    for channel in
+        crate::channel_state::effective_channels(context, participant).unwrap_or_default()
+    {
+        if let Ok(paths) = ChannelPaths::new(context, &channel) {
+            let dir = std::fs::canonicalize(&paths.messages).unwrap_or(paths.messages);
+            dirs.insert(dir);
+        }
+    }
     dirs.insert(std::fs::canonicalize(inbox).unwrap_or_else(|_| inbox.to_path_buf()));
     dirs
 }
@@ -1503,6 +1640,8 @@ body
         // A target with nothing in it yet; the delivery arrives DURING the
         // first wait, as a real filesystem event would.
         let mut targets = vec![WatchTarget {
+            participant: None,
+            address: None,
             channel_seen: HashMap::new(),
             room: "alpha".to_owned(),
             inbox: inbox.clone(),
@@ -1582,6 +1721,8 @@ body
         let mut targets: Vec<WatchTarget> = dirs_by_room
             .iter()
             .map(|(room, inbox)| WatchTarget {
+                participant: None,
+                address: None,
                 channel_seen: HashMap::new(),
                 room: room.clone(),
                 inbox: inbox.clone(),

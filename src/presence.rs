@@ -8,6 +8,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::mailbox::Context;
+use crate::participant::Participant;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -23,11 +24,22 @@ pub(crate) fn heartbeat_path(context: &Context, room: &str) -> PathBuf {
     context.root.join(room).join("watch.heartbeat")
 }
 
+pub(crate) fn participant_heartbeat_path(participant: &Participant) -> PathBuf {
+    participant.dir.join("watch.heartbeat")
+}
+
 /// Best-effort: a failed touch must never kill the doorbell. Never mint a
 /// room directory that does not already exist — watch must not recreate a
 /// mailbox that was moved aside mid-session. Never follow symlinks.
 pub(crate) fn touch_heartbeat(context: &Context, room: &str, interval_ms: u64) {
-    let path = heartbeat_path(context, room);
+    touch_path(&heartbeat_path(context, room), interval_ms);
+}
+
+pub(crate) fn touch_participant_heartbeat(participant: &Participant, interval_ms: u64) {
+    touch_path(&participant_heartbeat_path(participant), interval_ms);
+}
+
+fn touch_path(path: &Path, interval_ms: u64) {
     let Some(parent) = path.parent() else {
         return;
     };
@@ -39,7 +51,7 @@ pub(crate) fn touch_heartbeat(context: &Context, room: &str, interval_ms: u64) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let payload = format!("{now} {interval_ms}\n");
-    let _ = write_heartbeat_nofollow(&path, payload.as_bytes());
+    let _ = write_heartbeat_nofollow(path, payload.as_bytes());
 }
 
 /// Open/create `path` without following symlinks, require a solitary regular

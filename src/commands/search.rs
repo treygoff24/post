@@ -47,24 +47,60 @@ pub(super) fn run(
         .map(|hit| hit.result)
         .collect();
     let count = results.len();
+    let resolved = crate::participant::resolve(context)?;
+    let pending = if let Some(participant) = resolved.participant() {
+        let mut count = 0;
+        for address in super::inbox::visible_addresses(participant) {
+            count += crate::cursor_state::routing::provisional_pending_for(
+                context,
+                participant,
+                &address,
+            )?
+            .len();
+        }
+        count
+    } else {
+        0
+    };
 
     let rendered = if json_output {
-        output::json(
-            &SearchOutput {
-                ok: true,
-                framing: search_framing(framing, search_channels),
-                room: room.clone(),
-                pattern: args.pattern.clone(),
-                match_kind: "literal_case_insensitive".to_owned(),
-                results,
-                count,
-                limit: args.limit,
-                truncated,
-            },
-            pretty,
-        )?
+        let mut value = serde_json::to_value(SearchOutput {
+            ok: true,
+            framing: search_framing(framing, search_channels),
+            room: room.clone(),
+            pattern: args.pattern.clone(),
+            match_kind: "literal_case_insensitive".to_owned(),
+            results,
+            count,
+            limit: args.limit,
+            truncated,
+        })
+        .map_err(|error| AppError::invalid_argument(format!("serialize search: {error}")))?;
+        let object = value.as_object_mut().expect("search output is an object");
+        object.insert("pending".to_owned(), serde_json::json!(pending));
+        object.insert(
+            "participant".to_owned(),
+            serde_json::Value::String(resolved.participant().map_or_else(
+                || "unbound".to_owned(),
+                |participant| participant.id.clone(),
+            )),
+        );
+        output::json(&value, pretty)?
     } else {
-        render_text(&room, &args.pattern, &results, framing, search_channels)
+        let mut rendered = format!(
+            "participant: {}\npending: {pending}\n",
+            resolved
+                .participant()
+                .map_or("unbound", |participant| participant.id.as_str())
+        );
+        rendered.push_str(&render_text(
+            &room,
+            &args.pattern,
+            &results,
+            framing,
+            search_channels,
+        ));
+        rendered
     };
 
     Ok(CommandResult::success(rendered))

@@ -1,13 +1,26 @@
 use crate::cli::{FramingMode, ReadArgs};
 use crate::command_result::CommandResult;
-use crate::cursor_state::{self, Delta, MailMove, Snapshot};
+use crate::cursor_state::{self, Delta, MailMove, ParticipantCursors, Snapshot};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::model::ParsedMail;
 use crate::output::{self, Framing, ReadOutput};
+use crate::participant::{Address, AddressKind, Participant, Resolved};
 use std::path::{Path, PathBuf};
 
 pub(super) fn run(
+    context: &Context,
+    args: ReadArgs,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    if let Resolved::Bound { participant, .. } = crate::participant::resolve(context)? {
+        return run_participant(context, args, json_output, pretty, &participant);
+    }
+    run_legacy(context, args, json_output, pretty)
+}
+
+fn run_legacy(
     context: &Context,
     args: ReadArgs,
     json_output: bool,
@@ -40,6 +53,8 @@ pub(super) fn run(
                 source: Some(path.clone()),
                 destination: Some(destination),
                 already_read: false,
+                address: None,
+                participant: None,
             }
         }
         None => resolve_already_read(context, &room, &read, &args.id)?,
@@ -102,11 +117,134 @@ pub(super) fn run(
     }))
 }
 
+fn run_participant(
+    context: &Context,
+    args: ReadArgs,
+    json_output: bool,
+    pretty: bool,
+    participant: &Participant,
+) -> AppResult<CommandResult> {
+    let framing = crate::mailbox::resolve_framing(args.framing);
+    let consuming = args.ack || (!args.peek && args.offset.is_none() && args.length.is_none());
+    if consuming {
+        cursor_state::routing::route_for_participant(context, participant)?;
+    }
+    let addresses = if let Some(room) = args.room.clone() {
+        vec![Address {
+            kind: AddressKind::Workspace,
+            name: room,
+        }]
+    } else {
+        super::inbox::visible_addresses(participant)
+    };
+    let cursors = ParticipantCursors::load(context, participant);
+    let mut candidates = Vec::new();
+    for address in addresses {
+        let directory = cursor_state::routing::inbox_path(context, &address);
+        for path in prefix_matches(&directory, &args.id)? {
+            let parsed = parse_mail(&path)?;
+            if parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str()) {
+                continue;
+            }
+            let routed = cursor_state::routing::receipt(context, &address, &parsed.envelope.id)?
+                .is_some_and(|receipt| receipt.recipients.contains(&participant.id));
+            let provisional = !consuming
+                && cursor_state::routing::provisional_pending_for(context, participant, &address)?
+                    .contains(&parsed.envelope.id);
+            if routed || provisional {
+                let already_read = cursors.mail_has_seen(&address, &parsed.envelope.id);
+                candidates.push((address.clone(), parsed, already_read));
+            }
+        }
+    }
+    candidates.sort_by(|left, right| left.1.envelope.id.cmp(&right.1.envelope.id));
+    candidates.dedup_by(|left, right| left.1.envelope.id == right.1.envelope.id);
+    if candidates.len() > 1 {
+        let paths: Vec<PathBuf> = candidates
+            .iter()
+            .map(|(_, mail, _)| PathBuf::from(format!("{}.mail", mail.envelope.id)))
+            .collect();
+        return Err(ambiguous(
+            &paths,
+            &args.id,
+            participant.workspace.as_deref().unwrap_or(&participant.id),
+            "participant-visible",
+        ));
+    }
+    let Some((address, mail, already_read)) = candidates.pop() else {
+        return Err(AppError::new(
+            ErrorCode::NotFound,
+            format!(
+                "no participant-visible mail id starts with '{}' for '{}'",
+                args.id, participant.id
+            ),
+            "Run `post inbox --text` and retry with one listed id.",
+        )
+        .input(args.id)
+        .reason("no routed or provisionally visible canonical mail matches"));
+    };
+    let room = super::inbox::address_label(&address);
+    let resolved = ResolvedMail {
+        mail,
+        source: None,
+        destination: None,
+        already_read,
+        address: Some(address.clone()),
+        participant: Some(participant.clone()),
+    };
+    if args.ack {
+        return acknowledge(context, &room, resolved, json_output, pretty);
+    }
+    if args.offset.is_some() || args.length.is_some() {
+        return render_slice(
+            &args,
+            &room,
+            &resolved.mail,
+            resolved.already_read,
+            json_output,
+            pretty,
+            framing,
+        );
+    }
+    let (rendered, body_complete) = match args.max_bytes {
+        Some(max_bytes) => render_budgeted(
+            &room,
+            &resolved.mail,
+            resolved.already_read,
+            json_output,
+            pretty,
+            framing,
+            max_bytes,
+        )?,
+        None => (
+            render(
+                &resolved.mail,
+                resolved.already_read,
+                json_output,
+                pretty,
+                framing,
+            )?,
+            true,
+        ),
+    };
+    if args.peek || resolved.already_read || !body_complete {
+        return Ok(CommandResult::success(rendered));
+    }
+    let id = resolved.mail.envelope.id;
+    let context = context.clone();
+    let participant = participant.clone();
+    Ok(CommandResult::after_stdout(rendered, move || {
+        ParticipantCursors::consume_mail(&context, &participant, &address, &[id]).map(|_| ())
+    }))
+}
+
 struct ResolvedMail {
     mail: ParsedMail,
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
     already_read: bool,
+    address: Option<Address>,
+    participant: Option<Participant>,
 }
 
 fn acknowledge(
@@ -136,10 +274,18 @@ fn acknowledge(
     if resolved.already_read {
         return Ok(CommandResult::success(rendered));
     }
-    let source = resolved.source.expect("fresh acknowledgement has source");
+    if let (Some(address), Some(participant)) = (resolved.address, resolved.participant) {
+        let context = context.clone();
+        return Ok(CommandResult::after_stdout(rendered, move || {
+            ParticipantCursors::consume_mail(&context, &participant, &address, &[id]).map(|_| ())
+        }));
+    }
+    let source = resolved
+        .source
+        .expect("fresh legacy acknowledgement has source");
     let destination = resolved
         .destination
-        .expect("fresh acknowledgement has destination");
+        .expect("fresh legacy acknowledgement has destination");
     let context = context.clone();
     let room = room.to_owned();
     Ok(CommandResult::after_stdout(rendered, move || {
@@ -664,6 +810,8 @@ fn resolve_already_read(
         source: None,
         destination: None,
         already_read: true,
+        address: None,
+        participant: None,
     })
 }
 
@@ -719,19 +867,35 @@ fn render(
     framing: FramingMode,
 ) -> AppResult<String> {
     if json_output {
-        output::json(
-            &ReadOutput {
-                ok: true,
-                framing: match framing {
-                    FramingMode::Auto | FramingMode::Full => Framing::default(),
-                    FramingMode::Compact => Framing::compact(),
-                },
-                envelope: mail.envelope.clone(),
-                body: mail.body.clone(),
-                already_read,
+        let mut value = serde_json::to_value(ReadOutput {
+            ok: true,
+            framing: match framing {
+                FramingMode::Auto | FramingMode::Full => Framing::default(),
+                FramingMode::Compact => Framing::compact(),
             },
-            pretty,
-        )
+            envelope: mail.envelope.clone(),
+            body: mail.body.clone(),
+            already_read,
+        })
+        .map_err(|error| AppError::invalid_argument(format!("serialize mail read: {error}")))?;
+        if mail.envelope.from_participant.is_some() || mail.envelope.address_kind.is_some() {
+            if let Some(envelope) = value
+                .get_mut("envelope")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if let Some(participant) = mail.envelope.from_participant.as_ref() {
+                    envelope.insert(
+                        "reply_to_participant".to_owned(),
+                        serde_json::Value::String(format!("participant:{participant}")),
+                    );
+                }
+                envelope.insert(
+                    "reply_to_shared".to_owned(),
+                    serde_json::Value::String(mail.envelope.from.clone()),
+                );
+            }
+        }
+        output::json(&value, pretty)
     } else {
         Ok(render_text(
             &mail.envelope,
@@ -797,6 +961,17 @@ From room: {}   Kind: {}   Sent: {}   Id: {}\n",
             "Sender address: {} (self-declared instance tag, opaque and non-routable)\n",
             output::sanitize_text_header(address)
         ));
+    }
+    if envelope.from_participant.is_some() || envelope.address_kind.is_some() {
+        let participant_reply = envelope
+            .from_participant
+            .as_ref()
+            .map(|id| format!("participant:{id}"));
+        super::inbox::render_reply_targets(
+            &mut rendered,
+            participant_reply.as_deref(),
+            &envelope.from,
+        );
     }
     if already_read {
         rendered.push_str(

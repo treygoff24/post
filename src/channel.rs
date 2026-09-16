@@ -13,7 +13,7 @@
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{
     ascii_escape_json, atomic_replace, exclusive_atomic_write, local_timestamp_micros, new_mail_id,
-    shell_quote, validate_room_name, Context,
+    validate_room_name, Context,
 };
 use crate::model::{ChannelMessage, ParsedChannelMessage, RoomMap, SenderProvenance};
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,6 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const CHANNELS_DIR: &str = "channels";
 const CHANNELS_LOCK_FILE: &str = ".channels.lock";
-/// How many room names an error spells out inline before switching to a count.
-const ROOM_LIST_PREVIEW: usize = 8;
 pub(crate) const JOIN_EVENT: &str = "join";
 /// Profile-change announcement ("=== pact is now Lantern 🏮 (pact) ===").
 pub(crate) const PROFILE_EVENT: &str = "profile";
@@ -158,99 +156,28 @@ pub(crate) fn acting_room(
     context: &Context,
     rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
-    let (room, provenance) = {
-        let actor = context.sender()?;
-        let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
-            SenderProvenance::DeclaredEnv
-        } else {
-            context
-                .infer_from_cwd(rooms)
-                .map(|(_, provenance)| provenance)
-                .unwrap_or(SenderProvenance::InferredBasename)
-        };
-        (actor.from, provenance)
+    let (room, provenance) = match context.sender() {
+        Ok(actor) => {
+            let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
+                SenderProvenance::DeclaredEnv
+            } else {
+                context
+                    .infer_from_cwd(rooms)
+                    .map(|(_, provenance)| provenance)
+                    .unwrap_or(SenderProvenance::InferredBasename)
+            };
+            (actor.from, provenance)
+        }
+        Err(error) if error.code == ErrorCode::NoParticipant => {
+            context.resolved_room_with_provenance(None, rooms)?
+        }
+        Err(error) => return Err(error),
     };
-    if rooms.contains_key(&room) {
-        return Ok((room, provenance));
-    }
-    // Identity here is a location, so the error has to name the location. It used
-    // to report only the inferred basename ("cwd resolves to 'nested'"), which is
-    // the one fact the caller already knew and never the one they needed: five
-    // separate papercuts across three agents and three weeks are all "I composed a
-    // correct message from the wrong directory and post would not tell me which
-    // directory that was." Name the full path, list the rooms that do exist, and
-    // hand back a command that works.
-    let names: Vec<String> = rooms.keys().cloned().collect();
-    // `suggested_fix` is prose for a human; `exact_fix` is a command that runs as
-    // written (README § Commands), and the suite pins that as law -- see
-    // crossed_send_exact_fix_shell_quotes_channel_metacharacters, whose comment
-    // says an unquoted name there is a command injection. So every interpolated
-    // path and name goes through shell_quote, and `exact_fix` is omitted entirely
-    // on the branch where no single complete command exists rather than filled
-    // with a template nobody can run.
-    let (evidence, prose, exact) = if provenance == SenderProvenance::DeclaredEnv {
-        (
-            format!("the POST_FROM pin names '{room}'"),
-            format!(
-                "Register it with `post rooms add {} <path>`, or unset POST_FROM to fall back to cwd.",
-                shell_quote(&room)
-            ),
-            // The pin names a room but not a path, so no runnable command exists.
-            None,
-        )
-    } else {
-        let cwd = std::env::current_dir()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "<unreadable>".to_owned());
-        let register = format!(
-            "post rooms add {} {}",
-            shell_quote(&room),
-            shell_quote(&cwd)
-        );
-        let prose = match names.first().and_then(|first| rooms.get(first)) {
-            Some(path) => format!(
-                "cd into a registered room and retry, for example `cd {}`; or register this directory as a room with `{register}`.",
-                shell_quote(path)
-            ),
-            None => format!("No rooms are registered. Register this directory with `{register}`."),
-        };
-        (
-            format!("cwd {cwd} resolves to '{room}'"),
-            prose,
-            Some(register),
-        )
-    };
-    // The inline list is bounded because an error that costs more context than the
-    // operation it refused is its own papercut; the full set stays in `matches`
-    // for machine consumers.
-    let listed = if names.len() > ROOM_LIST_PREVIEW {
-        format!(
-            "{}, +{} more",
-            names[..ROOM_LIST_PREVIEW].join(", "),
-            names.len() - ROOM_LIST_PREVIEW
-        )
-    } else {
-        names.join(", ")
-    };
-    let registered = if names.is_empty() {
-        "no rooms are registered".to_owned()
-    } else {
-        format!("registered rooms: {listed}")
-    };
-    let mut error = AppError::new(
-        ErrorCode::UnknownRoom,
-        format!(
-            "channel operations require a registered room; {evidence}, which is not in rooms.json ({registered})"
-        ),
-        prose,
-    )
-    .input(room)
-    .reason("acting room is not registered")
-    .matches(names);
-    if let Some(command) = exact {
-        error = error.exact_fix(command);
-    }
-    Err(error)
+    // A participant without workspace context is still a first-class channel
+    // actor; its participant id is the shared reply address. Legacy code
+    // required a registered room here, which made session-only participants
+    // unable to join despite having durable membership/read state.
+    Ok((room, provenance))
 }
 
 pub(crate) struct JoinOutcome {
@@ -267,6 +194,7 @@ pub(crate) fn join(
 ) -> AppResult<JoinOutcome> {
     let rooms = context.load_rooms()?;
     let (room, provenance) = acting_room(context, &rooms)?;
+    let actor = context.sender()?;
     let paths = ChannelPaths::new(context, channel)?;
     let _lock = lock_channels(context)?;
 
@@ -274,8 +202,8 @@ pub(crate) fn join(
         validate_description(description)?;
     }
 
-    let mut members = paths.load_members()?;
-    if members.contains_key(&room) {
+    let membership = crate::channel_state::ParticipantChannels::load(&actor.participant)?;
+    if membership.joined_names().contains(channel) {
         // Already a member: --description still updates the norms carrier.
         if let Some(description) = description {
             write_description(&paths, description)?;
@@ -292,21 +220,24 @@ pub(crate) fn join(
     // state is written. Checked under the lock so a concurrent join of the
     // blocked counterpart cannot slip in between check and write.
     let rules = context.load_rules(&rooms)?;
-    for member in members.keys() {
-        if let Some(rule) = rules
-            .blocked
-            .iter()
-            .find(|rule| rule.matches_route(&room, member) || rule.matches_route(member, &room))
-        {
+    for member in crate::channel_state::effective_participants(context, channel)? {
+        let member_address = member.workspace.as_deref().unwrap_or(&member.id);
+        if let Some(rule) = rules.blocked.iter().find(|rule| {
+            rule.matches_route(&room, member_address)
+                || rule.matches_route(member_address, &room)
+                || rule.matches_route(&actor.participant.id, &member.id)
+                || rule.matches_route(&member.id, &actor.participant.id)
+        }) {
             return Err(AppError::new(
                 ErrorCode::BlockedRoute,
                 format!(
                     "joining '{channel}' would put '{room}' and existing member '{member}' in one channel, and that route is blocked: {}",
-                    rule.reason
+                    rule.reason,
+                    member = member.id
                 ),
                 "Do not route around this block. Ask the human operator to review rules.json.",
             )
-            .input(format!("{room} <-> {member}"))
+            .input(format!("{} <-> {}", actor.participant.id, member.id))
             .reason(rule.reason.clone())
             .rule(rule.clone()));
         }
@@ -354,17 +285,7 @@ pub(crate) fn join(
             provenance,
         },
     )?;
-    members.insert(room.clone(), sent);
-    let mut bytes = serde_json::to_vec_pretty(&members).map_err(|error| {
-        AppError::io(
-            "serialize channel members",
-            &paths.members_json,
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-        )
-    })?;
-    bytes.push(b'\n');
-    atomic_replace(&paths.members_json, &bytes)
-        .map_err(|error| AppError::io("write channel members", &paths.members_json, error))?;
+    crate::channel_state::ParticipantChannels::join(context, &actor.participant, channel)?;
 
     Ok(JoinOutcome {
         room,
@@ -439,6 +360,7 @@ pub(crate) fn send(
 ) -> AppResult<ChannelMessage> {
     let rooms = context.load_rooms()?;
     let (room, provenance) = acting_room(context, &rooms)?;
+    let actor = context.sender()?;
     let paths = ChannelPaths::new(context, channel)?;
     let quoted = crate::mailbox::shell_quote(channel);
     if !paths.exists() {
@@ -450,15 +372,20 @@ pub(crate) fn send(
         .input(channel)
         .reason("no channel.json under the channels directory"));
     }
-    let members = paths.load_members()?;
-    if !members.contains_key(&room) {
+    let membership = crate::channel_state::ParticipantChannels::load(&actor.participant)?;
+    if !membership.effective(context, &actor.participant, channel)? {
         return Err(AppError::new(
             ErrorCode::NotAMember,
-            format!("room '{room}' is not a member of channel '{channel}'"),
+            format!(
+                "participant '{}' is not a member of channel '{channel}'",
+                actor.participant.id
+            ),
             format!("Join first with `post chat {quoted} --join`, then retry the send."),
         )
-        .input(room)
-        .reason("sender is absent from members.json"));
+        .input(actor.participant.id)
+        .reason(
+            "participant is neither explicitly joined nor covered by a legacy workspace default",
+        ));
     }
     if options.body.trim().is_empty() {
         return Err(AppError::new(
@@ -476,7 +403,14 @@ pub(crate) fn send(
     // equivalent at the send point. Check-then-append has a TOCTOU window
     // (another room can land a message between check and exclusive create);
     // that occasional slip is accepted. Corrupting the store is not.
-    let crossed = crossed_send_check(context, &paths, channel, &room, options.body_flag)?;
+    let crossed = crossed_send_check(
+        context,
+        &paths,
+        channel,
+        &room,
+        &actor.participant,
+        options.body_flag,
+    )?;
     let (unseen, targeted) = (crossed.unseen, crossed.targeted);
     if options.anyway {
         log_crossed_event(
@@ -600,9 +534,9 @@ fn crossed_send_check(
     paths: &ChannelPaths,
     channel: &str,
     room: &str,
+    participant: &crate::participant::Participant,
     body_flag: &str,
 ) -> AppResult<CrossedReport> {
-    use crate::channel_state::ChannelState;
     use crate::error::MissedChannelMessage;
 
     // The parsed message is kept alongside the bounce payload so badge
@@ -614,7 +548,7 @@ fn crossed_send_check(
         targeted: bool,
     }
 
-    let state = ChannelState::load(context, room)?;
+    let state = crate::cursor_state::ParticipantCursors::load(context, participant);
     // Resolved once, before the scan: needed to decide targeting, and the same
     // value the badge pass below uses.
     let owner_room = crate::mailbox::resolve_owner(context)?.map(|owner| owner.room);
@@ -626,7 +560,7 @@ fn crossed_send_check(
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        if state.has_seen(channel, id) {
+        if state.channel_has_seen(channel, id) {
             continue;
         }
         let parsed = match parse_channel_message(&path) {
@@ -638,7 +572,9 @@ fn crossed_send_check(
         };
         // System events (join/profile) are not conversation the sender needs
         // to revise against; bounce only on ordinary messages from others.
-        if parsed.message.from == room || parsed.message.event.is_some() {
+        if parsed.message.from_participant.as_deref() == Some(participant.id.as_str())
+            || parsed.message.event.is_some()
+        {
             continue;
         }
         let message = parsed.message;

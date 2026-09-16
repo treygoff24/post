@@ -169,13 +169,13 @@ where
         Err(error) => return Err(error),
     };
 
-    // Self-mail refusal (M4): instances of one room coordinate via channels;
-    // routable instances are a recorded non-goal. --allow-self is the
-    // deliberate exception for doorbell probes and smoke tests.
-    if resolved_target
-        .as_ref()
-        .is_some_and(|target| sender == target.name)
-        && !args.allow_self
+    // A workspace is a fan-out address, so two participants bound to one
+    // workspace must be able to mail each other. The deliberate self-send
+    // gate applies only to an explicit participant:<own-id> target.
+    if resolved_target.as_ref().is_some_and(|target| {
+        target.kind == crate::participant::AddressKind::Participant
+            && target.name == actor.participant.id
+    }) && !args.allow_self
     {
         // Reproduce the caller's own invocation with the one change that makes
         // it succeed, INCLUDING the body when the body is knowable from argv or
@@ -189,14 +189,17 @@ where
         let fix = format!("{fix_prefix} --allow-self{body_flag}");
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
-            format!("refusing to send mail from '{sender}' to itself"),
+            format!(
+                "refusing to send participant '{}' mail to itself",
+                actor.participant.id
+            ),
             format!(
                 "Instances of one room coordinate via channels. For a deliberate self-send (doorbell probe, smoke test), run `{fix}`."
             ),
         )
         .exact_fix(fix)
         .input(args.to.clone())
-        .reason("from == to without --allow-self"));
+        .reason("participant addressed itself without --allow-self"));
     }
 
     if resolved_target.is_none() {
@@ -377,6 +380,17 @@ where
         )
     })?;
 
+    // The canonical mail and archive copy are already committed. A receipt
+    // failure deliberately leaves the message pending so the next admitted
+    // writer can recover it without a duplicate send.
+    if let Err(error) = crate::cursor_state::routing::route_message(context, &target, &envelope.id)
+    {
+        eprintln!(
+            "post: warning: mail {} was delivered but remains pending because routing failed: {}",
+            envelope.id, error.message
+        );
+    }
+
     let rendered = if json_output {
         output::json(
             &SendOutput {
@@ -419,11 +433,16 @@ fn ensure_route_allowed(
 ) -> AppResult<()> {
     let recipient = &target.name;
     let rules = context.load_rules(rooms)?;
-    let Some(rule) = rules
-        .blocked
-        .iter()
-        .find(|rule| rule.matches_route(sender, recipient))
-    else {
+    let Some(rule) = rules.blocked.iter().find(|rule| {
+        rule.matches_route(sender, recipient)
+            || crate::cursor_state::routing::resolved_recipients(context, target).is_ok_and(
+                |recipients| {
+                    recipients
+                        .iter()
+                        .any(|resolved| rule.matches_route(sender, resolved))
+                },
+            )
+    }) else {
         return Ok(());
     };
     Err(AppError::new(

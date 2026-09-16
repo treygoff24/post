@@ -1,7 +1,7 @@
-use crate::channel::{acting_room, list_channels};
+use crate::channel::list_channels;
 use crate::cli::ChannelsArgs;
 use crate::command_result::CommandResult;
-use crate::cursor_state::Snapshot;
+use crate::cursor_state::{eligibility, routing};
 use crate::error::AppResult;
 use crate::mailbox::Context;
 use crate::output::{self, ChannelListItem, ChannelsOutput};
@@ -9,52 +9,62 @@ use crate::output::{self, ChannelListItem, ChannelsOutput};
 pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppResult<CommandResult> {
     let summaries = list_channels(context)?;
 
-    // Get acting room for unread count calculation
-    let rooms = context.load_rooms()?;
-    let acting_room = acting_room(context, &rooms).map(|(room, _)| room).ok();
-
-    // Load cursor state for acting room (if any)
-    let cursor_snapshot = acting_room
-        .as_ref()
-        .map(|room| Snapshot::load(context, room));
-
-    let channels: Vec<ChannelListItem> = summaries
-        .into_iter()
-        .map(|summary| {
-            // Check if acting room is a member of this channel
-            let is_member = acting_room
-                .as_ref()
-                .map(|room| summary.members.contains_key(room))
-                .unwrap_or(false);
-
-            // Calculate unread count if acting room is a member
-            let unread = if is_member {
-                acting_room.as_ref().and_then(|_room| {
-                    cursor_snapshot.as_ref().map(|snapshot| {
-                        // Count unseen messages in this channel
-                        let seen_set = snapshot.channel_seen_count(&summary.info.name);
-                        summary.messages.saturating_sub(seen_set)
-                    })
-                })
-            } else {
-                None // Non-member gets null, not 0
-            };
-
-            ChannelListItem {
-                name: summary.info.name,
-                created: summary.info.created,
-                created_by: summary.info.created_by,
-                description: summary.info.description,
-                members: summary.members.into_keys().collect(),
-                messages: summary.messages,
-                room: acting_room.clone(),
-                unread,
+    let resolved = crate::participant::resolve(context)?;
+    let participant = resolved.participant();
+    let acting_room = participant.and_then(|actor| actor.workspace.clone());
+    let mut channels = Vec::new();
+    for summary in summaries {
+        let effective_members =
+            crate::channel_state::effective_participants(context, &summary.info.name)?;
+        let is_member = participant
+            .is_some_and(|actor| effective_members.iter().any(|member| member.id == actor.id));
+        let unread = match (participant, is_member) {
+            (Some(actor), true) => {
+                Some(eligibility::unread_channel(context, actor, &summary.info.name)?.len())
             }
-        })
-        .collect();
+            _ => None,
+        };
+        channels.push(ChannelListItem {
+            name: summary.info.name,
+            created: summary.info.created,
+            created_by: summary.info.created_by,
+            description: summary.info.description,
+            members: effective_members
+                .into_iter()
+                .map(|member| member.id)
+                .collect(),
+            messages: summary.messages,
+            room: acting_room.clone(),
+            unread,
+        });
+    }
+
+    let pending = if let Some(participant) = participant {
+        let mut count = 0;
+        for address in super::inbox::visible_addresses(participant) {
+            count += routing::provisional_pending_for(context, participant, &address)?.len();
+        }
+        count
+    } else {
+        let mut count = 0;
+        for room in context.load_rooms()?.into_keys() {
+            count += routing::pending_count(
+                context,
+                &crate::participant::Address {
+                    kind: crate::participant::AddressKind::Workspace,
+                    name: room,
+                },
+            )?;
+        }
+        count
+    };
 
     if args.text {
         let mut rendered = String::new();
+        rendered.push_str(&format!(
+            "participant: {}\npending: {pending}\n",
+            participant.map_or("unbound", |actor| actor.id.as_str())
+        ));
         if channels.is_empty() {
             rendered.push_str("post: no channels\n");
         } else {
@@ -77,13 +87,22 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         return Ok(CommandResult::success(rendered));
     }
     let count = channels.len();
-    let rendered = output::json(
-        &ChannelsOutput {
-            ok: true,
-            channels,
-            count,
-        },
-        pretty,
-    )?;
+    let mut value = serde_json::to_value(ChannelsOutput {
+        ok: true,
+        channels,
+        count,
+    })
+    .map_err(|error| {
+        crate::error::AppError::invalid_argument(format!("serialize channels: {error}"))
+    })?;
+    let object = value.as_object_mut().expect("channels output is an object");
+    object.insert(
+        "participant".to_owned(),
+        serde_json::Value::String(
+            participant.map_or_else(|| "unbound".to_owned(), |actor| actor.id.clone()),
+        ),
+    );
+    object.insert("pending".to_owned(), serde_json::json!(pending));
+    let rendered = output::json(&value, pretty)?;
     Ok(CommandResult::success(rendered))
 }
