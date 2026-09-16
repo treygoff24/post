@@ -29,6 +29,206 @@ fn inbox_as(sandbox: &Sandbox, participant: &str, cwd: &Path) -> Value {
     from_stdout(&output)
 }
 
+fn assert_reply_targets(value: &Value, participant: &str, shared: &str) {
+    assert_eq!(
+        value["reply_to_participant"],
+        format!("participant:{participant}")
+    );
+    assert_eq!(value["reply_to_shared"], shared);
+}
+
+#[test]
+fn routing_who_reports_per_address_pending_separately_from_unread() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let a = bind(&sandbox, "who-a", &alpha, "alpha");
+    let b = bind(&sandbox, "who-b", &alpha, "alpha");
+    let sender = bind(&sandbox, "who-sender", &beta, "beta");
+
+    send_as(&sandbox, &sender, &beta, "workspace:alpha", "routed unread");
+    let pending_id = "20990916-035959-fade01";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        pending_id,
+        &json!({
+            "id": pending_id,
+            "from": "beta",
+            "to": "alpha",
+            "kind": "note",
+            "subject": "pending",
+            "sent": "2026-09-16 03:59:59 -0500",
+            "from_participant": sender,
+            "address_kind": "workspace"
+        }),
+        "pending only",
+    );
+
+    let output = sandbox.run_as_participant(&["who"], &a, &alpha);
+    assert_success(&output);
+    let output: Value = from_stdout(&output);
+    assert_eq!(output["participant"]["unread"]["workspace:alpha"], 1);
+    assert_eq!(output["participant"]["pending"]["workspace:alpha"], 1);
+    assert!(output["participant"].get("pending_total").is_none());
+    for id in [&a, &b] {
+        let listed = output["participants"]
+            .as_array()
+            .expect("participants")
+            .iter()
+            .find(|participant| participant["id"].as_str() == Some(id.as_str()))
+            .expect("listed participant");
+        assert_eq!(listed["unread"]["workspace:alpha"], 1);
+        assert_eq!(listed["pending"]["workspace:alpha"], 1);
+        assert!(listed.get("pending_total").is_none());
+    }
+}
+
+#[test]
+fn routing_every_structured_message_projection_exposes_both_reply_targets() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let sender = bind(&sandbox, "reply-sender", &alpha, "alpha");
+    let recipient = bind(&sandbox, "reply-recipient", &beta, "beta");
+    let marker = "reply-target-matrix";
+    let sent = send_as(&sandbox, &sender, &alpha, "workspace:beta", marker);
+    let mail_id = sent["envelope"]["id"].as_str().expect("mail id");
+
+    let inbox = inbox_as(&sandbox, &recipient, &beta);
+    let inbox_message = inbox["unread"]
+        .as_array()
+        .expect("unread")
+        .iter()
+        .find(|message| message["id"] == mail_id)
+        .expect("inbox message");
+    assert_reply_targets(inbox_message, &sender, "alpha");
+
+    let read_peek =
+        sandbox.run_as_participant(&["read", mail_id, "--peek", "--json"], &recipient, &beta);
+    assert_success(&read_peek);
+    let read_peek: Value = from_stdout(&read_peek);
+    assert_reply_targets(&read_peek["envelope"], &sender, "alpha");
+
+    let watch = sandbox.run_as_participant(&["watch", "--snapshot", "--json"], &recipient, &beta);
+    assert_success(&watch);
+    let watch_message: Value = String::from_utf8_lossy(&watch.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("watch event JSON"))
+        .find(|event: &Value| event["id"] == mail_id)
+        .expect("watch mail event");
+    assert_reply_targets(&watch_message, &sender, "alpha");
+
+    let search =
+        sandbox.run_as_participant(&["search", marker, "--mail", "--json"], &recipient, &beta);
+    assert_success(&search);
+    let search: Value = from_stdout(&search);
+    let search_message = search["results"]
+        .as_array()
+        .expect("search results")
+        .iter()
+        .find(|message| message["id"] == mail_id)
+        .expect("search mail result");
+    assert_reply_targets(search_message, &sender, "alpha");
+
+    for (participant, cwd) in [(&sender, &alpha), (&recipient, &beta)] {
+        let joined = sandbox.run_as_participant(
+            &["chat", "reply-matrix", "--join", "--json"],
+            participant,
+            cwd,
+        );
+        assert_success(&joined);
+    }
+    let chat_send = sandbox.run_as_participant(
+        &[
+            "chat",
+            "reply-matrix",
+            "--send",
+            "--anyway",
+            "--body",
+            marker,
+            "--json",
+        ],
+        &sender,
+        &alpha,
+    );
+    assert_success(&chat_send);
+    let chat_send: Value = from_stdout(&chat_send);
+    let channel_id = chat_send["message"]["id"].as_str().expect("channel id");
+    let chat = sandbox.run_as_participant(
+        &["chat", "reply-matrix", "--peek", "--json"],
+        &recipient,
+        &beta,
+    );
+    assert_success(&chat);
+    let chat: Value = from_stdout(&chat);
+    let chat_message = chat["messages"]
+        .as_array()
+        .expect("chat messages")
+        .iter()
+        .find(|message| message["id"] == channel_id)
+        .expect("chat message");
+    assert_reply_targets(chat_message, &sender, "alpha");
+
+    let catchup = sandbox.run_as_participant(&["catchup", "--mail", "--json"], &recipient, &beta);
+    assert_success(&catchup);
+    let catchup: Value = from_stdout(&catchup);
+    let catchup_message = &catchup["targets"][0]["messages"][0]["envelope"];
+    assert_eq!(catchup_message["id"], mail_id);
+    assert_reply_targets(catchup_message, &sender, "alpha");
+
+    let read = sandbox.run_as_participant(&["read", mail_id, "--json"], &recipient, &beta);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    assert_eq!(read["already_read"], true);
+    assert_reply_targets(&read["envelope"], &sender, "alpha");
+}
+
+#[test]
+fn routing_crossed_send_uses_the_participants_seen_eligibility_snapshot() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let a = bind(&sandbox, "crossed-a", &alpha, "alpha");
+    let b = bind(&sandbox, "crossed-b", &beta, "beta");
+    for (participant, cwd) in [(&a, &alpha), (&b, &beta)] {
+        let joined = sandbox.run_as_participant(
+            &["chat", "eligibility-crossed", "--join", "--json"],
+            participant,
+            cwd,
+        );
+        assert_success(&joined);
+    }
+
+    let sent = sandbox.run_as_participant(
+        &[
+            "chat",
+            "eligibility-crossed",
+            "--send",
+            "--anyway",
+            "--body",
+            "@beta please read",
+            "--json",
+        ],
+        &a,
+        &alpha,
+    );
+    assert_success(&sent);
+    let consumed =
+        sandbox.run_as_participant(&["chat", "eligibility-crossed", "--json"], &b, &beta);
+    assert_success(&consumed);
+
+    let reply = sandbox.run_as_participant(
+        &[
+            "chat",
+            "eligibility-crossed",
+            "--send",
+            "--body",
+            "handled",
+            "--json",
+        ],
+        &b,
+        &beta,
+    );
+    assert_success(&reply);
+}
+
 #[test]
 fn routing_two_participants_consume_independently_and_canonical_file_stays_put() {
     let sandbox = Sandbox::new();

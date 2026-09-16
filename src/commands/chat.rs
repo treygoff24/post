@@ -604,12 +604,14 @@ fn read(
         let messages: Vec<output::ChatMessageItem> = batch
             .iter()
             .zip(&signed_statuses)
-            .map(|((message, body), status)| output::ChatMessageItem {
-                message: message.clone(),
-                body: body.clone(),
-                signed_verified: status
-                    .as_ref()
-                    .map(|status| matches!(status, SignedStatus::Verified { .. })),
+            .map(|((message, body), status)| {
+                output::ChatMessageItem::new(
+                    message.clone(),
+                    body.clone(),
+                    status
+                        .as_ref()
+                        .map(|status| matches!(status, SignedStatus::Verified { .. })),
+                )
             })
             .collect();
         match args.max_bytes {

@@ -400,25 +400,14 @@ where
             pretty,
         )?
     } else {
-        // `archived: true` was the whole receipt, and it is true, and it was
-        // useless: an agent that read it and ran `post read <id>` got told the
-        // message was "not in the archive". Name the command that works, from
-        // the room that just sent it.
-        // --room is not decoration. The archive admits the two parties to a
-        // message, and identity is resolved from cwd, so a receipt that omits it
-        // is only correct when the sender happens to equal the room the reader
-        // is standing in. With `--from <alias>` it never does, and the P2 panel's
-        // attacker lane found the receipt handing back a command that fails.
-        // Naming the room makes it correct from anywhere, which is what a
-        // copy-pasteable command has to be.
         format!(
-            "post: sent {} {} {} -> {}\npost: read it back with `post read {} --room {}`\n",
+            "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; unread is recipient-specific and suppresses the sender\n",
             envelope.kind,
             envelope.id,
             envelope.from,
             envelope.to,
-            crate::mailbox::shell_quote(&envelope.id),
-            crate::mailbox::shell_quote(&envelope.from)
+            target.kind.as_str(),
+            target.name,
         )
     };
     Ok(CommandResult::committed(rendered))
@@ -430,6 +419,11 @@ fn ensure_route_allowed(
     sender: &str,
     target: &crate::participant::Address,
 ) -> AppResult<()> {
+    // Lineage fan-out records blocked affiliates as per-recipient exclusions
+    // in the frozen receipt; an allowed affiliate must still receive it.
+    if target.kind == crate::participant::AddressKind::Lineage {
+        return Ok(());
+    }
     let rules = context.load_rules(rooms)?;
     let resolved = crate::cursor_state::routing::resolved_recipients(context, target)?;
     let mut recipient_workspaces = Vec::new();
@@ -443,8 +437,7 @@ fn ensure_route_allowed(
         })?;
         recipient_workspaces.push(participant.workspace);
     }
-    if target.kind == crate::participant::AddressKind::Workspace
-        && recipient_workspaces.is_empty()
+    if target.kind == crate::participant::AddressKind::Workspace && recipient_workspaces.is_empty()
     {
         recipient_workspaces.push(Some(target.name.clone()));
     }

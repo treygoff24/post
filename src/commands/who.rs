@@ -5,6 +5,7 @@ use crate::mailbox::Context;
 use crate::output::{self, WhoActingParticipant, WhoOutput, WhoParticipant, WhoRoom};
 use crate::participant::Resolved;
 use crate::presence;
+use std::collections::BTreeMap;
 
 const STALE_DELIVERY_NOTE: &str = "mail already frozen to a stale participant is not reassigned when its lease expires; activity affects new recipient selection only";
 
@@ -45,17 +46,22 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         Resolved::Bound {
             participant,
             provenance,
-        } => WhoActingParticipant {
-            status: "bound".to_owned(),
-            state: Some(participant.state(now).as_str().to_owned()),
-            last_seen: participant.last_seen.clone(),
-            id: Some(participant.id.clone()),
-            harness: Some(participant.harness.clone()),
-            provenance: Some(provenance.as_str().to_owned()),
-            workspace: participant.workspace.clone(),
-            lineage: participant.lineage.clone(),
-            fix: None,
-        },
+        } => {
+            let (unread, pending) = mail_counts(context, participant)?;
+            WhoActingParticipant {
+                status: "bound".to_owned(),
+                state: Some(participant.state(now).as_str().to_owned()),
+                last_seen: participant.last_seen.clone(),
+                id: Some(participant.id.clone()),
+                harness: Some(participant.harness.clone()),
+                provenance: Some(provenance.as_str().to_owned()),
+                workspace: participant.workspace.clone(),
+                lineage: participant.lineage.clone(),
+                unread,
+                pending,
+                fix: None,
+            }
+        }
         Resolved::Unbound => WhoActingParticipant {
             status: "unbound".to_owned(),
             state: None,
@@ -65,6 +71,8 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             provenance: None,
             workspace: None,
             lineage: None,
+            unread: BTreeMap::new(),
+            pending: BTreeMap::new(),
             fix: Some("run: post participant bind".to_owned()),
         },
     };
@@ -79,6 +87,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         Err(error) => return Err(error),
     };
     for participant in participant_records {
+        let (unread, pending) = mail_counts(context, &participant)?;
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
         let state = participant.state(now).as_str().to_owned();
         participants.push(WhoParticipant {
@@ -88,6 +97,8 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             last_seen: participant.last_seen,
             lineage: participant.lineage,
             workspace: participant.workspace,
+            unread,
+            pending,
             live_watch: presence.live_watch,
             watch_last_seen: presence.last_seen,
         });
@@ -103,7 +114,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             rendered.push_str("participant: unbound (run: post participant bind)\n");
         } else {
             rendered.push_str(&format!(
-                "participant: {}  state={}  last-seen={}  harness={}  provenance={}  workspace={}  lineage={}\n",
+                "participant: {}  state={}  last-seen={}  harness={}  provenance={}  workspace={}  lineage={}  unread={:?}  pending={:?}\n",
                 acting.id.as_deref().unwrap_or("unbound"),
                 acting.state.as_deref().unwrap_or("unbound"),
                 acting.last_seen.as_deref().unwrap_or("legacy"),
@@ -111,6 +122,8 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 acting.provenance.as_deref().unwrap_or("unbound"),
                 acting.workspace.as_deref().unwrap_or("none"),
                 acting.lineage.as_deref().unwrap_or("none"),
+                acting.unread,
+                acting.pending,
             ));
         }
         for entry in &participants {
@@ -118,12 +131,14 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             let seen = entry.last_seen.as_deref().unwrap_or("legacy");
             let watch_seen = entry.watch_last_seen.as_deref().unwrap_or("never");
             rendered.push_str(&format!(
-                "participant {}  state={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}\n",
+                "participant {}  state={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}  unread={:?}  pending={:?}\n",
                 output::sanitize_text_header(&entry.id),
                 entry.state,
                 output::sanitize_text_header(&entry.harness),
                 entry.lineage.as_deref().map(output::sanitize_text_header).unwrap_or_else(|| "none".to_owned()),
                 entry.workspace.as_deref().map(output::sanitize_text_header).unwrap_or_else(|| "none".to_owned()),
+                entry.unread,
+                entry.pending,
             ));
         }
         if participants
@@ -158,4 +173,25 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         },
         pretty,
     )
+}
+
+fn mail_counts(
+    context: &Context,
+    participant: &crate::participant::Participant,
+) -> AppResult<(BTreeMap<String, usize>, BTreeMap<String, usize>)> {
+    let mut unread = BTreeMap::new();
+    let mut pending = BTreeMap::new();
+    for address in super::inbox::visible_addresses(participant) {
+        let label = format!("{}:{}", address.kind.as_str(), address.name);
+        unread.insert(
+            label.clone(),
+            crate::cursor_state::eligibility::unread_mail(context, participant, &address)?.len(),
+        );
+        pending.insert(
+            label,
+            crate::cursor_state::routing::provisional_pending_for(context, participant, &address)?
+                .len(),
+        );
+    }
+    Ok((unread, pending))
 }

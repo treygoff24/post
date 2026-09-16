@@ -11,6 +11,8 @@ fn watch_text_line_includes_sanitized_preview_cap_at_80_chars() {
         InboxItem {
             id: "20260831-224243-test01".to_owned(),
             from: "test-sender".to_owned(),
+            reply_to_participant: None,
+            reply_to_shared: "test-sender".to_owned(),
             kind: MailKind::Note,
             subject: "test subject".to_owned(),
             sent: "2026-08-31 22:42:43 +0000".to_owned(),
@@ -52,6 +54,8 @@ fn watch_text_line_sanitizes_control_characters_and_newlines() {
         InboxItem {
             id: "20260831-224243-test02".to_owned(),
             from: "test-sender".to_owned(),
+            reply_to_participant: None,
+            reply_to_shared: "test-sender".to_owned(),
             kind: MailKind::Note,
             subject: "test subject".to_owned(),
             sent: "2026-08-31 22:42:43 +0000".to_owned(),
@@ -84,6 +88,8 @@ fn watch_text_line_neutralizes_square_brackets_to_prevent_fencepost_forging() {
         InboxItem {
             id: "20260831-224243-test03".to_owned(),
             from: "test-sender".to_owned(),
+            reply_to_participant: None,
+            reply_to_shared: "test-sender".to_owned(),
             kind: MailKind::Note,
             subject: "test subject".to_owned(),
             sent: "2026-08-31 22:42:43 +0000".to_owned(),
@@ -113,6 +119,8 @@ fn watch_channel_message_includes_preview() {
         channel: "test-channel".to_owned(),
         id: "20260831-224243-test04".to_owned(),
         from: "test-sender".to_owned(),
+        reply_to_participant: None,
+        reply_to_shared: "test-sender".to_owned(),
         subject: "test subject".to_owned(),
         sent: "2026-08-31 22:42:43 +0000".to_owned(),
         display_name: None,
@@ -151,6 +159,8 @@ fn watch_ndjson_includes_preview_field() {
         InboxItem {
             id: "20260831-224243-test06".to_owned(),
             from: "test-sender".to_owned(),
+            reply_to_participant: None,
+            reply_to_shared: "test-sender".to_owned(),
             kind: MailKind::Note,
             subject: "test subject".to_owned(),
             sent: "2026-08-31 22:42:43 +0000".to_owned(),
@@ -173,6 +183,8 @@ fn watch_ndjson_omits_preview_field_when_none() {
         InboxItem {
             id: "20260831-224243-test07".to_owned(),
             from: "test-sender".to_owned(),
+            reply_to_participant: None,
+            reply_to_shared: "test-sender".to_owned(),
             kind: MailKind::Note,
             subject: "test subject".to_owned(),
             sent: "2026-08-31 22:42:43 +0000".to_owned(),

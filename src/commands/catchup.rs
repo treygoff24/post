@@ -828,7 +828,7 @@ fn collect_mail(
         for item in cursor_state::eligibility::unread_mail(context, participant, &address)? {
             let id = item.envelope.id.clone();
             messages.push(CatchupMailItem {
-                envelope: item.envelope,
+                envelope: item.envelope.into(),
                 body: item.body,
             });
             moves.push(MailMove {
@@ -910,11 +910,7 @@ fn collect_channel(
         let signed_verified = mailbox::signed_status(owner, &message, &body, channel_name)
             .map(|status| matches!(status, mailbox::SignedStatus::Verified { .. }));
         seen_ids.push(message.id.clone());
-        messages.push(ChatMessageItem {
-            message,
-            body,
-            signed_verified,
-        });
+        messages.push(ChatMessageItem::new(message, body, signed_verified));
     }
     messages.sort_by(|left, right| left.message.id.cmp(&right.message.id));
     seen_ids.sort();

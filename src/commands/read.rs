@@ -172,6 +172,23 @@ fn run_participant(
         ));
     }
     let Some((address, mail, already_read)) = candidates.pop() else {
+        if let Some((channel, full_id, depth)) =
+            crate::channel::find_channel_message(context, &args.id)
+        {
+            let quoted = crate::mailbox::shell_quote(&channel);
+            let fix = format!("post chat {quoted} --history {depth}");
+            return Err(AppError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "'{full_id}' is a message in channel '{channel}', not mail; `post read` serves direct mail only"
+                ),
+                format!("Channels are a different store, and reading one never consumes it. Run `{fix}`."),
+            )
+            .exact_fix(fix)
+            .input(args.id)
+            .reason("id names a channel message, not mail")
+            .room(participant.workspace.as_deref().unwrap_or(&participant.id)));
+        }
         return Err(AppError::new(
             ErrorCode::NotFound,
             format!(
@@ -385,7 +402,7 @@ fn render_budgeted_read_json(
         &output::ReadBudgetOutput {
             ok: true,
             framing: read_framing(framing),
-            envelope: mail.envelope.clone(),
+            envelope: mail.envelope.clone().into(),
             body,
             already_read,
             count,
@@ -587,7 +604,7 @@ fn render_mail_slice_json(
         &output::MailBodySliceOutput {
             ok: true,
             framing: read_framing(framing),
-            envelope: envelope.clone(),
+            envelope: envelope.clone().into(),
             body_slice: body_slice.to_owned(),
             range: output::BodyByteRange {
                 start: request.start,
@@ -871,35 +888,19 @@ fn render(
     framing: FramingMode,
 ) -> AppResult<String> {
     if json_output {
-        let mut value = serde_json::to_value(ReadOutput {
-            ok: true,
-            framing: match framing {
-                FramingMode::Auto | FramingMode::Full => Framing::default(),
-                FramingMode::Compact => Framing::compact(),
+        output::json(
+            &ReadOutput {
+                ok: true,
+                framing: match framing {
+                    FramingMode::Auto | FramingMode::Full => Framing::default(),
+                    FramingMode::Compact => Framing::compact(),
+                },
+                envelope: mail.envelope.clone().into(),
+                body: mail.body.clone(),
+                already_read,
             },
-            envelope: mail.envelope.clone(),
-            body: mail.body.clone(),
-            already_read,
-        })
-        .map_err(|error| AppError::invalid_argument(format!("serialize mail read: {error}")))?;
-        if mail.envelope.from_participant.is_some() || mail.envelope.address_kind.is_some() {
-            if let Some(envelope) = value
-                .get_mut("envelope")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                if let Some(participant) = mail.envelope.from_participant.as_ref() {
-                    envelope.insert(
-                        "reply_to_participant".to_owned(),
-                        serde_json::Value::String(format!("participant:{participant}")),
-                    );
-                }
-                envelope.insert(
-                    "reply_to_shared".to_owned(),
-                    serde_json::Value::String(mail.envelope.from.clone()),
-                );
-            }
-        }
-        output::json(&value, pretty)
+            pretty,
+        )
     } else {
         Ok(render_text(
             &mail.envelope,

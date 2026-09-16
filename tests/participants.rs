@@ -581,7 +581,7 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
             ],
             None,
         ),
-        (vec!["chat", "missing", "--peek"], Some("not_found")),
+        (vec!["chat", "missing", "--peek"], Some("missing_chat")),
         (vec!["watch", "--snapshot", "--room", "alpha"], None),
         (vec!["profile", "show", "alpha"], None),
         (vec!["owner", "show"], None),
@@ -617,6 +617,14 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
                     assert_eq!(output.status.code(), Some(1), "{args:?}");
                     let value: Value = from_stdout(&output);
                     assert_eq!(value["ok"], false, "{args:?}");
+                }
+                Some("missing_chat") => {
+                    let error: ErrorEnvelope = from_stderr(&output);
+                    assert_eq!(
+                        error.error.code,
+                        if bound { "not_a_member" } else { "not_found" },
+                        "{args:?}"
+                    );
                 }
                 Some(code) => {
                     let error: ErrorEnvelope = from_stderr(&output);
@@ -1027,7 +1035,7 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     );
     assert_success(&output);
     let value: Value = from_stdout(&output);
-    assert_eq!(value["store_version"], 1);
+    assert_eq!(value["store_version"], 2);
     assert_eq!(tree(&broken.mail_root), before);
 
     let ambiguous = Sandbox::new_unseeded();
@@ -1044,7 +1052,10 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     );
     assert_success(&output);
     let value: Value = from_stdout(&output);
-    assert_eq!(value["capabilities"], serde_json::json!(["participants"]));
+    assert_eq!(
+        value["capabilities"],
+        serde_json::json!(["participants", "routing-receipts", "cursors-v2"])
+    );
     assert_eq!(tree(&ambiguous.mail_root), before);
 }
 
@@ -1456,72 +1467,101 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
     ));
 
     let commands = vec![
-        vec!["rooms".to_owned()],
-        vec!["version".to_owned(), "--json".to_owned()],
-        vec![
-            "watch".to_owned(),
-            "--snapshot".to_owned(),
-            "--room".to_owned(),
-            "alpha".to_owned(),
-        ],
-        vec![
-            "read".to_owned(),
-            sent_mail.envelope.id,
-            "--room".to_owned(),
-            "alpha".to_owned(),
-            "--peek".to_owned(),
-            "--json".to_owned(),
-        ],
-        vec!["profile".to_owned(), "show".to_owned()],
-        vec![
-            "search".to_owned(),
-            "needle".to_owned(),
-            "--channel".to_owned(),
-            "round2-read".to_owned(),
-            "--json".to_owned(),
-        ],
-        vec![
-            "chat".to_owned(),
-            "round2-read".to_owned(),
-            "--peek".to_owned(),
-            "--json".to_owned(),
-        ],
-        vec![
-            "chat".to_owned(),
-            "round2-read".to_owned(),
-            "--history".to_owned(),
-            "1".to_owned(),
-            "--json".to_owned(),
-        ],
-        vec![
-            "chat".to_owned(),
-            "round2-read".to_owned(),
-            "--since".to_owned(),
-            channel_id.clone(),
-            "--json".to_owned(),
-        ],
-        vec![
-            "chat".to_owned(),
-            "round2-read".to_owned(),
-            "--seen-by".to_owned(),
-            channel_id.clone(),
-            "--json".to_owned(),
-        ],
-        vec![
-            "chat".to_owned(),
-            "round2-read".to_owned(),
-            "--message".to_owned(),
-            channel_id,
-            "--max-bytes".to_owned(),
-            "4096".to_owned(),
-            "--json".to_owned(),
-        ],
+        (vec!["rooms".to_owned()], None),
+        (vec!["version".to_owned(), "--json".to_owned()], None),
+        (
+            vec![
+                "watch".to_owned(),
+                "--snapshot".to_owned(),
+                "--room".to_owned(),
+                "alpha".to_owned(),
+            ],
+            None,
+        ),
+        (
+            vec![
+                "read".to_owned(),
+                sent_mail.envelope.id,
+                "--room".to_owned(),
+                "alpha".to_owned(),
+                "--peek".to_owned(),
+                "--json".to_owned(),
+            ],
+            None,
+        ),
+        (vec!["profile".to_owned(), "show".to_owned()], None),
+        (
+            vec![
+                "search".to_owned(),
+                "needle".to_owned(),
+                "--channel".to_owned(),
+                "round2-read".to_owned(),
+                "--json".to_owned(),
+            ],
+            None,
+        ),
+        (
+            vec![
+                "chat".to_owned(),
+                "round2-read".to_owned(),
+                "--peek".to_owned(),
+                "--json".to_owned(),
+            ],
+            Some("not_a_member"),
+        ),
+        (
+            vec![
+                "chat".to_owned(),
+                "round2-read".to_owned(),
+                "--history".to_owned(),
+                "1".to_owned(),
+                "--json".to_owned(),
+            ],
+            Some("not_a_member"),
+        ),
+        (
+            vec![
+                "chat".to_owned(),
+                "round2-read".to_owned(),
+                "--since".to_owned(),
+                channel_id.clone(),
+                "--json".to_owned(),
+            ],
+            Some("not_a_member"),
+        ),
+        (
+            vec![
+                "chat".to_owned(),
+                "round2-read".to_owned(),
+                "--seen-by".to_owned(),
+                channel_id.clone(),
+                "--json".to_owned(),
+            ],
+            Some("not_a_member"),
+        ),
+        (
+            vec![
+                "chat".to_owned(),
+                "round2-read".to_owned(),
+                "--message".to_owned(),
+                channel_id,
+                "--max-bytes".to_owned(),
+                "4096".to_owned(),
+                "--json".to_owned(),
+            ],
+            Some("not_a_member"),
+        ),
     ];
-    for command in commands {
+    for (command, expected_error) in commands {
         let args = command.iter().map(String::as_str).collect::<Vec<_>>();
         let before = tree(&sandbox.mail_root);
         let output = sandbox.run_without_identity(&args, &alpha);
-        assert_success(&output);
+        if let Some(expected) = expected_error {
+            let error: ErrorEnvelope = from_stderr(&output);
+            assert_eq!(error.error.code, expected, "{args:?}");
+        } else {
+            assert_success(&output);
+        }
         assert_eq!(
             tree(&sandbox.mail_root),
             before,
@@ -1552,13 +1592,12 @@ fn participant_round2_workspace_less_actor_gets_rebind_fix_not_room_shadowing() 
     let output =
         sandbox.run_as_participant(&["chat", "any-channel", "--peek", "--json"], &actor, &alpha);
     let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "unknown_room");
-    assert!(error.error.message.contains("has no workspace"));
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post participant bind --workspace 'alpha'")
-    );
-    assert!(!error.error.suggested_fix.contains("post rooms add"));
+    assert_eq!(error.error.code, "not_a_member");
+    assert!(error.error.message.contains(&actor));
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post chat 'any-channel' --join"));
     assert_eq!(tree(&sandbox.mail_root), before);
 }
 
@@ -1705,6 +1744,33 @@ fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
         }),
         "lifecycle body",
     );
+    let message = sandbox
+        .mail_root
+        .join("alpha/inbox")
+        .join(format!("{slice_id}.mail"));
+    let receipt_dir = sandbox.mail_root.join("alpha/routing");
+    fs::create_dir_all(&receipt_dir).expect("routing receipt directory");
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&message).expect("canonical mail"))
+    );
+    fs::write(
+        receipt_dir.join(format!("{slice_id}.json")),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "message": slice_id,
+                "digest": digest,
+                "address": {"kind": "workspace", "name": "alpha"},
+                "recipients": [id],
+                "routed_at": "2026-09-16T04:00:02Z",
+                "routed_by": "test"
+            }))
+            .expect("serialize routing receipt")
+        ),
+    )
+    .expect("write routing receipt");
     for (args, expected) in [
         (vec!["participant", "show"], None),
         (vec!["participant", "list"], None),
@@ -1735,7 +1801,7 @@ fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
             ],
             None,
         ),
-        (vec!["chat", "missing", "--peek"], Some("not_found")),
+        (vec!["chat", "missing", "--peek"], Some("not_a_member")),
         (vec!["watch", "--snapshot", "--room", "alpha"], None),
         (vec!["profile", "show", "alpha"], None),
         (vec!["owner", "show"], None),

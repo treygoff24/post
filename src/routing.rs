@@ -162,6 +162,23 @@ pub(crate) fn provisional_pending_for(
     participant: &Participant,
     address: &Address,
 ) -> AppResult<Vec<String>> {
+    provisional_pending(context, participant, address, true)
+}
+
+pub(crate) fn provisional_pending_for_quiet(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+) -> AppResult<Vec<String>> {
+    provisional_pending(context, participant, address, false)
+}
+
+fn provisional_pending(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    warn: bool,
+) -> AppResult<Vec<String>> {
     let current = resolved_recipients(context, address)?;
     if !current.iter().any(|id| id == &participant.id) {
         return Ok(Vec::new());
@@ -176,7 +193,21 @@ pub(crate) fn provisional_pending_for(
         }
         let parsed = match parse_mail(&path) {
             Ok(parsed) => parsed,
-            Err(_) => continue,
+            Err(error) => {
+                if warn {
+                    let kind = if error.code == ErrorCode::IoError {
+                        "unreadable"
+                    } else {
+                        "malformed"
+                    };
+                    eprintln!(
+                        "post: warning: skipped {kind} pending mail {:?}: {:?}",
+                        path.display().to_string(),
+                        error.message
+                    );
+                }
+                continue;
+            }
         };
         if parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str()) {
             continue;

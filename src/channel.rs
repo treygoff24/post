@@ -564,36 +564,51 @@ fn crossed_send_check(
         targeted: bool,
     }
 
-    let state = crate::cursor_state::ParticipantCursors::load(context, participant);
     // Resolved once, before the scan: needed to decide targeting, and the same
     // value the badge pass below uses.
     let owner_room = crate::mailbox::resolve_owner(context)?.map(|owner| owner.room);
     let mut missed = Vec::new();
-    let mut unreadable_unseen = false;
-    for path in message_files(&paths.messages)? {
-        // The filename stem is the id (parse_channel_message enforces that a
-        // parsed envelope matches it); membership needs no parse.
-        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if state.channel_has_seen(channel, id) {
-            continue;
+    let eligible = match crate::cursor_state::eligibility::unread_channel(
+        context,
+        participant,
+        channel,
+    ) {
+        Ok(eligible) => eligible,
+        Err(error) if error.code == ErrorCode::ConfigInvalid => {
+            let fix = format!(
+                "post chat {} --send --anyway{}",
+                crate::mailbox::shell_quote(channel),
+                body_flag
+            );
+            return Ok(CrossedReport {
+                unseen: 1,
+                targeted: 1,
+                verdict: CrossedVerdict::Refuse(
+                    AppError::new(
+                        ErrorCode::CrossedSend,
+                        format!(
+                            "channel '{channel}' has unreadable unseen message(s); send was not delivered"
+                        ),
+                        format!(
+                            "Inspect/repair the channel store, catch up with `post chat {}`, then revise; or retry with `--anyway` to deliver regardless: `{fix}`.",
+                            crate::mailbox::shell_quote(channel)
+                        ),
+                    )
+                    .exact_fix(fix)
+                    .input(channel)
+                    .reason("unreadable unseen message"),
+                ),
+            });
         }
-        let parsed = match parse_channel_message(&path) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                unreadable_unseen = true;
-                continue;
-            }
-        };
+        Err(error) => return Err(error),
+    };
+    for item in eligible {
         // System events (join/profile) are not conversation the sender needs
         // to revise against; bounce only on ordinary messages from others.
-        if parsed.message.from_participant.as_deref() == Some(participant.id.as_str())
-            || parsed.message.event.is_some()
-        {
+        if item.message.event.is_some() {
             continue;
         }
-        let message = parsed.message;
+        let message = item.message;
         // Addressed to this room: an @mention of it, or a reply to something it
         // wrote. `re` carries a message id, so the author of the parent has to
         // be looked up; only messages that actually carry one pay for that.
@@ -619,18 +634,18 @@ fn crossed_send_check(
                 from: message.from.clone(),
                 subject: message.subject.clone(),
                 sent: message.sent.clone(),
-                body: parsed.body.clone(),
+                body: item.body.clone(),
                 signed_verified: None,
                 sender_address: message.sender_address.clone(),
                 sender_provenance: message.sender_provenance.clone(),
             },
             message,
-            body: parsed.body,
+            body: item.body,
         });
     }
     let unseen = missed.len();
     let targeted_count = missed.iter().filter(|item| item.targeted).count();
-    if missed.is_empty() && !unreadable_unseen {
+    if missed.is_empty() {
         return Ok(CrossedReport {
             verdict: CrossedVerdict::Clear,
             unseen: 0,
@@ -639,7 +654,7 @@ fn crossed_send_check(
     }
     // Nothing here concerns this room, so delivering is the right default and
     // the caller says what was crossed rather than refusing over it.
-    if targeted_count == 0 && !unreadable_unseen {
+    if targeted_count == 0 {
         return Ok(CrossedReport {
             verdict: CrossedVerdict::Warn,
             unseen,
@@ -661,29 +676,6 @@ fn crossed_send_check(
         crate::mailbox::shell_quote(channel),
         body_flag
     );
-    if unreadable_unseen && missed.is_empty() {
-        // Renders no messages, so it stays pure transport: the trust anchor
-        // is never loaded (Decision 3 matrix).
-        return Ok(CrossedReport {
-            unseen,
-            targeted: targeted_count,
-            verdict: CrossedVerdict::Refuse(
-            AppError::new(
-                ErrorCode::CrossedSend,
-                format!(
-                    "channel '{channel}' has unreadable unseen message(s); send was not delivered"
-                ),
-                format!(
-                    "Inspect/repair the channel store, catch up with `post chat {}`, then revise; or retry with `--anyway` to deliver regardless: `{fix}`.",
-                    crate::mailbox::shell_quote(channel)
-                ),
-            )
-            .exact_fix(fix)
-            .input(channel)
-            .reason("unreadable unseen message"),
-            ),
-        });
-    }
     // A bounce that renders missed conversation is a badge-computing surface
     // (A0a Decision 3): resolve the owner ONCE — a broken owner.json fails
     // the send with the config error instead of a crossed_send, and since
@@ -716,15 +708,10 @@ fn crossed_send_check(
     if missed.len() > PREVIEW_CAP {
         missed = missed.split_off(missed.len() - PREVIEW_CAP);
     }
-    let mut message = format!(
+    let message = format!(
         "channel '{channel}' has {total} unseen message(s) addressed to '{room}' out of {unseen} unseen; send was not delivered (showing the last {}, first line only)",
         missed.len()
     );
-    if unreadable_unseen {
-        message.push_str(
-            "; plus unreadable unseen message(s), which cannot be shown not to concern you",
-        );
-    }
     Ok(CrossedReport {
         verdict: CrossedVerdict::Refuse(
             AppError::new(ErrorCode::CrossedSend, message, format!(

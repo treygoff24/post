@@ -60,7 +60,10 @@ impl Sandbox {
             )
             .expect("restrict seeded config perms");
         }
-        sandbox.seed_test_participant(None, Some("test-default"));
+        // Legacy CLI tests use this single fixed actor for claude-space. Tests
+        // that exercise the unbound contract call `run_without_identity`, and
+        // multi-workspace tests use their explicit deterministic participants.
+        sandbox.seed_test_participant(Some("claude-space"), Some("test-default"));
         sandbox
     }
 
@@ -392,6 +395,21 @@ impl Sandbox {
     }
 
     fn seed_test_participant(&self, workspace: Option<&str>, fixed_id: Option<&str>) -> String {
+        if fixed_id.is_none() {
+            let default = self
+                .mail_root
+                .join("participants/test-default/participant.json");
+            if let Ok(bytes) = fs::read(&default) {
+                if serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|record| record["workspace"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == workspace
+                {
+                    return "test-default".to_owned();
+                }
+            }
+        }
         let key = format!("test:{}", workspace.unwrap_or("unbound-workspace"));
         let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
         let id = fixed_id
@@ -506,7 +524,9 @@ pub fn fence_under_external_lock(sandbox: &Sandbox, generation: u64) -> std::tim
         .expect("open migration lock");
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
 
-    let heartbeat = sandbox.mail_root.join("dest/watch.heartbeat");
+    let heartbeat = sandbox
+        .mail_root
+        .join("participants/test-default/watch.heartbeat");
     let before = fs::metadata(&heartbeat)
         .expect("heartbeat exists under transition lock")
         .modified()

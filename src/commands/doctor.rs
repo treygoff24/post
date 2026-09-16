@@ -54,7 +54,8 @@ fn finish(
         let mut value = serde_json::to_value(&output).map_err(|error| {
             AppError::invalid_argument(format!("serialize doctor report: {error}"))
         })?;
-        let resolved = crate::participant::resolve(context)?;
+        let resolved =
+            crate::participant::resolve(context).unwrap_or(crate::participant::Resolved::Unbound);
         let (participant, pending) = match &resolved {
             crate::participant::Resolved::Bound {
                 participant,
@@ -85,7 +86,7 @@ fn finish(
             }
             crate::participant::Resolved::Unbound => {
                 let mut pending = BTreeMap::new();
-                for room in context.load_rooms()?.into_keys() {
+                for room in context.load_rooms().unwrap_or_default().into_keys() {
                     let address = crate::participant::Address {
                         kind: crate::participant::AddressKind::Workspace,
                         name: room,

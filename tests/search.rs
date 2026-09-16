@@ -2,10 +2,9 @@ mod common;
 
 use common::{
     assert_success, from_stderr, from_stdout, register_alpha_beta, write_bad_channel,
-    write_channel_message, write_custom_mail, Sandbox,
+    write_channel_message, Sandbox,
 };
 use post::output::{ErrorEnvelope, SearchOutput};
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,17 +35,6 @@ fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     out
 }
 
-fn mail_envelope(id: &str, from: &str, to: &str, subject: &str) -> serde_json::Value {
-    json!({
-        "id": id,
-        "from": from,
-        "to": to,
-        "kind": "note",
-        "subject": subject,
-        "sent": "2026-08-20 12:00:00 +0000"
-    })
-}
-
 fn channel_fixture(sandbox: &Sandbox, name: &str, members: &str) {
     write_bad_channel(
         sandbox,
@@ -60,126 +48,61 @@ fn channel_fixture(sandbox: &Sandbox, name: &str, members: &str) {
 }
 
 #[test]
-fn search_is_party_visible_deduplicated_and_cursorless() {
+fn search_matches_the_same_participant_eligibility_as_inbox_and_is_cursorless() {
     let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
-    let marker = "VisibilityMarker";
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    let marker = "EligibilityMarker";
 
-    let inbox_id = "20260820-120000-aaaaaa";
-    let read_id = "20260820-120001-bbbbbb";
-    let own_archive_id = "20260820-120002-cccccc";
-    let member_channel_id = "20260820-120000-000001-dddddd";
-    let nonmember_channel_id = "20260820-120000-000002-eeeeee";
-    let third_party_archive_id = "20260820-120003-ffffff";
+    let mut ids = Vec::new();
+    for body in [format!("{marker} first"), format!("{marker} second")] {
+        let sent = sandbox.run_as_participant(
+            &["send", "--to", "workspace:beta", "--body", &body, "--json"],
+            &alpha_participant,
+            &alpha,
+        );
+        assert_success(&sent);
+        let sent: serde_json::Value = from_stdout(&sent);
+        ids.push(sent["envelope"]["id"].as_str().expect("mail id").to_owned());
+    }
 
-    let inbox = sandbox.mail_root.join("beta/inbox");
-    let read = sandbox.mail_root.join("beta/read");
-    fs::create_dir_all(&inbox).expect("inbox");
-    fs::create_dir_all(&read).expect("read");
-    write_custom_mail(
-        &inbox,
-        inbox_id,
-        &mail_envelope(inbox_id, "alpha", "beta", "inbox subject"),
-        marker,
-    );
-    write_custom_mail(
-        &read,
-        read_id,
-        &mail_envelope(read_id, "alpha", "beta", "read subject"),
-        marker,
-    );
+    let consumed =
+        sandbox.run_as_participant(&["read", &ids[0], "--json"], &beta_participant, &beta);
+    assert_success(&consumed);
 
-    let archive = sandbox.mail_root.join("archive");
-    fs::create_dir_all(&archive).expect("archive");
-    write_custom_mail(
-        &archive,
-        own_archive_id,
-        &mail_envelope(own_archive_id, "beta", "alpha", "sent subject"),
-        marker,
-    );
-    write_custom_mail(
-        &archive,
-        third_party_archive_id,
-        &mail_envelope(third_party_archive_id, "alpha", "gamma", "private subject"),
-        marker,
-    );
-
-    channel_fixture(&sandbox, "member", r#"{"alpha":"joined","beta":"joined"}"#);
-    write_channel_message(
-        &sandbox,
-        "member",
-        member_channel_id,
-        "alpha",
-        "channel subject",
-        marker,
-    );
-    channel_fixture(&sandbox, "private", r#"{"alpha":"joined"}"#);
-    write_channel_message(
-        &sandbox,
-        "private",
-        nonmember_channel_id,
-        "alpha",
-        "private channel subject",
-        marker,
-    );
-
-    // A duplicate id in read/ must not create a second result; inbox wins.
-    let duplicate_id = "20260820-120004-111111";
-    write_custom_mail(
-        &inbox,
-        duplicate_id,
-        &mail_envelope(duplicate_id, "alpha", "beta", "inbox wins"),
-        marker,
-    );
-    write_custom_mail(
-        &read,
-        duplicate_id,
-        &mail_envelope(duplicate_id, "alpha", "beta", "read loses"),
-        marker,
-    );
+    let inbox = sandbox.run_as_participant(&["inbox", "--json"], &beta_participant, &beta);
+    assert_success(&inbox);
+    let inbox: serde_json::Value = from_stdout(&inbox);
+    let inbox_ids: Vec<String> = inbox["unread"]
+        .as_array()
+        .expect("inbox unread")
+        .iter()
+        .map(|item| item["id"].as_str().expect("inbox id").to_owned())
+        .collect();
 
     let before = tree_bytes(&sandbox.mail_root);
-    let output = sandbox.run_in(&["search", marker, "--json"], None, &beta);
+    let output = sandbox.run_as_participant(
+        &["search", marker, "--mail", "--json"],
+        &beta_participant,
+        &beta,
+    );
     assert_success(&output);
     let parsed: SearchOutput = from_stdout(&output);
-    let ids: Vec<&str> = parsed
+    let search_ids: Vec<String> = parsed
         .results
         .iter()
-        .map(|result| result.id.as_str())
+        .map(|result| result.id.clone())
         .collect();
-    assert_eq!(parsed.match_kind, "literal_case_insensitive");
-    assert_eq!(parsed.count, 5);
-    assert_eq!(ids.len(), 5);
-    for expected in [
-        inbox_id,
-        read_id,
-        own_archive_id,
-        member_channel_id,
-        duplicate_id,
-    ] {
-        assert!(
-            ids.contains(&expected),
-            "missing visible result {expected}: {ids:?}"
-        );
-    }
-    assert!(!ids.contains(&nonmember_channel_id));
-    assert!(!ids.contains(&third_party_archive_id));
+
+    assert_eq!(search_ids, inbox_ids);
+    assert_eq!(search_ids, vec![ids[1].clone()]);
     assert_eq!(
-        parsed
-            .results
-            .iter()
-            .filter(|result| result.id == duplicate_id)
-            .count(),
-        1
+        parsed.results[0].reply_to_participant,
+        Some(format!("participant:{alpha_participant}"))
     );
-    assert!(parsed.results.iter().all(|result| result.preview == marker));
-    assert!(parsed
-        .results
-        .iter()
-        .any(|result| result.source == "channel"));
-    assert!(parsed.results.iter().any(|result| result.source == "mail"));
+    assert_eq!(parsed.results[0].reply_to_shared, "alpha");
     assert_eq!(before, tree_bytes(&sandbox.mail_root));
-    assert!(!sandbox.mail_root.join("beta/cursors.json").exists());
 }
 
 #[test]

@@ -853,7 +853,7 @@ fn scan_watch_target(
 
     let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
     let pending =
-        crate::cursor_state::routing::provisional_pending_for(context, participant, address)?;
+        crate::cursor_state::routing::provisional_pending_for_quiet(context, participant, address)?;
     for id in pending {
         let path =
             crate::cursor_state::routing::inbox_path(context, address).join(format!("{id}.mail"));
@@ -1219,15 +1219,7 @@ fn target_dirs(context: &Context, room: &str, inbox: &Path) -> BTreeSet<PathBuf>
         .into_iter()
         .map(|(_, dir)| std::fs::canonicalize(&dir).unwrap_or(dir))
         .collect();
-    let inbox_watch = if inbox.is_dir() {
-        inbox.to_path_buf()
-    } else {
-        inbox
-            .parent()
-            .filter(|parent| parent.is_dir())
-            .unwrap_or(inbox)
-            .to_path_buf()
-    };
+    let inbox_watch = existing_watch_anchor(inbox);
     dirs.insert(std::fs::canonicalize(&inbox_watch).unwrap_or(inbox_watch));
     dirs
 }
@@ -1246,8 +1238,22 @@ fn participant_target_dirs(
             dirs.insert(dir);
         }
     }
-    dirs.insert(std::fs::canonicalize(inbox).unwrap_or_else(|_| inbox.to_path_buf()));
+    let inbox_watch = existing_watch_anchor(inbox);
+    dirs.insert(std::fs::canonicalize(&inbox_watch).unwrap_or(inbox_watch));
     dirs
+}
+
+fn existing_watch_anchor(path: &Path) -> PathBuf {
+    let mut candidate = path;
+    loop {
+        if candidate.is_dir() {
+            return candidate.to_path_buf();
+        }
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        candidate = parent;
+    }
 }
 
 /// Each channel's seen-set for `room`, read-only — the startup floor for the
@@ -1377,6 +1383,8 @@ mod tests {
                 InboxItem {
                     id: id.to_owned(),
                     from: from.to_owned(),
+                    reply_to_participant: None,
+                    reply_to_shared: from.to_owned(),
                     kind: MailKind::Note,
                     subject: String::new(),
                     sent: "2026-08-22 00:00:00 +0000".to_owned(),
@@ -1404,6 +1412,8 @@ mod tests {
                 channel: channel.to_owned(),
                 id: id.to_owned(),
                 from: from.to_owned(),
+                reply_to_participant: None,
+                reply_to_shared: from.to_owned(),
                 subject: String::new(),
                 sent: "2026-08-22 00:00:00 +0000".to_owned(),
                 display_name: None,
