@@ -105,7 +105,7 @@ components:
 
 The explainer is a warm, exacting instrument record rather than a terminal costume. A ruled channel field owns the mechanism; editorial serif text owns the argument. Thin rules, event ticks, rail marks, condensed captions, and explicit state words make routing and read state inspectable without turning the page into a dashboard.
 
-The visual density is deliberate but orderly. Chart-stock surfaces and saturated channel inks keep the mechanism legible, while long passages retain a comfortable editorial measure. Every built mark has a job: location, attribution, state, boundary, or evidence. Acceptance is currently pending in every receipt row; the visual system reports that state and does not imply an installed or working runtime.
+The visual density is deliberate but orderly. Chart-stock surfaces and saturated channel inks keep the mechanism legible, while long passages retain a comfortable editorial measure. Every built mark has a job: location, attribution, state, boundary, or evidence. At documentation time (2026-09-16, before acceptance), every receipt row was pending. Live acceptance status belongs solely to `assets/receipts.js`; this design record does not imply an installed or working runtime.
 
 **Key Characteristics:**
 - Warm printed stock with dark record ink and fine functional rulings.
@@ -183,13 +183,13 @@ The form language is rectilinear and instrument-like. Fields, buttons, mode segm
 
 ### Buttons
 - **Shape:** Square, one-pixel outlined controls with compact 0.45rem by 0.8rem padding.
-- **Neutral:** Chart stock with record ink; hover reverses to record ink on chart stock.
+- **Neutral:** Chart stock with record ink; hover reverses to a record-ink background with chart-stock text.
 - **Participant variants:** Transparent chart-stock controls use the participant ink for border and text, then fill with that ink on hover.
 - **Quiet:** Major-rule border and secondary ink for reset or lower-emphasis actions.
 - **Hover / Focus / Active:** Color transitions run for 120ms; active controls move down 1px; keyboard focus uses the two-ring focus treatment. Disabled controls are 40% opaque, dashed, and retain a textual reason in the native title.
 
 ### Mode Control
-- **Style:** A two-segment outlined fieldset. The selected segment uses record ink on chart stock; the unselected segment stays on chart stock and gains deep stock on hover.
+- **Style:** A two-segment outlined fieldset. The selected segment uses a record-ink background with chart-stock text; the unselected segment stays on chart stock and gains deep stock on hover.
 - **Behavior:** Native radio inputs remain the source of truth beneath the visible labels, with an inset focus ring. Below a 44rem field width, both options divide the full row and wrap their labels.
 
 ### Channel Field and Event Marks
@@ -208,7 +208,7 @@ The form language is rectilinear and instrument-like. Fields, buttons, mode segm
 
 ### Evidence Record
 - **Status:** Pending uses ochre, pass uses moss, and fail uses vermilion. The header, opening panel, table tally, caption, and rows derive from the same receipt model.
-- **Current evidence:** All 11 checks are pending, with no run timestamp, commit, or evidence recorded. The page explicitly says it is not evidence that the system works.
+- **Authoring snapshot:** On 2026-09-16 before acceptance, all 11 checks were pending, with no run timestamp, commit, or evidence recorded. Consult `assets/receipts.js` for live status; the page explicitly says pending evidence is not proof that the system works.
 - **Table:** A ruled, semantic three-column table with condensed uppercase headers and a focusable overflow wrapper on narrow screens.
 
 ## Do's and Don'ts

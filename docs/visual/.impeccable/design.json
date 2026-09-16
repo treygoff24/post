@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-16T03:10:51-05:00",
+  "generatedAt": "2026-09-16T03:16:54-05:00",
   "title": "Design System: Post Participants Explainer",
   "extensions": {
     "colorMeta": {
@@ -120,7 +120,7 @@
   ],
   "narrative": {
     "northStar": "The Trace: a printed channel record",
-    "overview": "The explainer is a warm, exacting instrument record rather than a terminal costume. A ruled channel field owns the mechanism; editorial serif text owns the argument. Thin rules, event ticks, rail marks, condensed captions, and explicit state words make routing and read state inspectable without turning the page into a dashboard.\n\nThe visual density is deliberate but orderly. Chart-stock surfaces and saturated channel inks keep the mechanism legible, while long passages retain a comfortable editorial measure. Every built mark has a job: location, attribution, state, boundary, or evidence. Acceptance is currently pending in every receipt row; the visual system reports that state and does not imply an installed or working runtime.",
+    "overview": "The explainer is a warm, exacting instrument record rather than a terminal costume. A ruled channel field owns the mechanism; editorial serif text owns the argument. Thin rules, event ticks, rail marks, condensed captions, and explicit state words make routing and read state inspectable without turning the page into a dashboard.\n\nThe visual density is deliberate but orderly. Chart-stock surfaces and saturated channel inks keep the mechanism legible, while long passages retain a comfortable editorial measure. Every built mark has a job: location, attribution, state, boundary, or evidence. At documentation time (2026-09-16, before acceptance), every receipt row was pending. Live acceptance status belongs solely to `assets/receipts.js`; this design record does not imply an installed or working runtime.",
     "keyCharacteristics": [
       "Warm printed stock with dark record ink and fine functional rulings.",
       "One channel grammar at three scales: working field, inline glyph, and section mark.",
