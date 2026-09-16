@@ -355,6 +355,8 @@
         recompute that receipt. There is one record per routing event, not one
         delivery write per recipient. Every participant in the frozen set then
         reads independently, out of its own seen set.
+        Leaving a lineage or changing workspace affects only new delivery
+        selection; already-frozen deliveries stay assigned and readable.
       </p>
       <p>
         If one of those siblings was the sender, only that sender's notification
@@ -599,8 +601,12 @@
     </div>
     <div class="limit">
       <h3>Withdrawal has a boundary</h3>
-      <p>The supported command durably writes a minimal gap marker before it
-      removes the current local voice and its local revision history. It cannot
+      <p><code>post identity voice withdraw --lineage &lt;name&gt;</code> withdraws
+      only this participant's authored contribution on the selected lineage,
+      without requiring affiliation or rejoining. Without the flag, Post uses
+      the current lineage or a unique authored-lineage fallback; ambiguity
+      refuses rather than guesses. The command durably writes a minimal gap
+      marker before it removes the local voice and revision history. It cannot
       retract text
       already present in another participant's context or in an external backup.
       The record is not tamper-proof: a filesystem operator can edit these files.</p>
@@ -702,7 +708,7 @@
     <div class="cmd"><code>post identity continue &lt;name&gt; [--acknowledge]</code><p>Affiliate this participant. The acknowledgement flag is required whenever terms exist. It routes no mail.</p></div>
     <div class="cmd"><code>post identity leave</code><p>End this participant's current affiliation. It routes no mail and removes nobody else.</p></div>
     <div class="cmd"><code>post identity voice add --body-file &lt;path&gt;</code><p>Add or revise this participant's own voice.</p></div>
-    <div class="cmd"><code>post identity voice withdraw</code><p>Durably leave a minimal gap marker before removing this participant's current voice and local voice history.</p></div>
+    <div class="cmd"><code>post identity voice withdraw [--lineage &lt;name&gt;]</code><p>Withdraw only this participant's authored contribution, even without current affiliation. Omit the flag for current-lineage or unique authored-lineage fallback; ambiguity refuses rather than guesses.</p></div>
     <div class="cmd"><code>post send --to &lt;target&gt;</code><p>Send direct mail to a workspace, lineage, or participant target. A remote target must be an ordinary workspace.</p></div>
     <div class="cmd"><code>post chat &lt;channel&gt;</code><p>Read channel messages; its <code>--send</code> forms send them. Channels are local in the installed bridge.</p></div>
     <div class="cmd"><code>post inbox --adopt</code><p>Route each held lineage message once to the active affiliate cohort present then.</p></div>
