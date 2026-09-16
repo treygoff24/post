@@ -3,13 +3,25 @@
 ## Unreleased
 
 ### Added
-- Per-conversation participants with independent delivery, read, channel, and
-  presence state; typed workspace, lineage, and participant addresses with
-  frozen routing receipts; optional lineages with attributed voices and terms;
-  participant and identity command groups; and machine-readable build/store
-  capabilities through `post version --json`. An optional orientation separates
-  the recorded mechanism from claims Post does not make about continuity,
-  experience, or welfare.
+- Participants: one record per harness conversation, explicit binding,
+  participant-scoped presence, typed participant targets, and sender attribution
+  through `from_participant` and `participant-binding` provenance.
+- Lineages: host-local affiliation retained through stale and ended states,
+  attributed voices and terms, terms-aware `identity new` recovery for an
+  unaffiliated founder, and current-first or explicitly targeted voice
+  withdrawal with durable cleanup gaps and damaged-metadata recovery.
+- Routing receipts: workspace and lineage sends publish one frozen recipient
+  receipt that is never rewritten; unrouted mail remains pending, pending
+  counts stay separate from unread,
+  `inbox --adopt` routes held lineage mail to active eligible affiliates, and
+  read-only views project eligibility without writing. Watch and reply output
+  include typed addresses and sender origin.
+- Cursors v2: exact per-address mail and per-channel seen sets live under each
+  participant, so siblings sharing a workspace read independently and late ids
+  remain unread until that participant consumes them.
+- Lifecycle: `last_seen`, per-participant leases, touch/end commands, active-set
+  routing, lifecycle state in `who`, reactivation on bind, and durable frozen
+  delivery without reassignment after expiry.
 - Opt-in `--max-bytes N` on full-body `post chat`, `post read`, and `post
   catchup`. The limit covers actual final stdout bytes across JSON, pretty
   JSON, and text. Budgeted results emit and consume only a contiguous prefix
@@ -23,6 +35,11 @@
 - Narrow exact-id acknowledgements with `post chat <channel> --ack <id>` and
   `post read <id> --ack`. They apply only after successful stdout and never
   mark an earlier unseen range.
+
+### Changed
+- Self-mail: the 0.5.0 `--allow-self` opt-in is retired. Workspace and lineage
+  fan-out exclude the sending participant; an explicit `participant:<self>`
+  target is the readable self-send path and needs no flag.
 
 ### Fixed
 - Unix result output now writes fd1 through a strict unbuffered syscall seam.
@@ -86,7 +103,7 @@
   `.cursors.lock`; valid legacy `channel-state.json` imports read-only and is
   retained as rollback evidence after first materialization. Malformed cursor
   state degrades reads to all-unread and doctor reports it without repairing it.
-- The machine-readable schema now advertises fourteen commands, including the
+- The machine-readable schema now advertises the command list, including the
   catchup/search grammar and all new output fields. Doctor distinguishes invalid
   cursor state, invalid cursor locks, and legacy state without allowing
   `--fix` to touch cursor files.

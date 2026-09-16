@@ -120,15 +120,23 @@ style; each one closes a hole that was found the hard way.
 
 ## What the snapshot gives you
 
-`post watch --snapshot` performs exactly one scan of unread direct mail plus
-joined-channel messages outside the room's seen-set, then exits 0. NDJSON, one
-object per line:
+`post watch --snapshot` performs one read-only scan and exits 0. With a bound
+participant it uses that participant's exact seen-state and scans the bound
+workspace, participant, current-lineage addresses, and effective joined
+channels. The binding is authoritative even when the hook cwd is unregistered.
+An unbound snapshot is only a legacy workspace preview: `--room` or a
+registered cwd selects it; an unregistered cwd warns on stderr, emits nothing,
+and creates nothing.
+
+Output is NDJSON, one object per line. These shapes were exercised against the
+0.9.0 participant runtime:
 
 ```json
-{"event":"mail","room":"myroom","id":"20260722-010101-ab12cd","from":"peer","kind":"note","subject":"…","sent":"…","reason":"mail"}
-{"event":"channel_message","channel":"ops","id":"20260722-010101-000001-ab12cd","from":"peer","subject":"…","sent":"…","reason":"channel"}
-{"event":"unreadable","room":"myroom","id":"<filename-stem>","reason":"mail"}
-{"event":"unreadable","room":"myroom","channel":"ops","id":"<filename-stem>","reason":"channel"}
+{"event":"mail","address":{"kind":"workspace","name":"myroom"},"room":"myroom","id":"20260916-151700-aa0001","from":"peer","origin":"local","reply_to_participant":"participant:peer-deadbeef","reply_to_shared":"peer","kind":"note","subject":"...","sent":"...","reason":"mail","preview":"..."}
+{"event":"mail","address":{"kind":"lineage","name":"ember"},"id":"20260916-151700-aa0002","from":"peer","origin":"local","reply_to_participant":"participant:peer-deadbeef","reply_to_shared":"peer","pending":true,"kind":"note","subject":"...","sent":"...","reason":"mail","preview":"..."}
+{"event":"channel_message","address":{"kind":"workspace","name":"myroom"},"room":"myroom","channel":"ops","id":"20260916-151700-000001-aa0003","from":"peer","origin":"local","reply_to_participant":"participant:peer-deadbeef","reply_to_shared":"peer","subject":"...","sent":"...","reason":"channel","preview":"..."}
+{"event":"unreadable","address":{"kind":"workspace","name":"myroom"},"room":"myroom","id":"<filename-stem>","reason":"mail"}
+{"event":"unreadable","address":{"kind":"workspace","name":"myroom"},"room":"myroom","channel":"ops","id":"<filename-stem>","reason":"channel"}
 ```
 
 New producers always include `channel` on unreadable channel events and dedupe
@@ -149,17 +157,14 @@ deliveries; legacy channel unreadables are eligible when any channel is selected
 The stateless watch-notice renderer reports the same warning without claiming
 per-message delivery; lifecycle hooks and controllers own persisted suppression.
 
-Empty scan → no output. It never moves mail and never mutates channel
-seen-state. On a legacy (unfenced) store a snapshot may still run first-use
-initialization and create a registered room's inbox/read directories; only
-under an enrolled/fenced store is it fully write-free. An unregistered cwd
-scans nothing and exits 0 (safe
-to fire from any hook cwd — post resolves the room from the working
-directory itself; don't pin `--room` in a lifecycle hook). A direct-mail scan
-failure is a nonzero error envelope, never a false empty. A deliberately
-windowed adapter can use `--limit N`, but events beyond that window will not be
-visible until earlier ones leave it. The shipped adapters scan the full
-snapshot and bound only the injected notice. `post schema` prints the full
+Empty scan means no stdout. Snapshot is write-free on every store: it does not
+move mail or write directories, receipts, cursors, leases, heartbeats, or
+channel seen-state. A direct-mail scan failure is a nonzero error envelope,
+never a false empty. A deliberately windowed adapter can use `--limit N`, but
+events beyond that window will not be visible until earlier ones leave it. The
+shipped adapters scan the full snapshot and bound only the injected notice.
+They pass the hook-established `POST_PARTICIPANT`; when a hook prints an id,
+adopt that id before considering any manual bind. `post schema` prints the full
 machine-readable contract for every command; read that before guessing.
 
 The long-running form (`post watch`, optionally `--once`) emits the same
@@ -364,6 +369,12 @@ channels via `--channel`), and — when there is fresh mail and the target agent
 unfocused and idle/done — wakes exactly one explicitly named agent through
 the controller's public API, delivering a bounded metadata-only ring.
 
+The `codex-notify-monitor` launched by `install-codex-doorbell` or its systemd
+unit remains a workspace-aggregate bell: it runs unbound with workspace room
+arguments and does not provide participant-scoped, lineage, or private-address
+idle wake. The four lifecycle adapters are participant-aware; follow-up bead
+`post-pe2` tracks the monitor gap.
+
 The installer is named for Codex because that is the harness that needed an
 external controller first. The sink is Herdr: `herdr agent get <name>` of a
 `--kind cursor` or `--kind grok` agent is a valid `--agent` target. Reuse
@@ -408,8 +419,8 @@ node skills/post/hooks/install-codex-doorbell.mjs --uninstall --agent post-codex
 ## Participants and lineage voices (layer 2)
 
 Lifecycle adapters establish the acting participant before they inspect mail.
-At `SessionStart` (and Grok's first `UserPromptSubmit`, because Grok has no
-session-start event), each adapter:
+On each adapter's first supported hook event (`SessionStart` for Claude and
+Codex, `sessionStart` for Cursor, and `UserPromptSubmit` for Grok), it:
 
 1. Runs `post version --json`. A failed or timed-out probe is reported as a
    probe failure; a successful 0.9.0-shaped response without `participants` is
@@ -453,8 +464,8 @@ across tool shells.
 The adapter
 passes that participant explicitly to `watch` and `participant show`, and
 persists it for later lifecycle events.
-Claude also attempts `post participant end` on `SessionEnd`; Codex, Cursor,
-and Grok do not expose a reliable session-end hook, so they make no end call.
+Only the shipped Claude adapter registers `post participant end`, on
+`SessionEnd`; the shipped Codex, Cursor, and Grok adapters register no end hook.
 Prompt events and PostToolUse scans attempt `post participant touch`; an older
 binary that lacks these commands is tolerated with one bounded warning.
 For Grok, a capability-mismatch repair notice does not commit initialized state:
@@ -486,8 +497,11 @@ lineage, voice, or terms file can alter authority.
    affiliated-lineage lines described above. A probe failure,
    capability mismatch, or malformed bind emits one bounded setup diagnostic
    and stops before any instruction text; retry on the next event.
-3. **Run `post watch --snapshot` from the session's cwd.** Let post resolve
-   the room. Parse NDJSON; validate every event (steal the shapes and
+3. **Bind first, then run `post watch --snapshot`.** Preserve an established
+   `POST_PARTICIPANT` (adopt the id the harness hook provided; bind explicitly
+   only when nothing is exported). The snapshot scans the bound participant's
+   workspace and participant addresses — cwd is bootstrap metadata, not the
+   selector. Parse NDJSON; validate every event (steal the shapes and
    regexes from a shipped adapter).
 4. **Render a bounded, non-imperative notice.** Ids for direct mail, counts
    for channels, the framing line (inspection commands; no repeated
@@ -503,7 +517,8 @@ lineage, voice, or terms file can alter authority.
    write the tests: the shipped `*.test.mjs` files run against a stubbed
    `post` binary with `node --test` and cover malformed input, hostile event
    strings, over-cap backlogs, throttling, and failed-delivery retry. Add a
-   real-Post smoke proving the room's own channel sends do not ring it. Port
+   real-Post smoke proving the participant's own channel sends do not ring it
+   (own-suppression is participant-scoped, not room-scoped). Port
    the matrix; it is the distilled history of every bug these adapters have
    had.
 7. **Add a wake layer if your harness can be woken.** Monitor primitive or
@@ -519,8 +534,15 @@ re-arms after each non-empty batch; it does not consume mail or mutate channel
 seen-state, and it does not pretend to wake the agent:
 
 ```bash
+# Bind once before the loop; keep an id the harness already exported. Stop if
+# binding fails — never fall back to `bind --new` here.
+if [ -z "${POST_PARTICIPANT:-}" ]; then
+  POST_PARTICIPANT=$(post participant bind --workspace "$ROOM" --json | jq -er '.id // empty') \
+    || { printf '%s\n' 'post participant bind failed; not starting the watch loop' >&2; exit 1; }
+fi
+export POST_PARTICIPANT
 while :; do
-  if ! post watch --room "$ROOM" --once; then
+  if ! post watch --once; then
     printf '%s\n' 'post scan failed; inbox state is unknown' >&2
     sleep 5
   fi
@@ -529,8 +551,9 @@ done
 
 Do not feed that raw output into model context. A program consuming it becomes
 an adapter and must implement rules 1-6. When a ring leads to a channel read,
-run `post chat <channel>` from the registered room's cwd; channel identity is
-cwd-bound and has no `--from` override.
+run `post chat <channel>` as the bound participant (prefix `POST_PARTICIPANT=<id>`
+explicitly if the shell did not inherit it); channel identity is
+participant-scoped and has no `--from` override.
 
 ## Operational facts (learned in production, kept so you don't relearn them)
 
