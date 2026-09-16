@@ -24,6 +24,8 @@ struct ShowOutput {
     voices: Vec<VoiceIndex>,
     withdrawn_voices: usize,
     terms: TermsView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rendered_voices: Option<Vec<String>>,
 }
@@ -65,6 +67,8 @@ struct MutationOutput {
     terms: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terms_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -101,6 +105,7 @@ pub(super) fn run(
                     revisions: None,
                     terms: None,
                     terms_digest: None,
+                    hint: None,
                 },
                 pretty,
             )
@@ -131,6 +136,7 @@ pub(super) fn run(
                             revisions: None,
                             terms: framed,
                             terms_digest: digest,
+                            hint: None,
                         },
                         pretty,
                     )
@@ -155,6 +161,7 @@ pub(super) fn run(
                     revisions: None,
                     terms: None,
                     terms_digest: None,
+                    hint: None,
                 },
                 pretty,
             )
@@ -183,23 +190,26 @@ pub(super) fn run(
                             revisions: Some(revisions),
                             terms: None,
                             terms_digest: None,
+                            hint: None,
                         },
                         pretty,
                     )
                 }
                 IdentityVoiceCommand::Withdraw => {
                     let mutation = lineage_store::withdraw_voice(context, &acting, &author)?;
+                    let change = mutation.value;
                     receipt(
                         MutationOutput {
                             ok: true,
                             event: "voice_withdraw",
                             participant: author,
-                            lineage: Some(mutation.value.lineage),
-                            changed: true,
+                            lineage: Some(change.lineage),
+                            changed: mutation.changed,
                             warnings: mutation.warnings,
                             revisions: None,
                             terms: None,
                             terms_digest: None,
+                            hint: change.hint,
                         },
                         pretty,
                     )
@@ -222,6 +232,7 @@ pub(super) fn run(
                             revisions: None,
                             terms: None,
                             terms_digest: None,
+                            hint: None,
                         },
                         pretty,
                     )
@@ -258,6 +269,7 @@ fn show(context: &Context, name: &str, voices: bool, pretty: bool) -> AppResult<
             voices: view.voices,
             withdrawn_voices: view.withdrawn_voices,
             terms: view.terms,
+            warnings: view.warnings,
             rendered_voices,
         },
         pretty,

@@ -57,6 +57,7 @@ pub(crate) struct LineageView {
     pub voices: Vec<VoiceIndex>,
     pub withdrawn_voices: usize,
     pub terms: TermsView,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -91,6 +92,7 @@ pub(crate) struct Mutation<T> {
 pub(crate) struct VoiceChange {
     pub lineage: String,
     pub revisions: Option<usize>,
+    pub hint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -119,6 +121,18 @@ struct GapRecord {
 struct VoiceCatalog {
     voices: Vec<VoiceIndex>,
     withdrawn_voices: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+struct GapCleanup {
+    completed_pending: bool,
+}
+
+#[derive(Clone, Copy)]
+enum InvalidGapPolicy {
+    Fail,
+    WarnAndHide,
 }
 
 pub(crate) fn list(context: &Context) -> AppResult<LineageList> {
@@ -160,8 +174,30 @@ pub(crate) fn list(context: &Context) -> AppResult<LineageList> {
                 continue;
             }
         };
-        let affiliates = lineage.members(context)?.len();
-        let voices = voice_catalog(&lineage)?.voices.len();
+        let affiliates = match lineage.members(context) {
+            Ok(members) => members.len(),
+            Err(error) => {
+                warnings.push(format!(
+                    "lineage '{name}' was skipped: members could not be read: {}",
+                    error.message
+                ));
+                continue;
+            }
+        };
+        let voices = match voice_catalog(&lineage, InvalidGapPolicy::Fail) {
+            Ok(catalog) => catalog.voices.len(),
+            Err(error) => {
+                warnings.push(format!(
+                    "lineage '{name}' was skipped: voices could not be read: {}",
+                    error
+                        .details
+                        .reason
+                        .as_deref()
+                        .unwrap_or("invalid voice index")
+                ));
+                continue;
+            }
+        };
         summaries.push(LineageSummary {
             name: lineage.name.clone(),
             affiliates,
@@ -179,7 +215,7 @@ pub(crate) fn list(context: &Context) -> AppResult<LineageList> {
 pub(crate) fn view(context: &Context, name: &str) -> AppResult<LineageView> {
     let lineage = require_lineage(context, name)?;
     let members = lineage.members(context)?;
-    let catalog = voice_catalog(&lineage)?;
+    let catalog = voice_catalog(&lineage, InvalidGapPolicy::WarnAndHide)?;
     let terms = terms_document(&lineage)?;
     Ok(LineageView {
         lineage,
@@ -191,6 +227,7 @@ pub(crate) fn view(context: &Context, name: &str) -> AppResult<LineageView> {
             text: terms.as_ref().map(|terms| terms.text.clone()),
             digest: terms.map(|terms| terms.digest),
         },
+        warnings: catalog.warnings,
     })
 }
 
@@ -226,12 +263,26 @@ pub(crate) fn create(
     let _lock = participant::lock(context)?;
     let mut acting = current_actor(context, acting)?;
     if let Some(existing) = lineage::load(context, name)? {
-        if existing.founder == acting.id && acting.lineage.as_deref() == Some(name) {
-            return Ok(Mutation {
-                value: (existing, acting),
-                changed: false,
-                warnings: Vec::new(),
-            });
+        if existing.founder == acting.id {
+            if acting.lineage.as_deref() == Some(name) {
+                return Ok(Mutation {
+                    value: (existing, acting),
+                    changed: false,
+                    warnings: Vec::new(),
+                });
+            }
+            if acting.lineage.is_none() {
+                let (_, at) = local_timestamp()?;
+                acting.lineage = Some(name.to_owned());
+                acting.lineage_since = Some(at.clone());
+                write_participant(&acting)?;
+                let warnings = append_warning(&existing.dir, &at, "new", &acting.id, None);
+                return Ok(Mutation {
+                    value: (existing, acting),
+                    changed: true,
+                    warnings,
+                });
+            }
         }
         return Err(
             AppError::invalid_argument(format!("lineage '{name}' already exists"))
@@ -421,6 +472,7 @@ pub(crate) fn add_voice(
         value: VoiceChange {
             lineage: lineage.name,
             revisions: Some(revisions),
+            hint: None,
         },
         changed: true,
         warnings,
@@ -436,9 +488,48 @@ pub(crate) fn withdraw_voice(
     let _lock = participant::lock(context)?;
     let acting = current_actor(context, acting)?;
     ensure_own_voice(&acting, author)?;
-    let (name, dir) = resolve_voice_lineage(context, &acting, author)?;
+    if let Some(name) = &acting.lineage {
+        let dir = context.root.join(LINEAGES_DIR).join(name);
+        let voices = dir.join(VOICES_DIR);
+        if let Some(gap) = read_optional_gap(&voices, author)? {
+            if gap.cleanup_pending {
+                let cleanup = finish_pending_cleanup(&voices, author)?;
+                debug_assert!(cleanup.completed_pending);
+                return finish_recovered_withdrawal(&acting, name, &dir);
+            }
+            if voices.join(format!("{author}.md")).is_file() {
+                return withdraw_current_voice(&acting, name, &dir, author, Some(gap));
+            }
+            return Ok(Mutation {
+                value: VoiceChange {
+                    lineage: name.clone(),
+                    revisions: None,
+                    hint: Some(
+                        "no current voice here; to withdraw a voice on another lineage, continue that lineage first"
+                            .to_owned(),
+                    ),
+                },
+                changed: false,
+                warnings: Vec::new(),
+            });
+        }
+        if voices.join(format!("{author}.md")).is_file() {
+            return withdraw_current_voice(&acting, name, &dir, author, None);
+        }
+    }
+
+    let (name, dir) = resolve_voice_lineage(context, author)?;
+    withdraw_current_voice(&acting, &name, &dir, author, None)
+}
+
+fn withdraw_current_voice(
+    acting: &Participant,
+    name: &str,
+    dir: &Path,
+    author: &str,
+    prior_gap: Option<GapRecord>,
+) -> AppResult<Mutation<VoiceChange>> {
     let voices = dir.join(VOICES_DIR);
-    let prior_gap = finish_pending_cleanup(&voices, author)?;
     let current = voices.join(format!("{author}.md"));
     if !current.is_file() {
         return Err(no_voice(author));
@@ -462,11 +553,30 @@ pub(crate) fn withdraw_voice(
     cleanup_voice_files(&voices, author)?;
     gap.cleanup_pending = false;
     write_json(&gap_path, &gap, "finish voice withdrawal cleanup")?;
-    let warnings = append_warning(&dir, &at, "voice_withdraw", &acting.id, None);
+    let warnings = append_warning(dir, &at, "voice_withdraw", &acting.id, None);
     Ok(Mutation {
         value: VoiceChange {
-            lineage: name,
+            lineage: name.to_owned(),
             revisions: None,
+            hint: None,
+        },
+        changed: true,
+        warnings,
+    })
+}
+
+fn finish_recovered_withdrawal(
+    acting: &Participant,
+    name: &str,
+    dir: &Path,
+) -> AppResult<Mutation<VoiceChange>> {
+    let (_, at) = local_timestamp()?;
+    let warnings = append_warning(dir, &at, "voice_withdraw", &acting.id, None);
+    Ok(Mutation {
+        value: VoiceChange {
+            lineage: name.to_owned(),
+            revisions: None,
+            hint: None,
         },
         changed: true,
         warnings,
@@ -491,6 +601,7 @@ pub(crate) fn set_terms(
         value: VoiceChange {
             lineage: lineage.name,
             revisions: None,
+            hint: None,
         },
         changed: true,
         warnings,
@@ -589,18 +700,8 @@ fn require_lineage(context: &Context, name: &str) -> AppResult<Lineage> {
 
 fn resolve_voice_lineage(
     context: &Context,
-    acting: &Participant,
     author: &str,
 ) -> AppResult<(String, std::path::PathBuf)> {
-    if let Some(name) = &acting.lineage {
-        let dir = context.root.join(LINEAGES_DIR).join(name);
-        let voices = dir.join(VOICES_DIR);
-        finish_pending_cleanup(&voices, author)?;
-        if voice_is_current(&voices, author)? {
-            return Ok((name.clone(), dir));
-        }
-    }
-
     let root = context.root.join(LINEAGES_DIR);
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -621,7 +722,6 @@ fn resolve_voice_lineage(
             continue;
         };
         let voices = entry.path().join(VOICES_DIR);
-        finish_pending_cleanup(&voices, author)?;
         if voice_is_current(&voices, author)? {
             matches.push((name, entry.path()));
         }
@@ -660,19 +760,31 @@ fn voice_is_current(voices: &Path, author: &str) -> AppResult<bool> {
     Ok(!gap.is_file() || !read_gap(&gap)?.cleanup_pending)
 }
 
-fn finish_pending_cleanup(voices: &Path, author: &str) -> AppResult<Option<GapRecord>> {
+fn read_optional_gap(voices: &Path, author: &str) -> AppResult<Option<GapRecord>> {
     let path = voices.join(format!("{author}.gap"));
-    let mut gap = match fs::metadata(&path) {
+    let gap = match fs::metadata(&path) {
         Ok(_) => read_gap(&path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(AppError::io("inspect voice withdrawal gap", &path, error)),
     };
+    Ok(Some(gap))
+}
+
+fn finish_pending_cleanup(voices: &Path, author: &str) -> AppResult<GapCleanup> {
+    let path = voices.join(format!("{author}.gap"));
+    let Some(mut gap) = read_optional_gap(voices, author)? else {
+        return Ok(GapCleanup {
+            completed_pending: false,
+        });
+    };
+    let mut completed_pending = false;
     if gap.cleanup_pending {
         cleanup_voice_files(voices, author)?;
         gap.cleanup_pending = false;
         write_json(&path, &gap, "finish pending voice withdrawal cleanup")?;
+        completed_pending = true;
     }
-    Ok(Some(gap))
+    Ok(GapCleanup { completed_pending })
 }
 
 fn cleanup_voice_files(voices: &Path, author: &str) -> AppResult<()> {
@@ -703,7 +815,10 @@ fn cleanup_voice_files(voices: &Path, author: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn voice_catalog(lineage: &Lineage) -> AppResult<VoiceCatalog> {
+fn voice_catalog(
+    lineage: &Lineage,
+    invalid_gap_policy: InvalidGapPolicy,
+) -> AppResult<VoiceCatalog> {
     let root = lineage.dir.join(VOICES_DIR);
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -711,6 +826,7 @@ fn voice_catalog(lineage: &Lineage) -> AppResult<VoiceCatalog> {
             return Ok(VoiceCatalog {
                 voices: Vec::new(),
                 withdrawn_voices: 0,
+                warnings: Vec::new(),
             })
         }
         Err(error) => return Err(AppError::io("list lineage voices", &root, error)),
@@ -718,6 +834,8 @@ fn voice_catalog(lineage: &Lineage) -> AppResult<VoiceCatalog> {
     let mut current = BTreeSet::new();
     let mut gaps = BTreeMap::new();
     let mut histories = BTreeMap::new();
+    let mut invalid_authors = BTreeSet::new();
+    let mut warnings = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| AppError::io("read voice entry", &root, error))?;
         let file_type = entry
@@ -730,7 +848,25 @@ fn voice_catalog(lineage: &Lineage) -> AppResult<VoiceCatalog> {
             if let Some(author) = name.strip_suffix(".md") {
                 current.insert(author.to_owned());
             } else if let Some(author) = name.strip_suffix(".gap") {
-                gaps.insert(author.to_owned(), read_gap(&entry.path())?);
+                match read_gap(&entry.path()) {
+                    Ok(gap) => {
+                        gaps.insert(author.to_owned(), gap);
+                    }
+                    Err(error) => match invalid_gap_policy {
+                        InvalidGapPolicy::Fail => return Err(error),
+                        InvalidGapPolicy::WarnAndHide => {
+                            invalid_authors.insert(author.to_owned());
+                            warnings.push(format!(
+                                "one voice withdrawal marker is invalid and its content was hidden: {}",
+                                error
+                                    .details
+                                    .reason
+                                    .as_deref()
+                                    .unwrap_or("invalid gap marker")
+                            ));
+                        }
+                    },
+                }
             }
         } else if file_type.is_dir() {
             if let Some(author) = name.strip_suffix(".history") {
@@ -741,7 +877,10 @@ fn voice_catalog(lineage: &Lineage) -> AppResult<VoiceCatalog> {
     let withdrawn_voices = gaps.values().map(|gap| gap.withdrawals).sum();
     let voices = current
         .into_iter()
-        .filter(|participant| !gaps.get(participant).is_some_and(|gap| gap.cleanup_pending))
+        .filter(|participant| {
+            !invalid_authors.contains(participant)
+                && !gaps.get(participant).is_some_and(|gap| gap.cleanup_pending)
+        })
         .map(|participant| VoiceIndex {
             revisions: histories.get(&participant).copied().unwrap_or(0),
             participant,
@@ -750,6 +889,7 @@ fn voice_catalog(lineage: &Lineage) -> AppResult<VoiceCatalog> {
     Ok(VoiceCatalog {
         voices,
         withdrawn_voices,
+        warnings,
     })
 }
 
@@ -999,21 +1139,37 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> AppResult<()> {
     if length == 0 {
         return Ok(());
     }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| AppError::io("seek lineage journal", path, error))?;
-    let mut bytes = Vec::with_capacity(length as usize);
-    file.read_to_end(&mut bytes)
+    file.seek(SeekFrom::End(-1))
+        .map_err(|error| AppError::io("seek lineage journal tail", path, error))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)
         .map_err(|error| AppError::io("read lineage journal tail", path, error))?;
-    if bytes.last() == Some(&b'\n') {
+    if last[0] == b'\n' {
         return Ok(());
     }
-    let repaired_length = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    file.set_len(repaired_length as u64)
-        .map_err(|error| AppError::io("truncate torn lineage journal tail", path, error))
+
+    const CHUNK: u64 = 8 * 1024;
+    let mut end = length;
+    let mut buffer = [0_u8; CHUNK as usize];
+    loop {
+        let start = end.saturating_sub(CHUNK);
+        let size = (end - start) as usize;
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| AppError::io("seek lineage journal tail", path, error))?;
+        file.read_exact(&mut buffer[..size])
+            .map_err(|error| AppError::io("scan lineage journal tail", path, error))?;
+        if let Some(index) = buffer[..size].iter().rposition(|byte| *byte == b'\n') {
+            return file
+                .set_len(start + index as u64 + 1)
+                .map_err(|error| AppError::io("truncate torn lineage journal tail", path, error));
+        }
+        if start == 0 {
+            return file
+                .set_len(0)
+                .map_err(|error| AppError::io("truncate torn lineage journal tail", path, error));
+        }
+        end = start;
+    }
 }
 
 fn remove_file_if_exists(path: &Path, operation: &str) -> AppResult<()> {

@@ -8,7 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
 fn run_as(sandbox: &Sandbox, participant: &str, args: &[&str]) -> Output {
@@ -22,6 +22,56 @@ fn run_as(sandbox: &Sandbox, participant: &str, args: &[&str]) -> Output {
 
 fn write_body(path: &Path, body: &[u8]) {
     fs::write(path, body).expect("write body fixture");
+}
+
+fn seed_two_lineage_voices(sandbox: &Sandbox, withdraw_ember: bool) -> (String, PathBuf, PathBuf) {
+    let actor = sandbox.test_participant("claude-space");
+    let other = sandbox.test_participant("pact");
+    let body = sandbox.path.join("voice.md");
+    assert_success(&run_as(sandbox, &actor, &["identity", "new", "ember"]));
+    write_body(&body, b"ember voice\n");
+    assert_success(&run_as(
+        sandbox,
+        &actor,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    if withdraw_ember {
+        assert_success(&run_as(sandbox, &actor, &["identity", "voice", "withdraw"]));
+    }
+    assert_success(&run_as(sandbox, &actor, &["identity", "leave"]));
+
+    assert_success(&run_as(sandbox, &other, &["identity", "new", "ash"]));
+    assert_success(&run_as(sandbox, &actor, &["identity", "continue", "ash"]));
+    write_body(&body, b"ash voice\n");
+    assert_success(&run_as(
+        sandbox,
+        &actor,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    assert_success(&run_as(sandbox, &actor, &["identity", "leave"]));
+    assert_success(&run_as(sandbox, &actor, &["identity", "continue", "ember"]));
+
+    let ember_voice = sandbox
+        .mail_root
+        .join("lineages/ember/voices")
+        .join(format!("{actor}.md"));
+    let ash_voice = sandbox
+        .mail_root
+        .join("lineages/ash/voices")
+        .join(format!("{actor}.md"));
+    (actor, ember_voice, ash_voice)
 }
 
 #[test]
@@ -611,17 +661,24 @@ fn lineage_pending_withdrawal_hides_stale_content_and_readd_preserves_gap() {
     );
 
     let pending_withdraw = run_as(&sandbox, &actor, &["identity", "voice", "withdraw"]);
-    assert!(!pending_withdraw.status.success());
-    assert_eq!(
-        from_stderr::<ErrorEnvelope>(&pending_withdraw).error.code,
-        "not_found"
-    );
+    assert_success(&pending_withdraw);
+    let pending_receipt: Value = from_stdout(&pending_withdraw);
+    assert_eq!(pending_receipt["changed"], true);
+    assert!(pending_receipt.get("hint").is_none());
     assert!(!current.exists());
     assert!(!history.exists());
     assert!(!temporary.exists());
     let repaired_gap: Value =
         serde_json::from_slice(&fs::read(&gap).expect("repaired gap")).expect("repaired gap JSON");
     assert_eq!(repaired_gap["cleanup_pending"], false);
+    let history_jsonl = fs::read_to_string(sandbox.mail_root.join("lineages/ember/history.jsonl"))
+        .expect("lineage journal");
+    assert_eq!(
+        history_jsonl
+            .matches("\"event\":\"voice_withdraw\"")
+            .count(),
+        1
+    );
 
     write_body(&body, b"new voice\n");
     assert_success(&run_as(
@@ -914,6 +971,159 @@ fn lineage_withdraw_after_leave_resolves_one_voice_and_refuses_ambiguity() {
     assert_eq!(error.error.code, "invalid_argument");
     assert!(error.error.message.contains("ash"));
     assert!(error.error.message.contains("ember"));
+}
+
+#[test]
+fn lineage_withdraw_retry_on_current_gap_does_not_delete_another_lineage_voice() {
+    let sandbox = Sandbox::new();
+    let (actor, ember_voice, ash_voice) = seed_two_lineage_voices(&sandbox, true);
+    assert!(!ember_voice.exists());
+    assert_eq!(
+        fs::read_to_string(&ash_voice).expect("ash voice before retry"),
+        "ash voice\n"
+    );
+
+    for _ in 0..2 {
+        let retry = run_as(&sandbox, &actor, &["identity", "voice", "withdraw"]);
+        assert_success(&retry);
+        let receipt: Value = from_stdout(&retry);
+        assert_eq!(receipt["changed"], false);
+        assert_eq!(
+            receipt["hint"],
+            "no current voice here; to withdraw a voice on another lineage, continue that lineage first"
+        );
+        assert_eq!(
+            fs::read_to_string(&ash_voice).expect("ash voice survives retry"),
+            "ash voice\n"
+        );
+    }
+}
+
+#[test]
+fn lineage_pending_withdraw_retry_finishes_current_lineage_without_falling_through() {
+    let sandbox = Sandbox::new();
+    let (actor, ember_voice, ash_voice) = seed_two_lineage_voices(&sandbox, false);
+    let voices = ember_voice.parent().expect("ember voices");
+    let gap = voices.join(format!("{actor}.gap"));
+    fs::write(
+        &gap,
+        "{\"version\":1,\"withdrawals\":1,\"cleanup_pending\":true}\n",
+    )
+    .expect("pending ember gap");
+
+    let retry = run_as(&sandbox, &actor, &["identity", "voice", "withdraw"]);
+    assert_success(&retry);
+    let receipt: Value = from_stdout(&retry);
+    assert_eq!(receipt["changed"], true);
+    assert!(receipt.get("hint").is_none());
+    assert!(!ember_voice.exists());
+    assert_eq!(
+        fs::read_to_string(&ash_voice).expect("ash voice survives pending retry"),
+        "ash voice\n"
+    );
+    let gap_json: Value = serde_json::from_slice(&fs::read(&gap).expect("finished ember gap"))
+        .expect("finished ember gap JSON");
+    assert_eq!(gap_json["cleanup_pending"], false);
+    let journal = fs::read_to_string(sandbox.mail_root.join("lineages/ember/history.jsonl"))
+        .expect("ember journal");
+    assert_eq!(journal.matches("\"event\":\"voice_withdraw\"").count(), 1);
+}
+
+#[test]
+fn lineage_bad_gap_skips_list_entry_but_show_warns_and_renders_healthy_voices() {
+    let sandbox = Sandbox::new();
+    let good = sandbox.test_participant("claude-space");
+    let bad = sandbox.test_participant("pact");
+    let healthy = sandbox.test_participant("agent-memory");
+    let body = sandbox.path.join("voice.md");
+    assert_success(&run_as(&sandbox, &good, &["identity", "new", "ember"]));
+    assert_success(&run_as(&sandbox, &bad, &["identity", "new", "ash"]));
+    write_body(&body, b"voice hidden by bad gap\n");
+    assert_success(&run_as(
+        &sandbox,
+        &bad,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    assert_success(&run_as(
+        &sandbox,
+        &healthy,
+        &["identity", "continue", "ash"],
+    ));
+    write_body(&body, b"healthy voice remains visible\n");
+    assert_success(&run_as(
+        &sandbox,
+        &healthy,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    let voices = sandbox.mail_root.join("lineages/ash/voices");
+    fs::write(voices.join(format!("{bad}.gap")), "not JSON\n").expect("corrupt gap");
+    fs::write(
+        voices.join("ghost.gap"),
+        "{\"version\":2,\"withdrawals\":1,\"cleanup_pending\":false}\n",
+    )
+    .expect("unsupported gap version");
+
+    let listed = run_as(&sandbox, &good, &["identity", "list"]);
+    assert_success(&listed);
+    let listed: Value = from_stdout(&listed);
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["lineages"][0]["name"], "ember");
+    assert_eq!(
+        listed["warnings"].as_array().expect("list warnings").len(),
+        1
+    );
+
+    let shown = run_as(&sandbox, &good, &["identity", "show", "ash", "--voices"]);
+    assert_success(&shown);
+    let shown_text = stdout(&shown);
+    assert!(!shown_text.contains("voice hidden by bad gap"));
+    assert!(shown_text.contains("healthy voice remains visible"));
+    let shown: Value = from_stdout(&shown);
+    assert_eq!(shown["voices"].as_array().expect("healthy voices").len(), 1);
+    assert_eq!(shown["voices"][0]["participant"], healthy);
+    assert_eq!(
+        shown["warnings"].as_array().expect("show warnings").len(),
+        2
+    );
+    assert!(!shown["warnings"].to_string().contains(&bad));
+}
+
+#[test]
+fn lineage_new_repair_finishes_founder_affiliation_after_interrupted_create() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let dir = sandbox.mail_root.join("lineages/ember");
+    fs::create_dir_all(dir.join("voices")).expect("interrupted lineage directory");
+    fs::write(
+        dir.join("lineage.json"),
+        format!(
+            "{{\"version\":1,\"name\":\"ember\",\"created\":\"now\",\"founder\":\"{actor}\",\"host\":\"test\"}}\n"
+        ),
+    )
+    .expect("interrupted lineage record");
+    assert!(sandbox.read_participant(&actor)["lineage"].is_null());
+
+    let repaired = run_as(&sandbox, &actor, &["identity", "new", "ember"]);
+    assert_success(&repaired);
+    let receipt: Value = from_stdout(&repaired);
+    assert_eq!(receipt["changed"], true);
+    assert_eq!(receipt["lineage"], "ember");
+    assert_eq!(sandbox.read_participant(&actor)["lineage"], "ember");
+    assert!(sandbox.read_participant(&actor)["lineage_since"].is_string());
+    let journal = fs::read_to_string(dir.join("history.jsonl")).expect("repaired journal");
+    assert_eq!(journal.matches("\"event\":\"new\"").count(), 1);
 }
 
 #[test]
