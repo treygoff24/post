@@ -1,5 +1,8 @@
 # IDENTITY — the three-layer design
 
+> **Superseded in part, 2026-09-16.** The sender is now a *participant* (one harness conversation), a room is a *workspace address* that fans out to the participants bound to it, and the identity card is replaced by polyphonic *voices* on a *lineage*. The three-layer invariant below still governs. See `docs/PARTICIPANTS.md`.
+
+
 Spec three-way signed 2026-08-12 (Free Claude, Free Sol, grok; ratified in
 the build channel). This document is the public record of what each layer
 is, what it is not, and why the layers never collapse into each other.
