@@ -1699,6 +1699,65 @@ fn participant_lifecycle_touch_end_and_bind_reactivation() {
 }
 
 #[test]
+fn participant_touch_preserves_recorded_lease_unless_env_explicitly_overrides_it() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("lease-preservation", &alpha, Some("alpha"));
+    let id = participant_id(&bound).to_owned();
+    edit_participant(&sandbox, &id, |record| {
+        record.insert(
+            "last_seen".to_owned(),
+            Value::String("2020-01-01T00:00:00Z".to_owned()),
+        );
+        record.insert("lease_hours".to_owned(), Value::from(7));
+    });
+
+    let preserved = sandbox.run_as_participant(&["participant", "touch", "--json"], &id, &alpha);
+    assert_success(&preserved);
+    let preserved: Value = from_stdout(&preserved);
+    assert_eq!(preserved["participant"]["lease_hours"], 7);
+    assert_ne!(
+        preserved["participant"]["last_seen"],
+        "2020-01-01T00:00:00Z"
+    );
+
+    let overridden = sandbox.run_in_env(
+        &["participant", "touch", "--json"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", &id),
+            ("POST_PARTICIPANT_LEASE_HOURS", "3"),
+        ],
+    );
+    assert_success(&overridden);
+    let overridden: Value = from_stdout(&overridden);
+    assert_eq!(overridden["participant"]["lease_hours"], 3);
+
+    edit_participant(&sandbox, &id, |record| {
+        record.insert("lease_hours".to_owned(), Value::from(7));
+    });
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--body",
+            "refresh without lease override",
+            "--json",
+        ],
+        &id,
+        &alpha,
+    );
+    assert_success(&sent);
+    assert_eq!(sandbox.read_participant(&id)["lease_hours"], 7);
+
+    let rebound = sandbox.bind_claude("lease-preservation", &alpha, Some("alpha"));
+    assert_eq!(participant_id(&rebound), id);
+    assert_eq!(rebound["participant"]["lease_hours"], 7);
+}
+
+#[test]
 fn participant_lifecycle_missing_lease_is_stale_until_rebind() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);

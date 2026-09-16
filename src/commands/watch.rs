@@ -469,7 +469,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // Presence starts before backend registration. Registration can be slow,
     // but a running watch must already be visible to `post who`; the mandatory
     // first scan below closes the arrival gap after registration completes.
-    let mut warned_fenced = false;
+    let mut admission_warnings = AdmissionWarnings::default();
     let mut warned_touch_failures = HashSet::new();
     // Register every watch BEFORE the first scan (r2): nothing created in
     // the gap can be missed, because the first pass inside the loop is an
@@ -483,7 +483,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         context,
         &targets,
         interval_ms,
-        &mut warned_fenced,
+        &mut admission_warnings,
         &mut warned_touch_failures,
         || NotifyWake::register(&desired),
     )?;
@@ -515,7 +515,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
         &mut wake,
         slow_period,
-        warned_fenced,
+        admission_warnings,
         warned_touch_failures,
     )
 }
@@ -524,11 +524,11 @@ fn after_live_presence<T>(
     context: &Context,
     targets: &[WatchTarget],
     interval_ms: u64,
-    warned_fenced: &mut bool,
+    admission_warnings: &mut AdmissionWarnings,
     warned_touch_failures: &mut HashSet<String>,
     register: impl FnOnce() -> T,
 ) -> AppResult<T> {
-    let (presence_admission, allow_writes) = watch_admission(context, warned_fenced)?;
+    let (presence_admission, allow_writes) = watch_admission(context, admission_warnings)?;
     if allow_writes {
         touch_admitted_heartbeats(context, targets, interval_ms, warned_touch_failures);
     }
@@ -552,10 +552,10 @@ fn run_watch_loop(
     digest: bool,
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
-    mut warned_fenced: bool,
+    mut admission_warnings: AdmissionWarnings,
     mut warned_touch_failures: HashSet<String>,
 ) -> AppResult<CommandResult> {
-    let (initial_admission, allow_writes) = watch_admission(context, &mut warned_fenced)?;
+    let (initial_admission, allow_writes) = watch_admission(context, &mut admission_warnings)?;
     if allow_writes {
         touch_admitted_heartbeats(context, targets, interval_ms, &mut warned_touch_failures);
     }
@@ -588,7 +588,7 @@ fn run_watch_loop(
     let mut last_beat = Instant::now();
     loop {
         let wake_result = wake.wait(Duration::from_millis(interval_ms));
-        let (admission, allow_writes) = watch_admission(context, &mut warned_fenced)?;
+        let (admission, allow_writes) = watch_admission(context, &mut admission_warnings)?;
         batch = match wake_result {
             None => {
                 // Backend died mid-run: degrade to polling rather than to
@@ -648,14 +648,14 @@ fn run_watch_loop(
                 .flat_map(|target| target.dirs.iter().cloned())
                 .collect();
             wake.reconcile(&desired);
-            batch = scan_targets(
+            batch.extend(scan_targets(
                 context,
                 targets,
                 owned_rooms,
                 emitted_channel_ids,
                 allow_writes,
                 |_| true,
-            );
+            ));
         }
         drop(admission);
         if !batch.is_empty() {
@@ -667,26 +667,46 @@ fn run_watch_loop(
     }
 }
 
+#[derive(Default)]
+struct AdmissionWarnings {
+    fenced: bool,
+    transient: bool,
+}
+
 fn watch_admission(
     context: &Context,
-    warned_fenced: &mut bool,
+    warnings: &mut AdmissionWarnings,
 ) -> AppResult<(crate::migration_fence::LongWatchAdmission, bool)> {
     let admission = migration_fence::admit_long_watch(context)?;
     let allow_writes = match &admission {
         crate::migration_fence::LongWatchAdmission::Active(guard) => {
             let _ = guard.is_enrolled();
+            warnings.fenced = false;
+            warnings.transient = false;
             true
         }
-        crate::migration_fence::LongWatchAdmission::Fenced => false,
+        crate::migration_fence::LongWatchAdmission::Fenced => {
+            warnings.transient = false;
+            if !warnings.fenced {
+                eprintln!(
+                    "post: warning: migration fence active; watch continues read-only until same-generation recovery"
+                );
+                warnings.fenced = true;
+            }
+            false
+        }
+        crate::migration_fence::LongWatchAdmission::Transient(error) => {
+            warnings.fenced = false;
+            if !warnings.transient {
+                eprintln!(
+                    "post: warning: migration admission temporarily unavailable; watch continues read-only and will retry: {}",
+                    error.message
+                );
+                warnings.transient = true;
+            }
+            false
+        }
     };
-    if allow_writes {
-        *warned_fenced = false;
-    } else if !*warned_fenced {
-        eprintln!(
-            "post: warning: migration fence active; watch continues read-only until same-generation recovery"
-        );
-        *warned_fenced = true;
-    }
     Ok((admission, allow_writes))
 }
 
@@ -696,19 +716,37 @@ fn touch_admitted_heartbeats(
     interval_ms: u64,
     warned_failures: &mut HashSet<String>,
 ) {
+    let warnings = touch_admitted_heartbeats_with(
+        context,
+        targets,
+        interval_ms,
+        warned_failures,
+        |participant| crate::participant::touch(context, participant).map(|_| ()),
+    );
+    for error in warnings {
+        eprintln!(
+            "post: warning: participant activity refresh failed (watch continues): {}",
+            error.message
+        );
+    }
+}
+
+fn touch_admitted_heartbeats_with(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    warned_failures: &mut HashSet<String>,
+    mut touch: impl FnMut(&str) -> AppResult<()>,
+) -> Vec<AppError> {
+    let mut warnings = Vec::new();
     let mut participants = HashSet::new();
     for target in targets {
         if let Some(participant) = target.participant.as_ref() {
             if participants.insert(participant.id.clone()) {
-                if let Some(error) = touch_warning_for(
-                    &participant.id,
-                    crate::participant::touch(context, &participant.id).map(|_| ()),
-                    warned_failures,
-                ) {
-                    eprintln!(
-                        "post: warning: participant activity refresh failed (watch continues): {}",
-                        error.message
-                    );
+                if let Some(error) =
+                    touch_warning_for(&participant.id, touch(&participant.id), warned_failures)
+                {
+                    warnings.push(error);
                 }
                 crate::presence::touch_participant_heartbeat(participant, interval_ms);
             }
@@ -716,6 +754,7 @@ fn touch_admitted_heartbeats(
             crate::presence::touch_heartbeat(context, &target.room, interval_ms);
         }
     }
+    warnings
 }
 
 fn touch_warning_for(
@@ -996,21 +1035,23 @@ fn participant_mail_snapshot(
     address: &Address,
     allow_routing: bool,
 ) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
-    participant_mail_snapshot_after_initial_route(
+    participant_mail_snapshot_after_route_hooks(
         context,
         participant,
         address,
         allow_routing,
         || {},
+        || {},
     )
 }
 
-fn participant_mail_snapshot_after_initial_route(
+fn participant_mail_snapshot_after_route_hooks(
     context: &Context,
     participant: &Participant,
     address: &Address,
     allow_routing: bool,
     after_initial_route: impl FnOnce(),
+    after_final_route: impl FnOnce(),
 ) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
     if allow_routing && crate::cursor_state::routing::has_unrouted_mail(context, address)? {
         crate::cursor_state::routing::route_pending(context, address)?;
@@ -1023,7 +1064,15 @@ fn participant_mail_snapshot_after_initial_route(
         // before eligibility is projected. Route that observed arrival and
         // rebuild the snapshot so an admitted watch never emits it as pending.
         crate::cursor_state::routing::route_pending(context, address)?;
+        after_final_route();
         mail = collect_participant_mail(context, participant, address)?;
+    }
+    if allow_routing {
+        // Bound the admitted batch. A new arrival can enter the final
+        // projection after the last routing pass; defer it without adding its
+        // path to the process-local seen set. The next scan routes and emits it.
+        // Lineage and same-generation-fenced scans keep provisional events.
+        mail.retain(|item| !item.pending);
     }
     Ok(mail)
 }
@@ -1664,13 +1713,50 @@ mod tests {
     }
 
     #[test]
-    fn participant_touch_warning_is_once_per_failure_episode() {
+    fn touch_admitted_heartbeats_warns_once_per_failure_episode() {
+        let root = crate::test_support::test_root("watch-touch-warning-episodes");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant),
+            address: None,
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
         let mut warned = HashSet::new();
-        let failure = || Err(AppError::invalid_argument("transient touch failure"));
-        assert!(touch_warning_for("actor", failure(), &mut warned).is_some());
-        assert!(touch_warning_for("actor", failure(), &mut warned).is_none());
-        assert!(touch_warning_for("actor", Ok(()), &mut warned).is_none());
-        assert!(touch_warning_for("actor", failure(), &mut warned).is_some());
+        let failures = || Err(AppError::invalid_argument("transient touch failure"));
+        assert_eq!(
+            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
+                .len(),
+            1
+        );
+        assert!(touch_admitted_heartbeats_with(
+            &context,
+            &targets,
+            100,
+            &mut warned,
+            |_| failures()
+        )
+        .is_empty());
+        assert!(
+            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| Ok(()))
+                .is_empty()
+        );
+        assert_eq!(
+            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
+                .len(),
+            1
+        );
+        crate::test_support::trash_test_root(&root);
     }
 
     #[test]
@@ -1697,13 +1783,13 @@ mod tests {
             scan_failing: false,
             route_pending: false,
         }];
-        let mut warned_fenced = false;
+        let mut admission_warnings = AdmissionWarnings::default();
         let mut warned_touch_failures = HashSet::new();
         after_live_presence(
             &context,
             &targets,
             10_000,
-            &mut warned_fenced,
+            &mut admission_warnings,
             &mut warned_touch_failures,
             || assert!(heartbeat.is_file(), "registration began before presence"),
         )
@@ -1737,7 +1823,7 @@ mod tests {
         let path = inbox.join(format!("{id}.mail"));
         fs::write(&path, "{partial").expect("write partial arrival");
 
-        let mail = participant_mail_snapshot_after_initial_route(
+        let mail = participant_mail_snapshot_after_route_hooks(
             &context,
             &participant,
             &address,
@@ -1756,6 +1842,7 @@ mod tests {
                 fs::write(&path, format!("{envelope}\n---\nbridge arrival"))
                     .expect("complete arrival after first routing attempt");
             },
+            || {},
         )
         .expect("scan mail");
 
@@ -1767,6 +1854,177 @@ mod tests {
                 .expect("load receipt")
                 .is_some()
         );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_fast_scan_defers_arrival_after_final_route() {
+        let root = crate::test_support::test_root("watch-final-route-window");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({"alpha": root.join("alpha")}))
+                .expect("serialize rooms"),
+        )
+        .expect("write rooms");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        crate::participant::touch(&context, &participant.id).expect("activate participant");
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create inbox");
+        let first_id = "20990916-050100-beef03";
+        let second_id = "20990916-050101-beef04";
+        let first_path = inbox.join(format!("{first_id}.mail"));
+        let second_path = inbox.join(format!("{second_id}.mail"));
+        fs::write(&first_path, "{partial").expect("write partial first arrival");
+        let mail_bytes = |id: &str, subject: &str| {
+            let envelope = serde_json::json!({
+                "id": id,
+                "from": "beta",
+                "to": "alpha",
+                "kind": "note",
+                "subject": subject,
+                "sent": "2026-09-16 05:01:00 -0500",
+                "from_participant": "test-sender",
+                "address_kind": "workspace"
+            });
+            format!("{envelope}\n---\n{subject}")
+        };
+
+        let first_scan = participant_mail_snapshot_after_route_hooks(
+            &context,
+            &participant,
+            &address,
+            true,
+            || fs::write(&first_path, mail_bytes(first_id, "first")).expect("complete first"),
+            || fs::write(&second_path, mail_bytes(second_id, "second")).expect("write second"),
+        )
+        .expect("first scan");
+        assert_eq!(
+            first_scan
+                .iter()
+                .map(|item| item.envelope.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first_id]
+        );
+        assert!(first_scan.iter().all(|item| !item.pending));
+        assert!(
+            crate::cursor_state::routing::receipt(&context, &address, second_id)
+                .expect("load deferred receipt")
+                .is_none()
+        );
+        let mut seen = first_scan
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<HashSet<_>>();
+        assert!(!seen.contains(&second_path));
+
+        let second_scan = participant_mail_snapshot(&context, &participant, &address, true)
+            .expect("second scan")
+            .into_iter()
+            .filter(|item| seen.insert(item.path.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(second_scan.len(), 1);
+        assert_eq!(second_scan[0].envelope.id, second_id);
+        assert!(!second_scan[0].pending);
+        assert!(
+            crate::cursor_state::routing::receipt(&context, &address, second_id)
+                .expect("load routed receipt")
+                .is_some()
+        );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_fast_scans_never_emit_pending_during_atomic_arrival_burst() {
+        let root = crate::test_support::test_root("watch-route-burst");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({"alpha": root.join("alpha")}))
+                .expect("serialize rooms"),
+        )
+        .expect("write rooms");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        crate::participant::touch(&context, &participant.id).expect("activate participant");
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create inbox");
+
+        let arrival_inbox = inbox.clone();
+        let producer = std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for index in 0..60u32 {
+                let id = format!("20990916-0600{index:02}-{index:06x}");
+                let envelope = serde_json::json!({
+                    "id": id,
+                    "from": "bridge-peer",
+                    "to": "alpha",
+                    "kind": "note",
+                    "subject": "burst",
+                    "sent": "2026-09-16 06:00:00 -0500",
+                    "from_participant": "bridge-peer-participant",
+                    "address_kind": "workspace"
+                });
+                let temporary = arrival_inbox.join(format!(".{id}.tmp"));
+                fs::write(&temporary, format!("{envelope}\n---\nburst {index}"))
+                    .expect("write atomic arrival temp");
+                fs::rename(&temporary, arrival_inbox.join(format!("{id}.mail")))
+                    .expect("publish atomic arrival");
+                ids.push(id);
+                std::thread::sleep(Duration::from_millis(u64::from(index % 4)));
+            }
+            ids
+        });
+
+        let mut seen_paths = HashSet::new();
+        let mut delivered = BTreeSet::new();
+        for _ in 0..2_000 {
+            for item in participant_mail_snapshot(&context, &participant, &address, true)
+                .expect("scan burst")
+            {
+                assert!(!item.pending, "admitted watch exposed provisional mail");
+                if seen_paths.insert(item.path) {
+                    assert!(
+                        delivered.insert(item.envelope.id),
+                        "one arrival emitted more than once"
+                    );
+                }
+            }
+            if producer.is_finished() && delivered.len() == 60 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let ids = producer.join().expect("join arrival producer");
+        assert_eq!(
+            delivered.len(),
+            ids.len(),
+            "some burst arrivals never emitted"
+        );
+        for id in ids {
+            assert!(delivered.contains(&id), "arrival {id} never emitted");
+            assert!(
+                crate::cursor_state::routing::receipt(&context, &address, &id)
+                    .expect("load burst receipt")
+                    .is_some(),
+                "arrival {id} emitted without a receipt"
+            );
+        }
         crate::test_support::trash_test_root(&root);
     }
 
@@ -2392,7 +2650,7 @@ body
             false,
             &mut wake,
             Duration::from_secs(3600),
-            false,
+            AdmissionWarnings::default(),
             HashSet::new(),
         )
         .expect("loop emits and exits");
@@ -2400,6 +2658,75 @@ body
             room_dir.join("watch.heartbeat").exists(),
             "event mode must still touch presence heartbeats"
         );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn slow_deadline_extends_fast_batch_instead_of_overwriting_it() {
+        struct OneWake {
+            inbox: PathBuf,
+            dirs: BTreeSet<PathBuf>,
+            fired: bool,
+        }
+        impl WakeSource for OneWake {
+            fn wait(&mut self, _timeout: Duration) -> Option<Wake> {
+                assert!(!self.fired, "fast event was lost before emit");
+                self.fired = true;
+                let id = "20260822-000000-fedcba";
+                fs::write(
+                    self.inbox.join(format!("{id}.mail")),
+                    mail_bytes(id, "beta", "alpha"),
+                )
+                .expect("deliver fast-target mail");
+                Some(Wake::Events(self.dirs.clone()))
+            }
+        }
+
+        let root = test_root("watch-fast-slow-merge");
+        let room_dir = root.join("alpha");
+        let inbox = room_dir.join("inbox");
+        fs::create_dir_all(&inbox).expect("create inbox");
+        fs::write(
+            root.join("rooms.json"),
+            format!(r#"{{"alpha":{}}}"#, serde_json::json!(room_dir)),
+        )
+        .expect("write rooms");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut targets = vec![WatchTarget {
+            participant: None,
+            address: None,
+            channel_seen: HashMap::new(),
+            room: "alpha".to_owned(),
+            inbox: inbox.clone(),
+            dirs: target_dirs(&context, "alpha", &inbox),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut wake: Box<dyn WakeSource> = Box::new(OneWake {
+            inbox,
+            dirs: targets[0].dirs.clone(),
+            fired: false,
+        });
+        run_watch_loop(
+            &context,
+            &mut targets,
+            &BTreeSet::new(),
+            &mut HashSet::new(),
+            1000,
+            true,
+            false,
+            false,
+            &mut wake,
+            Duration::ZERO,
+            AdmissionWarnings::default(),
+            HashSet::new(),
+        )
+        .expect("merged fast batch emits exactly once");
         trash_test_root(&root);
     }
 
@@ -2481,7 +2808,7 @@ body
             false,
             &mut wake,
             Duration::from_secs(0),
-            false,
+            AdmissionWarnings::default(),
             HashSet::new(),
         )
         .expect("deadline pass emits the starved room's mail");

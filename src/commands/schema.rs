@@ -48,7 +48,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "participant",
             "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant touch | post participant end | post participant list",
             "JSON",
-            "show/list are read-only; bind is the only participant minting path and refreshes last_seen, records the participant's lease_hours, clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen/lease_hours; end sets ended_at idempotently",
+            "show/list are read-only; bind is the only participant minting path and refreshes last_seen, preserves an existing lease_hours unless POST_PARTICIPANT_LEASE_HOURS is explicit (new records default to 24), clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen and likewise preserves the recorded lease unless explicitly overridden; end sets ended_at idempotently",
         ),
         command(
             "identity",
@@ -456,7 +456,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "POST_FRAMING: presentation preference (auto|full|compact) consulted ONLY by body-returning reads (post read, post chat reads) when --framing is absent — send/join/discard/discard-through/seen-by never consult it; an explicit --framing always wins; set-but-invalid or non-UTF-8 warns on stderr and falls back to auto (presentation never breaks a read; deliberately weaker than the POST_FROM identity pin)",
             "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
             "POST_PARTICIPANT: explicit acting participant id; highest resolution precedence and never mints a missing record",
-            "POST_PARTICIPANT_LEASE_HOURS: positive integer lease recorded on the acting participant by bind/touch and writer activity; defaults to 24 and never reclassifies peer records",
+            "POST_PARTICIPANT_LEASE_HOURS: optional positive integer lease override applied to the acting participant by bind/touch and writer activity; when unset, refreshes preserve an existing recorded lease and only a new record defaults to 24; peer records are never reclassified",
             "CLAUDE_CODE_SESSION_ID: Claude conversation key used by post participant bind",
             "CODEX_THREAD_ID / CODEX_SESSION_ID: Codex conversation key (both present and different is an error, never a guess)",
             "CLAUDE_PID: marks a Claude ancestor when nested Claude/Codex harness keys are both inherited; nearest harness ancestor wins and unresolved ancestry fails naming POST_PARTICIPANT",

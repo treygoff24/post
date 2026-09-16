@@ -253,9 +253,41 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     let doctor = sandbox.run(&["doctor"]);
     let doctor = json_object(&doctor);
     assert_keys_are_documented(&keys(&doctor), &schema.output_shapes.doctor);
-    assert_eq!(
-        shape_top_level_keys(&schema.output_shapes.doctor),
-        expected_keys(&[
+    macro_rules! assert_shape {
+        ($name:literal, $shape:expr, [$($field:literal),* $(,)?]) => {
+            assert_eq!(
+                shape_top_level_keys($shape),
+                expected_keys(&[$($field),*]),
+                "{} output shape top-level fields drifted",
+                $name
+            );
+        };
+    }
+    assert_shape!(
+        "participant",
+        &schema.output_shapes.participant,
+        ["show/bind/touch/end:", "list:"]
+    );
+    assert_shape!(
+        "identity",
+        &schema.output_shapes.identity,
+        ["list:", "show:", "new/continue/leave:", "voice"]
+    );
+    assert_shape!(
+        "version",
+        &schema.output_shapes.version,
+        [
+            "ok",
+            "version",
+            "build_sha",
+            "store_version",
+            "capabilities"
+        ]
+    );
+    assert_shape!(
+        "doctor",
+        &schema.output_shapes.doctor,
+        [
             "ok",
             "status",
             "root",
@@ -266,24 +298,42 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "participant",
             "pending",
             "participant_fix",
-            "participant_error",
-        ])
+            "participant_error"
+        ]
     );
-    assert_eq!(
-        shape_top_level_keys(&schema.output_shapes.read_json),
-        expected_keys(&[
+    assert_shape!(
+        "inbox",
+        &schema.output_shapes.inbox,
+        [
+            "ok",
+            "room",
+            "participant",
+            "unread",
+            "count",
+            "skipped_unreadable",
+            "unread_count",
+            "pending",
+            "pending_by_address",
+            "held"
+        ]
+    );
+    assert_shape!(
+        "read_json",
+        &schema.output_shapes.read_json,
+        [
             "ok",
             "framing",
             "envelope",
             "body",
             "own",
             "pending",
-            "already_read",
-        ])
+            "already_read"
+        ]
     );
-    assert_eq!(
-        shape_top_level_keys(&schema.output_shapes.read_budget),
-        expected_keys(&[
+    assert_shape!(
+        "read_budget",
+        &schema.output_shapes.read_budget,
+        [
             "ok",
             "framing",
             "envelope",
@@ -295,12 +345,13 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "selected_count",
             "has_more",
             "byte_limit",
-            "omitted",
-        ])
+            "omitted"
+        ]
     );
-    assert_eq!(
-        shape_top_level_keys(&schema.output_shapes.read_slice),
-        expected_keys(&[
+    assert_shape!(
+        "read_slice",
+        &schema.output_shapes.read_slice,
+        [
             "ok",
             "framing",
             "envelope",
@@ -314,8 +365,186 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "own",
             "pending",
             "verification_scope",
+            "byte_limit"
+        ]
+    );
+    assert_shape!(
+        "read_ack",
+        &schema.output_shapes.read_ack,
+        ["ok", "room", "id", "already_read", "acknowledged"]
+    );
+    assert_shape!(
+        "rooms",
+        &schema.output_shapes.rooms,
+        ["ok", "rooms", "count"]
+    );
+    assert_shape!(
+        "schema",
+        &schema.output_shapes.schema,
+        [
+            "ok",
+            "name",
+            "contract_version",
+            "store_version",
+            "capabilities",
+            "participant",
+            "participant_error",
+            "global_flags",
+            "commands",
+            "output_shapes",
+            "error_shape",
+            "error_codes",
+            "exit_codes",
+            "doctor_exit_codes",
+            "laws",
+            "environment",
+            "owner"
+        ]
+    );
+    assert_shape!(
+        "send_json",
+        &schema.output_shapes.send_json,
+        ["ok", "envelope", "archived"]
+    );
+    assert_shape!(
+        "chat_join",
+        &schema.output_shapes.chat_join,
+        [
+            "ok",
+            "channel",
+            "room",
+            "created",
+            "already_member",
+            "event_id"
+        ]
+    );
+    assert_shape!(
+        "chat_send",
+        &schema.output_shapes.chat_send,
+        ["ok", "message"]
+    );
+    assert_shape!(
+        "chat_read",
+        &schema.output_shapes.chat_read,
+        [
+            "ok",
+            "framing",
+            "channel",
+            "room",
+            "peek",
+            "messages",
+            "count",
+            "skipped",
+            "has_more",
+            "selected_count",
             "byte_limit",
-        ])
+            "omitted"
+        ]
+    );
+    assert_shape!(
+        "chat_slice",
+        &schema.output_shapes.chat_slice,
+        [
+            "ok",
+            "framing",
+            "channel",
+            "room",
+            "message",
+            "origin",
+            "reply_to_participant",
+            "reply_to_shared",
+            "body_slice",
+            "range",
+            "total_body_bytes",
+            "body_complete",
+            "next_offset",
+            "continuation",
+            "signed_verified",
+            "verification_scope",
+            "byte_limit"
+        ]
+    );
+    assert_shape!(
+        "chat_ack",
+        &schema.output_shapes.chat_ack,
+        ["ok", "channel", "room", "id", "acknowledged"]
+    );
+    assert_shape!(
+        "chat_discard",
+        &schema.output_shapes.chat_discard,
+        ["ok", "channel", "room", "discarded", "cursor"]
+    );
+    assert_shape!(
+        "chat_discard_through",
+        &schema.output_shapes.chat_discard_through,
+        [
+            "ok",
+            "channel",
+            "room",
+            "target",
+            "prior_cursor",
+            "cursor",
+            "advanced",
+            "discarded"
+        ]
+    );
+    assert_shape!(
+        "catchup",
+        &schema.output_shapes.catchup,
+        [
+            "ok",
+            "room",
+            "targets",
+            "count",
+            "selected_count",
+            "has_more",
+            "byte_limit",
+            "omitted"
+        ]
+    );
+    assert_shape!(
+        "search",
+        &schema.output_shapes.search,
+        [
+            "ok",
+            "participant",
+            "pending",
+            "framing",
+            "room",
+            "pattern",
+            "match",
+            "results",
+            "count",
+            "limit",
+            "truncated"
+        ]
+    );
+    assert_shape!(
+        "channels",
+        &schema.output_shapes.channels,
+        ["ok", "channels", "count", "participant", "pending"]
+    );
+    assert_shape!(
+        "profile",
+        &schema.output_shapes.profile,
+        ["ok", "room", "profile", "announced"]
+    );
+    assert_shape!(
+        "watch",
+        &schema.output_shapes.watch,
+        ["mail:", "unreadable:", "channel_message:", "digest:"]
+    );
+    assert_shape!(
+        "who",
+        &schema.output_shapes.who,
+        [
+            "ok",
+            "participant",
+            "participants",
+            "legacy_rooms",
+            "activity_note",
+            "count"
+        ]
     );
     assert_eq!(
         schema

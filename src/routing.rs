@@ -37,6 +37,13 @@ pub(crate) struct RouteReport {
     pub held: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PendingSummary {
+    pub pending: Vec<String>,
+    pub held: Vec<String>,
+    pub unreadable: Vec<String>,
+}
+
 static WARNED_RECORDS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 pub(crate) fn inbox_path(context: &Context, address: &Address) -> PathBuf {
@@ -105,9 +112,11 @@ pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<R
             Err(error) if error.code == ErrorCode::ConfigInvalid => {
                 warn_once(
                     receipt_path(context, address, id),
-                    format!("corrupt routing receipt held for doctor: {}", error.message),
+                    format!(
+                        "corrupt routing receipt skipped as unreadable: {}",
+                        error.message
+                    ),
                 );
-                report.held.push(id.to_owned());
                 continue;
             }
             Err(error) => return Err(error),
@@ -165,24 +174,53 @@ pub(crate) fn route_for_participant(
 }
 
 pub(crate) fn pending_count(context: &Context, address: &Address) -> AppResult<usize> {
-    let mut pending = 0usize;
+    Ok(pending_summary(context, address)?.pending.len())
+}
+
+pub(crate) fn pending_summary(context: &Context, address: &Address) -> AppResult<PendingSummary> {
+    let mut summary = PendingSummary::default();
     for path in message_files(&inbox_path(context, address))? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        match receipt(context, address, id) {
-            Ok(None) => pending += 1,
-            Ok(Some(_)) => {}
+        let receipt = match receipt(context, address, id) {
+            Ok(receipt) => receipt,
             Err(error) if error.code == ErrorCode::ConfigInvalid => {
                 warn_once(
                     receipt_path(context, address, id),
-                    format!("corrupt routing receipt held for doctor: {}", error.message),
+                    format!("corrupt routing receipt skipped: {}", error.message),
                 );
+                summary.unreadable.push(id.to_owned());
+                continue;
             }
+            Err(error) => return Err(error),
+        };
+        if receipt.is_some() {
+            continue;
+        }
+        let parsed = match parse_mail(&path) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                warn_once(
+                    path.clone(),
+                    format!("skipped unreadable pending mail: {}", error.message),
+                );
+                summary.unreadable.push(id.to_owned());
+                continue;
+            }
+        };
+        match filtered_recipients(context, address, &parsed.envelope) {
+            Err(error) if error.code == ErrorCode::BlockedRoute => {
+                summary.held.push(id.to_owned());
+            }
+            Ok((recipients, exclusions)) if recipients.is_empty() && !exclusions.is_empty() => {
+                summary.held.push(id.to_owned());
+            }
+            Ok(_) => summary.pending.push(id.to_owned()),
             Err(error) => return Err(error),
         }
     }
-    Ok(pending.saturating_sub(held_ids(context, address)?.len()))
+    Ok(summary)
 }
 
 pub(crate) fn has_unrouted_mail(context: &Context, address: &Address) -> AppResult<bool> {
@@ -196,7 +234,10 @@ pub(crate) fn has_unrouted_mail(context: &Context, address: &Address) -> AppResu
             Err(error) if error.code == ErrorCode::ConfigInvalid => {
                 warn_once(
                     receipt_path(context, address, id),
-                    format!("corrupt routing receipt held for doctor: {}", error.message),
+                    format!(
+                        "corrupt routing receipt skipped as unreadable: {}",
+                        error.message
+                    ),
                 );
             }
             Err(error) => return Err(error),
@@ -438,28 +479,7 @@ pub(crate) fn held_for(
 }
 
 pub(crate) fn held_ids(context: &Context, address: &Address) -> AppResult<Vec<String>> {
-    let mut held = Vec::new();
-    for path in message_files(&inbox_path(context, address))? {
-        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !matches!(receipt(context, address, id), Ok(None)) {
-            continue;
-        }
-        let parsed = match parse_mail(&path) {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
-        match filtered_recipients(context, address, &parsed.envelope) {
-            Err(error) if error.code == ErrorCode::BlockedRoute => held.push(id.to_owned()),
-            Ok((recipients, exclusions)) if recipients.is_empty() && !exclusions.is_empty() => {
-                held.push(id.to_owned());
-            }
-            Ok(_) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(held)
+    Ok(pending_summary(context, address)?.held)
 }
 
 fn route_message_locked(

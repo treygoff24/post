@@ -7,6 +7,7 @@
 use crate::cursor_state;
 use crate::error::AppResult;
 use crate::mailbox::{atomic_replace, Context};
+use crate::model::BlockingRule;
 use crate::participant::Participant;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -189,33 +190,114 @@ pub(crate) fn effective_participants(
     context: &Context,
     channel: &str,
 ) -> AppResult<Vec<Participant>> {
-    participants_for_channel(context, channel, false)
+    participants_for_channel(context, channel)
 }
 
 pub(crate) fn participants_for_join_validation(
     context: &Context,
     channel: &str,
+    actor: &Participant,
+    actor_address: &str,
+    blocked: &[BlockingRule],
 ) -> AppResult<Vec<Participant>> {
-    participants_for_channel(context, channel, true)
-}
-
-fn participants_for_channel(
-    context: &Context,
-    channel: &str,
-    include_unknown: bool,
-) -> AppResult<Vec<Participant>> {
+    let evidence = join_evidence(context, channel)?;
+    let legacy_members = crate::channel::ChannelPaths::new(context, channel)?.load_members()?;
+    let root = context.root.join(crate::participant::PARTICIPANTS_DIR);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(crate::error::AppError::io(
+                "list participants for channel admission",
+                &root,
+                error,
+            ))
+        }
+    };
     let mut participants = Vec::new();
-    for participant in crate::participant::list(context)? {
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            crate::error::AppError::io("read participant admission entry", &root, error)
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            crate::error::AppError::io("inspect participant admission entry", &entry.path(), error)
+        })?;
+        if !file_type.is_dir() || entry.file_name() == "by-session" {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            eprintln!(
+                "post: warning: skipped non-UTF-8 participant directory during channel admission"
+            );
+            continue;
+        };
+        let participant = match crate::participant::load(context, &id) {
+            Ok(Some(participant)) => participant,
+            Ok(None) => {
+                let path = entry.path().join("participant.json");
+                if invalid_record_could_block(&id, evidence.get(&id), actor, actor_address, blocked)
+                {
+                    return Err(crate::error::AppError::config(
+                        &path,
+                        format!(
+                            "participant record is missing, so membership in channel '{channel}' cannot be validated against a blocked route; restore or remove the record, then retry"
+                        ),
+                    ));
+                }
+                eprintln!(
+                    "post: warning: skipped participant {id:?} with missing participant.json"
+                );
+                continue;
+            }
+            Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                if invalid_record_could_block(&id, evidence.get(&id), actor, actor_address, blocked)
+                {
+                    return Err(crate::error::AppError::config(
+                        &entry.path().join("participant.json"),
+                        format!(
+                            "participant record cannot be validated for possible membership in channel '{channel}': {}; repair or remove the record, then retry",
+                            error.message
+                        ),
+                    ));
+                }
+                eprintln!(
+                    "post: warning: skipped corrupt participant {:?}: {:?}",
+                    id, error.message
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let state = match ParticipantChannels::load(&participant) {
             Ok(state) => state,
             Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                let could_be_member = evidence.contains_key(&participant.id)
+                    || participant
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| legacy_members.contains_key(workspace));
+                let candidate_address = participant.workspace.as_deref().unwrap_or(&participant.id);
+                if could_be_member
+                    && has_blocked_pair(
+                        actor_address,
+                        &actor.id,
+                        candidate_address,
+                        &participant.id,
+                        blocked,
+                    )
+                {
+                    return Err(crate::error::AppError::config(
+                        &participant.dir.join("channels.json"),
+                        format!(
+                            "participant '{}' may belong to channel '{channel}', but its membership record is unreadable and a blocked route could apply: {}; repair or remove the record, then retry",
+                            participant.id, error.message
+                        ),
+                    ));
+                }
                 eprintln!(
                     "post: warning: skipped invalid participant channels {:?}: {:?}",
                     participant.id, error.message
                 );
-                if include_unknown {
-                    participants.push(participant);
-                }
                 continue;
             }
             Err(error) => return Err(error),
@@ -226,6 +308,83 @@ fn participants_for_channel(
     }
     participants.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(participants)
+}
+
+fn participants_for_channel(context: &Context, channel: &str) -> AppResult<Vec<Participant>> {
+    let mut participants = Vec::new();
+    for participant in crate::participant::list(context)? {
+        let state = match ParticipantChannels::load(&participant) {
+            Ok(state) => state,
+            Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+                eprintln!(
+                    "post: warning: skipped invalid participant channels {:?}: {:?}",
+                    participant.id, error.message
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if state.effective(context, &participant, channel)? {
+            participants.push(participant);
+        }
+    }
+    participants.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(participants)
+}
+
+fn join_evidence(
+    context: &Context,
+    channel: &str,
+) -> AppResult<BTreeMap<String, BTreeSet<String>>> {
+    let paths = crate::channel::ChannelPaths::new(context, channel)?;
+    if !paths.messages.is_dir() {
+        return Ok(BTreeMap::new());
+    }
+    let mut evidence = BTreeMap::<String, BTreeSet<String>>::new();
+    for path in crate::channel::message_files(&paths.messages)? {
+        let Ok(parsed) = crate::channel::parse_channel_message(&path) else {
+            continue;
+        };
+        if parsed.message.event.as_deref() != Some(crate::channel::JOIN_EVENT) {
+            continue;
+        }
+        if let Some(participant) = parsed.message.from_participant {
+            evidence
+                .entry(participant)
+                .or_default()
+                .insert(parsed.message.from);
+        }
+    }
+    Ok(evidence)
+}
+
+fn invalid_record_could_block(
+    id: &str,
+    addresses: Option<&BTreeSet<String>>,
+    actor: &Participant,
+    actor_address: &str,
+    blocked: &[BlockingRule],
+) -> bool {
+    addresses.is_some_and(|addresses| {
+        addresses
+            .iter()
+            .any(|address| has_blocked_pair(actor_address, &actor.id, address, id, blocked))
+    })
+}
+
+fn has_blocked_pair(
+    actor_address: &str,
+    actor_id: &str,
+    candidate_address: &str,
+    candidate_id: &str,
+    blocked: &[BlockingRule],
+) -> bool {
+    blocked.iter().any(|rule| {
+        rule.matches_route(actor_address, candidate_address)
+            || rule.matches_route(candidate_address, actor_address)
+            || rule.matches_route(actor_id, candidate_id)
+            || rule.matches_route(candidate_id, actor_id)
+    })
 }
 
 fn mutate<T>(

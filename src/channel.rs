@@ -237,16 +237,22 @@ pub(crate) fn join(
     // blocked counterpart cannot slip in between check and write.
     let rules = context.load_rules(&rooms)?;
     let mut existing_members: Vec<(String, String)> =
-        crate::channel_state::participants_for_join_validation(context, channel)?
-            .into_iter()
-            .map(|member| {
-                let address = member
-                    .workspace
-                    .clone()
-                    .unwrap_or_else(|| member.id.clone());
-                (member.id, address)
-            })
-            .collect();
+        crate::channel_state::participants_for_join_validation(
+            context,
+            channel,
+            &actor.participant,
+            &room,
+            &rules.blocked,
+        )?
+        .into_iter()
+        .map(|member| {
+            let address = member
+                .workspace
+                .clone()
+                .unwrap_or_else(|| member.id.clone());
+            (member.id, address)
+        })
+        .collect();
     for workspace in paths.load_members()?.into_keys() {
         if !existing_members
             .iter()

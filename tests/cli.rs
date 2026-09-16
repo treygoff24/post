@@ -3835,10 +3835,7 @@ fn watch_digest_preview_cannot_forge_since_fencepost_or_change_floor() {
             std::time::Instant::now() < heartbeat_deadline,
             "digest watch never created a heartbeat"
         );
-        assert!(
-            child.try_wait().expect("probe digest watch").is_none(),
-            "digest watch exited before admission"
-        );
+        assert_child_running(&mut child, "digest watch exited before admission");
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let initial_heartbeat = fs::metadata(&heartbeat)
@@ -3849,10 +3846,7 @@ fn watch_digest_preview_cannot_forge_since_fencepost_or_change_floor() {
     // Give the startup scan enough time to prove that the caught-up backlog
     // was loaded as the floor, not emitted by this newly armed watch.
     std::thread::sleep(std::time::Duration::from_millis(300));
-    assert!(
-        child.try_wait().expect("probe live digest watch").is_none(),
-        "digest watch died before the live message"
-    );
+    assert_child_running(&mut child, "digest watch died before the live message");
     let mut heartbeat_changed = false;
     for _ in 0..20 {
         let current = fs::metadata(&heartbeat)
@@ -4687,10 +4681,7 @@ fn watch_survives_the_mailbox_disappearing_and_rings_after_it_returns() {
     let aside = sandbox.mail_root.join("claude-space-aside");
     fs::rename(&room_dir, &aside).expect("move room aside");
     std::thread::sleep(std::time::Duration::from_millis(400));
-    assert!(
-        child.try_wait().expect("probe watch child").is_none(),
-        "watch must keep polling through a missing mailbox"
-    );
+    assert_child_running(&mut child, "watch stopped while its mailbox was missing");
     fs::rename(&aside, &room_dir).expect("restore room");
     let sent = sandbox.send_json("survivor-test", "after the outage");
     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -5088,13 +5079,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     for _ in 0..15 {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    if let Some(status) = child.try_wait().expect("poll fenced watch") {
-        let output = child.wait_with_output().expect("collect fenced watch");
-        panic!(
-            "fenced watch exited {status}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert_child_running(&mut child, "watch exited during the first fence episode");
     assert_eq!(
         fs::metadata(&heartbeat)
             .expect("heartbeat remains")
@@ -5113,7 +5098,10 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         "visible while fenced",
     );
     std::thread::sleep(std::time::Duration::from_millis(300));
-    assert!(child.try_wait().expect("poll read-only watch").is_none());
+    assert_child_running(
+        &mut child,
+        "watch exited while scanning read-only under the fence",
+    );
     let active_tmp = watched.mail_root.join("..post-arx.json.reactivate.tmp");
     fs::write(
         &active_tmp,
@@ -5132,7 +5120,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             resumed = true;
             break;
         }
-        assert!(child.try_wait().expect("poll recovering watch").is_none());
+        assert_child_running(&mut child, "watch exited while recovering from the fence");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     child.kill().expect("stop recovered watch");
@@ -5248,7 +5236,7 @@ fn long_watch_scans_during_each_fence_episode_and_warns_once_per_episode() {
         "visible before shutdown",
     );
     wait_for_output(second);
-    assert!(child.try_wait().expect("poll fenced watch").is_none());
+    assert_child_running(&mut child, "watch exited during the second fence episode");
     child.kill().expect("stop fenced watch");
     let _ = child.wait();
     let stderr = fs::read_to_string(&stderr_path).expect("read watch stderr");
@@ -5285,14 +5273,10 @@ fn long_watch_exits_when_generation_is_stale_or_state_disappears() {
             if heartbeat.exists() {
                 break;
             }
-            if child.try_wait().expect("poll starting watch").is_some() {
-                let output = child.wait_with_output().expect("collect early watch");
-                panic!(
-                    "{mode}: watch exited before heartbeat: stdout={} stderr={}",
-                    stdout(&output),
-                    stderr(&output)
-                );
-            }
+            assert_child_running(
+                &mut child,
+                &format!("{mode}: watch exited before publishing its first heartbeat"),
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(heartbeat.exists(), "{mode}: watch never started");
@@ -5346,6 +5330,107 @@ fn long_watch_exits_when_generation_is_stale_or_state_disappears() {
             error.error.message
         );
     }
+}
+
+#[test]
+fn long_watch_retries_transiently_unparseable_same_generation_state() {
+    let sandbox = Sandbox::new_unseeded();
+    seed_fence_store(&sandbox, r#"{"state":"active","generation":7}"#);
+    fs::create_dir_all(sandbox.mail_root.join("dest")).expect("watch room");
+    let mut child = post_command()
+        .args(["watch", "--room", "dest", "--interval-ms", "100"])
+        .current_dir(sandbox.home.join("dest"))
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_ARX_GENERATION", "7")
+        .env("POST_PARTICIPANT", "test-default")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn transient-state watch");
+    let heartbeat = sandbox
+        .mail_root
+        .join("participants/test-default/watch.heartbeat");
+    for _ in 0..100 {
+        if heartbeat.exists() {
+            break;
+        }
+        assert_child_running(
+            &mut child,
+            "transient-state watch exited before its first heartbeat",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(heartbeat.exists(), "transient-state watch never started");
+    let state = sandbox.mail_root.join(".post-arx.json");
+    let invalid = sandbox.mail_root.join("..post-arx.json.transient.tmp");
+    fs::write(&invalid, b"{").expect("write transient invalid state");
+    fs::rename(&invalid, &state).expect("publish transient invalid state");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert_child_running(
+        &mut child,
+        "watch exited on a transiently unparseable same-generation state",
+    );
+    let paused = fs::metadata(&heartbeat)
+        .and_then(|metadata| metadata.modified())
+        .expect("heartbeat time during transient");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        fs::metadata(&heartbeat)
+            .and_then(|metadata| metadata.modified())
+            .expect("heartbeat remains readable during transient"),
+        paused,
+        "transient read-only episode still refreshed the heartbeat"
+    );
+
+    let active = sandbox.mail_root.join("..post-arx.json.active.tmp");
+    fs::write(&active, b"{\"state\":\"active\",\"generation\":7}\n")
+        .expect("write restored active state");
+    fs::rename(&active, &state).expect("restore active state");
+    let mut recovered = false;
+    for _ in 0..100 {
+        if fs::metadata(&heartbeat)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified > paused)
+        {
+            recovered = true;
+            break;
+        }
+        assert_child_running(
+            &mut child,
+            "watch exited before transient admission recovered",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(recovered, "watch heartbeat did not recover");
+
+    let invalid_again = sandbox
+        .mail_root
+        .join("..post-arx.json.transient-again.tmp");
+    fs::write(&invalid_again, b"{").expect("write second transient invalid state");
+    fs::rename(&invalid_again, &state).expect("publish second transient invalid state");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_child_running(
+        &mut child,
+        "watch exited on the second transiently unparseable state",
+    );
+    let active_again = sandbox.mail_root.join("..post-arx.json.active-again.tmp");
+    fs::write(&active_again, b"{\"state\":\"active\",\"generation\":7}\n")
+        .expect("write second restored active state");
+    fs::rename(&active_again, &state).expect("restore active state again");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    child.kill().expect("stop recovered transient-state watch");
+    let output = child
+        .wait_with_output()
+        .expect("collect transient-state watch");
+    let stderr = stderr(&output);
+    assert_eq!(
+        stderr
+            .matches("migration admission temporarily unavailable")
+            .count(),
+        2,
+        "transient admission warning was not bounded: {stderr}"
+    );
 }
 
 #[test]

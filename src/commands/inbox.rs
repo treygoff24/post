@@ -195,11 +195,13 @@ fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<C
         kind: AddressKind::Workspace,
         name: room.clone(),
     };
-    let pending = routing::pending_count(context, &address)?;
-    let held = routing::held_ids(context, &address)?.len();
+    let pending_summary = routing::pending_summary(context, &address)?;
+    let pending = pending_summary.pending.len();
+    let held = pending_summary.held.len();
+    let skipped_unreadable = pending_summary.unreadable.len();
     if args.text {
         return Ok(CommandResult::success(format!(
-            "participant: unbound (run: post participant bind)\npost: inbox for {} (pending {pending}; held {held}; unread unavailable)\n",
+            "participant: unbound (run: post participant bind)\npost: inbox for {} (pending {pending}; held {held}; skipped unreadable {skipped_unreadable}; unread unavailable)\n",
             output::sanitize_text_header(&room)
         )));
     }
@@ -212,7 +214,7 @@ fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<C
             participant: "unbound".to_owned(),
             unread: Vec::new(),
             count: 0,
-            skipped_unreadable: 0,
+            skipped_unreadable,
             unread_count: 0,
             pending,
             pending_by_address,

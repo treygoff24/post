@@ -2,17 +2,40 @@
 use post::output::{ErrorEnvelope, SendOutput};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn assert_child_running(child: &mut Child, context: &str) {
+    let Some(status) = child.try_wait().expect("poll child process") else {
+        return;
+    };
+    let mut stdout_bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout
+            .read_to_end(&mut stdout_bytes)
+            .expect("read exited child stdout");
+    }
+    let mut stderr_bytes = Vec::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        stderr
+            .read_to_end(&mut stderr_bytes)
+            .expect("read exited child stderr");
+    }
+    panic!(
+        "{context}: child exited {status}; stdout={} stderr={}",
+        String::from_utf8_lossy(&stdout_bytes),
+        String::from_utf8_lossy(&stderr_bytes)
+    );
+}
 
 pub struct Sandbox {
     pub path: PathBuf,

@@ -28,6 +28,12 @@ type LockOpenHook = Box<dyn Fn(&Path) + Send>;
 #[cfg(test)]
 static LOCK_OPEN_HOOK: OnceLock<Mutex<Option<LockOpenHook>>> = OnceLock::new();
 
+#[cfg(test)]
+type StateOpenHook = Box<dyn Fn(&Path) + Send>;
+
+#[cfg(test)]
+static STATE_OPEN_HOOK: OnceLock<Mutex<Option<StateOpenHook>>> = OnceLock::new();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FenceState {
     Fenced { generation: u64 },
@@ -50,6 +56,7 @@ impl WriteAdmission {
 pub(crate) enum LongWatchAdmission {
     Active(WriteAdmission),
     Fenced,
+    Transient(AppError),
 }
 
 #[derive(Debug)]
@@ -288,6 +295,16 @@ fn read_state(context: &Context) -> AppResult<Option<FenceState>> {
         }
         Err(error) => return Err(AppError::io("open migration fence", &path, error)),
     };
+    #[cfg(test)]
+    {
+        let guard = STATE_OPEN_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("state-open hook mutex");
+        if let Some(hook) = guard.as_ref() {
+            hook(&path);
+        }
+    }
     let metadata = file
         .metadata()
         .map_err(|error| AppError::io("inspect migration fence", &path, error))?;
@@ -351,7 +368,22 @@ pub(crate) fn admit(context: &Context, writes: bool) -> AppResult<WriteAdmission
 
 pub(crate) fn admit_long_watch(context: &Context) -> AppResult<LongWatchAdmission> {
     let generation = current_generation()?;
-    match read_state(context)? {
+    admit_long_watch_for_generation(context, generation)
+}
+
+fn admit_long_watch_for_generation(
+    context: &Context,
+    generation: Option<u64>,
+) -> AppResult<LongWatchAdmission> {
+    let state = match read_state(context) {
+        Ok(None) => match read_state(context) {
+            Ok(state) => state,
+            Err(error) => return Ok(LongWatchAdmission::Transient(error)),
+        },
+        Ok(state) => state,
+        Err(error) => return Ok(LongWatchAdmission::Transient(error)),
+    };
+    match state {
         Some(FenceState::Fenced {
             generation: expected,
         }) => match generation {
@@ -365,17 +397,81 @@ pub(crate) fn admit_long_watch(context: &Context) -> AppResult<LongWatchAdmissio
                 "an enrolled long watch requires an explicit generation",
             )),
         },
-        Some(FenceState::Active { .. }) => match admit_generation(context, true, generation) {
-            Ok(admission) => Ok(LongWatchAdmission::Active(admission)),
-            Err(error) => match read_state(context)? {
-                Some(FenceState::Fenced {
-                    generation: expected,
-                }) if generation == Some(expected) => Ok(LongWatchAdmission::Fenced),
-                _ => Err(error),
-            },
-        },
+        Some(FenceState::Active {
+            generation: expected,
+        }) => {
+            match generation {
+                Some(actual) if actual != expected => {
+                    return Err(refuse(
+                        context,
+                        format!(
+                            "watch generation {actual} is stale; active generation is {expected}"
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(refuse(
+                        context,
+                        "an enrolled long watch requires an explicit generation",
+                    ));
+                }
+                Some(_) => {}
+            }
+            match admit_generation(context, true, generation) {
+                Ok(admission) => Ok(LongWatchAdmission::Active(admission)),
+                Err(error) => classify_failed_long_watch_admission(context, generation, error),
+            }
+        }
         None if generation.is_some() => Err(refuse(context, "the enrolled state file is missing")),
-        None => admit_generation(context, true, None).map(LongWatchAdmission::Active),
+        None => match admit_generation(context, true, None) {
+            Ok(admission) => Ok(LongWatchAdmission::Active(admission)),
+            Err(error) => Ok(LongWatchAdmission::Transient(error)),
+        },
+    }
+}
+
+fn classify_failed_long_watch_admission(
+    context: &Context,
+    generation: Option<u64>,
+    error: AppError,
+) -> AppResult<LongWatchAdmission> {
+    let state = match read_state(context) {
+        Ok(None) => match read_state(context) {
+            Ok(state) => state,
+            Err(second) => return Ok(LongWatchAdmission::Transient(second)),
+        },
+        Ok(state) => state,
+        Err(second) => return Ok(LongWatchAdmission::Transient(second)),
+    };
+    match state {
+        Some(FenceState::Fenced {
+            generation: expected,
+        }) if generation == Some(expected) => Ok(LongWatchAdmission::Fenced),
+        Some(FenceState::Fenced {
+            generation: expected,
+        }) => Err(refuse(
+            context,
+            format!(
+                "watch generation {} is stale; current generation is {expected}",
+                generation
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unset".to_owned())
+            ),
+        )),
+        Some(FenceState::Active {
+            generation: expected,
+        }) if generation != Some(expected) => Err(refuse(
+            context,
+            format!(
+                "watch generation {} is stale; current generation is {expected}",
+                generation
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unset".to_owned())
+            ),
+        )),
+        Some(FenceState::Active { .. }) => Ok(LongWatchAdmission::Transient(error)),
+        None if generation.is_some() => Err(refuse(context, "the enrolled state file is missing")),
+        None => Ok(LongWatchAdmission::Transient(error)),
     }
 }
 
@@ -718,6 +814,59 @@ mod tests {
         context.prepare_first_run().expect("prepare defaults");
         assert!(root.join("rooms.json").is_file());
         assert!(root.join("rules.json").is_file());
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn long_watch_retries_state_inode_replaced_between_open_and_fstat() {
+        let (root, context) = context("arx-state-open-replace");
+        let state_path = root.join(STATE_FILE);
+        fs::write(&state_path, br#"{"state":"active","generation":7}"#).expect("active state");
+        fs::write(root.join(LOCK_FILE), b"").expect("migration lock");
+
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let expected_path = state_path.clone();
+        *STATE_OPEN_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("state-open hook mutex") = Some(Box::new(move |path| {
+            if path == expected_path {
+                opened_tx.send(()).expect("signal state open");
+                release_rx.recv().expect("release state open");
+            }
+        }));
+
+        let child_context = context.clone();
+        let child = thread::spawn(move || admit_long_watch_for_generation(&child_context, Some(7)));
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("child thread HUNG before opening the old state inode, or died");
+        let replacement = root.join("state-replacement");
+        fs::write(&replacement, br#"{"state":"active","generation":7}"#)
+            .expect("replacement state");
+        fs::rename(&replacement, &state_path).expect("atomically replace state");
+        release_tx.send(()).expect("release child");
+
+        let result = child.join().expect("join state reader");
+        let LongWatchAdmission::Transient(error) = result.expect("transient admission result")
+        else {
+            panic!("replaced state inode must be transient");
+        };
+        assert!(
+            error
+                .message
+                .contains("state must be a solitary regular file"),
+            "unexpected transient error: {error}"
+        );
+        *STATE_OPEN_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("state-open hook mutex") = None;
+        assert!(matches!(
+            admit_long_watch_for_generation(&context, Some(7)).expect("retry admission"),
+            LongWatchAdmission::Active(_)
+        ));
         trash_test_root(&root);
     }
 

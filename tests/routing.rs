@@ -542,6 +542,25 @@ fn routing_corrupt_receipt_isolated_from_other_workspaces_and_bind() {
     fs::create_dir_all(&routing).expect("routing directory");
     fs::write(routing.join(format!("{bad_id}.json")), b"{corrupt").expect("corrupt receipt");
 
+    let alpha_view =
+        sandbox.run_as_participant(&["inbox", "--room", "alpha"], &gamma_actor, &gamma);
+    assert!(
+        alpha_view.status.success(),
+        "{}",
+        common::stderr(&alpha_view)
+    );
+    let alpha_view: Value = from_stdout(&alpha_view);
+    assert_eq!(alpha_view["pending"], 0);
+    assert_eq!(alpha_view["held"], 0);
+    assert_eq!(alpha_view["skipped_unreadable"], 1);
+
+    let unbound = sandbox.run_without_identity(&["inbox", "--room", "alpha"], &alpha);
+    assert!(unbound.status.success(), "{}", common::stderr(&unbound));
+    let unbound: Value = from_stdout(&unbound);
+    assert_eq!(unbound["pending"], 0);
+    assert_eq!(unbound["held"], 0);
+    assert_eq!(unbound["skipped_unreadable"], 1);
+
     for args in [
         vec!["inbox"],
         vec!["watch", "--snapshot"],
@@ -674,8 +693,10 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
         sandbox.run_as_participant(&["chat", "tax", "--join", "--json"], &alpha_actor, &alpha);
     assert!(!join.status.success());
     let error: post::output::ErrorEnvelope = common::from_stderr(&join);
-    assert_eq!(error.error.code, "blocked_route");
+    assert_eq!(error.error.code, "config_invalid");
     assert!(error.error.message.contains(&gamma_actor));
+    assert!(error.error.message.contains("channels.json"));
+    assert!(error.error.suggested_fix.contains("fix the named file"));
     let alpha_channels = sandbox
         .mail_root
         .join("participants")
@@ -683,9 +704,66 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
         .join("channels.json");
     assert!(!alpha_channels.exists());
 
+    let unrelated = sandbox.run_as_participant(
+        &["chat", "healthy", "--join", "--json"],
+        &alpha_actor,
+        &alpha,
+    );
+    assert!(unrelated.status.success(), "{}", common::stderr(&unrelated));
+    assert!(common::stderr(&unrelated).contains("invalid participant channels"));
+
     let listed = sandbox.run_as_participant(&["channels"], &alpha_actor, &alpha);
     assert!(listed.status.success(), "{}", common::stderr(&listed));
     assert!(common::stderr(&listed).contains("invalid participant channels"));
+}
+
+#[test]
+fn routing_join_refuses_unknown_participant_records_without_breaking_listing() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&gamma).expect("gamma workspace");
+    register_room(&sandbox, "gamma", &gamma);
+    let alpha_actor = bind(&sandbox, "strict-record-alpha", &alpha, "alpha");
+    let gamma_actor = bind(&sandbox, "strict-record-gamma", &gamma, "gamma");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--join", "--json"],
+        &gamma_actor,
+        &gamma,
+    ));
+    fs::write(
+        sandbox
+            .mail_root
+            .join("participants")
+            .join(&gamma_actor)
+            .join("participant.json"),
+        b"{corrupt",
+    )
+    .expect("corrupt gamma participant record");
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"alpha","to":"gamma","reason":"separate workspaces"}]}"#,
+    )
+    .expect("write blocked route");
+
+    let join =
+        sandbox.run_as_participant(&["chat", "tax", "--join", "--json"], &alpha_actor, &alpha);
+    assert!(!join.status.success());
+    let error: post::output::ErrorEnvelope = common::from_stderr(&join);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(error.error.message.contains(&gamma_actor));
+    assert!(error.error.message.contains("participant.json"));
+    assert!(error.error.suggested_fix.contains("fix the named file"));
+    assert!(!sandbox
+        .mail_root
+        .join("participants")
+        .join(&alpha_actor)
+        .join("channels.json")
+        .exists());
+
+    let listed = sandbox.run_as_participant(&["channels"], &alpha_actor, &alpha);
+    assert!(listed.status.success(), "{}", common::stderr(&listed));
+    assert!(common::stderr(&listed).contains("skipped corrupt participant"));
 }
 
 #[test]
@@ -736,6 +814,50 @@ fn routing_malformed_pending_mail_counts_unreadable_and_never_held() {
     assert!(catchup.status.success(), "{}", common::stderr(&catchup));
     assert!(common::stderr(&catchup).contains("skipped unreadable pending mail"));
     assert!(!common::stderr(&catchup).contains("held"));
+}
+
+#[test]
+fn routing_unbound_pending_classification_is_truthful_and_read_only() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let id = "20990916-051201-acde13";
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+    fs::create_dir_all(&inbox).expect("alpha inbox");
+    fs::write(inbox.join(format!("{id}.mail")), b"not mail").expect("malformed mail");
+    let before = tree(&sandbox.mail_root);
+
+    let json = sandbox.run_without_identity(&["inbox", "--room", "alpha"], &alpha);
+    assert!(json.status.success(), "{}", common::stderr(&json));
+    let json: Value = from_stdout(&json);
+    assert_eq!(json["participant"], "unbound");
+    assert_eq!(json["pending"], 0);
+    assert_eq!(json["held"], 0);
+    assert_eq!(json["skipped_unreadable"], 1);
+
+    let text = sandbox.run_without_identity(&["inbox", "--room", "alpha", "--text"], &alpha);
+    assert!(text.status.success(), "{}", common::stderr(&text));
+    let text = common::stdout(&text);
+    assert!(text.contains("pending 0"), "{text}");
+    assert!(text.contains("held 0"), "{text}");
+    assert!(text.contains("skipped unreadable 1"), "{text}");
+
+    let channels = sandbox.run_without_identity(&["channels"], &alpha);
+    assert!(channels.status.success(), "{}", common::stderr(&channels));
+    let channels: Value = from_stdout(&channels);
+    assert_eq!(channels["participant"], "unbound");
+    assert_eq!(channels["pending"], 0);
+
+    let doctor = sandbox.run_without_identity(&["doctor"], &alpha);
+    assert_eq!(doctor.status.code(), Some(1));
+    let doctor: Value = from_stdout(&doctor);
+    assert_eq!(doctor["pending"]["workspace:alpha"], 0);
+    assert!(doctor["checks"]
+        .as_array()
+        .expect("doctor checks")
+        .iter()
+        .any(|check| check["id"] == "state.malformed_mail"));
+
+    assert_eq!(tree(&sandbox.mail_root), before);
 }
 
 #[test]

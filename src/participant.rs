@@ -369,11 +369,10 @@ pub(crate) fn sender(context: &Context) -> AppResult<Sender> {
 }
 
 pub(crate) fn touch(context: &Context, id: &str) -> AppResult<Participant> {
-    let (last_seen, lease_hours) = activity_from_env()?;
+    let activity = activity_from_env()?;
     let _lock = lock(context)?;
     let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
-    participant.last_seen = Some(last_seen);
-    participant.lease_hours = lease_hours;
+    apply_activity(&mut participant, &activity);
     write_record(&participant)?;
     Ok(participant)
 }
@@ -399,7 +398,7 @@ pub(crate) fn bind(
     workspace_override: Option<&str>,
     bootstrap: Option<(&str, &str)>,
 ) -> AppResult<Participant> {
-    let (last_seen, lease_hours) = activity_from_env()?;
+    let activity = activity_from_env()?;
     // An explicit bootstrap deliberately starts an independent participant.
     // It must not inspect or reuse an inherited parent binding.
     let explicit = if bootstrap.is_some() {
@@ -420,8 +419,7 @@ pub(crate) fn bind(
             participant.workspace = workspace;
             participant.workspace_path = workspace_path;
         }
-        participant.last_seen = Some(last_seen);
-        participant.lease_hours = lease_hours;
+        apply_activity(&mut participant, &activity);
         participant.ended_at = None;
         write_record(&participant)?;
         return Ok(participant);
@@ -446,8 +444,7 @@ pub(crate) fn bind(
             existing.workspace = workspace;
             existing.workspace_path = workspace_path;
         }
-        existing.last_seen = Some(last_seen);
-        existing.lease_hours = lease_hours;
+        apply_activity(existing, &activity);
         existing.ended_at = None;
         write_record(existing)?;
     } else {
@@ -462,8 +459,8 @@ pub(crate) fn bind(
             harness: binding.harness.clone(),
             conversation_key_digest: digest.clone(),
             created,
-            last_seen: Some(last_seen),
-            lease_hours,
+            last_seen: Some(activity.last_seen),
+            lease_hours: activity.lease_override.unwrap_or(DEFAULT_LEASE_HOURS),
             ended_at: None,
             workspace,
             workspace_path,
@@ -960,22 +957,39 @@ fn realpath_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn activity_from_env() -> AppResult<(String, u64)> {
+struct ActivityRefresh {
+    last_seen: String,
+    lease_override: Option<u64>,
+}
+
+fn apply_activity(participant: &mut Participant, activity: &ActivityRefresh) {
+    participant.last_seen = Some(activity.last_seen.clone());
+    if let Some(lease_hours) = activity.lease_override {
+        participant.lease_hours = lease_hours;
+    }
+}
+
+fn activity_from_env() -> AppResult<ActivityRefresh> {
     let lease_hours = match env_utf8(LEASE_ENV)? {
-        Some(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| {
-                AppError::invalid_argument(format!(
-                    "{LEASE_ENV} must be a positive integer number of hours"
-                ))
-                .input(value)
-                .reason("participant lease must be positive")
-            })?,
-        None => DEFAULT_LEASE_HOURS,
+        Some(value) => Some(
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    AppError::invalid_argument(format!(
+                        "{LEASE_ENV} must be a positive integer number of hours"
+                    ))
+                    .input(value)
+                    .reason("participant lease must be positive")
+                })?,
+        ),
+        None => None,
     };
-    Ok((format_rfc3339(SystemTime::now())?, lease_hours))
+    Ok(ActivityRefresh {
+        last_seen: format_rfc3339(SystemTime::now())?,
+        lease_override: lease_hours,
+    })
 }
 
 fn format_rfc3339(now: SystemTime) -> AppResult<String> {
