@@ -1055,10 +1055,15 @@ fn lineage_withdraw_after_leave_resolves_one_voice_and_refuses_ambiguity() {
         error.error.details.matches,
         Some(vec!["ash".to_owned(), "ember".to_owned()])
     );
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post identity voice withdraw --lineage 'ash'")
-    );
+    assert!(error.error.details.exact_fix.is_none());
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post identity voice withdraw --lineage 'ash'"));
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post identity voice withdraw --lineage 'ember'"));
 }
 
 #[test]
@@ -1169,6 +1174,47 @@ fn lineage_withdraw_selector_targets_one_lineage_and_reports_it() {
 }
 
 #[test]
+fn lineage_withdraw_selector_works_with_corrupt_lineage_metadata() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let body = sandbox.path.join("voice.md");
+    write_body(&body, b"voice survives metadata damage\n");
+    assert_success(&run_as(&sandbox, &actor, &["identity", "new", "ember"]));
+    assert_success(&run_as(
+        &sandbox,
+        &actor,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    assert_success(&run_as(&sandbox, &actor, &["identity", "leave"]));
+    let lineage_dir = sandbox.mail_root.join("lineages/ember");
+    fs::write(lineage_dir.join("lineage.json"), "not JSON\n").expect("corrupt lineage record");
+
+    let withdrawn = run_as(
+        &sandbox,
+        &actor,
+        &["identity", "voice", "withdraw", "--lineage", "ember"],
+    );
+    assert_success(&withdrawn);
+    let receipt: Value = from_stdout(&withdrawn);
+    assert_eq!(receipt["lineage"], "ember");
+    assert_eq!(receipt["changed"], true);
+    assert!(!lineage_dir
+        .join("voices")
+        .join(format!("{actor}.md"))
+        .exists());
+    assert!(lineage_dir
+        .join("voices")
+        .join(format!("{actor}.gap"))
+        .exists());
+}
+
+#[test]
 fn lineage_withdraw_after_readd_and_leave_preserves_gap_count() {
     let sandbox = Sandbox::new();
     let actor = sandbox.test_participant("claude-space");
@@ -1218,6 +1264,38 @@ fn lineage_withdraw_after_readd_and_leave_preserves_gap_count() {
         serde_json::from_slice(&fs::read(gap).expect("voice gap")).expect("voice gap JSON");
     assert_eq!(gap["withdrawals"], 2);
     assert_eq!(gap["cleanup_pending"], false);
+}
+
+#[test]
+fn lineage_unaffiliated_settled_gap_retry_is_idempotent() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let body = sandbox.path.join("voice.md");
+    write_body(&body, b"voice\n");
+    assert_success(&run_as(&sandbox, &actor, &["identity", "new", "ember"]));
+    assert_success(&run_as(
+        &sandbox,
+        &actor,
+        &[
+            "identity",
+            "voice",
+            "add",
+            "--body-file",
+            body.to_str().expect("UTF-8 fixture path"),
+        ],
+    ));
+    assert_success(&run_as(&sandbox, &actor, &["identity", "leave"]));
+    assert_success(&run_as(
+        &sandbox,
+        &actor,
+        &["identity", "voice", "withdraw"],
+    ));
+
+    let retry = run_as(&sandbox, &actor, &["identity", "voice", "withdraw"]);
+    assert_success(&retry);
+    let receipt: Value = from_stdout(&retry);
+    assert_eq!(receipt["lineage"], "ember");
+    assert_eq!(receipt["changed"], false);
 }
 
 #[test]
@@ -1319,10 +1397,15 @@ fn lineage_unaffiliated_pending_withdraw_is_recovered_and_ambiguity_is_safe() {
         error.error.details.matches,
         Some(vec!["ash".to_owned(), "ember".to_owned()])
     );
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post identity voice withdraw --lineage 'ash'")
-    );
+    assert!(error.error.details.exact_fix.is_none());
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post identity voice withdraw --lineage 'ash'"));
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post identity voice withdraw --lineage 'ember'"));
     assert_eq!(
         fs::read_to_string(&ash_voice).expect("ambiguous ash voice survives"),
         "ash current voice\n"
@@ -1355,7 +1438,7 @@ fn lineage_withdraw_retry_on_current_gap_does_not_delete_another_lineage_voice()
         assert_eq!(receipt["changed"], false);
         assert_eq!(
             receipt["hint"],
-            "no current voice here; to withdraw a voice on another lineage, continue that lineage first"
+            "no current voice here; to withdraw a voice on another lineage, run: post identity voice withdraw --lineage NAME"
         );
         assert_eq!(
             fs::read_to_string(&ash_voice).expect("ash voice survives retry"),

@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::lineage::{self, Lineage, Member, LINEAGES_DIR};
-use crate::mailbox::{atomic_replace, local_timestamp, shell_quote, Context};
+use crate::mailbox::{atomic_replace, local_timestamp, shell_quote, validate_room_name, Context};
 use crate::participant::{self, Participant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const LINEAGE_VERSION: u64 = 1;
 const LINEAGE_FILE: &str = "lineage.json";
@@ -517,8 +517,8 @@ pub(crate) fn withdraw_voice(
     let acting = current_actor(context, acting)?;
     ensure_own_voice(&acting, author)?;
     if let Some(name) = requested_lineage {
-        let lineage = require_lineage(context, name)?;
-        return withdraw_selected_voice(&acting, &lineage.name, &lineage.dir, author, false);
+        let dir = voice_lineage_dir(context, name)?;
+        return withdraw_selected_voice(&acting, name, &dir, author, false);
     }
     if let Some(name) = &acting.lineage {
         let dir = context.root.join(LINEAGES_DIR).join(name);
@@ -553,7 +553,7 @@ fn withdraw_selected_voice(
     }
     if gap.is_some() {
         let hint = current_lineage.then(|| {
-            "no current voice here; to withdraw a voice on another lineage, continue that lineage first"
+            "no current voice here; to withdraw a voice on another lineage, run: post identity voice withdraw --lineage NAME"
                 .to_owned()
         });
         return Ok(Mutation {
@@ -745,6 +745,33 @@ fn require_lineage(context: &Context, name: &str) -> AppResult<Lineage> {
     })
 }
 
+fn voice_lineage_dir(context: &Context, name: &str) -> AppResult<PathBuf> {
+    validate_room_name(name).map_err(|reason| {
+        AppError::invalid_argument(format!("lineage name '{name}' is invalid: {reason}"))
+            .input(name)
+            .reason(reason)
+    })?;
+    let dir = context.root.join(LINEAGES_DIR).join(name);
+    match fs::metadata(&dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(dir),
+        Ok(_) => Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("lineage '{name}' was not found"),
+            "Run `post identity list` and retry with an existing lineage name.",
+        )
+        .input(name)
+        .reason("lineage directory is absent")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("lineage '{name}' was not found"),
+            "Run `post identity list` and retry with an existing lineage name.",
+        )
+        .input(name)
+        .reason("lineage directory is absent")),
+        Err(error) => Err(AppError::io("inspect lineage directory", &dir, error)),
+    }
+}
+
 fn resolve_voice_lineage(
     context: &Context,
     author: &str,
@@ -756,6 +783,7 @@ fn resolve_voice_lineage(
         Err(error) => return Err(AppError::io("search lineage voices", &root, error)),
     };
     let mut matches = Vec::new();
+    let mut settled_gaps = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| AppError::io("read lineage entry", &root, error))?;
         if !entry
@@ -774,22 +802,38 @@ fn resolve_voice_lineage(
         let cleanup_pending = gap.is_some_and(|gap| gap.cleanup_pending);
         if current || cleanup_pending {
             matches.push((name, entry.path()));
+        } else if gap.is_some() {
+            settled_gaps.push((name, entry.path()));
         }
     }
     matches.sort_by(|left, right| left.0.cmp(&right.0));
+    settled_gaps.sort_by(|left, right| left.0.cmp(&right.0));
+    if matches.is_empty() && settled_gaps.len() == 1 {
+        return Ok(settled_gaps.pop().expect("one settled gap exists"));
+    }
     match matches.len() {
         0 => Err(no_voice(author)),
         1 => Ok(matches.pop().expect("one voice match exists")),
         _ => {
             let names: Vec<String> = matches.into_iter().map(|(name, _)| name).collect();
-            Err(AppError::invalid_argument(format!(
-                "participant '{author}' has voices in several lineages: {}; withdrawal is ambiguous",
-                names.join(", ")
-            ))
-            .exact_fix(format!(
-                "post identity voice withdraw --lineage {}",
-                shell_quote(&names[0])
-            ))
+            let commands = names
+                .iter()
+                .map(|name| {
+                    format!(
+                        "`post identity voice withdraw --lineage {}`",
+                        shell_quote(name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(AppError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "participant '{author}' has voices in several lineages: {}; withdrawal is ambiguous",
+                    names.join(", ")
+                ),
+                format!("Choose the intended lineage and run one of: {commands}."),
+            )
             .matches(names)
             .reason("withdrawal requires exactly one matching current or pending voice"))
         }
