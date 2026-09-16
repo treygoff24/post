@@ -478,10 +478,12 @@ function main() {
   const needsSetup = eventName === "SessionStart" || !state.participantId || (explicit && explicit !== state.participantId);
   let participantId = state.participantId;
   if (needsSetup) {
-    const versionError = versionFailure(runPost(["version", "--json"], input.cwd, { clearConversationKeys: true, deadline }));
-    if (versionError) {
-      tryEmit(setupPayload(eventName, versionError));
-      return;
+    if (eventName === "SessionStart") {
+      const versionError = versionFailure(runPost(["version", "--json"], input.cwd, { clearConversationKeys: true, deadline }));
+      if (versionError) {
+        tryEmit(setupPayload(eventName, versionError));
+        return;
+      }
     }
     participantId = setupParticipant(input.cwd, input.session_id, deadline);
     if (!participantId) {

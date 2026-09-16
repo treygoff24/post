@@ -82,11 +82,6 @@ function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
       POST_CLAUDE_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
-      // Hermetic against the developer shell: a live agent-session launch
-      // exports POST_HARNESS/POST_REPO_KEY, which must not leak a real
-      // identity card into tests. Card tests re-add them via extraEnv.
-      POST_HARNESS: "",
-      POST_REPO_KEY: "",
       ...extraEnv,
     },
   });

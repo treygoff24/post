@@ -81,11 +81,6 @@ function run(input, { stateDir, env: extraEnv = {} } = {}) {
       POST_GROK_HOOK_STATE_DIR: stateDir,
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
-      // Hermetic against the developer shell: a live agent-session launch
-      // exports POST_HARNESS/POST_REPO_KEY, which must not leak a real
-      // identity card into tests. Card tests re-add them via extraEnv.
-      POST_HARNESS: "",
-      POST_REPO_KEY: "",
       ...extraEnv,
     },
   });
