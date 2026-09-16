@@ -30,6 +30,11 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .input(args.name.clone())
         .reason(reason)
     })?;
+    // One namespace decision spans participants/lineages and rooms. Always
+    // acquire the participant lock first, then the rooms lock, so identity
+    // creation can keep using only the participant lock without deadlock.
+    let _participant_lock = crate::participant::lock(context)?;
+    let _lock = context.lock_rooms()?;
     if crate::lineage::load(context, &args.name)?.is_some() {
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
@@ -43,7 +48,6 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .reason("room names cannot collide with existing lineages"));
     }
 
-    let _lock = context.lock_rooms()?;
     let mut rooms = context.load_rooms()?;
     if let Some(existing_name) = rooms
         .keys()

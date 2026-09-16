@@ -83,6 +83,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
                 command: crate::cli::ParticipantCommand::Show,
             })
         );
+    let annotate_unbound_json = report_unbound && unbound_json_listing(&cli.command);
     // clap enforces `conflicts_with = "json"` only when the global flag
     // FOLLOWS the subcommand; `post --json <cmd> --text` parses fine. Every
     // human-only flag is therefore re-checked here, ordering-independent.
@@ -121,7 +122,13 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Version => unreachable!("version dispatches before mailbox context resolution"),
     }?;
     if report_unbound {
-        annotate_unbound(&mut result, pretty, resolution_error.as_deref())?;
+        eprintln!("participant: unbound (run: post participant bind)");
+        if let Some(error) = resolution_error.as_deref() {
+            eprintln!("participant resolution error: {error}");
+        }
+        if annotate_unbound_json {
+            annotate_unbound(&mut result, pretty, resolution_error.as_deref())?;
+        }
     }
     if !long_watch && writes {
         let admission = admission.expect("writer admission exists");
@@ -132,6 +139,24 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         }));
     }
     Ok(result)
+}
+
+fn unbound_json_listing(command: &Command) -> bool {
+    use crate::cli::{OwnerCommand, ParticipantCommand, ProfileCommand, RoomsCommand};
+    match command {
+        Command::Rooms(args) => !matches!(args.command, Some(RoomsCommand::Add(_))),
+        Command::Channels(_)
+        | Command::Inbox(_)
+        | Command::Doctor(_)
+        | Command::Schema
+        | Command::Who(_) => true,
+        Command::Participant(crate::cli::ParticipantArgs {
+            command: ParticipantCommand::List,
+        }) => true,
+        Command::Profile(args) => matches!(args.command, None | Some(ProfileCommand::Show(_))),
+        Command::Owner(args) => matches!(args.command, None | Some(OwnerCommand::Show)),
+        _ => false,
+    }
 }
 
 fn explicit_participant_bootstrap(command: &Command) -> bool {
@@ -187,11 +212,6 @@ fn annotate_unbound(
     resolution_error: Option<&str>,
 ) -> AppResult<()> {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result.stdout) else {
-        let mut annotation = "participant: unbound (run: post participant bind)\n".to_owned();
-        if let Some(error) = resolution_error {
-            annotation.push_str(&format!("participant resolution error: {error}\n"));
-        }
-        result.stdout.insert_str(0, &annotation);
         return Ok(());
     };
     let Some(object) = value.as_object_mut() else {

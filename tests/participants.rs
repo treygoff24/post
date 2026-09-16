@@ -1,6 +1,8 @@
 mod common;
 
-use common::{assert_success, from_stderr, from_stdout, register_alpha_beta, Sandbox};
+use common::{
+    assert_success, from_stderr, from_stdout, register_alpha_beta, write_custom_mail, Sandbox,
+};
 use post::output::{ErrorEnvelope, SendOutput};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -8,6 +10,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+#[cfg(unix)]
+use std::{fs::OpenOptions, os::fd::AsRawFd, os::unix::fs::OpenOptionsExt, thread, time::Duration};
 
 fn digest(key: &str) -> String {
     format!("{:x}", Sha256::digest(key.as_bytes()))
@@ -547,35 +551,78 @@ fn participant_codex_conflict_is_an_error_not_a_guess() {
 
 #[test]
 fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree() {
-    let commands: Vec<Vec<&str>> = vec![
-        vec!["version", "--json"],
-        vec!["participant", "show"],
-        vec!["participant", "list"],
-        vec!["inbox", "--room", "alpha"],
-        vec!["who"],
-        vec!["channels"],
-        vec!["doctor"],
-        vec!["schema"],
-        vec!["rooms"],
-        vec!["read", "missing", "--room", "alpha", "--peek"],
-        vec!["chat", "missing", "--peek"],
-        vec!["watch", "--snapshot", "--room", "alpha"],
-        vec!["profile", "show", "alpha"],
-        vec!["owner", "show"],
-        vec!["search", "needle", "--mail", "--json"],
+    let commands: Vec<(Vec<&str>, Option<&str>)> = vec![
+        (vec!["version", "--json"], None),
+        (vec!["participant", "show"], None),
+        (vec!["participant", "list"], None),
+        (vec!["inbox", "--room", "alpha"], None),
+        (vec!["who"], None),
+        (vec!["channels"], None),
+        (vec!["doctor"], Some("doctor_findings")),
+        (vec!["schema"], None),
+        (vec!["rooms"], None),
+        (
+            vec!["read", "missing", "--room", "alpha", "--peek"],
+            Some("not_found"),
+        ),
+        (
+            vec![
+                "read",
+                "20260916-040001-a1b2c4",
+                "--room",
+                "alpha",
+                "--offset",
+                "0",
+                "--length",
+                "4",
+                "--max-bytes",
+                "4096",
+                "--json",
+            ],
+            None,
+        ),
+        (vec!["chat", "missing", "--peek"], Some("not_found")),
+        (vec!["watch", "--snapshot", "--room", "alpha"], None),
+        (vec!["profile", "show", "alpha"], None),
+        (vec!["owner", "show"], None),
+        (vec!["search", "needle", "--mail", "--json"], None),
     ];
     for bound in [false, true] {
-        for args in &commands {
+        for (args, expected) in &commands {
             let sandbox = Sandbox::new();
             let (alpha, _beta) = register_alpha_beta(&sandbox);
             let actor = sandbox.test_participant("alpha");
+            write_custom_mail(
+                &sandbox.mail_root.join("alpha/inbox"),
+                "20260916-040001-a1b2c4",
+                &serde_json::json!({
+                    "id": "20260916-040001-a1b2c4",
+                    "from": "beta",
+                    "to": "alpha",
+                    "kind": "note",
+                    "subject": "slice",
+                    "sent": "2026-09-16 00:00:00 +0000"
+                }),
+                "slice body",
+            );
             let before = tree(&sandbox.mail_root);
             let output = if bound {
                 sandbox.run_as_participant(args, &actor, &alpha)
             } else {
                 sandbox.run_unbound(args, &alpha)
             };
-            let _ = output;
+            match expected {
+                None => assert_success(&output),
+                Some("doctor_findings") => {
+                    assert_eq!(output.status.code(), Some(1), "{args:?}");
+                    let value: Value = from_stdout(&output);
+                    assert_eq!(value["ok"], false, "{args:?}");
+                }
+                Some(code) => {
+                    let error: ErrorEnvelope = from_stderr(&output);
+                    assert_eq!(error.error.code, *code, "{args:?}");
+                }
+            }
             assert_eq!(
                 tree(&sandbox.mail_root),
                 before,
@@ -584,6 +631,385 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
             );
         }
     }
+}
+
+#[test]
+fn participant_round4_unbound_streams_keep_stdout_protocol_and_budget() {
+    let empty = Sandbox::new();
+    let empty_output = empty.run_without_identity(
+        &["watch", "--snapshot", "--room", "claude-space"],
+        &empty.path,
+    );
+    assert_success(&empty_output);
+    assert_eq!(
+        empty_output.stdout.len(),
+        0,
+        "empty NDJSON stream was poisoned"
+    );
+    assert!(common::stderr(&empty_output).contains("participant: unbound"));
+
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let id = "20260916-040000-a1b2c3";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        id,
+        &serde_json::json!({
+            "id": id,
+            "from": "beta",
+            "to": "alpha",
+            "kind": "note",
+            "subject": "round four",
+            "sent": "2026-09-16 04:00:00 -0500"
+        }),
+        "budgeted body",
+    );
+
+    let actor = sandbox.test_participant("alpha");
+    let baseline = sandbox.run_as_participant(
+        &[
+            "read",
+            id,
+            "--room",
+            "alpha",
+            "--offset",
+            "0",
+            "--length",
+            "8",
+            "--max-bytes",
+            "4096",
+            "--json",
+        ],
+        &actor,
+        &alpha,
+    );
+    assert_success(&baseline);
+    let cap = baseline.stdout.len().to_string();
+    let budgeted_args = vec![
+        "read",
+        id,
+        "--room",
+        "alpha",
+        "--offset",
+        "0",
+        "--length",
+        "8",
+        "--max-bytes",
+        cap.as_str(),
+        "--json",
+    ];
+    let budgeted = sandbox.run_without_identity(&budgeted_args, &alpha);
+    assert_success(&budgeted);
+    assert!(
+        budgeted.stdout.len() <= baseline.stdout.len(),
+        "unbound notice exceeded the {}-byte budget: {} bytes",
+        baseline.stdout.len(),
+        budgeted.stdout.len()
+    );
+    assert!(common::stderr(&budgeted).contains("participant: unbound"));
+
+    let watched = sandbox.run_without_identity(&["watch", "--snapshot", "--room", "alpha"], &alpha);
+    assert_success(&watched);
+    assert!(!watched.stdout.is_empty());
+    for line in common::stdout(&watched).lines() {
+        serde_json::from_str::<Value>(line)
+            .unwrap_or_else(|error| panic!("invalid watch NDJSON line {line:?}: {error}"));
+    }
+    assert!(common::stderr(&watched).contains("participant: unbound"));
+}
+
+#[test]
+fn participant_round4_typed_participant_blocks_use_recipient_workspace() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let sender = sandbox.bind_claude("blocked-sender", &alpha, Some("alpha"));
+    let sender_id = participant_id(&sender).to_owned();
+    let receiver = sandbox.bind_codex("blocked-receiver", &beta, Some("beta"));
+    let receiver_id = participant_id(&receiver).to_owned();
+
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"alpha","to":"beta","reason":"beta is blocked"}]}"#,
+    )
+    .expect("block beta");
+    let blocked = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{receiver_id}"),
+            "--body",
+            "must not land",
+        ],
+        &sender_id,
+        &alpha,
+    );
+    let error: ErrorEnvelope = from_stderr(&blocked);
+    assert_eq!(error.error.code, "blocked_route");
+
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"alpha","to":"claude-space","reason":"other target"}]}"#,
+    )
+    .expect("allow beta");
+    assert_success(&sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{receiver_id}"),
+            "--body",
+            "allowed",
+        ],
+        &sender_id,
+        &alpha,
+    ));
+
+    let workspace_less = sandbox.run(&[
+        "participant",
+        "bind",
+        "--harness",
+        "shell",
+        "--key",
+        "workspace-less-block-target",
+        "--json",
+    ]);
+    assert_success(&workspace_less);
+    let workspace_less: Value = from_stdout(&workspace_less);
+    let workspace_less_id = participant_id(&workspace_less).to_owned();
+    assert!(workspace_less["participant"]["workspace"].is_null());
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"alpha","to":"*","reason":"all routes blocked"}]}"#,
+    )
+    .expect("block wildcard");
+    let wildcard = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{workspace_less_id}"),
+            "--body",
+            "must not land",
+        ],
+        &sender_id,
+        &alpha,
+    );
+    let error: ErrorEnvelope = from_stderr(&wildcard);
+    assert_eq!(error.error.code, "blocked_route");
+}
+
+#[test]
+fn participant_round4_lineage_recipient_filtering_remains_pending_p2() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let sender = sandbox.bind_claude("lineage-pending-sender", &alpha, Some("alpha"));
+    let sender_id = participant_id(&sender).to_owned();
+    let lineage_dir = sandbox.mail_root.join("lineages/round4-lineage");
+    fs::create_dir_all(&lineage_dir).expect("lineage dir");
+    fs::write(
+        lineage_dir.join("lineage.json"),
+        r#"{"name":"round4-lineage","founder":"founder","created":"2026-09-16 00:00:00 +0000","host":"test"}"#,
+    )
+    .expect("lineage record");
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"alpha","to":"beta","reason":"recipient workspace blocked"}]}"#,
+    )
+    .expect("recipient rule");
+
+    // P.1 only holds lineage-addressed mail. P.2 must filter blocked affiliates
+    // while freezing the receipt; this assertion prevents P.1 from pretending
+    // it can decide before recipient selection exists.
+    assert_success(&sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "lineage:round4-lineage",
+            "--body",
+            "held for P.2 routing",
+        ],
+        &sender_id,
+        &alpha,
+    ));
+}
+
+#[test]
+fn participant_round4_bound_sender_assertions_refuse_disagreement() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("sender-disagreement", &beta, Some("beta"));
+    let actor = participant_id(&bound).to_owned();
+
+    let flag = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "alpha",
+            "--from",
+            "alpha",
+            "--body",
+            "wrong flag",
+        ],
+        &actor,
+        &beta,
+    );
+    let error: ErrorEnvelope = from_stderr(&flag);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error
+        .error
+        .message
+        .contains("conflicts with bound participant"));
+
+    let pin = sandbox.run_in_env(
+        &["send", "--to", "alpha", "--body", "wrong pin"],
+        None,
+        &beta,
+        &[("POST_PARTICIPANT", actor.as_str()), ("POST_FROM", "alpha")],
+    );
+    let error: ErrorEnvelope = from_stderr(&pin);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("workspace pin"));
+
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "pin-conflict", "--join", "--json"],
+        &actor,
+        &beta,
+    ));
+    let channel = sandbox.run_in_env(
+        &[
+            "chat",
+            "pin-conflict",
+            "--send",
+            "--anyway",
+            "--body",
+            "wrong channel pin",
+        ],
+        None,
+        &beta,
+        &[("POST_PARTICIPANT", actor.as_str()), ("POST_FROM", "alpha")],
+    );
+    let error: ErrorEnvelope = from_stderr(&channel);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("workspace pin"));
+}
+
+#[test]
+fn participant_round4_bound_matching_cwd_still_uses_binding_provenance() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("matching-cwd-provenance", &beta, Some("beta"));
+    let actor = participant_id(&bound).to_owned();
+    let direct = sandbox.run_as_participant(
+        &["send", "--to", "alpha", "--body", "bound", "--json"],
+        &actor,
+        &beta,
+    );
+    assert_success(&direct);
+    let direct: Value = from_stdout(&direct);
+    assert_eq!(
+        direct["envelope"]["sender_provenance"],
+        "participant-binding"
+    );
+
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "matching-cwd", "--join", "--json"],
+        &actor,
+        &beta,
+    ));
+    let channel = sandbox.run_as_participant(
+        &[
+            "chat",
+            "matching-cwd",
+            "--send",
+            "--anyway",
+            "--body",
+            "bound channel",
+            "--json",
+        ],
+        &actor,
+        &beta,
+    );
+    assert_success(&channel);
+    let channel: Value = from_stdout(&channel);
+    assert_eq!(
+        channel["message"]["sender_provenance"],
+        "participant-binding"
+    );
+}
+
+#[test]
+fn participant_round4_native_keys_reject_empty_or_whitespace() {
+    for variable in [
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+    ] {
+        for value in ["", "   "] {
+            let sandbox = Sandbox::new_unseeded();
+            let output = sandbox.run_in_env(
+                &["participant", "bind", "--json"],
+                None,
+                &sandbox.path,
+                &[(variable, value)],
+            );
+            let error: ErrorEnvelope = from_stderr(&output);
+            assert_eq!(error.error.code, "invalid_argument", "{variable}={value:?}");
+            assert!(
+                error.error.message.contains(variable),
+                "{}",
+                error.error.message
+            );
+            assert!(
+                !sandbox.mail_root.join("participants").exists(),
+                "{variable}={value:?} minted a participant"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn participant_round4_rooms_add_waits_for_participants_lock() {
+    let sandbox = Sandbox::new();
+    let room = sandbox.path.join("round4-room");
+    fs::create_dir(&room).expect("room path");
+    let lock_path = sandbox.mail_root.join(".participants.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .expect("open participants lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let mut child = common::post_command()
+        .args([
+            "rooms",
+            "add",
+            "round4-room",
+            room.to_str().expect("UTF-8 room path"),
+        ])
+        .current_dir(&sandbox.path)
+        .env_clear()
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rooms add");
+    for _ in 0..20 {
+        if child.try_wait().expect("probe rooms add").is_some() {
+            panic!("rooms add bypassed .participants.lock");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let output = child.wait_with_output().expect("wait rooms add");
+    assert!(
+        output.status.success(),
+        "rooms add failed after lock release: {}",
+        common::stderr(&output)
+    );
 }
 
 #[test]
@@ -1265,25 +1691,70 @@ fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
             Value::String("2020-01-01T00:00:00Z".to_owned()),
         );
     });
-    for args in [
-        vec!["participant", "show"],
-        vec!["participant", "list"],
-        vec!["who"],
-        vec!["rooms"],
-        vec!["channels"],
-        vec!["inbox", "--room", "alpha"],
-        vec!["doctor"],
-        vec!["schema"],
-        vec!["version", "--json"],
-        vec!["read", "missing", "--room", "alpha", "--peek"],
-        vec!["chat", "missing", "--peek"],
-        vec!["watch", "--snapshot", "--room", "alpha"],
-        vec!["profile", "show", "alpha"],
-        vec!["owner", "show"],
-        vec!["search", "needle", "--mail", "--json"],
+    let slice_id = "20260916-040002-a1b2c5";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        slice_id,
+        &serde_json::json!({
+            "id": slice_id,
+            "from": "beta",
+            "to": "alpha",
+            "kind": "note",
+            "subject": "lifecycle slice",
+            "sent": "2026-09-16 04:00:02 -0500"
+        }),
+        "lifecycle body",
+    );
+    for (args, expected) in [
+        (vec!["participant", "show"], None),
+        (vec!["participant", "list"], None),
+        (vec!["who"], None),
+        (vec!["rooms"], None),
+        (vec!["channels"], None),
+        (vec!["inbox", "--room", "alpha"], None),
+        (vec!["doctor"], Some("doctor_findings")),
+        (vec!["schema"], None),
+        (vec!["version", "--json"], None),
+        (
+            vec!["read", "missing", "--room", "alpha", "--peek"],
+            Some("not_found"),
+        ),
+        (
+            vec![
+                "read",
+                slice_id,
+                "--room",
+                "alpha",
+                "--offset",
+                "0",
+                "--length",
+                "4",
+                "--max-bytes",
+                "4096",
+                "--json",
+            ],
+            None,
+        ),
+        (vec!["chat", "missing", "--peek"], Some("not_found")),
+        (vec!["watch", "--snapshot", "--room", "alpha"], None),
+        (vec!["profile", "show", "alpha"], None),
+        (vec!["owner", "show"], None),
+        (vec!["search", "needle", "--mail", "--json"], None),
     ] {
         let before = tree(&sandbox.mail_root);
-        let _ = sandbox.run_as_participant(&args, &id, &alpha);
+        let output = sandbox.run_as_participant(&args, &id, &alpha);
+        match expected {
+            None => assert_success(&output),
+            Some("doctor_findings") => {
+                assert_eq!(output.status.code(), Some(1), "{args:?}");
+                let value: Value = from_stdout(&output);
+                assert_eq!(value["ok"], false, "{args:?}");
+            }
+            Some(code) => {
+                let error: ErrorEnvelope = from_stderr(&output);
+                assert_eq!(error.error.code, code, "{args:?}");
+            }
+        }
         assert_eq!(tree(&sandbox.mail_root), before, "read mutated: {args:?}");
     }
     assert_eq!(

@@ -801,13 +801,21 @@ fn auto_text_peeks_never_stamp_banner_day_and_only_consuming_success_does() {
         !sandbox.mail_root.join("beta/banner-day").exists(),
         "unbudgeted peeks are read-only too"
     );
+    let today = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+        / 86_400;
+    fs::create_dir_all(sandbox.mail_root.join("beta")).expect("seed beta state directory");
+    fs::write(sandbox.mail_root.join("beta/banner-day"), today.to_string())
+        .expect("seed same-day banner receipt");
     let same_day_budget = sandbox.run_in(
         &["chat", "banner-budget", "--peek", "--max-bytes", "3000"],
         None,
         &beta,
     );
     assert_success(&same_day_budget);
-    assert!(common::stdout(&same_day_budget).contains("READ THIS FRAMING FIRST"));
+    assert!(!common::stdout(&same_day_budget).contains("READ THIS FRAMING FIRST"));
 
     let consuming = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&consuming);

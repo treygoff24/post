@@ -120,6 +120,13 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
         schema.capabilities,
         vec!["participants", "routing-receipts", "cursors-v2"]
     );
+    let watch = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "watch")
+        .expect("watch schema command");
+    assert!(!watch.side_effects.contains("creates missing mailbox"));
+    assert!(watch.side_effects.contains("empty scan emits nothing"));
 
     for args in [
         &["participant", "--help"] as &[&str],
