@@ -127,6 +127,7 @@ fn run_participant(
     let framing = crate::mailbox::resolve_framing(args.framing);
     let consuming = args.ack || (!args.peek && args.offset.is_none() && args.length.is_none());
     if consuming {
+        cursor_state::routing::touch_participant(context, participant)?;
         cursor_state::routing::route_for_participant(context, participant)?;
     }
     let addresses = if let Some(room) = args.room.clone() {

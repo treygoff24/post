@@ -251,6 +251,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     let resolved = crate::participant::resolve(context)?;
     if let Resolved::Bound { participant, .. } = &resolved {
         if !snapshot {
+            crate::cursor_state::routing::touch_participant(context, participant)?;
             crate::cursor_state::routing::route_for_participant(context, participant)?;
         }
     }

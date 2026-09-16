@@ -188,6 +188,102 @@ fn routing_exact_seen_sets_leave_a_late_older_id_unread() {
     assert_eq!(listed["unread_count"], 0);
 }
 
+#[test]
+fn routing_lifecycle_excludes_stale_and_ended_fanout_but_not_participant_target() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let active = bind(&sandbox, "life-active", &alpha, "alpha");
+    let stale = bind(&sandbox, "life-stale", &alpha, "alpha");
+    let ended = bind(&sandbox, "life-ended", &alpha, "alpha");
+    let sender = bind(&sandbox, "life-sender", &beta, "beta");
+    patch_participant(&sandbox, &stale, |record| {
+        record["last_seen"] = json!("2000-01-01 00:00:00 +0000");
+        record["lease_hours"] = json!(1);
+    });
+    patch_participant(&sandbox, &ended, |record| {
+        record["ended_at"] = json!("2026-09-16 03:00:00 -0500");
+    });
+
+    let sent = send_as(&sandbox, &sender, &beta, "workspace:alpha", "active only");
+    let id = sent["envelope"]["id"].as_str().expect("workspace id");
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(sandbox.mail_root.join(format!("alpha/routing/{id}.json")))
+            .expect("workspace receipt"),
+    )
+    .expect("workspace receipt JSON");
+    let recipients = receipt["recipients"].as_array().expect("recipients");
+    assert!(recipients.iter().any(|value| value == &active));
+    assert!(!recipients.iter().any(|value| value == &stale));
+    assert!(!recipients.iter().any(|value| value == &ended));
+
+    let direct = send_as(
+        &sandbox,
+        &sender,
+        &beta,
+        &format!("participant:{ended}"),
+        "durable direct",
+    );
+    let direct_id = direct["envelope"]["id"].as_str().expect("direct id");
+    let direct_receipt: Value = serde_json::from_slice(
+        &fs::read(
+            sandbox
+                .mail_root
+                .join(format!("participants/{ended}/routing/{direct_id}.json")),
+        )
+        .expect("direct receipt"),
+    )
+    .expect("direct receipt JSON");
+    assert_eq!(direct_receipt["recipients"], json!([ended]));
+}
+
+#[test]
+fn routing_sender_only_workspace_stays_pending_until_another_participant_arrives() {
+    let sandbox = Sandbox::new();
+    let solo = sandbox.path.join("solo");
+    fs::create_dir_all(&solo).expect("solo workspace");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms")).expect("rooms JSON");
+    rooms["solo"] = json!(solo.display().to_string());
+    fs::write(
+        &rooms_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rooms).expect("serialize rooms")
+        ),
+    )
+    .expect("write rooms");
+    let a = bind(&sandbox, "solo-a", &solo, "solo");
+    let sent = send_as(&sandbox, &a, &solo, "workspace:solo", "wait for sibling");
+    let id = sent["envelope"]["id"].as_str().expect("solo id");
+    let receipt = sandbox.mail_root.join(format!("solo/routing/{id}.json"));
+    assert!(!receipt.exists(), "sender-only fanout must remain pending");
+
+    let b = bind(&sandbox, "solo-b", &solo, "solo");
+    let read = sandbox.run_as_participant(&["read", id, "--json"], &b, &solo);
+    assert_success(&read);
+    assert!(receipt.is_file());
+}
+
+fn patch_participant(sandbox: &Sandbox, id: &str, patch: impl FnOnce(&mut Value)) {
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(id)
+        .join("participant.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).expect("participant record"))
+        .expect("participant JSON");
+    patch(&mut record);
+    fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&record).expect("serialize participant")
+        ),
+    )
+    .expect("write participant record");
+}
+
 fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, current: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         let Ok(entries) = fs::read_dir(current) else {

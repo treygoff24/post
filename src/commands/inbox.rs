@@ -207,6 +207,7 @@ fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<C
 }
 
 fn adopt(context: &Context, participant: &Participant, pretty: bool) -> AppResult<CommandResult> {
+    routing::touch_participant(context, participant)?;
     let lineage = participant.lineage.clone().ok_or_else(|| {
         AppError::invalid_argument(
             "inbox --adopt requires the acting participant to have a current lineage",

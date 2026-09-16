@@ -136,6 +136,47 @@ pub(crate) fn route_for_participant(
     Ok(report)
 }
 
+pub(crate) fn touch_participant(context: &Context, participant: &Participant) -> AppResult<()> {
+    let lease_hours = match std::env::var("POST_PARTICIPANT_LEASE_HOURS") {
+        Ok(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|hours| *hours > 0)
+            .ok_or_else(|| {
+                AppError::invalid_argument(
+                    "POST_PARTICIPANT_LEASE_HOURS must be a positive whole number of hours",
+                )
+            })?,
+        Err(std::env::VarError::NotPresent) => 24,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(AppError::invalid_argument(
+                "POST_PARTICIPANT_LEASE_HOURS is not valid UTF-8",
+            ));
+        }
+    };
+    let _lock = participant::lock(context)?;
+    let path = participant.dir.join("participant.json");
+    let bytes = fs::read(&path)
+        .map_err(|error| AppError::io("read participant for lifecycle touch", &path, error))?;
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| AppError::config(&path, format!("invalid participant JSON: {error}")))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::config(&path, "participant record is not a JSON object"))?;
+    let (_, now) = crate::mailbox::local_timestamp()?;
+    object.insert("last_seen".to_owned(), serde_json::Value::String(now));
+    object.insert("lease_hours".to_owned(), serde_json::json!(lease_hours));
+    let mut encoded = serde_json::to_vec_pretty(&value).map_err(|error| {
+        AppError::config(
+            &path,
+            format!("cannot serialize participant lifecycle: {error}"),
+        )
+    })?;
+    encoded.push(b'\n');
+    atomic_replace(&path, &encoded)
+        .map_err(|error| AppError::io("update participant lifecycle", &path, error))
+}
+
 pub(crate) fn pending_count(context: &Context, address: &Address) -> AppResult<usize> {
     let mut pending = 0;
     for path in message_files(&inbox_path(context, address))? {
@@ -192,7 +233,12 @@ fn route_message_locked(
     // Parsing pins filename/envelope identity before a receipt can bless the
     // file. The digest below covers the exact immutable bytes.
     let parsed = parse_mail(&message_path)?;
-    let recipients = resolved_recipients(context, address)?;
+    let mut recipients = resolved_recipients(context, address)?;
+    if matches!(address.kind, AddressKind::Workspace | AddressKind::Lineage) {
+        if let Some(sender) = parsed.envelope.from_participant.as_ref() {
+            recipients.retain(|recipient| recipient != sender);
+        }
+    }
     if recipients.is_empty() {
         return Ok(None);
     }
@@ -228,11 +274,23 @@ pub(crate) fn resolved_recipients(context: &Context, address: &Address) -> AppRe
     let mut recipients = match address.kind {
         AddressKind::Workspace => participant::list(context)?
             .into_iter()
-            .filter(|candidate| candidate.workspace.as_deref() == Some(address.name.as_str()))
+            .filter(|candidate| {
+                candidate.workspace.as_deref() == Some(address.name.as_str())
+                    && participant_is_active(candidate)
+            })
             .map(|candidate| candidate.id)
             .collect(),
         AddressKind::Lineage => match lineage::load(context, &address.name)? {
-            Some(lineage) => lineage.members(context)?.into_keys().collect(),
+            Some(lineage) => lineage
+                .members(context)?
+                .into_keys()
+                .filter(|id| {
+                    participant::load(context, id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|candidate| participant_is_active(&candidate))
+                })
+                .collect(),
             None => Vec::new(),
         },
         AddressKind::Participant => participant::load(context, &address.name)?
@@ -242,6 +300,97 @@ pub(crate) fn resolved_recipients(context: &Context, address: &Address) -> AppRe
     recipients.sort();
     recipients.dedup();
     Ok(recipients)
+}
+
+fn participant_is_active(participant: &Participant) -> bool {
+    let path = participant.dir.join("participant.json");
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    if value.get("ended_at").is_some_and(|ended| !ended.is_null()) {
+        return false;
+    }
+    let Some(last_seen) = value.get("last_seen").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    let lease_hours = value
+        .get("lease_hours")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|hours| *hours > 0)
+        .unwrap_or(24);
+    let Some(last_seen) = parse_timestamp(last_seen) else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
+    now.is_some_and(|now| {
+        now >= last_seen
+            && now.saturating_sub(last_seen)
+                <= i64::try_from(lease_hours.saturating_mul(3600)).unwrap_or(i64::MAX)
+    })
+}
+
+fn parse_timestamp(value: &str) -> Option<i64> {
+    let mut fields = value.split_ascii_whitespace();
+    let date = fields.next()?;
+    let time = fields.next()?;
+    let offset = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    let mut date = date.split('-');
+    let year = date.next()?.parse::<i64>().ok()?;
+    let month = date.next()?.parse::<i64>().ok()?;
+    let day = date.next()?.parse::<i64>().ok()?;
+    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let mut time = time.split(':');
+    let hour = time.next()?.parse::<i64>().ok()?;
+    let minute = time.next()?.parse::<i64>().ok()?;
+    let second = time.next()?.parse::<i64>().ok()?;
+    if time.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let sign = match offset.as_bytes().first().copied()? {
+        b'+' => 1_i64,
+        b'-' => -1_i64,
+        _ => return None,
+    };
+    if offset.len() != 5 {
+        return None;
+    }
+    let offset_hour = offset.get(1..3)?.parse::<i64>().ok()?;
+    let offset_minute = offset.get(3..5)?.parse::<i64>().ok()?;
+    if offset_hour > 23 || offset_minute > 59 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(
+        days.saturating_mul(86_400)
+            .saturating_add(hour * 3600 + minute * 60 + second)
+            .saturating_sub(sign * (offset_hour * 3600 + offset_minute * 60)),
+    )
+}
+
+fn days_from_civil(mut year: i64, month: i64, day: i64) -> Option<i64> {
+    year -= i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    // Reject impossible dates by round-tripping the coarse month bounds most
+    // likely to be hand-edited incorrectly. Production timestamps come from
+    // Post itself; this parser's job is fail-closed lifecycle classification.
+    let month_lengths = [31_i64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    (day <= month_lengths[usize::try_from(month - 1).ok()?]).then_some(days)
 }
 
 fn ensure_resolved_routes_allowed(

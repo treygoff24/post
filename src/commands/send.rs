@@ -91,6 +91,7 @@ where
     // exact flags this invocation used.
     let fix_prefix = send_fix_prefix(&args);
     let actor = context.sender()?;
+    crate::cursor_state::routing::touch_participant(context, &actor.participant)?;
     let (sender, provenance) = {
         if let Some(declared) = args.sender.as_deref() {
             if let Some(pinned) = identity.pin.as_deref() {
