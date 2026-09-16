@@ -1869,7 +1869,7 @@ fn budget_banner_plan(
         crate::cli::FramingMode::Auto => {
             let due = banner_due_today(context, room);
             BudgetBannerPlan {
-                show_wall: due || crate::mailbox::read_only_command(),
+                show_wall: due || crate::migration_fence::conservative_read_mode(context),
                 stamp_after_stdout: due && consuming,
             }
         }

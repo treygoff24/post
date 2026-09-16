@@ -303,8 +303,7 @@ fn read_state(context: &Context) -> AppResult<Option<FenceState>> {
     parsed.into_state(&path).map(Some)
 }
 
-#[cfg(test)]
-fn read_only_must_not_mutate(context: &Context) -> bool {
+pub(crate) fn conservative_read_mode(context: &Context) -> bool {
     if std::env::var_os(GENERATION_ENV).is_some() {
         return true;
     }
@@ -312,6 +311,11 @@ fn read_only_must_not_mutate(context: &Context) -> bool {
         read_state(context),
         Ok(Some(FenceState::Fenced { .. } | FenceState::Active { .. })) | Err(_)
     )
+}
+
+#[cfg(test)]
+fn read_only_must_not_mutate(context: &Context) -> bool {
+    conservative_read_mode(context)
 }
 
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {

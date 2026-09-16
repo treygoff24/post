@@ -389,7 +389,6 @@ impl Sandbox {
             })
             .max()
             .map(|(_, name)| name)
-            .or_else(|| cwd.file_name()?.to_str().map(str::to_owned))
     }
 
     fn seed_test_participant(&self, workspace: Option<&str>, fixed_id: Option<&str>) -> String {
@@ -711,6 +710,8 @@ pub fn is_identity_notice(line: &str) -> bool {
         || line.contains("(POST_FROM pin")
         || line.contains("(bound participant ")
         || line.contains("(participant binding)")
+        || line.starts_with("participant: unbound")
+        || line.starts_with("participant resolution error:")
 }
 
 fn argument_value<'a>(args: &'a [&str], flag: &str) -> Option<&'a str> {

@@ -565,7 +565,7 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
         (
             vec![
                 "read",
-                "slice-mail",
+                "20260916-040001-a1b2c4",
                 "--room",
                 "alpha",
                 "--offset",
@@ -591,9 +591,9 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
             let actor = sandbox.test_participant("alpha");
             write_custom_mail(
                 &sandbox.mail_root.join("alpha/inbox"),
-                "slice-mail",
+                "20260916-040001-a1b2c4",
                 &serde_json::json!({
-                    "id": "slice-mail",
+                    "id": "20260916-040001-a1b2c4",
                     "from": "beta",
                     "to": "alpha",
                     "kind": "note",
@@ -647,7 +647,7 @@ fn participant_round4_unbound_streams_keep_stdout_protocol_and_budget() {
 
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
-    let id = "20260916-040000-000001-a1b2c3";
+    let id = "20260916-040000-a1b2c3";
     write_custom_mail(
         &sandbox.mail_root.join("alpha/inbox"),
         id,
@@ -1688,25 +1688,70 @@ fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
             Value::String("2020-01-01T00:00:00Z".to_owned()),
         );
     });
-    for args in [
-        vec!["participant", "show"],
-        vec!["participant", "list"],
-        vec!["who"],
-        vec!["rooms"],
-        vec!["channels"],
-        vec!["inbox", "--room", "alpha"],
-        vec!["doctor"],
-        vec!["schema"],
-        vec!["version", "--json"],
-        vec!["read", "missing", "--room", "alpha", "--peek"],
-        vec!["chat", "missing", "--peek"],
-        vec!["watch", "--snapshot", "--room", "alpha"],
-        vec!["profile", "show", "alpha"],
-        vec!["owner", "show"],
-        vec!["search", "needle", "--mail", "--json"],
+    let slice_id = "20260916-040002-a1b2c5";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        slice_id,
+        &serde_json::json!({
+            "id": slice_id,
+            "from": "beta",
+            "to": "alpha",
+            "kind": "note",
+            "subject": "lifecycle slice",
+            "sent": "2026-09-16 04:00:02 -0500"
+        }),
+        "lifecycle body",
+    );
+    for (args, expected) in [
+        (vec!["participant", "show"], None),
+        (vec!["participant", "list"], None),
+        (vec!["who"], None),
+        (vec!["rooms"], None),
+        (vec!["channels"], None),
+        (vec!["inbox", "--room", "alpha"], None),
+        (vec!["doctor"], Some("doctor_findings")),
+        (vec!["schema"], None),
+        (vec!["version", "--json"], None),
+        (
+            vec!["read", "missing", "--room", "alpha", "--peek"],
+            Some("not_found"),
+        ),
+        (
+            vec![
+                "read",
+                slice_id,
+                "--room",
+                "alpha",
+                "--offset",
+                "0",
+                "--length",
+                "4",
+                "--max-bytes",
+                "4096",
+                "--json",
+            ],
+            None,
+        ),
+        (vec!["chat", "missing", "--peek"], Some("not_found")),
+        (vec!["watch", "--snapshot", "--room", "alpha"], None),
+        (vec!["profile", "show", "alpha"], None),
+        (vec!["owner", "show"], None),
+        (vec!["search", "needle", "--mail", "--json"], None),
     ] {
         let before = tree(&sandbox.mail_root);
-        let _ = sandbox.run_as_participant(&args, &id, &alpha);
+        let output = sandbox.run_as_participant(&args, &id, &alpha);
+        match expected {
+            None => assert_success(&output),
+            Some("doctor_findings") => {
+                assert_eq!(output.status.code(), Some(1), "{args:?}");
+                let value: Value = from_stdout(&output);
+                assert_eq!(value["ok"], false, "{args:?}");
+            }
+            Some(code) => {
+                let error: ErrorEnvelope = from_stderr(&output);
+                assert_eq!(error.error.code, code, "{args:?}");
+            }
+        }
         assert_eq!(tree(&sandbox.mail_root), before, "read mutated: {args:?}");
     }
     assert_eq!(

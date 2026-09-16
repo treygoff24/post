@@ -142,10 +142,7 @@ where
         } else if identity.pin.is_some() {
             SenderProvenance::DeclaredEnv
         } else {
-            match context.infer_from_cwd(&rooms) {
-                Ok((inferred, provenance)) if inferred == actor.from => provenance,
-                _ => SenderProvenance::ParticipantBinding,
-            }
+            SenderProvenance::ParticipantBinding
         };
         if identity.pin.is_some() {
             eprintln!(
@@ -335,7 +332,11 @@ where
             ensure_route_allowed(context, &rooms, &sender, &target)?;
             fs::create_dir_all(&archive)
                 .map_err(|error| AppError::io("create archive directory", &archive, error))?;
-            inbox = Some(target.inbox(context)?);
+            let target_inbox = target.inbox(context)?;
+            fs::create_dir_all(&target_inbox).map_err(|error| {
+                AppError::io("create canonical target inbox", &target_inbox, error)
+            })?;
+            inbox = Some(target_inbox);
         }
         let inbox = inbox.as_ref().expect("mailbox was initialized");
         let archive_path = archive.join(format!("{id}.mail"));
@@ -415,15 +416,37 @@ fn ensure_route_allowed(
     sender: &str,
     target: &crate::participant::Address,
 ) -> AppResult<()> {
-    let recipient = &target.name;
     let rules = context.load_rules(rooms)?;
-    let Some(rule) = rules
-        .blocked
-        .iter()
-        .find(|rule| rule.matches_route(sender, recipient))
-    else {
+    let participant = if target.kind == crate::participant::AddressKind::Participant {
+        Some(
+            crate::participant::load(context, &target.name)?.ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::NotFound,
+                    format!("participant target '{}' no longer exists", target.name),
+                    "Run `post participant list`, then retry with an existing target.",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let Some(rule) = rules.blocked.iter().find(|rule| {
+        let recipient = participant
+            .as_ref()
+            .and_then(|participant| participant.workspace.as_deref())
+            .unwrap_or(&target.name);
+        if participant
+            .as_ref()
+            .is_some_and(|participant| participant.workspace.is_none())
+        {
+            (rule.from == "*" || rule.from == sender) && rule.to == "*"
+        } else {
+            rule.matches_route(sender, recipient)
+        }
+    }) else {
         return Ok(());
     };
+    let recipient = format!("{}:{}", target.kind.as_str(), target.name);
     Err(AppError::new(
         ErrorCode::BlockedRoute,
         format!("route {sender} -> {recipient} is blocked: {}", rule.reason),

@@ -315,7 +315,7 @@ fn armed_route_refusal_quotes_the_rule_reason_before_writing() {
 }
 
 #[test]
-fn reserved_sender_refuses_but_free_form_and_cwd_basename_work() {
+fn reserved_sender_refuses_but_free_form_and_participant_binding_work() {
     let sandbox = Sandbox::new();
     let reserved = sandbox.run(&[
         "send",
@@ -352,7 +352,8 @@ fn reserved_sender_refuses_but_free_form_and_cwd_basename_work() {
         &project,
     );
     assert_success(&inferred);
-    assert!(stdout(&inferred).contains("my-project -> claude-space"));
+    assert!(stdout(&inferred).contains("test-30e38191 -> claude-space"));
+    assert!(!stdout(&inferred).contains("my-project -> claude-space"));
 
     let registered_workspace = sandbox.home.join("claude-space");
     fs::create_dir_all(&registered_workspace).expect("create registered room workspace");
@@ -637,6 +638,7 @@ fn read_collision_preserves_both_unread_and_read_copies() {
         .join("claude-space/read")
         .join(format!("{}.mail", sent.envelope.id));
     let unread_bytes = fs::read(&inbox).expect("read unread collision fixture");
+    fs::create_dir_all(read.parent().expect("read directory")).expect("create read directory");
     fs::write(&read, "existing read copy").expect("create read collision fixture");
 
     let output = sandbox.run(&[
@@ -1354,7 +1356,7 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
 #[test]
 fn unregistered_cwd_names_the_directory_and_lists_the_rooms_that_exist() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run(&["chat", "some-channel", "--peek"]);
+    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
     assert_eq!(output.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "unknown_room");
@@ -1420,7 +1422,7 @@ fn unregistered_cwd_exact_fix_shell_quotes_the_directory() {
         let hostile = sandbox.path.join(dirname);
         fs::create_dir_all(&hostile).expect("create hostile cwd");
 
-        let output = sandbox.run_in(&["chat", "some-channel", "--peek"], None, &hostile);
+        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
         let error: ErrorEnvelope = from_stderr(&output);
         let fix = error
             .error
@@ -1462,7 +1464,7 @@ fn many_rooms_are_summarized_inline_but_complete_in_matches() {
     )
     .expect("seed many rooms");
 
-    let output = sandbox.run(&["chat", "some-channel", "--peek"]);
+    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
     let error: ErrorEnvelope = from_stderr(&output);
     assert!(
         error.error.message.contains("+4 more"),
@@ -5975,7 +5977,14 @@ fn who_reports_live_watch_without_pids() {
     let during = wait_for_live_watch(&sandbox, "alpha");
     assert!(during.legacy_rooms[0].live_watch);
     assert!(during.legacy_rooms[0].last_seen.is_some());
-    let raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
+    let mut raw = String::new();
+    for _ in 0..40 {
+        raw = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
+        if raw.contains("live-watch=yes") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(raw.contains("live-watch=yes"));
     assert!(!raw.to_ascii_lowercase().contains("pid"));
     child.kill().expect("stop watch");

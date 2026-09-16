@@ -171,7 +171,14 @@ pub(crate) struct Address {
 impl Address {
     pub(crate) fn inbox(&self, context: &Context) -> AppResult<PathBuf> {
         let inbox = match self.kind {
-            AddressKind::Workspace => context.mailbox_dirs(&self.name)?.0,
+            AddressKind::Workspace => {
+                crate::mailbox::validate_room_name(&self.name).map_err(|reason| {
+                    AppError::invalid_argument(format!("room '{}' is invalid: {reason}", self.name))
+                        .input(&self.name)
+                        .reason(reason)
+                })?;
+                context.root.join(&self.name).join("inbox")
+            }
             AddressKind::Lineage => context
                 .root
                 .join(crate::lineage::LINEAGES_DIR)
@@ -183,8 +190,6 @@ impl Address {
                 .join(&self.name)
                 .join("inbox"),
         };
-        fs::create_dir_all(&inbox)
-            .map_err(|error| AppError::io("create canonical target inbox", &inbox, error))?;
         Ok(inbox)
     }
 }
@@ -711,7 +716,10 @@ fn conversation_binding() -> AppResult<Option<ConversationBinding>> {
     match (claude, codex_present) {
         (Some(claude_key), true) => match nearest_native_harness() {
             Some(NativeHarness::Claude) => {
-                return Ok(Some(native_binding(NativeHarness::Claude, claude_key)))
+                return Ok(Some(native_binding(
+                    NativeHarness::Claude,
+                    nonempty_native_key("CLAUDE_CODE_SESSION_ID", claude_key)?,
+                )))
             }
             Some(NativeHarness::Codex) => {
                 let key = codex_key(thread, session)?;
@@ -724,7 +732,12 @@ fn conversation_binding() -> AppResult<Option<ConversationBinding>> {
                 .reason("ambiguous nested harness ancestry"));
             }
         },
-        (Some(key), false) => return Ok(Some(native_binding(NativeHarness::Claude, key))),
+        (Some(key), false) => {
+            return Ok(Some(native_binding(
+                NativeHarness::Claude,
+                nonempty_native_key("CLAUDE_CODE_SESSION_ID", key)?,
+            )))
+        }
         (None, true) => {
             let key = codex_key(thread, session)?;
             return Ok(Some(native_binding(NativeHarness::Codex, key)));
@@ -785,9 +798,22 @@ fn codex_key(thread: Option<String>, session: Option<String>) -> AppResult<Strin
             .reason("conflicting Codex conversation keys"));
         }
     }
-    Ok(thread
-        .or(session)
-        .expect("at least one Codex key is present"))
+    match (thread, session) {
+        (Some(key), _) => nonempty_native_key("CODEX_THREAD_ID", key),
+        (None, Some(key)) => nonempty_native_key("CODEX_SESSION_ID", key),
+        (None, None) => unreachable!("at least one Codex key is present"),
+    }
+}
+
+fn nonempty_native_key(variable: &str, key: String) -> AppResult<String> {
+    if key.trim().is_empty() {
+        return Err(AppError::invalid_argument(format!(
+            "{variable} is empty or whitespace-only; refusing to bind every misconfigured session to one participant"
+        ))
+        .input(variable)
+        .reason("empty or whitespace-only native conversation key"));
+    }
+    Ok(key)
 }
 
 fn nearest_native_harness() -> Option<NativeHarness> {
@@ -1166,8 +1192,8 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
 #[cfg(test)]
 mod tests {
     use super::{
-        list_active, nearest_native_harness_from, nearest_native_harness_in, NativeHarness,
-        Participant,
+        list_active, nearest_native_harness_from, nearest_native_harness_in, Address, AddressKind,
+        NativeHarness, Participant,
     };
     use crate::mailbox::Context;
     use crate::test_support::{test_root, trash_test_root};
@@ -1196,6 +1222,36 @@ mod tests {
             ended_at: ended_at.map(str::to_owned),
             dir: PathBuf::new(),
         }
+    }
+
+    #[test]
+    fn address_inbox_is_a_pure_path_accessor() {
+        let root = test_root("participant-address-path");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        for (kind, name, expected) in [
+            (AddressKind::Workspace, "alpha", root.join("alpha/inbox")),
+            (
+                AddressKind::Lineage,
+                "ember",
+                root.join("lineages/ember/inbox"),
+            ),
+            (
+                AddressKind::Participant,
+                "codex-12345678",
+                root.join("participants/codex-12345678/inbox"),
+            ),
+        ] {
+            let address = Address {
+                kind,
+                name: name.to_owned(),
+            };
+            assert_eq!(address.inbox(&context).expect("address path"), expected);
+            assert!(!expected.exists(), "path accessor created {expected:?}");
+        }
+        trash_test_root(&root);
     }
 
     #[test]

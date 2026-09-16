@@ -167,8 +167,7 @@ pub(crate) enum SenderProvenance {
     InferredCwd,
     /// `from` fell back to the cwd basename (no registered room matched).
     InferredBasename,
-    /// `from` came from a bound participant whose reply address differs from
-    /// the current directory's legacy room inference.
+    /// `from` came from the bound participant rather than a caller assertion.
     ParticipantBinding,
 }
 

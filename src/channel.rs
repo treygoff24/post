@@ -166,13 +166,23 @@ pub(crate) fn acting_room(
                     &participant.id,
                 ));
             };
-            let provenance = if crate::mailbox::declared_env_pin()?.is_some() {
-                SenderProvenance::DeclaredEnv
-            } else {
-                match context.infer_from_cwd(rooms) {
-                    Ok((inferred, provenance)) if inferred == room => provenance,
-                    _ => SenderProvenance::ParticipantBinding,
+            let provenance = match crate::mailbox::declared_env_pin()? {
+                Some(pin) => {
+                    if pin != room {
+                        return Err(AppError::new(
+                            ErrorCode::InvalidArgument,
+                            format!(
+                                "POST_FROM workspace pin '{pin}' conflicts with bound participant '{}' reply address '{room}'",
+                                participant.id
+                            ),
+                            "Run `post participant bind --workspace <room>` to change workspace context deliberately.",
+                        )
+                        .input(pin)
+                        .reason("workspace pin disagrees with bound participant"));
+                    }
+                    SenderProvenance::DeclaredEnv
                 }
+                None => SenderProvenance::ParticipantBinding,
             };
             (room, provenance)
         }
