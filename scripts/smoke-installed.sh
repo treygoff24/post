@@ -17,6 +17,21 @@ case "$BIN" in
     *) BIN="$(pwd)/$BIN" ;;
 esac
 
+setup_prerequisites() {
+    if [ ! -x "$BIN" ]; then
+        printf 'FAIL SETUP: post binary is not executable: %s\n' "$BIN"
+        return 1
+    fi
+    for setup_tool in jq python3 mktemp pgrep; do
+        if ! command -v "$setup_tool" >/dev/null 2>&1; then
+            printf 'FAIL SETUP: required command is unavailable: %s\n' "$setup_tool"
+            return 1
+        fi
+    done
+}
+
+setup_prerequisites || exit 1
+
 # Portable bounded process wait. Poll first so the final wait only reaps an
 # already-exited child. A timed-out child is terminated, then killed if needed.
 wait_for_pid() {
@@ -55,21 +70,40 @@ wait_for_pid() {
 stop_pid() {
     stop_pid_value=$1
     [ -n "$stop_pid_value" ] || return 0
+    for stop_pid_child in $(pgrep -P "$stop_pid_value" 2>/dev/null); do
+        stop_pid "$stop_pid_child"
+    done
     kill "$stop_pid_value" 2>/dev/null || true
     wait_for_pid "$stop_pid_value" 20 >/dev/null 2>&1 || true
 }
 
 remove_temp_tree() {
     temp_tree=$1
-    case "$temp_tree" in
-        /tmp/tmp.* | /private/tmp/tmp.* | /var/folders/*/T/tmp.*)
-            [ -d "$temp_tree" ] && rm -rf -- "$temp_tree"
-            ;;
-        *)
-            printf 'post smoke: refusing to remove unexpected temp path %s\n' "$temp_tree" >&2
-            return 1
-            ;;
-    esac
+    created_tree=$2
+    if [ -z "$temp_tree" ] || [ "$temp_tree" = / ] || [ "$temp_tree" != "$created_tree" ]; then
+        printf 'post smoke: refusing to remove unregistered temp path %s\n' "$temp_tree" >&2
+        return 1
+    fi
+    [ ! -d "$temp_tree" ] || rm -rf -- "$temp_tree"
+}
+
+# Execute the binary directly in a bounded child. `exec` makes the recorded PID
+# the process that can block; wait_for_pid therefore cannot strand a grandchild.
+run_bounded_exec() {
+    bounded_cwd=$1
+    bounded_stdout=$2
+    bounded_stderr=$3
+    bounded_polls=$4
+    shift 4
+    (
+        cd "$bounded_cwd" || exit 125
+        exec "$@"
+    ) >"$bounded_stdout" 2>"$bounded_stderr" &
+    RUN_BOUNDED_PID=$!
+    wait_for_pid "$RUN_BOUNDED_PID" "$bounded_polls"
+    bounded_rc=$?
+    RUN_BOUNDED_PID=
+    return "$bounded_rc"
 }
 
 # A read-only proof must notice newly-created empty directories as well as byte
@@ -137,7 +171,18 @@ PY
 participants_smoke() (
     set +e
     PS_BIN=$1
-    PS_BASE=$(mktemp -d)
+    PS_BASE=$(mktemp -d 2>&1)
+    PS_MKTEMP_RC=$?
+    if [ "$PS_MKTEMP_RC" -ne 0 ] || [ -z "$PS_BASE" ] || [ ! -d "$PS_BASE" ]; then
+        printf 'FAIL SETUP-participants: mktemp failed: %s\n' "$PS_BASE"
+        exit 1
+    fi
+    PS_CREATED_ROOT=$PS_BASE
+    if [ ! -w "$PS_BASE" ]; then
+        printf 'FAIL SETUP-participants: temp root is not writable: %s\n' "$PS_BASE"
+        remove_temp_tree "$PS_BASE" "$PS_CREATED_ROOT" || true
+        exit 1
+    fi
     PS_ROOT="$PS_BASE/mail"
     PS_WORK="$PS_BASE/workspace"
     PS_A_KEY=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
@@ -148,6 +193,7 @@ participants_smoke() (
     PS_FIFO_READER_PID=
     PS_FIFO_WRITER_PID=
     PS_WATCH_PID=
+    RUN_BOUNDED_PID=
     A_ID=claude-missing0000
     B_ID=codex-missing0000
     C_ID=smoke-missing0000
@@ -161,9 +207,22 @@ participants_smoke() (
         stop_pid "$PS_FIFO_READER_PID"
         stop_pid "$PS_FIFO_WRITER_PID"
         stop_pid "$PS_WATCH_PID"
-        remove_temp_tree "$PS_BASE" || true
+        stop_pid "$RUN_BOUNDED_PID"
+        if remove_temp_tree "$PS_BASE" "$PS_CREATED_ROOT"; then
+            printf 'participants smoke root removed: %s\n' "$PS_BASE"
+        else
+            printf 'participants smoke root retained after cleanup failure: %s\n' "$PS_BASE" >&2
+        fi
+    }
+    stop_participants_on_signal() {
+        signal_rc=$1
+        trap - EXIT INT TERM
+        cleanup_participants
+        exit "$signal_rc"
     }
     trap cleanup_participants EXIT
+    trap 'stop_participants_on_signal 130' INT
+    trap 'stop_participants_on_signal 143' TERM
 
     mkdir -p "$PS_WORK"
     "$PS_BIN" doctor --fix >/dev/null 2>"$PS_BASE/doctor.err"
@@ -260,13 +319,41 @@ participants_smoke() (
         if "$row_function"; then
             printf 'ok %s: %s\n' "$row_name" "$row_description"
         else
-            [ -n "$ROW_REASON" ] || ROW_REASON="assertion failed"
+            [ -n "$ROW_REASON" ] || ROW_REASON="row returned failure without a diagnostic (smoke bug)"
             printf 'FAIL %s: %s\n' "$row_name" "$ROW_REASON"
             PS_FAILURES=$((PS_FAILURES + 1))
         fi
     }
     mail_id_from() {
         jq -r '.envelope.id // empty' "$1"
+    }
+    write_workspace_receipt() {
+        receipt_id=$1
+        receipt_recipient=$2
+        receipt_mail="$PS_ROOT/smoke/inbox/$receipt_id.mail"
+        receipt_dir="$PS_ROOT/smoke/routing"
+        receipt_digest=$(python3 - "$receipt_mail" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+        ) || {
+            ROW_REASON="could not hash routed fixture $receipt_id"
+            return 1
+        }
+        mkdir -p "$receipt_dir" || {
+            ROW_REASON="could not create routing fixture directory"
+            return 1
+        }
+        jq -n --arg id "$receipt_id" --arg digest "$receipt_digest" \
+            --arg recipient "$receipt_recipient" \
+            '{version:1,message:$id,digest:$digest,address:{kind:"workspace",name:"smoke"},recipients:[$recipient],excluded:[],routed_at:"2026-09-16T08:00:00Z",routed_by:$recipient}' \
+            >"$receipt_dir/$receipt_id.json" || {
+            ROW_REASON="could not write routing fixture $receipt_id"
+            return 1
+        }
     }
     manifest() {
         manifest_root=$1
@@ -331,6 +418,8 @@ participants_smoke() (
             --arg id "$id" || return 1
         capture_json "$PS_BASE/row02-b-read.json" as_b read "$id" --json || return 1
         capture_json "$PS_BASE/row02-a-read.json" as_a read "$id" --json || return 1
+        assert_jq "$PS_BASE/row02-a-read.json" \
+            '.envelope.id == $id and .own == true' --arg id "$id" || return 1
         [ -f "$PS_ROOT/smoke/inbox/$id.mail" ] || { ROW_REASON="canonical inbox file moved"; return 1; }
         b_cursor="$PS_ROOT/participants/$B_ID/cursors.json"
         [ -f "$b_cursor" ] || { ROW_REASON="B cursor missing after consumption"; return 1; }
@@ -340,7 +429,7 @@ participants_smoke() (
         a_cursor="$PS_ROOT/participants/$A_ID/cursors.json"
         if [ -e "$a_cursor" ]; then
             assert_jq "$a_cursor" \
-                '([.mail["workspace:smoke"].seen[]?] | index($id)) == null' \
+                '([.mail // {} | .[] | .seen[]?] | index($id)) == null' \
                 --arg id "$id" || return 1
         fi
         capture_json "$PS_BASE/row02-b-after.json" as_b inbox --json || return 1
@@ -376,6 +465,17 @@ participants_smoke() (
             '([.unread[]?.id] | index($id)) != null and .unread_count == 1' \
             --arg id "$id" || return 1
         capture_json "$PS_BASE/row03-b-read.json" as_b read "$id" --json || return 1
+        assert_jq "$PS_BASE/row03-b-read.json" \
+            '.envelope.id == $id' --arg id "$id" || return 1
+        b_cursor="$PS_ROOT/participants/$B_ID/cursors.json"
+        [ -f "$b_cursor" ] || { ROW_REASON="B cursor missing after row03 consumption"; return 1; }
+        assert_jq "$b_cursor" \
+            '([.mail["workspace:smoke"].seen[]?] | index($id)) != null' \
+            --arg id "$id" || return 1
+        capture_json "$PS_BASE/row03-b-after.json" as_b inbox --json || return 1
+        assert_jq "$PS_BASE/row03-b-after.json" \
+            '([.unread[]?.id] | index($id)) == null and .unread_count == 0' \
+            --arg id "$id" || return 1
         receipt="$PS_ROOT/smoke/routing/$id.json"
         [ -f "$receipt" ] || { ROW_REASON="routing receipt missing"; return 1; }
         assert_jq "$receipt" \
@@ -537,9 +637,11 @@ participants_smoke() (
         dd if="$fifo" of="$first_byte" bs=1 count=1 2>/dev/null &
         PS_FIFO_READER_PID=$!
         (
-            as_participant "$pipe_id" read "$big_id" --json >"$fifo" 2>"$PS_BASE/$suffix-read.err"
-            printf '%s\n' "$?" >"$PS_BASE/$suffix-read.status"
-        ) &
+            clear_identity
+            export POST_PARTICIPANT="$pipe_id"
+            cd "$PS_WORK" || exit 125
+            exec "$PS_BIN" read "$big_id" --json
+        ) >"$fifo" 2>"$PS_BASE/$suffix-read.err" &
         PS_FIFO_WRITER_PID=$!
         if ! wait_for_pid "$PS_FIFO_READER_PID" 50; then
             ROW_REASON="closed-pipe reader timed out"
@@ -549,14 +651,15 @@ participants_smoke() (
             return 1
         fi
         PS_FIFO_READER_PID=
-        if ! wait_for_pid "$PS_FIFO_WRITER_PID" 50; then
+        wait_for_pid "$PS_FIFO_WRITER_PID" 50
+        read_rc=$?
+        if [ "$read_rc" -eq 124 ]; then
             ROW_REASON="closed-pipe writer timed out"
             PS_FIFO_WRITER_PID=
             return 1
         fi
         PS_FIFO_WRITER_PID=
         [ -s "$first_byte" ] || { ROW_REASON="closed-pipe reader observed no stdout byte"; return 1; }
-        read_rc=$(cat "$PS_BASE/$suffix-read.status" 2>/dev/null)
         [ "$read_rc" -eq 75 ] 2>/dev/null || { ROW_REASON="closed pipe read expected output-failure exit 75, got ${read_rc:-missing}"; return 1; }
         assert_jq "$PS_BASE/$suffix-read.err" \
             '.ok == false and .error.code == "io_error" and .error.details.operation == "write stdout" and (.error.details.reason | test("broken pipe|epipe"; "i"))' || return 1
@@ -580,33 +683,39 @@ participants_smoke() (
         printf '%s\n---\n%s\n' \
             "{\"id\":\"$newer\",\"from\":\"smoke\",\"to\":\"smoke\",\"kind\":\"note\",\"subject\":\"newer\",\"sent\":\"2026-09-16 03:03:00 -0500\",\"from_participant\":\"$C_ID\",\"address_kind\":\"workspace\"}" \
             newer >"$inbox/$newer.mail"
+        write_workspace_receipt "$newer" "$A_ID" || return 1
         capture_json "$PS_BASE/row08-newer-read.json" as_a read "$newer" --json || return 1
         printf '%s\n---\n%s\n' \
             "{\"id\":\"$older\",\"from\":\"smoke\",\"to\":\"smoke\",\"kind\":\"note\",\"subject\":\"older\",\"sent\":\"2026-09-16 03:02:00 -0500\",\"from_participant\":\"$C_ID\",\"address_kind\":\"workspace\"}" \
             older >"$inbox/$older.mail"
+        write_workspace_receipt "$older" "$A_ID" || return 1
         capture_json "$PS_BASE/row08-newer-reread.json" as_a read "$newer" --peek --json || return 1
         assert_jq "$PS_BASE/row08-newer-reread.json" \
             '.envelope.id == $id and .already_read == true' --arg id "$newer" || return 1
         capture_json "$PS_BASE/row08-before.json" as_a inbox --json || return 1
         assert_jq "$PS_BASE/row08-before.json" \
-            '.pending_by_address["workspace:smoke"] == 1 and ([.unread[]?.id] | index($id)) == null' \
+            '.pending_by_address["workspace:smoke"] == 0 and ([.unread[]?.id] | index($id)) != null and .unread_count == 1 and .count == 1' \
             --arg id "$older" || return 1
         capture_json "$PS_BASE/row08-older-peek.json" as_a read "$older" --peek --json || return 1
         assert_jq "$PS_BASE/row08-older-peek.json" \
-            '.envelope.id == $id and .pending == true and (has("already_read") | not)' \
+            '.envelope.id == $id and (has("pending") | not) and (has("already_read") | not)' \
             --arg id "$older" || return 1
         capture_json "$PS_BASE/row08-older-read.json" as_a read "$older" --json || return 1
         assert_jq "$PS_BASE/row08-older-read.json" 'has("already_read") | not' || return 1
         closed_pipe_case row08-pipe
     }
 
-    row_09() {
+    row_09_durable_read_suppression() {
         capture_json "$PS_BASE/row09-send.json" as_c send --to workspace:smoke \
             --subject row09 --body "watch restart" --json || return 1
         id=$(mail_id_from "$PS_BASE/row09-send.json")
         [ -n "$id" ] || { ROW_REASON="watch send returned no envelope id"; return 1; }
-        as_a watch --room smoke --once --json \
-            >"$PS_BASE/row09-a-first.ndjson" 2>"$PS_BASE/row09-a-first.err" &
+        (
+            clear_identity
+            export CLAUDE_CODE_SESSION_ID="$PS_A_KEY"
+            cd "$PS_WORK" || exit 125
+            exec "$PS_BIN" watch --room smoke --once --json
+        ) >"$PS_BASE/row09-a-first.ndjson" 2>"$PS_BASE/row09-a-first.err" &
         PS_WATCH_PID=$!
         if ! wait_for_pid "$PS_WATCH_PID" 100; then
             ROW_REASON="A watch --once failed or timed out"
@@ -621,25 +730,56 @@ participants_smoke() (
             return 1
         fi
         capture_json "$PS_BASE/row09-a-read.json" as_a read "$id" --json || return 1
-        as_a watch --room smoke --snapshot --json >"$PS_BASE/row09-a-restart.ndjson" 2>"$PS_BASE/row09-a-restart.err" || {
-            ROW_REASON="A restarted watch failed"
-            return 1
-        }
-        if ! jq -e -s --arg id "$id" '([.[] | select(.id==$id)] | length) == 0' \
-            "$PS_BASE/row09-a-restart.ndjson" >/dev/null 2>&1; then
-            ROW_REASON="restart repeated A's consumed id"
+        if ! run_bounded_exec "$PS_WORK" "$PS_BASE/row09-a-restart.ndjson" \
+            "$PS_BASE/row09-a-restart.err" 100 env \
+            CLAUDE_CODE_SESSION_ID="$PS_A_KEY" "$PS_BIN" watch --room smoke --snapshot --json; then
+            ROW_REASON="A restarted snapshot failed or timed out"
             return 1
         fi
-        as_b watch --room smoke --snapshot --json >"$PS_BASE/row09-b.ndjson" 2>"$PS_BASE/row09-b.err" || {
-            ROW_REASON="B watch failed"
+        if ! jq -e -s --arg id "$id" '([.[] | select(.id==$id)] | length) == 0' \
+            "$PS_BASE/row09-a-restart.ndjson" >/dev/null 2>&1; then
+            ROW_REASON="restarted watcher rang A's durably consumed id"
             return 1
-        }
+        fi
+        if ! run_bounded_exec "$PS_WORK" "$PS_BASE/row09-b.ndjson" \
+            "$PS_BASE/row09-b.err" 100 env CODEX_THREAD_ID="$PS_B_KEY" \
+            CODEX_SESSION_ID="$PS_B_KEY" "$PS_BIN" watch --room smoke --snapshot --json; then
+            ROW_REASON="B snapshot failed or timed out"
+            return 1
+        fi
         if ! jq -e -s --arg id "$id" \
             '([.[] | select(.id==$id and .address=={kind:"workspace",name:"smoke"})] | length) == 1' \
             "$PS_BASE/row09-b.ndjson" >/dev/null 2>&1; then
             ROW_REASON="B was not independently notified exactly once"
             return 1
         fi
+    }
+
+    row_09_unread_restart_rering() {
+        capture_json "$PS_BASE/row09-unread-send.json" as_c send --to workspace:smoke \
+            --subject row09-unread --body "unread watcher restart" --json || return 1
+        id=$(mail_id_from "$PS_BASE/row09-unread-send.json")
+        [ -n "$id" ] || { ROW_REASON="unread restart send returned no envelope id"; return 1; }
+        restart_index=1
+        while [ "$restart_index" -le 2 ]; do
+            output="$PS_BASE/row09-unread-watch-$restart_index.ndjson"
+            error="$PS_BASE/row09-unread-watch-$restart_index.err"
+            if ! run_bounded_exec "$PS_WORK" "$output" "$error" 100 env \
+                CLAUDE_CODE_SESSION_ID="$PS_A_KEY" "$PS_BIN" watch --room smoke --once --json; then
+                ROW_REASON="unread watcher invocation $restart_index failed or timed out"
+                return 1
+            fi
+            if ! jq -e -s --arg id "$id" \
+                '([.[] | select(.id==$id and .address=={kind:"workspace",name:"smoke"})] | length) == 1' \
+                "$output" >/dev/null 2>&1; then
+                ROW_REASON="unread id did not ring exactly once on watcher invocation $restart_index"
+                return 1
+            fi
+            restart_index=$((restart_index + 1))
+        done
+        capture_json "$PS_BASE/row09-unread-still.json" as_a inbox --json || return 1
+        assert_jq "$PS_BASE/row09-unread-still.json" \
+            '([.unread[]?.id] | index($id)) != null' --arg id "$id"
     }
 
     row_10() {
@@ -664,17 +804,43 @@ participants_smoke() (
         id=$(jq -r '.participant.id // empty' "$PS_BASE/lifecycle-touch-bind.json")
         participant_file="$PS_ROOT/participants/$id/participant.json"
         seeded=2000-01-01T00:00:00Z
-        jq --arg seeded "$seeded" '.last_seen=$seeded | .lease_hours=7' \
-            "$participant_file" >"$participant_file.tmp" && mv "$participant_file.tmp" "$participant_file"
-        capture_json "$PS_BASE/lifecycle-touch.json" as_participant_with_lease "$id" 7 participant touch --json || return 1
-        assert_jq "$PS_BASE/lifecycle-touch.json" \
+        if ! jq --arg seeded "$seeded" '.last_seen=$seeded | .lease_hours=7' \
+            "$participant_file" >"$participant_file.tmp"; then
+            ROW_REASON="could not seed stored lease for preservation check"
+            return 1
+        fi
+        mv "$participant_file.tmp" "$participant_file" || { ROW_REASON="could not publish stored lease for preservation check"; return 1; }
+        capture_json "$PS_BASE/lifecycle-touch-preserve.json" as_participant "$id" participant touch --json || return 1
+        preserve_reason=
+        assert_jq "$PS_BASE/lifecycle-touch-preserve.json" \
             '.participant.id == $id and .participant.last_seen > $seeded and .participant.lease_hours == 7' \
-            --arg id "$id" --arg seeded "$seeded" || return 1
+            --arg id "$id" --arg seeded "$seeded" || preserve_reason=$ROW_REASON
         assert_jq "$participant_file" \
-            '.last_seen > $seeded and .lease_hours == 7' --arg seeded "$seeded" || return 1
+            '.last_seen > $seeded and .lease_hours == 7' --arg seeded "$seeded" || {
+            [ -n "$preserve_reason" ] || preserve_reason=$ROW_REASON
+        }
+        preserved_seen=$(jq -er '.last_seen' "$participant_file") || {
+            ROW_REASON="preservation check left no last_seen value"
+            return 1
+        }
+        if ! jq '.lease_hours=7' "$participant_file" >"$participant_file.tmp"; then
+            ROW_REASON="could not reseed stored lease for env override check"
+            return 1
+        fi
+        mv "$participant_file.tmp" "$participant_file" || { ROW_REASON="could not publish stored lease for env override check"; return 1; }
+        capture_json "$PS_BASE/lifecycle-touch-override.json" as_participant_with_lease "$id" 3 participant touch --json || return 1
+        assert_jq "$PS_BASE/lifecycle-touch-override.json" \
+            '.participant.id == $id and .participant.last_seen >= $preserved and .participant.lease_hours == 3' \
+            --arg id "$id" --arg preserved "$preserved_seen" || return 1
+        assert_jq "$participant_file" \
+            '.last_seen >= $preserved and .lease_hours == 3' --arg preserved "$preserved_seen" || return 1
         capture_json "$PS_BASE/lifecycle-touch-who.json" as_participant "$id" who --json || return 1
         assert_jq "$PS_BASE/lifecycle-touch-who.json" \
-            '.participant.id == $id and .participant.state == "active"' --arg id "$id"
+            '.participant.id == $id and .participant.state == "active"' --arg id "$id" || return 1
+        if [ -n "$preserve_reason" ]; then
+            ROW_REASON=$preserve_reason
+            return 1
+        fi
     }
 
     lifecycle_who() {
@@ -740,24 +906,30 @@ PY
         capture_json "$PS_BASE/lifecycle-frozen-end.json" as_participant "$frozen" participant end --json || return 1
         participant_file="$PS_ROOT/participants/$frozen/participant.json"
         cp "$participant_file" "$PS_BASE/lifecycle-frozen-ended.json" || { ROW_REASON="could not snapshot ended participant"; return 1; }
-        capture_json "$PS_BASE/lifecycle-frozen-read.json" as_participant "$frozen" read "$id" --peek --json || return 1
+        capture_json "$PS_BASE/lifecycle-frozen-read.json" as_participant "$frozen" read "$id" --json || return 1
         assert_jq "$PS_BASE/lifecycle-frozen-read.json" '.envelope.id == $id' --arg id "$id" || return 1
-        cmp -s "$participant_file" "$PS_BASE/lifecycle-frozen-ended.json" || { ROW_REASON="frozen peek reactivated or changed ended participant"; return 1; }
-        assert_jq "$participant_file" '.ended_at != null'
+        cmp -s "$participant_file" "$PS_BASE/lifecycle-frozen-ended.json" || { ROW_REASON="consuming read reactivated or changed ended participant"; return 1; }
+        assert_jq "$participant_file" '.ended_at != null' || return 1
+        capture_json "$PS_BASE/lifecycle-frozen-who.json" as_a who --json || return 1
+        assert_jq "$PS_BASE/lifecycle-frozen-who.json" \
+            '([.participants[] | select(.id==$id and .state=="ended")] | length) == 1' \
+            --arg id "$frozen"
     }
 
     unbound_watch() {
         before="$PS_BASE/unbound-watch-before.manifest"
         after="$PS_BASE/unbound-watch-after.manifest"
         manifest "$PS_ROOT" "$before" || return 1
-        unbound watch --room smoke --snapshot >"$PS_BASE/unbound-watch-plain.ndjson" 2>"$PS_BASE/unbound-watch-plain.err" || {
-            ROW_REASON="unbound plain snapshot failed"
+        if ! run_bounded_exec "$PS_WORK" "$PS_BASE/unbound-watch-plain.ndjson" \
+            "$PS_BASE/unbound-watch-plain.err" 100 "$PS_BIN" watch --room smoke --snapshot; then
+            ROW_REASON="unbound plain snapshot failed or timed out"
             return 1
-        }
-        unbound watch --room smoke --snapshot --json >"$PS_BASE/unbound-watch-json.ndjson" 2>"$PS_BASE/unbound-watch-json.err" || {
-            ROW_REASON="unbound JSON snapshot failed"
+        fi
+        if ! run_bounded_exec "$PS_WORK" "$PS_BASE/unbound-watch-json.ndjson" \
+            "$PS_BASE/unbound-watch-json.err" 100 "$PS_BIN" watch --room smoke --snapshot --json; then
+            ROW_REASON="unbound JSON snapshot failed or timed out"
             return 1
-        }
+        fi
         if ! python3 - "$PS_BASE/unbound-watch-plain.ndjson" "$PS_BASE/unbound-watch-json.ndjson" <<'PY'
 import json
 import sys
@@ -880,13 +1052,14 @@ PY
     record_row P13-05 "held lineage mail adopts once and excludes later affiliates" row_05
     record_row P13-06 "voice loading is opt-in, terms require acknowledgement, and leave is individual" row_06
     record_row P13-07 "workspace-default channel leave survives a SessionStart-style rebind" row_07
-    record_row P13-08 "late older ids stay unread and failed output records no seen id" row_08
-    record_row P13-09 "watch restart dedupes consumed mail while another participant still rings" row_09
+    record_row P13-08 "late older routed ids stay unread and failed output records no seen id" row_08
+    record_row P13-09-durable-read-suppression "consumed ids stay suppressed after watcher restart while independently eligible frozen recipient B still rings" row_09_durable_read_suppression
+    record_row P13-09-unread-restart-rering "an unconsumed id rings again after watcher restart" row_09_unread_restart_rering
     record_row P13-10 "version advertises the expected installed capabilities" row_10
-    record_row LIFECYCLE-touch "participant touch refreshes the participant lease" lifecycle_touch
+    record_row LIFECYCLE-touch "participant touch preserves the stored lease without an override and reapplies an explicit override" lifecycle_touch
     record_row LIFECYCLE-who "who labels active, stale, ended, and no lease record" lifecycle_who
     record_row LIFECYCLE-fanout "new workspace fan-out includes active participants and excludes ended, stale, and no-lease actors" lifecycle_fanout
-    record_row LIFECYCLE-frozen "a frozen receipt remains readable after participant end" lifecycle_frozen
+    record_row LIFECYCLE-frozen "a consuming frozen-receipt read does not reactivate an ended participant" lifecycle_frozen
     record_row UNBOUND-watch "fully unbound snapshot output is NDJSON or empty and read-only" unbound_watch
     record_row UNBOUND-version "version --json works fully unbound and read-only" unbound_version
     record_row UNBOUND-show "participant show reports the unbound payload without mutation" unbound_show
@@ -895,14 +1068,24 @@ PY
     record_row IDENTITY-terms "continue refuses terms until the explicit acknowledge path" identity_terms
     record_row OUTPUT-closed-pipe "closed-pipe read failure leaves the cursor byte-identical" output_failure
 
-    printf 'participants smoke root: %s\n' "$PS_BASE"
     [ "$PS_FAILURES" -eq 0 ]
 )
 
 legacy_smoke() (
     set +e
     BIN=$1
-    BASE=$(mktemp -d)
+    BASE=$(mktemp -d 2>&1)
+    LEGACY_MKTEMP_RC=$?
+    if [ "$LEGACY_MKTEMP_RC" -ne 0 ] || [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+        printf 'FAIL SETUP-legacy: mktemp failed: %s\n' "$BASE"
+        exit 1
+    fi
+    LEGACY_CREATED_ROOT=$BASE
+    if [ ! -w "$BASE" ]; then
+        printf 'FAIL SETUP-legacy: temp root is not writable: %s\n' "$BASE"
+        remove_temp_tree "$BASE" "$LEGACY_CREATED_ROOT" || true
+        exit 1
+    fi
     export POST_MAIL_ROOT="$BASE/mail"
     unset POST_FROM POST_SENDER_ADDRESS POST_FRAMING POST_ARX_GENERATION \
         POST_PARTICIPANT POST_HARNESS POST_PARTICIPANT_LEASE_HOURS \
@@ -917,6 +1100,7 @@ legacy_smoke() (
     WATCH_PID=
     ONCE_PID=
     FROM_NOW_PID=
+    RUN_BOUNDED_PID=
 
     stop_watch() {
         if [ -n "$WATCH_PID" ]; then
@@ -927,10 +1111,23 @@ legacy_smoke() (
     cleanup_legacy() {
         stop_pid "$ONCE_PID"
         stop_pid "$FROM_NOW_PID"
+        stop_pid "$RUN_BOUNDED_PID"
         stop_watch
-        remove_temp_tree "$BASE" || true
+        if remove_temp_tree "$BASE" "$LEGACY_CREATED_ROOT"; then
+            printf 'legacy smoke root removed: %s\n' "$BASE"
+        else
+            printf 'legacy smoke root retained after cleanup failure: %s\n' "$BASE" >&2
+        fi
+    }
+    stop_legacy_on_signal() {
+        signal_rc=$1
+        trap - EXIT INT TERM
+        cleanup_legacy
+        exit "$signal_rc"
     }
     trap cleanup_legacy EXIT
+    trap 'stop_legacy_on_signal 130' INT
+    trap 'stop_legacy_on_signal 143' TERM
 
     legacy_record() {
         row_name=$1
@@ -940,7 +1137,7 @@ legacy_smoke() (
         if "$row_function"; then
             printf 'ok %s: %s\n' "$row_name" "$row_description"
         else
-            [ -n "$LEGACY_REASON" ] || LEGACY_REASON="assertion failed"
+            [ -n "$LEGACY_REASON" ] || LEGACY_REASON="row returned failure without a diagnostic (smoke bug)"
             printf 'FAIL %s: %s\n' "$row_name" "$LEGACY_REASON"
             LEGACY_FAILURES=$((LEGACY_FAILURES + 1))
         fi
@@ -953,6 +1150,9 @@ legacy_smoke() (
     }
     json_field() {
         jq -er "$2 // empty" "$1" 2>/dev/null
+    }
+    legacy_json_actual() {
+        jq -c . "$1" 2>/dev/null || printf '<invalid-json>'
     }
 
     legacy_doctor() {
@@ -967,7 +1167,10 @@ legacy_smoke() (
     }
 
     legacy_setup() {
-        mkdir -p "$BASE/alpha" "$BASE/beta" || return 1
+        mkdir -p "$BASE/alpha" "$BASE/beta" || {
+            LEGACY_SETUP_REASON="could not create legacy workspaces"
+            return 1
+        }
         "$BIN" rooms add alpha "$BASE/alpha" >/dev/null 2>"$BASE/rooms-alpha.err" || {
             LEGACY_SETUP_REASON="rooms add alpha failed: $(tr '\n' ' ' <"$BASE/rooms-alpha.err")"
             return 1
@@ -997,11 +1200,11 @@ legacy_smoke() (
             return 1
         }
         LEGACY_ALPHA_ID=$(json_field "$BASE/legacy-alpha-bind.json" '.participant.id') || {
-            LEGACY_SETUP_REASON="alpha bind returned no participant id"
+            LEGACY_SETUP_REASON="alpha bind returned no participant id: $(legacy_json_actual "$BASE/legacy-alpha-bind.json")"
             return 1
         }
         LEGACY_BETA_ID=$(json_field "$BASE/legacy-beta-bind.json" '.participant.id') || {
-            LEGACY_SETUP_REASON="beta bind returned no participant id"
+            LEGACY_SETUP_REASON="beta bind returned no participant id: $(legacy_json_actual "$BASE/legacy-beta-bind.json")"
             return 1
         }
         export POST_PARTICIPANT="$LEGACY_ALPHA_ID"
@@ -1017,10 +1220,10 @@ legacy_smoke() (
             return 1
         }
         backlog_id=$(json_field "$BASE/backlog-send.json" '.envelope.id') || {
-            LEGACY_REASON="backlog send returned no id"
+            LEGACY_REASON="backlog send returned no id: $(legacy_json_actual "$BASE/backlog-send.json")"
             return 1
         }
-        ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
+        ( cd "$BASE/beta" && exec env POST_PARTICIPANT="$LEGACY_BETA_ID" \
             "$BIN" watch --room beta --once --text \
             >"$BASE/backlog-watch.out" 2>"$BASE/backlog-watch.err" ) &
         ONCE_PID=$!
@@ -1045,10 +1248,10 @@ legacy_smoke() (
             return 1
         }
         backlog_id=$(json_field "$BASE/fromnow-backlog-send.json" '.envelope.id') || {
-            LEGACY_REASON="from-now backlog send returned no id"
+            LEGACY_REASON="from-now backlog send returned no id: $(legacy_json_actual "$BASE/fromnow-backlog-send.json")"
             return 1
         }
-        ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
+        ( cd "$BASE/beta" && exec env POST_PARTICIPANT="$LEGACY_BETA_ID" \
             "$BIN" watch --room beta --from now --once --text \
             >"$BASE/fromnow.out" 2>"$BASE/fromnow.err" ) &
         FROM_NOW_PID=$!
@@ -1062,7 +1265,7 @@ legacy_smoke() (
             return 1
         }
         fresh_id=$(json_field "$BASE/fromnow-fresh-send.json" '.envelope.id') || {
-            LEGACY_REASON="post-start send returned no id"
+            LEGACY_REASON="post-start send returned no id: $(legacy_json_actual "$BASE/fromnow-fresh-send.json")"
             stop_pid "$FROM_NOW_PID"
             FROM_NOW_PID=
             return 1
@@ -1107,14 +1310,22 @@ legacy_smoke() (
             return 1
         }
         ( cd "$BASE/alpha" && "$BIN" chat "$channel" --send --body \
-            "first channel msg" --anyway >/dev/null ) || return 1
-        ( cd "$BASE/alpha" && "$BIN" chat "$channel" --send --body \
-            "second channel msg" --anyway >/dev/null ) || return 1
-        digest=$(cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" watch --room beta --snapshot --digest --text) || {
-            LEGACY_REASON="digest snapshot failed"
+            "first channel msg" --anyway >/dev/null ) || {
+            LEGACY_REASON="first digest message send failed"
             return 1
         }
+        ( cd "$BASE/alpha" && "$BIN" chat "$channel" --send --body \
+            "second channel msg" --anyway >/dev/null ) || {
+            LEGACY_REASON="second digest message send failed"
+            return 1
+        }
+        if ! run_bounded_exec "$BASE/beta" "$BASE/digest-snapshot.out" \
+            "$BASE/digest-snapshot.err" 100 env POST_PARTICIPANT="$LEGACY_BETA_ID" \
+            "$BIN" watch --room beta --snapshot --digest --text; then
+            LEGACY_REASON="digest snapshot failed or timed out: $(tr '\n' ' ' <"$BASE/digest-snapshot.err")"
+            return 1
+        fi
+        digest=$(cat "$BASE/digest-snapshot.out")
         printf '%s' "$digest" | grep -Eq "#$channel: [0-9]+ new" || {
             LEGACY_REASON="digest line missing count: $digest"
             return 1
@@ -1141,18 +1352,33 @@ legacy_smoke() (
 
     prepare_catchup_channel() {
         catchup_channel=$1
-        ( cd "$BASE/alpha" && "$BIN" chat "$catchup_channel" --join --json >/dev/null ) || return 1
+        ( cd "$BASE/alpha" && "$BIN" chat "$catchup_channel" --join --json >/dev/null ) || {
+            LEGACY_REASON="alpha could not join catchup channel $catchup_channel"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
             "$BIN" chat "$catchup_channel" --join --json \
-            >"$BASE/$catchup_channel-beta-join.json" ) || return 1
-        join_id=$(json_field "$BASE/$catchup_channel-beta-join.json" '.event_id') || return 1
+            >"$BASE/$catchup_channel-beta-join.json" ) || {
+            LEGACY_REASON="beta could not join catchup channel $catchup_channel"
+            return 1
+        }
+        join_id=$(json_field "$BASE/$catchup_channel-beta-join.json" '.event_id') || {
+            LEGACY_REASON="beta join returned no event id: $(legacy_json_actual "$BASE/$catchup_channel-beta-join.json")"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" chat "$catchup_channel" --discard-through "$join_id" --json >/dev/null ) || return 1
+            "$BIN" chat "$catchup_channel" --discard-through "$join_id" --json >/dev/null ) || {
+            LEGACY_REASON="beta could not discard catchup setup event $join_id"
+            return 1
+        }
         catchup_index=1
         while [ "$catchup_index" -le 3 ]; do
             ( cd "$BASE/alpha" && "$BIN" chat "$catchup_channel" --send \
                 --anyway --body "catchup $catchup_index" --json \
-                >"$BASE/$catchup_channel-send-$catchup_index.json" ) || return 1
+                >"$BASE/$catchup_channel-send-$catchup_index.json" ) || {
+                LEGACY_REASON="catchup setup send $catchup_index failed for $catchup_channel"
+                return 1
+            }
             catchup_index=$((catchup_index + 1))
         done
     }
@@ -1172,7 +1398,7 @@ legacy_smoke() (
         if ! jq -e --arg channel "$channel" \
             '([.channels[] | select(.name==$channel and .messages >= 3 and .unread == 3)] | length) == 1' \
             "$BASE/channels-before-catchup.json" >/dev/null 2>&1; then
-            LEGACY_REASON="channels did not report exactly three unread messages"
+            LEGACY_REASON="channels did not report exactly three unread messages; actual=$(legacy_json_actual "$BASE/channels-before-catchup.json")"
             return 1
         fi
     }
@@ -1184,9 +1410,18 @@ legacy_smoke() (
             LEGACY_REASON="could not prepare catchup channel"
             return 1
         }
-        first_id=$(json_field "$BASE/$channel-send-1.json" '.message.id') || return 1
-        second_id=$(json_field "$BASE/$channel-send-2.json" '.message.id') || return 1
-        third_id=$(json_field "$BASE/$channel-send-3.json" '.message.id') || return 1
+        first_id=$(json_field "$BASE/$channel-send-1.json" '.message.id') || {
+            LEGACY_REASON="first catchup setup send returned no id: $(legacy_json_actual "$BASE/$channel-send-1.json")"
+            return 1
+        }
+        second_id=$(json_field "$BASE/$channel-send-2.json" '.message.id') || {
+            LEGACY_REASON="second catchup setup send returned no id: $(legacy_json_actual "$BASE/$channel-send-2.json")"
+            return 1
+        }
+        third_id=$(json_field "$BASE/$channel-send-3.json" '.message.id') || {
+            LEGACY_REASON="third catchup setup send returned no id: $(legacy_json_actual "$BASE/$channel-send-3.json")"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
             "$BIN" catchup "$channel" --json >"$BASE/catchup-first.json" ) || {
             LEGACY_REASON="first catchup failed"
@@ -1196,7 +1431,7 @@ legacy_smoke() (
             --arg two "$second_id" --arg three "$third_id" \
             '.count == 3 and ([.targets[] | select(.source=="channel" and .channel==$channel and .count==3 and ([.messages[].id] == [$one,$two,$three]))] | length) == 1' \
             "$BASE/catchup-first.json" >/dev/null 2>&1; then
-            LEGACY_REASON="first catchup did not return the exact three messages"
+            LEGACY_REASON="first catchup did not return the exact three messages; actual=$(legacy_json_actual "$BASE/catchup-first.json")"
             return 1
         fi
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
@@ -1207,7 +1442,7 @@ legacy_smoke() (
         if ! jq -e --arg channel "$channel" \
             '.count == 0 and ([.targets[] | select(.source=="channel" and .channel==$channel and .count==0 and (.messages|length)==0)] | length) == 1' \
             "$BASE/catchup-second.json" >/dev/null 2>&1; then
-            LEGACY_REASON="second catchup was not empty"
+            LEGACY_REASON="second catchup was not empty; actual=$(legacy_json_actual "$BASE/catchup-second.json")"
             return 1
         fi
         cursor="$BASE/mail/participants/$LEGACY_BETA_ID/cursors.json"
@@ -1216,11 +1451,14 @@ legacy_smoke() (
             return 1
         }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" channels >"$BASE/channels-after-catchup.json" ) || return 1
+            "$BIN" channels >"$BASE/channels-after-catchup.json" ) || {
+            LEGACY_REASON="channels listing after catchup failed"
+            return 1
+        }
         if ! jq -e --arg channel "$channel" \
             '([.channels[] | select(.name==$channel and .unread==0)] | length) == 1' \
             "$BASE/channels-after-catchup.json" >/dev/null 2>&1; then
-            LEGACY_REASON="channel did not report zero unread after catchup"
+            LEGACY_REASON="channel did not report zero unread after catchup; actual=$(legacy_json_actual "$BASE/channels-after-catchup.json")"
             return 1
         fi
     }
@@ -1233,20 +1471,29 @@ legacy_smoke() (
             LEGACY_REASON="legacy mail send failed"
             return 1
         }
-        mail_id=$(json_field "$BASE/legacy-mail-send.json" '.envelope.id') || return 1
+        mail_id=$(json_field "$BASE/legacy-mail-send.json" '.envelope.id') || {
+            LEGACY_REASON="legacy mail send returned no id: $(legacy_json_actual "$BASE/legacy-mail-send.json")"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" inbox --room beta >"$BASE/inbox-before-read.json" ) || return 1
+            "$BIN" inbox --room beta >"$BASE/inbox-before-read.json" ) || {
+            LEGACY_REASON="inbox listing before legacy mail read failed"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
             "$BIN" read "$mail_id" --room beta --json >/dev/null ) || {
             LEGACY_REASON="mail read failed"
             return 1
         }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" inbox --room beta >"$BASE/inbox-after-read.json" ) || return 1
+            "$BIN" inbox --room beta >"$BASE/inbox-after-read.json" ) || {
+            LEGACY_REASON="inbox listing after legacy mail read failed"
+            return 1
+        }
         if ! jq -e --arg id "$mail_id" --slurpfile after "$BASE/inbox-after-read.json" \
             '([.unread[].id] | index($id)) != null and ([$after[0].unread[].id] | index($id)) == null and $after[0].unread_count < .unread_count' \
             "$BASE/inbox-before-read.json" >/dev/null 2>&1; then
-            LEGACY_REASON="mail read did not lower unread count for the exact id"
+            LEGACY_REASON="mail read did not lower unread count for the exact id; before=$(legacy_json_actual "$BASE/inbox-before-read.json"); after=$(legacy_json_actual "$BASE/inbox-after-read.json")"
             return 1
         fi
     }
@@ -1274,25 +1521,55 @@ legacy_smoke() (
     legacy_long_watch() {
         require_legacy_setup || return 1
         channel=legacy-bell
-        mkdir -p "$BASE/gamma" || return 1
-        "$BIN" rooms add gamma "$BASE/gamma" >/dev/null || return 1
+        mkdir -p "$BASE/gamma" || {
+            LEGACY_REASON="could not create gamma workspace"
+            return 1
+        }
+        "$BIN" rooms add gamma "$BASE/gamma" >/dev/null || {
+            LEGACY_REASON="rooms add gamma failed"
+            return 1
+        }
         (
             unset POST_PARTICIPANT POST_HARNESS POST_ARX_GENERATION \
                 POST_PARTICIPANT_LEASE_HOURS CLAUDE_CODE_SESSION_ID \
                 CLAUDE_PID CODEX_THREAD_ID CODEX_SESSION_ID
             "$BIN" participant bind --harness smoke --key legacy-gamma \
                 --workspace gamma --json
-        ) >"$BASE/legacy-gamma-bind.json" || return 1
-        gamma_id=$(json_field "$BASE/legacy-gamma-bind.json" '.participant.id') || return 1
-        ( cd "$BASE/alpha" && "$BIN" chat "$channel" --join --json >/dev/null ) || return 1
+        ) >"$BASE/legacy-gamma-bind.json" || {
+            LEGACY_REASON="gamma participant bind failed"
+            return 1
+        }
+        gamma_id=$(json_field "$BASE/legacy-gamma-bind.json" '.participant.id') || {
+            LEGACY_REASON="gamma bind returned no participant id: $(legacy_json_actual "$BASE/legacy-gamma-bind.json")"
+            return 1
+        }
+        ( cd "$BASE/alpha" && "$BIN" chat "$channel" --join --json >/dev/null ) || {
+            LEGACY_REASON="alpha could not join bell channel"
+            return 1
+        }
         ( cd "$BASE/gamma" && POST_PARTICIPANT="$gamma_id" \
-            "$BIN" chat "$channel" --join --json >"$BASE/bell-gamma-join.json" ) || return 1
-        join_id=$(json_field "$BASE/bell-gamma-join.json" '.event_id') || return 1
+            "$BIN" chat "$channel" --join --json >"$BASE/bell-gamma-join.json" ) || {
+            LEGACY_REASON="gamma could not join bell channel"
+            return 1
+        }
+        join_id=$(json_field "$BASE/bell-gamma-join.json" '.event_id') || {
+            LEGACY_REASON="gamma bell join returned no event id: $(legacy_json_actual "$BASE/bell-gamma-join.json")"
+            return 1
+        }
         ( cd "$BASE/gamma" && POST_PARTICIPANT="$gamma_id" \
-            "$BIN" chat "$channel" --discard-through "$join_id" --json >/dev/null ) || return 1
+            "$BIN" chat "$channel" --discard-through "$join_id" --json >/dev/null ) || {
+            LEGACY_REASON="gamma could not discard bell join event $join_id"
+            return 1
+        }
         ( cd "$BASE/alpha" && "$BIN" chat "$channel" --send --anyway \
-            --body "bell backlog" --json >"$BASE/bell-first.json" ) || return 1
-        first_id=$(json_field "$BASE/bell-first.json" '.message.id') || return 1
+            --body "bell backlog" --json >"$BASE/bell-first.json" ) || {
+            LEGACY_REASON="bell backlog send failed"
+            return 1
+        }
+        first_id=$(json_field "$BASE/bell-first.json" '.message.id') || {
+            LEGACY_REASON="bell backlog send returned no id: $(legacy_json_actual "$BASE/bell-first.json")"
+            return 1
+        }
         WATCH_OUT="$BASE/bell-watch.out"
         WATCH_ERR="$BASE/bell-watch.err"
         : >"$WATCH_OUT"
@@ -1305,11 +1582,15 @@ legacy_smoke() (
             return 1
         }
         ( cd "$BASE/gamma" && POST_PARTICIPANT="$gamma_id" \
-            "$BIN" catchup "$channel" --json >"$BASE/bell-first-catchup.json" ) || return 1
+            "$BIN" catchup "$channel" --json >"$BASE/bell-first-catchup.json" ) || {
+            LEGACY_REASON="first bell catchup command failed"
+            stop_watch
+            return 1
+        }
         if ! jq -e --arg channel "$channel" --arg id "$first_id" \
             '.count == 1 and ([.targets[] | select(.source=="channel" and .channel==$channel) | .messages[].id] == [$id])' \
             "$BASE/bell-first-catchup.json" >/dev/null 2>&1; then
-            LEGACY_REASON="backlog catchup mismatch"
+            LEGACY_REASON="backlog catchup mismatch; actual=$(legacy_json_actual "$BASE/bell-first-catchup.json")"
             stop_watch
             return 1
         fi
@@ -1320,8 +1601,16 @@ legacy_smoke() (
             return 1
         }
         ( cd "$BASE/alpha" && "$BIN" chat "$channel" --send --anyway \
-            --body "bell after catchup" --json >"$BASE/bell-second.json" ) || return 1
-        second_id=$(json_field "$BASE/bell-second.json" '.message.id') || return 1
+            --body "bell after catchup" --json >"$BASE/bell-second.json" ) || {
+            LEGACY_REASON="second bell message send failed"
+            stop_watch
+            return 1
+        }
+        second_id=$(json_field "$BASE/bell-second.json" '.message.id') || {
+            LEGACY_REASON="second bell message returned no id: $(legacy_json_actual "$BASE/bell-second.json")"
+            stop_watch
+            return 1
+        }
         wait_for_legacy_watch_id "$second_id" || {
             stop_watch
             return 1
@@ -1332,12 +1621,16 @@ legacy_smoke() (
             return 1
         }
         ( cd "$BASE/gamma" && POST_PARTICIPANT="$gamma_id" \
-            "$BIN" catchup "$channel" --json >"$BASE/bell-second-catchup.json" ) || return 1
+            "$BIN" catchup "$channel" --json >"$BASE/bell-second-catchup.json" ) || {
+            LEGACY_REASON="second bell catchup command failed"
+            stop_watch
+            return 1
+        }
         stop_watch
         if ! jq -e --arg channel "$channel" --arg id "$second_id" \
             '.count == 1 and ([.targets[] | select(.source=="channel" and .channel==$channel) | .messages[].id] == [$id])' \
             "$BASE/bell-second-catchup.json" >/dev/null 2>&1; then
-            LEGACY_REASON="watch-ring message was not left unread"
+            LEGACY_REASON="watch-ring message was not left unread; actual=$(legacy_json_actual "$BASE/bell-second-catchup.json")"
             return 1
         fi
     }
@@ -1347,7 +1640,10 @@ legacy_smoke() (
         fence_root="$BASE/fenced-mail"
         channel=fenced
         message_id=20260901-010101-000001-aaaaaa
-        mkdir -p "$fence_root/fence-room" "$fence_root/channels/$channel/messages" || return 1
+        mkdir -p "$fence_root/fence-room" "$fence_root/channels/$channel/messages" || {
+            LEGACY_REASON="could not create fenced store fixture"
+            return 1
+        }
         printf '{"fence-room":"%s/fence-room"}\n' "$fence_root" >"$fence_root/rooms.json"
         printf '%s\n' '{"blocked":[]}' >"$fence_root/rules.json"
         (
@@ -1356,8 +1652,14 @@ legacy_smoke() (
                 CLAUDE_PID CODEX_THREAD_ID CODEX_SESSION_ID
             POST_MAIL_ROOT="$fence_root" "$BIN" participant bind --harness smoke \
                 --key fenced-participant --workspace fence-room --json
-        ) >"$BASE/fence-bind.json" || return 1
-        participant=$(json_field "$BASE/fence-bind.json" '.participant.id') || return 1
+        ) >"$BASE/fence-bind.json" || {
+            LEGACY_REASON="fenced participant bind failed"
+            return 1
+        }
+        participant=$(json_field "$BASE/fence-bind.json" '.participant.id') || {
+            LEGACY_REASON="fenced bind returned no participant id: $(legacy_json_actual "$BASE/fence-bind.json")"
+            return 1
+        }
         printf '%s\n' '{"state":"fenced","generation":7}' >"$fence_root/.post-arx.json"
         : >"$fence_root/.post-arx.lock"
         chmod 600 "$fence_root/rooms.json" "$fence_root/rules.json" \
@@ -1389,26 +1691,56 @@ legacy_smoke() (
         }
         ( cd "$fence_root/fence-room" && POST_MAIL_ROOT="$fence_root" \
             POST_PARTICIPANT="$participant" "$BIN" chat "$channel" --peek --json \
-            >"$BASE/fence-chat.json" ) || return 1
+            >"$BASE/fence-chat.json" ) || {
+            LEGACY_REASON="fenced chat peek failed"
+            return 1
+        }
+        if ! run_bounded_exec "$fence_root/fence-room" "$BASE/fence-watch.out" \
+            "$BASE/fence-watch.err" 100 env POST_MAIL_ROOT="$fence_root" \
+            POST_PARTICIPANT="$participant" "$BIN" watch --room fence-room --snapshot; then
+            LEGACY_REASON="fenced watch snapshot failed or timed out: $(tr '\n' ' ' <"$BASE/fence-watch.err")"
+            return 1
+        fi
         ( cd "$fence_root/fence-room" && POST_MAIL_ROOT="$fence_root" \
-            POST_PARTICIPANT="$participant" "$BIN" watch --room fence-room --snapshot \
-            >"$BASE/fence-watch.out" ) || return 1
+            POST_PARTICIPANT="$participant" "$BIN" channels >"$BASE/fence-channels.json" ) || {
+            LEGACY_REASON="fenced channels listing failed"
+            return 1
+        }
         ( cd "$fence_root/fence-room" && POST_MAIL_ROOT="$fence_root" \
-            POST_PARTICIPANT="$participant" "$BIN" channels >"$BASE/fence-channels.json" ) || return 1
-        ( cd "$fence_root/fence-room" && POST_MAIL_ROOT="$fence_root" \
-            POST_PARTICIPANT="$participant" "$BIN" inbox --room fence-room >"$BASE/fence-inbox.json" ) || return 1
+            POST_PARTICIPANT="$participant" "$BIN" inbox --room fence-room >"$BASE/fence-inbox.json" ) || {
+            LEGACY_REASON="fenced inbox listing failed"
+            return 1
+        }
         ( cd "$fence_root/fence-room" && POST_MAIL_ROOT="$fence_root" \
             POST_PARTICIPANT="$participant" "$BIN" search fenced --channel "$channel" --json \
-            >"$BASE/fence-search.json" ) || return 1
-        /usr/bin/grep -Fq -- "$message_id" "$BASE/fence-chat.json" || return 1
-        /usr/bin/grep -Fq -- "$message_id" "$BASE/fence-watch.out" || return 1
-        store_manifest "$fence_root" >"$after" || return 1
+            >"$BASE/fence-search.json" ) || {
+            LEGACY_REASON="fenced search failed"
+            return 1
+        }
+        /usr/bin/grep -Fq -- "$message_id" "$BASE/fence-chat.json" || {
+            LEGACY_REASON="fenced chat peek omitted $message_id"
+            return 1
+        }
+        /usr/bin/grep -Fq -- "$message_id" "$BASE/fence-watch.out" || {
+            LEGACY_REASON="fenced watch snapshot omitted $message_id"
+            return 1
+        }
+        store_manifest "$fence_root" >"$after" || {
+            LEGACY_REASON="could not capture fenced manifest after reads"
+            return 1
+        }
         /usr/bin/cmp -s "$before" "$after" || {
             LEGACY_REASON="fenced read-only surfaces changed store metadata or bytes"
             return 1
         }
-        [ ! -e "$fence_root/participants/$participant/cursors.json" ] || return 1
-        [ ! -e "$fence_root/participants/$participant/.cursors.lock" ] || return 1
+        [ ! -e "$fence_root/participants/$participant/cursors.json" ] || {
+            LEGACY_REASON="fenced read-only surfaces created participant cursor state"
+            return 1
+        }
+        [ ! -e "$fence_root/participants/$participant/.cursors.lock" ] || {
+            LEGACY_REASON="fenced read-only surfaces created a participant cursor lock"
+            return 1
+        }
     }
 
     legacy_search_visibility() {
@@ -1416,25 +1748,52 @@ legacy_smoke() (
         channel_visible=legacy-search-visible
         channel_private=legacy-search-private
         marker=legacy-search-marker
-        ( cd "$BASE/alpha" && "$BIN" chat "$channel_visible" --join --json >/dev/null ) || return 1
+        ( cd "$BASE/alpha" && "$BIN" chat "$channel_visible" --join --json >/dev/null ) || {
+            LEGACY_REASON="alpha could not join visible search channel"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" chat "$channel_visible" --join --json >/dev/null ) || return 1
+            "$BIN" chat "$channel_visible" --join --json >/dev/null ) || {
+            LEGACY_REASON="beta could not join visible search channel"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" chat "$channel_visible" --discard --json >/dev/null ) || return 1
-        ( cd "$BASE/alpha" && "$BIN" chat "$channel_private" --join --json >/dev/null ) || return 1
+            "$BIN" chat "$channel_visible" --discard --json >/dev/null ) || {
+            LEGACY_REASON="beta could not discard visible search backlog"
+            return 1
+        }
+        ( cd "$BASE/alpha" && "$BIN" chat "$channel_private" --join --json >/dev/null ) || {
+            LEGACY_REASON="alpha could not join private search channel"
+            return 1
+        }
         ( cd "$BASE/alpha" && "$BIN" chat "$channel_visible" --send --anyway \
-            --body "$marker member-visible" --json >"$BASE/search-member.json" ) || return 1
-        visible_id=$(json_field "$BASE/search-member.json" '.message.id') || return 1
+            --body "$marker member-visible" --json >"$BASE/search-member.json" ) || {
+            LEGACY_REASON="visible search fixture send failed"
+            return 1
+        }
+        visible_id=$(json_field "$BASE/search-member.json" '.message.id') || {
+            LEGACY_REASON="visible search fixture returned no id: $(legacy_json_actual "$BASE/search-member.json")"
+            return 1
+        }
         ( cd "$BASE/alpha" && "$BIN" chat "$channel_private" --send --anyway \
-            --body "$marker non-member" --json >"$BASE/search-private.json" ) || return 1
-        private_id=$(json_field "$BASE/search-private.json" '.message.id') || return 1
+            --body "$marker non-member" --json >"$BASE/search-private.json" ) || {
+            LEGACY_REASON="private search fixture send failed"
+            return 1
+        }
+        private_id=$(json_field "$BASE/search-private.json" '.message.id') || {
+            LEGACY_REASON="private search fixture returned no id: $(legacy_json_actual "$BASE/search-private.json")"
+            return 1
+        }
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
-            "$BIN" search "$marker" --json >"$BASE/search-result.json" ) || return 1
+            "$BIN" search "$marker" --json >"$BASE/search-result.json" ) || {
+            LEGACY_REASON="beta search command failed"
+            return 1
+        }
         if ! jq -e --arg visible "$channel_visible" --arg visible_id "$visible_id" \
             --arg private_id "$private_id" \
             '.count == 1 and (.results|length)==1 and .results[0].id==$visible_id and .results[0].source=="channel" and .results[0].channel==$visible and (.results[0].matched|index("body")) != null and ([.results[].id]|index($private_id)) == null' \
             "$BASE/search-result.json" >/dev/null 2>&1; then
-            LEGACY_REASON="search visibility/count mismatch"
+            LEGACY_REASON="search visibility/count mismatch; actual=$(legacy_json_actual "$BASE/search-result.json")"
             return 1
         fi
     }
@@ -1446,7 +1805,10 @@ legacy_smoke() (
         one=20260901-010101-000001-aaaaaa
         two=20260901-010101-000002-bbbbbb
         mail=20260901-010101-cccccc
-        mkdir -p "$root/legacy-beta/inbox" "$root/channels/$channel/messages" || return 1
+        mkdir -p "$root/legacy-beta/inbox" "$root/channels/$channel/messages" || {
+            LEGACY_REASON="could not create cursorless legacy store fixture"
+            return 1
+        }
         printf '{"legacy-beta":"%s/legacy-beta"}\n' "$root" >"$root/rooms.json"
         printf '%s\n' '{"blocked":[]}' >"$root/rules.json"
         (
@@ -1455,8 +1817,14 @@ legacy_smoke() (
                 CLAUDE_PID CODEX_THREAD_ID CODEX_SESSION_ID
             POST_MAIL_ROOT="$root" "$BIN" participant bind --harness smoke \
                 --key legacy-store-beta --workspace legacy-beta --json
-        ) >"$BASE/legacy-store-bind.json" || return 1
-        participant=$(json_field "$BASE/legacy-store-bind.json" '.participant.id') || return 1
+        ) >"$BASE/legacy-store-bind.json" || {
+            LEGACY_REASON="cursorless legacy participant bind failed"
+            return 1
+        }
+        participant=$(json_field "$BASE/legacy-store-bind.json" '.participant.id') || {
+            LEGACY_REASON="cursorless legacy bind returned no participant id: $(legacy_json_actual "$BASE/legacy-store-bind.json")"
+            return 1
+        }
         printf '%s\n' '{"name":"legacy-channel","created":"2026-09-01 01:01:01 +0000","created_by":"legacy-alpha"}' >"$root/channels/$channel/channel.json"
         printf '%s\n' '{"legacy-alpha":"2026-09-01 01:01:01 +0000","legacy-beta":"2026-09-01 01:01:01 +0000"}' >"$root/channels/$channel/members.json"
         printf '%s\n---\n%s\n' '{"id":"20260901-010101-000001-aaaaaa","from":"legacy-alpha","channel":"legacy-channel","subject":"","sent":"2026-09-01 01:01:01 +0000"}' 'legacy channel one' >"$root/channels/$channel/messages/$one.msg"
@@ -1464,46 +1832,80 @@ legacy_smoke() (
         printf '%s\n---\n%s\n' '{"id":"20260901-010101-cccccc","from":"legacy-alpha","to":"legacy-beta","kind":"note","subject":"legacy mail","sent":"2026-09-01 01:01:01 +0000"}' 'legacy mail' >"$root/legacy-beta/inbox/$mail.mail"
         before="$BASE/legacy-before.manifest"
         after="$BASE/legacy-after.manifest"
-        store_manifest "$root" >"$before" || return 1
+        store_manifest "$root" >"$before" || {
+            LEGACY_REASON="could not capture cursorless manifest before reads"
+            return 1
+        }
         ( cd "$root/legacy-beta" && POST_MAIL_ROOT="$root" POST_PARTICIPANT="$participant" \
-            "$BIN" channels >"$BASE/legacy-channels.json" ) || return 1
+            "$BIN" channels >"$BASE/legacy-channels.json" ) || {
+            LEGACY_REASON="cursorless channels listing failed"
+            return 1
+        }
         ( cd "$root/legacy-beta" && POST_MAIL_ROOT="$root" POST_PARTICIPANT="$participant" \
-            "$BIN" inbox --room legacy-beta >"$BASE/legacy-inbox.json" ) || return 1
+            "$BIN" inbox --room legacy-beta >"$BASE/legacy-inbox.json" ) || {
+            LEGACY_REASON="cursorless inbox listing failed"
+            return 1
+        }
         ( cd "$root/legacy-beta" && POST_MAIL_ROOT="$root" POST_PARTICIPANT="$participant" \
-            "$BIN" chat "$channel" --peek --json >"$BASE/legacy-chat.json" ) || return 1
-        ( cd "$root/legacy-beta" && POST_MAIL_ROOT="$root" POST_PARTICIPANT="$participant" \
-            "$BIN" watch --room legacy-beta --snapshot >"$BASE/legacy-watch.out" ) || return 1
+            "$BIN" chat "$channel" --peek --json >"$BASE/legacy-chat.json" ) || {
+            LEGACY_REASON="cursorless channel peek failed"
+            return 1
+        }
+        if ! run_bounded_exec "$root/legacy-beta" "$BASE/legacy-watch.out" \
+            "$BASE/legacy-watch.err" 100 env POST_MAIL_ROOT="$root" \
+            POST_PARTICIPANT="$participant" "$BIN" watch --room legacy-beta --snapshot; then
+            LEGACY_REASON="cursorless watch snapshot failed or timed out: $(tr '\n' ' ' <"$BASE/legacy-watch.err")"
+            return 1
+        fi
         if ! jq -e --arg channel "$channel" \
             '([.channels[] | select(.name==$channel and .messages==2 and .unread==2)] | length)==1' \
             "$BASE/legacy-channels.json" >/dev/null 2>&1; then
-            LEGACY_REASON="cursorless channel was not all-unread"
+            LEGACY_REASON="cursorless channel was not all-unread; actual=$(legacy_json_actual "$BASE/legacy-channels.json")"
             return 1
         fi
         if ! jq -e '.count==0 and .unread_count==0 and .pending==1 and .pending_by_address["workspace:legacy-beta"]==1' \
             "$BASE/legacy-inbox.json" >/dev/null 2>&1; then
-            LEGACY_REASON="cursorless inbox did not report one pending mail"
+            LEGACY_REASON="cursorless inbox did not report one pending mail; actual=$(legacy_json_actual "$BASE/legacy-inbox.json")"
             return 1
         fi
         if ! jq -e --arg one "$one" --arg two "$two" \
             '.count==2 and [.messages[].id]==[$one,$two]' "$BASE/legacy-chat.json" >/dev/null 2>&1; then
-            LEGACY_REASON="cursorless channel peek mismatch"
+            LEGACY_REASON="cursorless channel peek mismatch; actual=$(legacy_json_actual "$BASE/legacy-chat.json")"
             return 1
         fi
-        /usr/bin/grep -Fq -- "$one" "$BASE/legacy-watch.out" || return 1
-        /usr/bin/grep -Fq -- "$two" "$BASE/legacy-watch.out" || return 1
-        [ ! -e "$root/participants/$participant/cursors.json" ] || return 1
-        [ ! -e "$root/participants/$participant/.cursors.lock" ] || return 1
-        store_manifest "$root" >"$after" || return 1
+        /usr/bin/grep -Fq -- "$one" "$BASE/legacy-watch.out" || {
+            LEGACY_REASON="cursorless watch omitted first channel id $one"
+            return 1
+        }
+        /usr/bin/grep -Fq -- "$two" "$BASE/legacy-watch.out" || {
+            LEGACY_REASON="cursorless watch omitted second channel id $two"
+            return 1
+        }
+        [ ! -e "$root/participants/$participant/cursors.json" ] || {
+            LEGACY_REASON="cursorless read-only surfaces created participant cursor state"
+            return 1
+        }
+        [ ! -e "$root/participants/$participant/.cursors.lock" ] || {
+            LEGACY_REASON="cursorless read-only surfaces created a participant cursor lock"
+            return 1
+        }
+        store_manifest "$root" >"$after" || {
+            LEGACY_REASON="could not capture cursorless manifest after reads"
+            return 1
+        }
         /usr/bin/cmp -s "$before" "$after" || {
             LEGACY_REASON="cursorless read-only surfaces changed store metadata or bytes"
             return 1
         }
         ( cd "$root/legacy-beta" && POST_MAIL_ROOT="$root" POST_PARTICIPANT="$participant" \
-            "$BIN" catchup "$channel" --json >"$BASE/legacy-catchup.json" ) || return 1
+            "$BIN" catchup "$channel" --json >"$BASE/legacy-catchup.json" ) || {
+            LEGACY_REASON="cursorless catchup command failed"
+            return 1
+        }
         if ! jq -e --arg channel "$channel" --arg one "$one" --arg two "$two" \
             '.count==2 and ([.targets[] | select(.source=="channel" and .channel==$channel) | .messages[].id] == [$one,$two])' \
             "$BASE/legacy-catchup.json" >/dev/null 2>&1; then
-            LEGACY_REASON="legacy catchup did not consume both messages"
+            LEGACY_REASON="legacy catchup did not consume both messages; actual=$(legacy_json_actual "$BASE/legacy-catchup.json")"
             return 1
         fi
         [ -f "$root/participants/$participant/cursors.json" ] || {
@@ -1526,7 +1928,6 @@ legacy_smoke() (
     legacy_record LEGACY-11 "search includes a member marker and excludes a non-member marker" legacy_search_visibility
     legacy_record LEGACY-12 "cursorless legacy reads stay read-only until first catchup" legacy_cursorless_store
 
-    printf 'legacy smoke root: %s\n' "$BASE"
     [ "$LEGACY_FAILURES" -eq 0 ]
 )
 
