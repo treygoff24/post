@@ -437,6 +437,13 @@ session-start event), each adapter:
    it is never truncated. An unaffiliated participant receives no lineage or
    voice text, but Cursor/Grok still receive the neutral bootstrap line.
 
+Typed watch addresses preserve the Post grammar: participant ids carry an
+8- or 12-hex suffix; lineage names use the path-safe `identity new` component
+rules (spaces and punctuation are allowed, while control characters, `/`,
+`\\`, `:`, `.`/`..`, and reserved mailbox names are refused). Legacy `room`
+fields retain the stricter adapter room grammar. Lineage names are sanitized
+and byte-bounded only for display, never narrowed during validation.
+
 Claude and Codex have verified native conversation keys, so their payload-key
 bind converges with the harness environment. Cursor and Grok do not; prefix
 each Post command with the neutral `POST_PARTICIPANT=<id>` binding (or export

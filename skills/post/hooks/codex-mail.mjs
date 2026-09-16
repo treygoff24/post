@@ -40,7 +40,9 @@ const UNREADABLE_ID_MAX = 255; // filename-derived stem bound
 const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
 const ROOM_NAME = /^[A-Za-z0-9._-]+$/;
-const PARTICIPANT_ADDRESS = /^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/;
+const PARTICIPANT_ADDRESS = /^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}([0-9a-f]{4})?$/;
+const LINEAGE_NAME_MAX_BYTES = 4096;
+const RESERVED_ROOM_NAMES = new Set(["*", "archive", "participants", "lineages", "routing", ".participants.lock", "rooms.json", "rules.json", "profiles.json", "owner.json", ".rooms.lock", ".post-arx.json", ".post-arx.lock"]);
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const HARNESS = "codex";
 const SESSION_DEADLINE_MS = 4500;
@@ -184,8 +186,19 @@ function safeName(value) {
 function validAddress(address) {
   if (!address || typeof address !== "object" || Array.isArray(address)) return false;
   if (address.kind === "participant") return typeof address.name === "string" && PARTICIPANT_ADDRESS.test(address.name);
-  if (address.kind === "workspace" || address.kind === "lineage") return safeName(address.name);
+  if (address.kind === "workspace") return safeName(address.name);
+  if (address.kind === "lineage") return validLineageName(address.name);
   return false;
+}
+
+function validLineageName(value) {
+  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > LINEAGE_NAME_MAX_BYTES) return false;
+  if ([...value].some((char) => CONTROL_CHARS.test(char)) || value === "." || value === ".." || /[\\/]/.test(value) || value.includes(":")) return false;
+  const folded = value.toLowerCase();
+  if (RESERVED_ROOM_NAMES.has(folded)) return false;
+  if (folded.startsWith(".rooms.json.") && folded.endsWith(".tmp")) return false;
+  if (folded.startsWith("..post-arx.json.") && folded.endsWith(".tmp")) return false;
+  return true;
 }
 
 function validEventAddress(event) {
@@ -199,9 +212,17 @@ function validEventAddress(event) {
 function targetDescription(event) {
   const address = event.address;
   if (address?.kind === "participant") return "direct to you";
-  if (address?.kind === "lineage") return `lineage ${address.name}`;
+  if (address?.kind === "lineage") return `lineage ${displayAddressName(address.name)}`;
   if (address?.kind === "workspace") return `room ${event.room ?? address.name}`;
   return event.room ? `room ${event.room}` : null;
+}
+
+function displayAddressName(value) {
+  const clean = [...value].filter((char) => !CONTROL_CHARS.test(char) && char !== "\u2028" && char !== "\u2029").join("");
+  if (Buffer.byteLength(clean, "utf8") <= 255) return clean;
+  const chars = [...clean];
+  while (chars.length > 0 && Buffer.byteLength(`${chars.join("")}…`, "utf8") > 255) chars.pop();
+  return `${chars.join("")}…`;
 }
 
 // This field is identity-only, never rendered; accept Post's path-safe Unicode
