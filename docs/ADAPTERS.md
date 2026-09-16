@@ -440,9 +440,10 @@ session-start event), each adapter:
 Typed watch addresses preserve the Post grammar: participant ids carry an
 8- or 12-hex suffix; lineage names use the path-safe `identity new` component
 rules (spaces and punctuation are allowed, while control characters, `/`,
-`\\`, `:`, `.`/`..`, and reserved mailbox names are refused). Legacy `room`
-fields retain the stricter adapter room grammar. Lineage names are sanitized
-and byte-bounded only for display, never narrowed during validation.
+`\\`, `:`, `.`/`..`, and reserved mailbox names are refused). Names are
+accepted up to the 4,096-byte protocol bound. Legacy `room` fields retain the
+stricter adapter room grammar; lineage display applies a separate sanitizing
+and rendering bound without narrowing the accepted identity grammar.
 
 Claude and Codex have verified native conversation keys, so their payload-key
 bind converges with the harness environment. Cursor and Grok do not; prefix
