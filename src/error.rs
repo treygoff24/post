@@ -426,7 +426,7 @@ mod exact_fix_contract {
         // Brackets inside an argument are data; only a whole argument that is
         // nothing but a bracket pair is a placeholder.
         assert!(!contains_placeholder(
-            "post send --to 'a' --allow-self --body 'see the <tag> here'"
+            "post send --to 'participant:test-self' --body 'see the <tag> here'"
         ));
         assert!(!contains_placeholder(
             "post chat 'ops' --send --anyway --body '<note>hi</note>'"

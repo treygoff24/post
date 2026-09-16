@@ -1,8 +1,14 @@
-//! Unified per-room consumption state.
+//! Per-participant consumption state plus a read-only legacy room reader.
+
+#[path = "eligibility.rs"]
+pub(crate) mod eligibility;
+#[path = "routing.rs"]
+pub(crate) mod routing;
 
 use crate::channel::{self, CHANNELS_DIR};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{atomic_replace, exclusive_move, Context, MoveError};
+use crate::participant::{Address, Participant};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -14,6 +20,338 @@ pub(crate) const CURSORS_FILE: &str = "cursors.json";
 pub(crate) const CURSORS_LOCK_FILE: &str = ".cursors.lock";
 pub(crate) const STATE_VERSION: u64 = 1;
 pub(crate) const SEEN_SET_WARN: usize = 50_000;
+
+const PARTICIPANT_STATE_VERSION: u64 = 2;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParticipantCursors {
+    mail: BTreeMap<String, BTreeSet<String>>,
+    channels: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ParticipantCursors {
+    /// Missing or malformed participant state is an empty snapshot for reads.
+    /// Writers reload under the lock and refuse malformed state rather than
+    /// repairing it by discarding evidence.
+    pub(crate) fn load(_context: &Context, participant: &Participant) -> Self {
+        match read_participant_cursor(&participant_cursor_path(participant)) {
+            ParticipantCursorRead::Missing => Self::default(),
+            ParticipantCursorRead::Valid(state) => state,
+            ParticipantCursorRead::Invalid => {
+                eprintln!(
+                    "post: warning: participant '{}' has invalid cursors.json; treating every eligible message as unread",
+                    participant.id
+                );
+                Self::default()
+            }
+        }
+    }
+
+    pub(crate) fn mail_has_seen(&self, address: &Address, id: &str) -> bool {
+        self.mail
+            .get(&mail_key(address))
+            .is_some_and(|seen| seen.contains(id))
+    }
+
+    pub(crate) fn channel_has_seen(&self, channel: &str, id: &str) -> bool {
+        self.channels
+            .get(channel)
+            .is_some_and(|seen| seen.contains(id))
+    }
+
+    pub(crate) fn consume_mail(
+        context: &Context,
+        participant: &Participant,
+        address: &Address,
+        ids: &[String],
+    ) -> AppResult<usize> {
+        for id in ids {
+            validate_mail_id(id)?;
+        }
+        update_participant(context, participant, |state| {
+            let seen = state.mail.entry(mail_key(address)).or_default();
+            let before = seen.len();
+            seen.extend(ids.iter().cloned());
+            Ok(seen.len() - before)
+        })
+    }
+
+    pub(crate) fn consume_channel(
+        context: &Context,
+        participant: &Participant,
+        channel: &str,
+        ids: &[String],
+    ) -> AppResult<CursorAdvance> {
+        channel::validate_channel_name(channel)?;
+        for id in ids {
+            validate_channel_id(id)?;
+        }
+        update_participant(context, participant, |state| {
+            let seen = state.channels.entry(channel.to_owned()).or_default();
+            let prior = seen.last().cloned();
+            let before = seen.len();
+            seen.extend(ids.iter().cloned());
+            let marked = seen.len() - before;
+            let cursor = seen.last().cloned().or(prior.clone()).unwrap_or_default();
+            Ok(CursorAdvance {
+                prior,
+                cursor,
+                advanced: marked > 0,
+                marked,
+            })
+        })
+    }
+
+    pub(crate) fn consume_channel_through(
+        context: &Context,
+        participant: &Participant,
+        channel: &str,
+        target: &str,
+    ) -> AppResult<CursorAdvance> {
+        channel::validate_channel_name(channel)?;
+        validate_channel_id(target)?;
+        update_participant(context, participant, |state| {
+            let seen = state.channels.entry(channel.to_owned()).or_default();
+            let prior = seen.last().cloned();
+            let candidates = unseen_candidates(context, channel, seen, Some(target))?;
+            let marked = candidates.len();
+            seen.extend(candidates);
+            let cursor = seen.last().cloned().or(prior.clone()).unwrap_or_default();
+            Ok(CursorAdvance {
+                prior,
+                cursor,
+                advanced: marked > 0,
+                marked,
+            })
+        })
+    }
+}
+
+fn validate_mail_id(id: &str) -> AppResult<()> {
+    if is_canonical_mail_id(id) {
+        Ok(())
+    } else {
+        Err(AppError::invalid_argument(format!(
+            "mail cursor id '{id}' is not canonical"
+        )))
+    }
+}
+
+fn validate_channel_id(id: &str) -> AppResult<()> {
+    if channel::is_canonical_channel_message_id(id) {
+        Ok(())
+    } else {
+        Err(AppError::invalid_argument(format!(
+            "channel cursor id '{id}' is not canonical"
+        )))
+    }
+}
+
+fn mail_key(address: &Address) -> String {
+    format!("{}:{}", address.kind.as_str(), address.name)
+}
+
+fn participant_cursor_path(participant: &Participant) -> PathBuf {
+    participant.dir.join(CURSORS_FILE)
+}
+
+enum ParticipantCursorRead {
+    Missing,
+    Valid(ParticipantCursors),
+    Invalid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParticipantCursorDocument {
+    version: u64,
+    mail: BTreeMap<String, CursorSet>,
+    channels: BTreeMap<String, CursorSet>,
+}
+
+fn read_participant_cursor(path: &Path) -> ParticipantCursorRead {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ParticipantCursorRead::Missing;
+        }
+        Err(_) => return ParticipantCursorRead::Invalid,
+    };
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return ParticipantCursorRead::Invalid;
+    }
+    let raw = match fs::read(path) {
+        Ok(raw) => raw,
+        Err(_) => return ParticipantCursorRead::Invalid,
+    };
+    parse_participant_cursor(&raw)
+        .map(ParticipantCursorRead::Valid)
+        .unwrap_or(ParticipantCursorRead::Invalid)
+}
+
+fn parse_participant_cursor(raw: &[u8]) -> Result<ParticipantCursors, String> {
+    let document: ParticipantCursorDocument =
+        serde_json::from_slice(raw).map_err(|error| error.to_string())?;
+    if document.version != PARTICIPANT_STATE_VERSION {
+        return Err(format!(
+            "unsupported participant cursor version {}",
+            document.version
+        ));
+    }
+    let mut mail = BTreeMap::new();
+    for (address, set) in document.mail {
+        let (kind, name) = address
+            .split_once(':')
+            .ok_or_else(|| format!("invalid mail cursor address '{address}'"))?;
+        if !matches!(kind, "workspace" | "lineage" | "participant") {
+            return Err(format!("invalid mail cursor address kind '{kind}'"));
+        }
+        crate::mailbox::validate_component(name)
+            .map_err(|reason| format!("invalid mail cursor address '{address}': {reason}"))?;
+        mail.insert(address, parse_ids(set.seen, IdKind::Mail)?);
+    }
+    let mut channels = BTreeMap::new();
+    for (channel, set) in document.channels {
+        channel::validate_channel_name(&channel)
+            .map_err(|_| format!("invalid channel name '{channel}'"))?;
+        channels.insert(channel, parse_ids(set.seen, IdKind::Channel)?);
+    }
+    Ok(ParticipantCursors { mail, channels })
+}
+
+fn serialize_participant_cursor(state: &ParticipantCursors) -> AppResult<Vec<u8>> {
+    #[derive(Serialize)]
+    struct StoredSet<'a> {
+        seen: &'a BTreeSet<String>,
+    }
+    #[derive(Serialize)]
+    struct StoredDocument<'a> {
+        version: u64,
+        mail: BTreeMap<&'a str, StoredSet<'a>>,
+        channels: BTreeMap<&'a str, StoredSet<'a>>,
+    }
+    let document = StoredDocument {
+        version: PARTICIPANT_STATE_VERSION,
+        mail: state
+            .mail
+            .iter()
+            .map(|(key, seen)| (key.as_str(), StoredSet { seen }))
+            .collect(),
+        channels: state
+            .channels
+            .iter()
+            .map(|(key, seen)| (key.as_str(), StoredSet { seen }))
+            .collect(),
+    };
+    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|error| {
+        AppError::new(
+            ErrorCode::IoError,
+            format!("failed to serialize participant cursor state: {error}"),
+            "Retry the consuming command; the cursor was not updated.",
+        )
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn update_participant<T>(
+    _context: &Context,
+    participant: &Participant,
+    update: impl FnOnce(&mut ParticipantCursors) -> AppResult<T>,
+) -> AppResult<T> {
+    fs::create_dir_all(&participant.dir).map_err(|error| {
+        AppError::io(
+            "create participant cursor directory",
+            &participant.dir,
+            error,
+        )
+    })?;
+    let _lock = lock_cursor_dir(&participant.dir)?;
+    let path = participant_cursor_path(participant);
+    ensure_cursor_destination_safe(&path)?;
+    let mut state = match read_participant_cursor(&path) {
+        ParticipantCursorRead::Missing => ParticipantCursors::default(),
+        ParticipantCursorRead::Valid(state) => state,
+        ParticipantCursorRead::Invalid => {
+            return Err(AppError::config(
+                &path,
+                "participant cursors.json is malformed or unsafe; refusing to discard its read state",
+            ));
+        }
+    };
+    let before = state.clone();
+    let result = update(&mut state)?;
+    if state != before {
+        let bytes = serialize_participant_cursor(&state)?;
+        atomic_replace(&path, &bytes)
+            .map_err(|error| AppError::io("atomically update participant cursors", &path, error))?;
+    }
+    Ok(result)
+}
+
+fn lock_cursor_dir(directory: &Path) -> AppResult<File> {
+    let path = directory.join(CURSORS_LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                cursor_write_refused(&path, "lock path is a symlink")
+            } else {
+                AppError::io("open cursor state lock", &path, error)
+            }
+        })?;
+    let before = file
+        .metadata()
+        .map_err(|error| AppError::io("inspect cursor state lock", &path, error))?;
+    if !trusted_lock_metadata(&before) {
+        return Err(cursor_write_refused(
+            &path,
+            "lock must be a solitary regular file",
+        ));
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
+        return Err(AppError::io(
+            "lock cursor state",
+            &path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| AppError::io("reinspect cursor state lock", &path, error))?;
+    let on_path = fs::symlink_metadata(&path).map_err(|error| {
+        cursor_write_refused(
+            &path,
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "lock path disappeared while acquiring its flock"
+            } else {
+                "lock path cannot be inspected after acquiring its flock"
+            },
+        )
+    })?;
+    if !trusted_lock_metadata(&after)
+        || !trusted_lock_metadata(&on_path)
+        || after.dev() != on_path.dev()
+        || after.ino() != on_path.ino()
+        || after.nlink() != on_path.nlink()
+    {
+        return Err(cursor_write_refused(
+            &path,
+            "lock path changed while acquiring its flock",
+        ));
+    }
+    if after.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| AppError::io("restrict cursor state lock", &path, error))?;
+    }
+    Ok(file)
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CursorAdvance {
@@ -90,6 +428,7 @@ impl Snapshot {
             .map(String::as_str)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn channel_seen_count(&self, channel: &str) -> usize {
         self.channels.get(channel).map(|set| set.len()).unwrap_or(0)
     }
@@ -112,6 +451,7 @@ pub(crate) fn consume(context: &Context, room: &str, delta: Delta) -> AppResult<
     consume_inner(context, room, delta, None, None).map(|_| ())
 }
 
+#[allow(dead_code)]
 pub(crate) fn consume_channel(
     context: &Context,
     room: &str,
@@ -141,6 +481,7 @@ pub(crate) fn consume_channel(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn consume_channel_through(
     context: &Context,
     room: &str,
@@ -704,69 +1045,11 @@ fn is_canonical_mail_id(id: &str) -> bool {
 }
 
 fn lock_room_cursors(context: &Context, room: &str) -> AppResult<File> {
-    let path = cursor_path(context, room)?.with_file_name(CURSORS_LOCK_FILE);
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
-        .map_err(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                cursor_write_refused(&path, "lock path is a symlink")
-            } else {
-                AppError::io("open cursor state lock", &path, error)
-            }
-        })?;
-    let before = file
-        .metadata()
-        .map_err(|error| AppError::io("inspect cursor state lock", &path, error))?;
-    if !trusted_lock_metadata(&before) {
-        return Err(cursor_write_refused(
-            &path,
-            "lock must be a solitary regular file",
-        ));
-    }
-    // SAFETY: file owns a live descriptor for this function, and the return
-    // code is checked before assuming that the lock is held.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
-        return Err(AppError::io(
-            "lock cursor state",
-            &path,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let after = file
-        .metadata()
-        .map_err(|error| AppError::io("reinspect cursor state lock", &path, error))?;
-    let on_path = fs::symlink_metadata(&path).map_err(|error| {
-        cursor_write_refused(
-            &path,
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "lock path disappeared while acquiring its flock"
-            } else {
-                "lock path cannot be inspected after acquiring its flock"
-            },
-        )
-    })?;
-    if !trusted_lock_metadata(&after)
-        || !trusted_lock_metadata(&on_path)
-        || after.dev() != on_path.dev()
-        || after.ino() != on_path.ino()
-        || after.nlink() != on_path.nlink()
-    {
-        return Err(cursor_write_refused(
-            &path,
-            "lock path changed while acquiring its flock",
-        ));
-    }
-    if after.permissions().mode() & 0o777 != 0o600 {
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| AppError::io("restrict cursor state lock", &path, error))?;
-    }
-    Ok(file)
+    let directory = cursor_path(context, room)?
+        .parent()
+        .expect("room cursor path has a parent")
+        .to_path_buf();
+    lock_cursor_dir(&directory)
 }
 
 fn trusted_lock_metadata(metadata: &fs::Metadata) -> bool {
@@ -854,6 +1137,45 @@ mod tests {
         );
         assert!(!root.join("alpha/.cursors.lock").exists());
         trash_test_root(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn participant_cursor_lock_refuses_symlink_hardlink_and_fifo_without_mutation() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        for kind in ["symlink", "hardlink", "fifo"] {
+            let (root, context) = context(&format!("hostile-lock-{kind}"));
+            let participant = crate::participant::bind_test_actor(&context, "alpha");
+            let lock = participant.dir.join(CURSORS_LOCK_FILE);
+            let victim = root.join("victim");
+            fs::write(&victim, b"untouched").expect("seed victim");
+            match kind {
+                "symlink" => symlink(&victim, &lock).expect("plant symlink"),
+                "hardlink" => fs::hard_link(&victim, &lock).expect("plant hard link"),
+                "fifo" => {
+                    let raw = CString::new(lock.as_os_str().as_bytes()).expect("fifo path");
+                    assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+                }
+                _ => unreachable!(),
+            }
+            let error = ParticipantCursors::consume_mail(
+                &context,
+                &participant,
+                &Address {
+                    kind: crate::participant::AddressKind::Workspace,
+                    name: "alpha".to_owned(),
+                },
+                &[MAIL_ID.to_owned()],
+            )
+            .expect_err("hostile cursor lock must be refused");
+            assert_eq!(error.code, ErrorCode::ConfigInvalid, "{kind}");
+            assert_eq!(fs::read(&victim).expect("victim survives"), b"untouched");
+            assert!(!participant.dir.join("cursors.json").exists());
+            trash_test_root(&root);
+        }
     }
 
     #[test]

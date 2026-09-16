@@ -164,36 +164,6 @@ where
         Err(error) => return Err(error),
     };
 
-    // Self-mail refusal (M4): instances of one room coordinate via channels;
-    // routable instances are a recorded non-goal. --allow-self is the
-    // deliberate exception for doorbell probes and smoke tests.
-    if resolved_target
-        .as_ref()
-        .is_some_and(|target| sender == target.name)
-        && !args.allow_self
-    {
-        // Reproduce the caller's own invocation with the one change that makes
-        // it succeed, INCLUDING the body when the body is knowable from argv or
-        // a file. The old fix said `--body '<text>'`; the test that ran it
-        // asserted success and got it, because a mail whose body is literally
-        // "<text>" does land. Runnable and correct are not the same property.
-        let body_flag = send_body_flag(
-            args.body.as_deref(),
-            args.body_file.as_deref().or(args.file.as_deref()),
-        );
-        let fix = format!("{fix_prefix} --allow-self{body_flag}");
-        return Err(AppError::new(
-            ErrorCode::InvalidArgument,
-            format!("refusing to send mail from '{sender}' to itself"),
-            format!(
-                "Instances of one room coordinate via channels. For a deliberate self-send (doorbell probe, smoke test), run `{fix}`."
-            ),
-        )
-        .exact_fix(fix)
-        .input(args.to.clone())
-        .reason("from == to without --allow-self"));
-    }
-
     if resolved_target.is_none() {
         // Rooms and channels are disjoint namespaces, so a channel name reaching
         // --to used to produce a flat "room is unknown" that never mentioned the
@@ -376,6 +346,28 @@ where
         )
     })?;
 
+    // The canonical mail and archive copy are already committed. A receipt
+    // failure deliberately leaves the message pending so the next admitted
+    // writer can recover it without a duplicate send.
+    let receipt = match crate::cursor_state::routing::route_message(context, &target, &envelope.id)
+    {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            eprintln!(
+                "post: warning: mail {} was delivered but remains pending because routing failed: {}",
+                envelope.id, error.message
+            );
+            None
+        }
+    };
+    let delivery_status = match receipt.as_ref() {
+        Some(receipt) if receipt.recipients.contains(&actor.participant.id) => {
+            "sender is a frozen recipient and the message is initially unread"
+        }
+        Some(_) => "sender is not a frozen recipient; unread is recipient-specific",
+        None => "no frozen recipient exists yet; message is pending sender history",
+    };
+
     let rendered = if json_output {
         output::json(
             &SendOutput {
@@ -386,25 +378,15 @@ where
             pretty,
         )?
     } else {
-        // `archived: true` was the whole receipt, and it is true, and it was
-        // useless: an agent that read it and ran `post read <id>` got told the
-        // message was "not in the archive". Name the command that works, from
-        // the room that just sent it.
-        // --room is not decoration. The archive admits the two parties to a
-        // message, and identity is resolved from cwd, so a receipt that omits it
-        // is only correct when the sender happens to equal the room the reader
-        // is standing in. With `--from <alias>` it never does, and the P2 panel's
-        // attacker lane found the receipt handing back a command that fails.
-        // Naming the room makes it correct from anywhere, which is what a
-        // copy-pasteable command has to be.
         format!(
-            "post: sent {} {} {} -> {}\npost: read it back with `post read {} --room {}`\n",
+            "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; {delivery_status}\npost: read it back with: post read {}\n",
             envelope.kind,
             envelope.id,
             envelope.from,
             envelope.to,
+            target.kind.as_str(),
+            target.name,
             crate::mailbox::shell_quote(&envelope.id),
-            crate::mailbox::shell_quote(&envelope.from)
         )
     };
     Ok(CommandResult::committed(rendered))
@@ -416,33 +398,35 @@ fn ensure_route_allowed(
     sender: &str,
     target: &crate::participant::Address,
 ) -> AppResult<()> {
+    // Lineage fan-out records blocked affiliates as per-recipient exclusions
+    // in the frozen receipt; an allowed affiliate must still receive it.
+    if target.kind == crate::participant::AddressKind::Lineage {
+        return Ok(());
+    }
     let rules = context.load_rules(rooms)?;
-    let participant = if target.kind == crate::participant::AddressKind::Participant {
-        Some(
-            crate::participant::load(context, &target.name)?.ok_or_else(|| {
-                AppError::new(
-                    ErrorCode::NotFound,
-                    format!("participant target '{}' no longer exists", target.name),
-                    "Run `post participant list`, then retry with an existing target.",
-                )
-            })?,
-        )
-    } else {
-        None
-    };
+    let resolved = crate::cursor_state::routing::resolved_recipients(context, target)?;
+    let mut recipient_workspaces = Vec::new();
+    for id in resolved {
+        let participant = crate::participant::load(context, &id)?.ok_or_else(|| {
+            AppError::new(
+                ErrorCode::NotFound,
+                format!("participant target '{id}' no longer exists"),
+                "Run `post participant list`, then retry with an existing target.",
+            )
+        })?;
+        recipient_workspaces.push(participant.workspace);
+    }
+    if target.kind == crate::participant::AddressKind::Workspace && recipient_workspaces.is_empty()
+    {
+        recipient_workspaces.push(Some(target.name.clone()));
+    }
     let Some(rule) = rules.blocked.iter().find(|rule| {
-        let recipient = participant
-            .as_ref()
-            .and_then(|participant| participant.workspace.as_deref())
-            .unwrap_or(&target.name);
-        if participant
-            .as_ref()
-            .is_some_and(|participant| participant.workspace.is_none())
-        {
-            (rule.from == "*" || rule.from == sender) && rule.to == "*"
-        } else {
-            rule.matches_route(sender, recipient)
-        }
+        recipient_workspaces.iter().any(|workspace| {
+            workspace.as_deref().map_or(
+                (rule.from == "*" || rule.from == sender) && rule.to == "*",
+                |workspace| rule.matches_route(sender, workspace),
+            )
+        })
     }) else {
         return Ok(());
     };
@@ -486,9 +470,6 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
     }
     if args.oversize {
         prefix.push_str(" --oversize");
-    }
-    if args.allow_self {
-        prefix.push_str(" --allow-self");
     }
     prefix
 }
@@ -721,7 +702,6 @@ mod tests {
                 body: None,
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -768,7 +748,6 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -812,7 +791,6 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -869,7 +847,6 @@ mod tests {
                 body: Some("new delivery".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -913,7 +890,6 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             false,
@@ -956,7 +932,6 @@ mod tests {
                 body: Some("body".to_owned()),
                 body_file: None,
                 oversize: false,
-                allow_self: false,
                 file: None,
             },
             true,

@@ -1,13 +1,9 @@
-use crate::channel::{self, ChannelPaths};
+use crate::channel::ChannelPaths;
 use crate::cli::{FramingMode, SearchArgs};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{self, Context};
-use crate::model::{ParsedChannelMessage, ParsedMail};
 use crate::output::{self, Framing, SearchOutput, SearchResult};
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 const PREVIEW_LIMIT: usize = 160;
 
@@ -18,7 +14,16 @@ pub(super) fn run(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let (room, _) = channel::acting_room(context, &rooms)?;
+    let resolved = crate::participant::resolve(context)?;
+    let room = resolved.participant().map_or_else(
+        || context.resolved_room(None, &rooms),
+        |participant| {
+            Ok(participant
+                .workspace
+                .clone()
+                .unwrap_or_else(|| participant.id.clone()))
+        },
+    )?;
     let framing = mailbox::resolve_framing(args.framing);
     let pattern = LiteralPattern::new(&args.pattern);
     let mut matches = MatchAccumulator::new(args.limit);
@@ -26,16 +31,20 @@ pub(super) fn run(
     let search_mail = args.channel.is_none() || args.mail;
     let search_channels = !args.mail;
 
-    if search_mail {
-        collect_mail(context, &room, &pattern, &mut matches)?;
-    }
+    if let Some(participant) = resolved.participant() {
+        if search_mail {
+            for address in super::inbox::visible_addresses(context, participant)? {
+                collect_mail(context, participant, &address, &pattern, &mut matches)?;
+            }
+        }
 
-    if let Some(channel_name) = args.channel.as_deref() {
-        let paths = member_channel_paths(context, channel_name, &room)?;
-        collect_channel(channel_name, &paths, &pattern, &mut matches)?;
-    } else if search_channels {
-        for (channel_name, paths) in joined_channel_paths(context, &room)? {
-            collect_channel(&channel_name, &paths, &pattern, &mut matches)?;
+        if let Some(channel_name) = args.channel.as_deref() {
+            require_channel(context, channel_name)?;
+            collect_channel(context, participant, channel_name, &pattern, &mut matches)?;
+        } else if search_channels {
+            for channel_name in crate::channel_state::effective_channels(context, participant)? {
+                collect_channel(context, participant, &channel_name, &pattern, &mut matches)?;
+            }
         }
     }
 
@@ -47,24 +56,59 @@ pub(super) fn run(
         .map(|hit| hit.result)
         .collect();
     let count = results.len();
+    let pending = if let Some(participant) = resolved.participant() {
+        let mut count = 0;
+        for address in super::inbox::visible_addresses(context, participant)? {
+            count += crate::cursor_state::routing::provisional_pending_for(
+                context,
+                participant,
+                &address,
+            )?
+            .len();
+        }
+        count
+    } else {
+        0
+    };
 
     let rendered = if json_output {
-        output::json(
-            &SearchOutput {
-                ok: true,
-                framing: search_framing(framing, search_channels),
-                room: room.clone(),
-                pattern: args.pattern.clone(),
-                match_kind: "literal_case_insensitive".to_owned(),
-                results,
-                count,
-                limit: args.limit,
-                truncated,
-            },
-            pretty,
-        )?
+        let mut value = serde_json::to_value(SearchOutput {
+            ok: true,
+            framing: search_framing(framing, search_channels),
+            room: room.clone(),
+            pattern: args.pattern.clone(),
+            match_kind: "literal_case_insensitive".to_owned(),
+            results,
+            count,
+            limit: args.limit,
+            truncated,
+        })
+        .map_err(|error| AppError::invalid_argument(format!("serialize search: {error}")))?;
+        let object = value.as_object_mut().expect("search output is an object");
+        object.insert("pending".to_owned(), serde_json::json!(pending));
+        object.insert(
+            "participant".to_owned(),
+            serde_json::Value::String(resolved.participant().map_or_else(
+                || "unbound".to_owned(),
+                |participant| participant.id.clone(),
+            )),
+        );
+        output::json(&value, pretty)?
     } else {
-        render_text(&room, &args.pattern, &results, framing, search_channels)
+        let mut rendered = format!(
+            "participant: {}\npending: {pending}\n",
+            resolved
+                .participant()
+                .map_or("unbound", |participant| participant.id.as_str())
+        );
+        rendered.push_str(&render_text(
+            &room,
+            &args.pattern,
+            &results,
+            framing,
+            search_channels,
+        ));
+        rendered
     };
 
     Ok(CommandResult::success(rendered))
@@ -180,37 +224,20 @@ impl MatchAccumulator {
 
 fn collect_mail(
     context: &Context,
-    room: &str,
+    participant: &crate::participant::Participant,
+    address: &crate::participant::Address,
     pattern: &LiteralPattern,
     matches: &mut MatchAccumulator,
 ) -> AppResult<()> {
-    let room_dir = context.root.join(room);
-    let archive = context.root.join("archive");
-    let directories = [room_dir.join("inbox"), room_dir.join("read"), archive];
-    let mut candidates: BTreeMap<String, MailCandidate> = BTreeMap::new();
-
-    for directory in directories {
-        for path in mailbox::mail_files(&directory)? {
-            let parsed = match mailbox::parse_mail(&path) {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    warn_mail(&path, &error);
-                    continue;
-                }
-            };
-            if parsed.envelope.from != room && parsed.envelope.to != room {
-                continue;
-            }
-            let id = parsed.envelope.id.clone();
-            candidates.entry(id).or_insert(MailCandidate { parsed });
-        }
-    }
-
-    for (_id, candidate) in candidates {
-        let ParsedMail { envelope, body } = candidate.parsed;
+    let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    for item in crate::cursor_state::eligibility::visible_mail(context, participant, address)? {
+        let already_read = item.recipient && cursors.mail_has_seen(address, &item.envelope.id);
+        let own = item.own;
+        let pending = item.pending;
+        let envelope = item.envelope;
         let matched = matched_fields(
             pattern,
-            &body,
+            &item.body,
             &envelope.subject,
             &envelope.from,
             &envelope.id,
@@ -219,15 +246,27 @@ fn collect_mail(
             continue;
         }
         let id = envelope.id.clone();
+        let reply = output::reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        );
         let result = SearchResult {
             source: "mail".to_owned(),
             channel: None,
             id: id.clone(),
-            from: envelope.from,
+            from: envelope.from.clone(),
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
             sent: envelope.sent,
             subject: envelope.subject,
-            preview: preview(&body),
+            preview: preview(&item.body),
             matched,
+            own,
+            pending,
+            already_read,
             kind: Some(envelope.kind),
         };
         matches.push(SearchHit {
@@ -238,194 +277,76 @@ fn collect_mail(
     Ok(())
 }
 
-#[derive(Debug)]
-struct MailCandidate {
-    parsed: ParsedMail,
-}
-
 fn collect_channel(
+    context: &Context,
+    participant: &crate::participant::Participant,
     channel_name: &str,
-    paths: &ChannelPaths,
     pattern: &LiteralPattern,
     matches: &mut MatchAccumulator,
 ) -> AppResult<()> {
-    for path in message_files(&paths.messages)? {
-        let parsed = match channel::parse_channel_message(&path) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                warn_channel(&path, &error);
-                continue;
-            }
-        };
-        if parsed.message.channel != channel_name {
-            eprintln!(
-                "post: warning: skipped channel message '{}' whose envelope names channel '{}'",
-                path.display(),
-                parsed.message.channel
-            );
+    for item in
+        crate::cursor_state::eligibility::visible_channel(context, participant, channel_name)?
+    {
+        let own = item.own;
+        let already_read = item.already_read;
+        let message = item.message;
+        let matched = matched_fields(
+            pattern,
+            &item.body,
+            &message.subject,
+            &message.from,
+            &message.id,
+        );
+        if matched.is_empty() {
             continue;
         }
-        push_channel_match(channel_name, parsed, pattern, matches);
+        let id = message.id.clone();
+        let reply = output::reply_metadata(
+            context,
+            &message.from,
+            message.from_participant.as_deref(),
+            message.sender_provenance.as_deref(),
+        );
+        let result = SearchResult {
+            source: "channel".to_owned(),
+            channel: Some(channel_name.to_owned()),
+            id: id.clone(),
+            from: message.from.clone(),
+            origin: reply.origin,
+            reply_to_participant: reply.participant,
+            reply_to_shared: reply.shared,
+            sent: message.sent,
+            subject: message.subject,
+            preview: preview(&item.body),
+            matched,
+            own,
+            pending: false,
+            already_read,
+            kind: None,
+        };
+        matches.push(SearchHit {
+            key: SortKey::new(&id, "channel", Some(channel_name)),
+            result,
+        });
     }
     Ok(())
 }
 
-fn push_channel_match(
-    channel_name: &str,
-    parsed: crate::model::ParsedChannelMessage,
-    pattern: &LiteralPattern,
-    matches: &mut MatchAccumulator,
-) {
-    let ParsedChannelMessage { message, body } = parsed;
-    let matched = matched_fields(pattern, &body, &message.subject, &message.from, &message.id);
-    if matched.is_empty() {
-        return;
-    }
-    let id = message.id.clone();
-    let result = SearchResult {
-        source: "channel".to_owned(),
-        channel: Some(channel_name.to_owned()),
-        id: id.clone(),
-        from: message.from,
-        sent: message.sent,
-        subject: message.subject,
-        preview: preview(&body),
-        matched,
-        kind: None,
-    };
-    matches.push(SearchHit {
-        key: SortKey::new(&id, "channel", Some(channel_name)),
-        result,
-    });
-}
-
-fn member_channel_paths(
-    context: &Context,
-    channel_name: &str,
-    room: &str,
-) -> AppResult<ChannelPaths> {
+fn require_channel(context: &Context, channel_name: &str) -> AppResult<()> {
     let paths = ChannelPaths::new(context, channel_name)?;
-    if !paths.exists() {
-        return Err(AppError::new(
-            ErrorCode::NotFound,
-            format!("channel '{channel_name}' does not exist"),
-            format!(
-                "Create it with `post chat {} --join`.",
-                mailbox::shell_quote(channel_name)
-            ),
-        )
-        .input(channel_name)
-        .reason("no channel.json under the channels directory"));
+    if paths.exists() {
+        return Ok(());
     }
-    let members = paths.load_members()?;
-    if !members.contains_key(room) {
-        return Err(AppError::new(
-            ErrorCode::NotAMember,
-            format!("room '{room}' is not a member of channel '{channel_name}'"),
-            format!(
-                "Join first with `post chat {} --join`, then retry the search.",
-                mailbox::shell_quote(channel_name)
-            ),
-        )
-        .input(room)
-        .reason("reader is absent from members.json"));
-    }
-    Ok(paths)
-}
-
-fn joined_channel_paths(context: &Context, room: &str) -> AppResult<Vec<(String, ChannelPaths)>> {
-    let directory = context.root.join(channel::CHANNELS_DIR);
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(AppError::io("list channels directory", &directory, error)),
-    };
-    let mut channels = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| AppError::io("read channels entry", &directory, error))?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let paths = match ChannelPaths::new(context, &name) {
-            Ok(paths) => paths,
-            Err(_) => continue,
-        };
-        if !paths.exists() {
-            continue;
-        }
-        let members = match paths.load_members() {
-            Ok(members) => members,
-            Err(error) => {
-                // A malformed membership document closes only this channel;
-                // never enumerate its messages on an uncertain boundary.
-                eprintln!(
-                    "post: warning: skipped channel '{}' because its membership file is invalid: {}",
-                    name, error.message
-                );
-                continue;
-            }
-        };
-        if members.contains_key(room) {
-            channels.push((name, paths));
-        }
-    }
-    channels.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(channels)
-}
-
-fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(AppError::io(
-                "list channel messages directory",
-                directory,
-                error,
-            ))
-        }
-    };
-    let mut files = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| AppError::io("read channel messages entry", directory, error))?;
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("msg") {
-            files.push(path);
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-fn warn_mail(path: &Path, error: &AppError) {
-    let kind = if error.code == ErrorCode::IoError {
-        "unreadable"
-    } else {
-        "malformed"
-    };
-    eprintln!(
-        "post: warning: skipped {kind} mail '{}': {}",
-        path.display(),
-        error.message
-    );
-}
-
-fn warn_channel(path: &Path, error: &AppError) {
-    let kind = if error.code == ErrorCode::IoError {
-        "unreadable"
-    } else {
-        "malformed"
-    };
-    eprintln!(
-        "post: warning: skipped {kind} channel message '{}': {}",
-        path.display(),
-        error.message
-    );
+    Err(AppError::new(
+        ErrorCode::NotFound,
+        format!("channel '{channel_name}' does not exist"),
+        format!(
+            "Create it with `post chat {} --join`.",
+            mailbox::shell_quote(channel_name)
+        ),
+    )
+    .input(channel_name)
+    .reason("no channel.json under the channels directory"))
 }
 
 fn preview(body: &str) -> String {
@@ -509,13 +430,22 @@ fn render_text(
             |channel| format!("channel #{}", output::sanitize_text_header(channel)),
         );
         rendered.push_str(&format!(
-            "{source} {} from {} at {} subject={:?} preview={}\n",
+            "{source} {} from {} at {} subject={:?} preview={} own={} pending={} already_read={}\n",
             output::sanitize_text_header(&result.id),
             output::sanitize_text_header(&result.from),
             output::sanitize_text_header(&result.sent),
             output::sanitize_text_header(&result.subject),
             output::sanitize_text_body(&result.preview),
+            result.own,
+            result.pending,
+            result.already_read,
         ));
+        output::render_reply_metadata(
+            &mut rendered,
+            &result.origin,
+            result.reply_to_participant.as_deref(),
+            &result.reply_to_shared,
+        );
     }
     rendered.push_str(&format!("post: {} match(es)\n", results.len()));
     rendered

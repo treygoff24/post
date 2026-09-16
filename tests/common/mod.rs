@@ -2,17 +2,40 @@
 use post::output::{ErrorEnvelope, SendOutput};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn assert_child_running(child: &mut Child, context: &str) {
+    let Some(status) = child.try_wait().expect("poll child process") else {
+        return;
+    };
+    let mut stdout_bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout
+            .read_to_end(&mut stdout_bytes)
+            .expect("read exited child stdout");
+    }
+    let mut stderr_bytes = Vec::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        stderr
+            .read_to_end(&mut stderr_bytes)
+            .expect("read exited child stderr");
+    }
+    panic!(
+        "{context}: child exited {status}; stdout={} stderr={}",
+        String::from_utf8_lossy(&stdout_bytes),
+        String::from_utf8_lossy(&stderr_bytes)
+    );
+}
 
 pub struct Sandbox {
     pub path: PathBuf,
@@ -60,7 +83,10 @@ impl Sandbox {
             )
             .expect("restrict seeded config perms");
         }
-        sandbox.seed_test_participant(None, Some("test-default"));
+        // Legacy CLI tests use this single fixed actor for claude-space. Tests
+        // that exercise the unbound contract call `run_without_identity`, and
+        // multi-workspace tests use their explicit deterministic participants.
+        sandbox.seed_test_participant(Some("claude-space"), Some("test-default"));
         sandbox
     }
 
@@ -392,6 +418,21 @@ impl Sandbox {
     }
 
     fn seed_test_participant(&self, workspace: Option<&str>, fixed_id: Option<&str>) -> String {
+        if fixed_id.is_none() {
+            let default = self
+                .mail_root
+                .join("participants/test-default/participant.json");
+            if let Ok(bytes) = fs::read(&default) {
+                if serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|record| record["workspace"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == workspace
+                {
+                    return "test-default".to_owned();
+                }
+            }
+        }
         let key = format!("test:{}", workspace.unwrap_or("unbound-workspace"));
         let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
         let id = fixed_id
@@ -508,7 +549,9 @@ pub fn fence_under_external_lock(sandbox: &Sandbox, generation: u64) -> std::tim
         .expect("open migration lock");
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
 
-    let heartbeat = sandbox.mail_root.join("dest/watch.heartbeat");
+    let heartbeat = sandbox
+        .mail_root
+        .join("participants/test-default/watch.heartbeat");
     let before = fs::metadata(&heartbeat)
         .expect("heartbeat exists under transition lock")
         .modified()
@@ -562,14 +605,17 @@ pub fn write_custom_mail(
     body: &str,
 ) {
     fs::create_dir_all(inbox).expect("create custom mail fixture inbox");
+    let destination = inbox.join(format!("{filename_id}.mail"));
+    let temporary = inbox.join(format!(".{filename_id}.mail.tmp"));
     fs::write(
-        inbox.join(format!("{filename_id}.mail")),
+        &temporary,
         format!(
             "{}\n---\n{body}",
             serde_json::to_string_pretty(envelope).expect("serialize custom envelope")
         ),
     )
     .expect("write custom mail fixture");
+    fs::rename(&temporary, &destination).expect("publish custom mail fixture atomically");
 }
 
 pub fn register_alpha_beta(sandbox: &Sandbox) -> (PathBuf, PathBuf) {

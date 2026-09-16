@@ -1,52 +1,41 @@
-use post::output::InboxOutput;
 mod common;
-use common::*;
+
+use common::{assert_success, from_stdout, register_alpha_beta, Sandbox};
+use serde_json::Value;
 
 #[test]
-fn basic_inbox_unread_count() {
+fn basic_inbox_unread_count_uses_participant_eligibility_not_file_subtraction() {
     let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let beta_participant = sandbox.test_participant("beta");
+    let mut ids = Vec::new();
+    for body in ["one", "two", "three"] {
+        let sent = sandbox.run_in(
+            &["send", "--to", "workspace:beta", "--body", body, "--json"],
+            None,
+            &alpha,
+        );
+        assert_success(&sent);
+        let sent: Value = from_stdout(&sent);
+        ids.push(sent["envelope"]["id"].as_str().expect("mail id").to_owned());
+    }
 
-    // Send some mail to the default room
-    let sent1 = sandbox.send_json("test-sender", "test body 1");
-    let _sent2 = sandbox.send_json("test-sender", "test body 2");
-    let _sent3 = sandbox.send_json("test-sender", "test body 3");
+    let first = sandbox.run_as_participant(&["inbox", "--json"], &beta_participant, &beta);
+    assert_success(&first);
+    let first: Value = from_stdout(&first);
+    assert_eq!(first["count"], 3);
+    assert_eq!(first["unread_count"], 3);
 
-    // Check inbox - should have unread_count matching file count initially
-    let output = sandbox.run(&["inbox", "--room", "claude-space", "--json"]);
-    assert_success(&output);
-    let inbox: InboxOutput = from_stdout(&output);
-    assert_eq!(inbox.count, 3);
-    assert_eq!(inbox.unread_count, 3); // Should match file count initially
-
-    // Read one message: its file leaves the inbox and its id enters
-    // mail.seen. The two remaining inbox ids are still absent from seen, so
-    // count and unread_count agree — the contract's healthy-store promise.
-    // (The pre-fix formula count - |seen| reported 1 here: a seen id whose
-    // file already left the inbox deflated the number.)
-    let _ = sandbox.run(&["read", &sent1.envelope.id, "--room", "claude-space"]);
-
-    let output = sandbox.run(&["inbox", "--room", "claude-space", "--json"]);
-    assert_success(&output);
-    let inbox: InboxOutput = from_stdout(&output);
-    assert_eq!(inbox.count, 2); // File count reduced
-    assert_eq!(inbox.unread_count, 2); // Neither remaining id is in mail.seen
-
-    // The contract's divergence case: a failed unlink leaves the consumed
-    // mail's file duplicated back in the inbox. Its id IS in mail.seen, so
-    // count exposes the physical file while unread_count excludes it —
-    // proving unread_count is the per-id predicate, not the raw file count.
-    let room_dir = sandbox.mail_root.join("claude-space");
-    let read_copy = room_dir
-        .join("read")
-        .join(format!("{}.mail", sent1.envelope.id));
-    let inbox_dup = room_dir
-        .join("inbox")
-        .join(format!("{}.mail", sent1.envelope.id));
-    std::fs::copy(&read_copy, &inbox_dup).expect("plant failed-unlink duplicate");
-
-    let output = sandbox.run(&["inbox", "--room", "claude-space", "--json"]);
-    assert_success(&output);
-    let inbox: InboxOutput = from_stdout(&output);
-    assert_eq!(inbox.count, 3); // Physical files, duplicate included
-    assert_eq!(inbox.unread_count, 2); // The seen duplicate is excluded
+    let read = sandbox.run_as_participant(&["read", &ids[0], "--json"], &beta_participant, &beta);
+    assert_success(&read);
+    let second = sandbox.run_as_participant(&["inbox", "--json"], &beta_participant, &beta);
+    assert_success(&second);
+    let second: Value = from_stdout(&second);
+    assert_eq!(second["count"], 2);
+    assert_eq!(second["unread_count"], 2);
+    assert!(ids.iter().all(|id| sandbox
+        .mail_root
+        .join("beta/inbox")
+        .join(format!("{id}.mail"))
+        .is_file()));
 }

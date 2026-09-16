@@ -40,6 +40,25 @@ fn assert_keys_in_shape(shape: &[String], expected: &[&str]) {
     }
 }
 
+fn shape_top_level_keys(shape: &[String]) -> BTreeSet<String> {
+    shape
+        .iter()
+        .map(|field| {
+            field
+                .split(|character: char| {
+                    character.is_whitespace() || matches!(character, '(' | '[' | '{' | '=' | '?')
+                })
+                .next()
+                .expect("shape field name")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn expected_keys(fields: &[&str]) -> BTreeSet<String> {
+    fields.iter().map(|field| (*field).to_owned()).collect()
+}
+
 fn assert_keys_are_documented(actual: &BTreeSet<String>, shape: &[String]) {
     let shape = shape.join("\n");
     for field in actual {
@@ -115,8 +134,11 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
     assert!(!identity.side_effects.contains("P.3"));
     assert!(!identity.side_effects.contains("not_yet"));
     assert!(!schema.output_shapes.identity.join("\n").contains("not_yet"));
-    assert_eq!(schema.store_version, 1);
-    assert_eq!(schema.capabilities, vec!["participants", "lineages"]);
+    assert_eq!(schema.store_version, 2);
+    assert_eq!(
+        schema.capabilities,
+        vec!["participants", "lineages", "routing-receipts", "cursors-v2"]
+    );
     let watch = schema
         .commands
         .iter()
@@ -145,6 +167,399 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
     assert!(!participant_help
         .lines()
         .any(|line| line.trim_start().starts_with("new ")));
+}
+
+#[test]
+fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
+    let sandbox = Sandbox::new();
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    let watch = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "watch")
+        .expect("watch command");
+    assert!(watch
+        .side_effects
+        .contains("long-running watch requires a bound participant"));
+    assert!(watch.side_effects.contains("bounded sanitized previews"));
+    assert!(watch
+        .side_effects
+        .contains("snapshot is the read-only unbound exception"));
+    assert!(!watch.side_effects.contains("legacy unbound watches"));
+    assert!(!watch.side_effects.contains("never emits body content"));
+
+    let laws = schema.laws.join("\n");
+    assert!(laws.contains(
+        "Already-read participant mail stays in its canonical inbox and remains retrievable"
+    ));
+    assert!(laws.contains("legacy room cursor, read/, and channel-state files are read-only"));
+    assert!(laws.contains("never imported into participant cursor state"));
+    assert!(laws.contains("Search is participant-visible history"));
+    assert!(!laws.contains("retrievable by id or prefix from the read store"));
+    assert!(!laws.contains("legacy channel-state.json is imported"));
+
+    let environment = schema.environment.join("\n");
+    assert!(environment.contains("legacy cursor state is never imported or materialized"));
+    assert!(!environment.contains("valid legacy channel-state.json imports"));
+
+    for shape in [
+        &schema.output_shapes.read_json,
+        &schema.output_shapes.read_budget,
+        &schema.output_shapes.read_slice,
+    ] {
+        assert_keys_in_shape(
+            shape,
+            &[
+                "origin",
+                "reply_to_participant",
+                "reply_to_shared",
+                "address",
+                "own",
+                "pending",
+                "already_read",
+            ],
+        );
+    }
+    assert_keys_in_shape(
+        &schema.output_shapes.search,
+        &["own", "pending", "already_read"],
+    );
+    assert_keys_in_shape(&schema.output_shapes.watch, &["digest", "pending"]);
+    assert_keys_in_shape(
+        &schema.output_shapes.inbox,
+        &[
+            "participant",
+            "pending",
+            "pending_by_address",
+            "held",
+            "unread[]",
+            "origin",
+            "reply_to_participant",
+            "reply_to_shared",
+        ],
+    );
+    assert_keys_in_shape(
+        &schema.output_shapes.channels,
+        &["participant", "pending", "channels"],
+    );
+    assert_keys_in_shape(
+        &schema.output_shapes.doctor,
+        &[
+            "participant",
+            "pending",
+            "participant_fix",
+            "participant_error",
+        ],
+    );
+    let doctor = sandbox.run(&["doctor"]);
+    let doctor = json_object(&doctor);
+    assert_keys_are_documented(&keys(&doctor), &schema.output_shapes.doctor);
+    macro_rules! assert_shape {
+        ($name:literal, $shape:expr, [$($field:literal),* $(,)?]) => {
+            assert_eq!(
+                shape_top_level_keys($shape),
+                expected_keys(&[$($field),*]),
+                "{} output shape top-level fields drifted",
+                $name
+            );
+        };
+    }
+    assert_shape!(
+        "participant",
+        &schema.output_shapes.participant,
+        ["show/bind/touch/end:", "list:"]
+    );
+    assert_shape!(
+        "identity",
+        &schema.output_shapes.identity,
+        ["list:", "show:", "new/continue/leave:", "voice"]
+    );
+    assert_shape!(
+        "version",
+        &schema.output_shapes.version,
+        [
+            "ok",
+            "version",
+            "build_sha",
+            "store_version",
+            "capabilities"
+        ]
+    );
+    assert_shape!(
+        "doctor",
+        &schema.output_shapes.doctor,
+        [
+            "ok",
+            "status",
+            "root",
+            "checks",
+            "count",
+            "fixed",
+            "exit_codes",
+            "participant",
+            "pending",
+            "participant_fix",
+            "participant_error"
+        ]
+    );
+    assert_shape!(
+        "inbox",
+        &schema.output_shapes.inbox,
+        [
+            "ok",
+            "room",
+            "participant",
+            "unread",
+            "count",
+            "skipped_unreadable",
+            "unread_count",
+            "pending",
+            "pending_by_address",
+            "held"
+        ]
+    );
+    assert_shape!(
+        "read_json",
+        &schema.output_shapes.read_json,
+        [
+            "ok",
+            "framing",
+            "envelope",
+            "body",
+            "own",
+            "pending",
+            "already_read"
+        ]
+    );
+    assert_shape!(
+        "read_budget",
+        &schema.output_shapes.read_budget,
+        [
+            "ok",
+            "framing",
+            "envelope",
+            "body",
+            "own",
+            "pending",
+            "already_read",
+            "count",
+            "selected_count",
+            "has_more",
+            "byte_limit",
+            "omitted"
+        ]
+    );
+    assert_shape!(
+        "read_slice",
+        &schema.output_shapes.read_slice,
+        [
+            "ok",
+            "framing",
+            "envelope",
+            "body_slice",
+            "range",
+            "total_body_bytes",
+            "body_complete",
+            "next_offset",
+            "continuation",
+            "already_read",
+            "own",
+            "pending",
+            "verification_scope",
+            "byte_limit"
+        ]
+    );
+    assert_shape!(
+        "read_ack",
+        &schema.output_shapes.read_ack,
+        ["ok", "room", "id", "already_read", "acknowledged"]
+    );
+    assert_shape!(
+        "rooms",
+        &schema.output_shapes.rooms,
+        ["ok", "rooms", "count"]
+    );
+    assert_shape!(
+        "schema",
+        &schema.output_shapes.schema,
+        [
+            "ok",
+            "name",
+            "contract_version",
+            "store_version",
+            "capabilities",
+            "participant",
+            "participant_error",
+            "global_flags",
+            "commands",
+            "output_shapes",
+            "error_shape",
+            "error_codes",
+            "exit_codes",
+            "doctor_exit_codes",
+            "laws",
+            "environment",
+            "owner"
+        ]
+    );
+    assert_shape!(
+        "send_json",
+        &schema.output_shapes.send_json,
+        ["ok", "envelope", "archived"]
+    );
+    assert_shape!(
+        "chat_join",
+        &schema.output_shapes.chat_join,
+        [
+            "ok",
+            "channel",
+            "room",
+            "created",
+            "already_member",
+            "event_id"
+        ]
+    );
+    assert_shape!(
+        "chat_send",
+        &schema.output_shapes.chat_send,
+        ["ok", "message"]
+    );
+    assert_shape!(
+        "chat_read",
+        &schema.output_shapes.chat_read,
+        [
+            "ok",
+            "framing",
+            "channel",
+            "room",
+            "peek",
+            "messages",
+            "count",
+            "skipped",
+            "has_more",
+            "selected_count",
+            "byte_limit",
+            "omitted"
+        ]
+    );
+    assert_shape!(
+        "chat_slice",
+        &schema.output_shapes.chat_slice,
+        [
+            "ok",
+            "framing",
+            "channel",
+            "room",
+            "message",
+            "origin",
+            "reply_to_participant",
+            "reply_to_shared",
+            "body_slice",
+            "range",
+            "total_body_bytes",
+            "body_complete",
+            "next_offset",
+            "continuation",
+            "signed_verified",
+            "verification_scope",
+            "byte_limit"
+        ]
+    );
+    assert_shape!(
+        "chat_ack",
+        &schema.output_shapes.chat_ack,
+        ["ok", "channel", "room", "id", "acknowledged"]
+    );
+    assert_shape!(
+        "chat_discard",
+        &schema.output_shapes.chat_discard,
+        ["ok", "channel", "room", "discarded", "cursor"]
+    );
+    assert_shape!(
+        "chat_discard_through",
+        &schema.output_shapes.chat_discard_through,
+        [
+            "ok",
+            "channel",
+            "room",
+            "target",
+            "prior_cursor",
+            "cursor",
+            "advanced",
+            "discarded"
+        ]
+    );
+    assert_shape!(
+        "catchup",
+        &schema.output_shapes.catchup,
+        [
+            "ok",
+            "room",
+            "targets",
+            "count",
+            "selected_count",
+            "has_more",
+            "byte_limit",
+            "omitted"
+        ]
+    );
+    assert_shape!(
+        "search",
+        &schema.output_shapes.search,
+        [
+            "ok",
+            "participant",
+            "pending",
+            "framing",
+            "room",
+            "pattern",
+            "match",
+            "results",
+            "count",
+            "limit",
+            "truncated"
+        ]
+    );
+    assert_shape!(
+        "channels",
+        &schema.output_shapes.channels,
+        ["ok", "channels", "count", "participant", "pending"]
+    );
+    assert_shape!(
+        "profile",
+        &schema.output_shapes.profile,
+        ["ok", "room", "profile", "announced"]
+    );
+    assert_shape!(
+        "watch",
+        &schema.output_shapes.watch,
+        ["mail:", "unreadable:", "channel_message:", "digest:"]
+    );
+    assert_shape!(
+        "who",
+        &schema.output_shapes.who,
+        [
+            "ok",
+            "participant",
+            "participants",
+            "legacy_rooms",
+            "activity_note",
+            "count"
+        ]
+    );
+    assert_eq!(
+        schema
+            .output_shapes
+            .read_json
+            .iter()
+            .find(|field| field.starts_with("envelope "))
+            .expect("read envelope shape"),
+        "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)"
+    );
+    assert!(schema
+        .global_flags
+        .iter()
+        .any(|flag| flag.contains("participant binding") && flag.contains("never cwd")));
 }
 
 fn option_names(text: &str) -> BTreeSet<String> {
@@ -177,7 +592,7 @@ fn declared_option_names(help_options: &str) -> BTreeSet<String> {
 #[test]
 fn schema_matches_catchup_and_search_help_and_json() {
     let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let (alpha, beta) = register_alpha_beta(&sandbox);
     write_bad_channel(
         &sandbox,
         "tax",
@@ -330,6 +745,14 @@ fn schema_matches_catchup_and_search_help_and_json() {
         }
     }
 
+    write_channel_message(
+        &sandbox,
+        "tax",
+        "20260820-120001-000001-bbbbbb",
+        "alpha",
+        "searchable after catchup",
+        "schema surface marker",
+    );
     let search_output = sandbox.run_in(&["search", "schema surface marker", "--json"], None, &beta);
     assert_success(&search_output);
     let search_json = json_object(&search_output);
@@ -343,6 +766,8 @@ fn schema_matches_catchup_and_search_help_and_json() {
         "count",
         "limit",
         "truncated",
+        "participant",
+        "pending",
     ];
     assert_keys_in_shape(&schema.output_shapes.search, &search_top);
     assert_keys_in_shape(
@@ -395,6 +820,14 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let channels_output = sandbox.run_in(&["channels"], None, &beta);
     assert_success(&channels_output);
     let channels_json = json_object(&channels_output);
+    assert_eq!(
+        keys(&channels_json),
+        ["ok", "channels", "count", "participant", "pending"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_keys_are_documented(&keys(&channels_json), &schema.output_shapes.channels);
     assert_keys_in_shape(&schema.output_shapes.channels, &["room", "unread"]);
     for channel in channels_json["channels"].as_array().expect("channels") {
         let channel_keys = keys(channel);
@@ -410,17 +843,77 @@ fn schema_matches_catchup_and_search_help_and_json() {
     assert_eq!(private["room"], "beta");
     assert!(private["unread"].is_null());
 
-    let inbox_output = sandbox.run_in(&["inbox", "--room", "beta"], None, &beta);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--body",
+            "schema inbox fields",
+            "--json",
+        ],
+        &alpha_participant,
+        &alpha,
+    );
+    assert_success(&sent);
+    let sent = json_object(&sent);
+    let sent_id = sent["envelope"]["id"].as_str().expect("sent id");
+    let inbox_output =
+        sandbox.run_as_participant(&["inbox", "--room", "beta"], &beta_participant, &beta);
     assert_success(&inbox_output);
     let inbox_json = json_object(&inbox_output);
-    assert_keys_in_shape(&schema.output_shapes.inbox, &["unread_count"]);
-    assert!(keys(&inbox_json).contains("unread_count"));
+    assert_eq!(
+        keys(&inbox_json),
+        [
+            "ok",
+            "room",
+            "participant",
+            "unread",
+            "count",
+            "skipped_unreadable",
+            "unread_count",
+            "pending",
+            "pending_by_address",
+            "held",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_keys_are_documented(&keys(&inbox_json), &schema.output_shapes.inbox);
+    let item = inbox_json["unread"]
+        .as_array()
+        .expect("unread")
+        .iter()
+        .find(|item| item["id"] == sent_id)
+        .unwrap_or_else(|| panic!("new inbox item {sent_id}: {inbox_json}"));
+    assert_eq!(
+        keys(item),
+        [
+            "id",
+            "from",
+            "origin",
+            "kind",
+            "subject",
+            "sent",
+            "sender_provenance",
+            "from_participant",
+            "reply_to_participant",
+            "reply_to_shared",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_keys_are_documented(&keys(item), &schema.output_shapes.inbox);
 }
 
 #[test]
 fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let (alpha, beta) = register_alpha_beta(&sandbox);
     write_bad_channel(
         &sandbox,
         "bounded",
@@ -437,22 +930,24 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         "schema budget",
         &"x".repeat(4_000),
     );
-    let inbox = sandbox.mail_root.join("beta/inbox");
-    fs::create_dir_all(&inbox).expect("inbox");
-    let mail_id = "20990906-121000-666667";
-    write_custom_mail(
-        &inbox,
-        mail_id,
-        &serde_json::json!({
-            "id": mail_id,
-            "from": "alpha",
-            "to": "beta",
-            "kind": "note",
-            "subject": "schema budget",
-            "sent": "2026-09-06 12:10:00 +0000"
-        }),
-        &"y".repeat(4_000),
+    let body = "y".repeat(4_000);
+    let sent = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--subject",
+            "schema budget",
+            "--body",
+            &body,
+            "--json",
+        ],
+        None,
+        &alpha,
     );
+    assert_success(&sent);
+    let sent = json_object(&sent);
+    let mail_id = sent["envelope"]["id"].as_str().expect("mail id").to_owned();
     let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
     for (command, tokens) in [
         (
@@ -530,11 +1025,16 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &keys(&json_object(&chat_slice)),
         &schema.output_shapes.chat_slice,
     );
+    assert_keys_in_shape(
+        &schema.output_shapes.chat_slice,
+        &["origin", "reply_to_participant", "reply_to_shared"],
+    );
 
-    let read_budget = sandbox.run_in(
+    let beta_participant = sandbox.test_participant("beta");
+    let read_budget = sandbox.run_as_participant(
         &[
             "read",
-            mail_id,
+            &mail_id,
             "--room",
             "beta",
             "--peek",
@@ -542,19 +1042,21 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
             "1200",
             "--json",
         ],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&read_budget);
+    let read_budget = json_object(&read_budget);
+    assert_keys_are_documented(&keys(&read_budget), &schema.output_shapes.read_budget);
     assert_keys_are_documented(
-        &keys(&json_object(&read_budget)),
+        &keys(&read_budget["envelope"]),
         &schema.output_shapes.read_budget,
     );
 
-    let read_slice = sandbox.run_in(
+    let read_slice = sandbox.run_as_participant(
         &[
             "read",
-            mail_id,
+            &mail_id,
             "--room",
             "beta",
             "--offset",
@@ -563,12 +1065,14 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
             "1200",
             "--json",
         ],
-        None,
+        &beta_participant,
         &beta,
     );
     assert_success(&read_slice);
+    let read_slice = json_object(&read_slice);
+    assert_keys_are_documented(&keys(&read_slice), &schema.output_shapes.read_slice);
     assert_keys_are_documented(
-        &keys(&json_object(&read_slice)),
+        &keys(&read_slice["envelope"]),
         &schema.output_shapes.read_slice,
     );
 
@@ -601,7 +1105,7 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &schema.output_shapes.chat_ack,
     );
     let read_ack = sandbox.run_in(
-        &["read", mail_id, "--room", "beta", "--ack", "--json"],
+        &["read", &mail_id, "--room", "beta", "--ack", "--json"],
         None,
         &beta,
     );
@@ -633,7 +1137,7 @@ fn doctor_reports_cursor_state_without_repairing_it() {
         .find(|check| check.id == "cursor_state.claude-space.invalid")
         .expect("malformed cursor check");
     assert_eq!(invalid.severity, DoctorSeverity::Warning);
-    assert!(invalid.message.contains("all unread"));
+    assert!(invalid.message.contains("participant reads ignore it"));
 
     let fixed = sandbox.run(&["doctor", "--fix"]);
     assert_eq!(fixed.status.code(), Some(1));

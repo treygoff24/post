@@ -87,6 +87,7 @@ pub(super) fn run(
             })?;
             let participant =
                 participant::bind(context, &cwd, args.workspace.as_deref(), bootstrap)?;
+            crate::cursor_state::routing::route_for_participant(context, &participant)?;
             if bootstrap.is_some() && !json {
                 return Ok(CommandResult::success(format!(
                     "export POST_PARTICIPANT={}\n",
@@ -138,6 +139,9 @@ fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandRes
     } else {
         participant::touch(context, &current.id)?
     };
+    if !end {
+        crate::cursor_state::routing::route_for_participant(context, &participant)?;
+    }
     let id = participant.id.clone();
     CommandResult::json(
         &ParticipantOutput {

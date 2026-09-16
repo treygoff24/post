@@ -348,12 +348,6 @@ pub(crate) struct SendArgs {
     #[arg(long)]
     pub oversize: bool,
 
-    /// Allow sending mail to yourself (from == to). Instances of one room
-    /// coordinate via channels; self-mail is the deliberate exception
-    /// (doorbell probes, quickstart smoke tests).
-    #[arg(long = "allow-self")]
-    pub allow_self: bool,
-
     /// Deprecated positional spelling of --body-file; omit every body source to read stdin.
     #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub file: Option<PathBuf>,
@@ -390,6 +384,7 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
      post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n\n\
+     post chat <CHANNEL> --leave                      (leave for this participant only)\n\n\
      These forms are alternatives; pass exactly one. --body/--body-file imply --send.\n\
      Direct mail to a single room is a different verb: `post send --to <ROOM>`."
 )]
@@ -401,6 +396,10 @@ pub(crate) struct ChatArgs {
     /// Join the channel (creates it on first join); recorded in history.
     #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway"])]
     pub join: bool,
+
+    /// Leave the channel for this participant only; preserves every seen id.
+    #[arg(long, conflicts_with_all = ["join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
+    pub leave: bool,
 
     /// Set or update the channel description (norms carrier); with --join.
     /// Cap 1 KiB. Any member may update.

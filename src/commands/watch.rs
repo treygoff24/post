@@ -5,7 +5,8 @@ use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
 use crate::migration_fence;
-use crate::output::{InboxItem, WatchEvent, WatchReason};
+use crate::output::{InboxItem, WatchAddress, WatchEvent, WatchReason};
+use crate::participant::{Address, AddressKind, Participant, Resolved};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -18,6 +19,8 @@ use std::time::{Duration, Instant};
 struct WatchTarget {
     room: String,
     inbox: PathBuf,
+    participant: Option<Participant>,
+    address: Option<Address>,
     /// Dirs this target watches: its inbox plus every membership channel's
     /// messages dir. Registered up front, re-derived on the slow pass (r2:
     /// re-register when a new channel dir appears or a watched dir is
@@ -28,7 +31,9 @@ struct WatchTarget {
     /// everything, the safe direction for a doorbell.
     channel_seen: HashMap<String, BTreeSet<String>>,
     seen: HashSet<PathBuf>,
+    reported_unreadable: HashSet<PathBuf>,
     scan_failing: bool,
+    route_pending: bool,
 }
 
 struct WatchDelivery {
@@ -76,11 +81,17 @@ impl WatchDelivery {
             | WatchEvent::ChannelMessage { reason, .. } => *reason,
         }
     }
+
+    fn pending(&self) -> bool {
+        matches!(&self.event, WatchEvent::Mail { item, .. } if item.pending)
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct WatchDigest {
     event: &'static str,
+    address: crate::output::WatchAddress,
+    #[serde(skip_serializing_if = "typed_watch_room")]
     room: String,
     source: String,
     count: usize,
@@ -88,6 +99,8 @@ struct WatchDigest {
     last_id: String,
     from: Vec<String>,
     reason: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pending: bool,
     /// Sanitized preview of the group's most recent previewable body —
     /// additive in NDJSON, and rendered BEFORE the `[first..last] [--since ...]`
     /// suffix in text so the true fencepost group stays rightmost.
@@ -119,7 +132,11 @@ impl WatchDigest {
             .as_ref()
             .map_or_else(String::new, |p| format!("  {p}"));
         if self.sender_counts.is_empty() {
-            return format!("{label}: {} new{preview}{bounds}{action}\n", self.count);
+            let pending = if self.pending { " pending" } else { "" };
+            return format!(
+                "{label}: {} new{pending}{preview}{bounds}{action}\n",
+                self.count
+            );
         }
         let show_counts = self.sender_counts.iter().any(|(_, count)| *count > 1);
         let mut senders = self
@@ -140,8 +157,9 @@ impl WatchDigest {
             senders.push(format!("+{omitted} more"));
         }
         format!(
-            "{label}: {} new ({}){preview}{bounds}{action}\n",
+            "{label}: {} new{} ({}){preview}{bounds}{action}\n",
             self.count,
+            if self.pending { " pending" } else { "" },
             senders.join(", ")
         )
     }
@@ -161,24 +179,36 @@ fn digest_since_fencepost(first_id: &str) -> String {
 }
 
 fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
-    let mut group_indexes = HashMap::<(String, String), usize>::new();
+    let mut group_indexes = HashMap::<(String, String, bool), usize>::new();
     let mut digests = Vec::<WatchDigest>::new();
     for delivery in batch {
-        let key = (delivery.room.clone(), delivery.source.clone());
+        let key = (
+            delivery.room.clone(),
+            delivery.source.clone(),
+            delivery.pending(),
+        );
         let index = match group_indexes.get(&key) {
             Some(index) => *index,
             None => {
                 let index = digests.len();
                 group_indexes.insert(key, index);
+                let address = watch_address(&delivery.event);
+                let room = if address.kind == "workspace" {
+                    address.name.clone()
+                } else {
+                    delivery.room.clone()
+                };
                 digests.push(WatchDigest {
                     event: "digest",
-                    room: delivery.room.clone(),
+                    address,
+                    room,
                     source: delivery.source.clone(),
                     count: 0,
                     first_id: delivery.id().to_owned(),
                     last_id: delivery.id().to_owned(),
                     from: Vec::new(),
                     reason: delivery.reason().as_str().to_owned(),
+                    pending: delivery.pending(),
                     preview: None,
                     sender_counts: Vec::new(),
                 });
@@ -221,6 +251,18 @@ fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
     digests
 }
 
+fn watch_address(event: &WatchEvent) -> crate::output::WatchAddress {
+    match event {
+        WatchEvent::Mail { address, .. }
+        | WatchEvent::Unreadable { address, .. }
+        | WatchEvent::ChannelMessage { address, .. } => address.clone(),
+    }
+}
+
+fn typed_watch_room(room: &str) -> bool {
+    room.starts_with("participant:") || room.starts_with("lineage:")
+}
+
 fn apply_snapshot_limit(batch: &mut Vec<WatchDelivery>, limit: Option<usize>) -> usize {
     let Some(limit) = limit.filter(|limit| *limit > 0) else {
         return 0;
@@ -245,8 +287,12 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
     } = args;
     let rooms = context.load_rooms()?;
+    let resolved = crate::participant::resolve(context)?;
     let requested_rooms = if requested_rooms.is_empty() {
-        vec![context.resolved_room(None, &rooms)?]
+        match &resolved {
+            Resolved::Bound { .. } => Vec::new(),
+            Resolved::Unbound => vec![context.resolved_room(None, &rooms)?],
+        }
     } else {
         requested_rooms
             .into_iter()
@@ -255,45 +301,102 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     };
     let mut unique_rooms = HashSet::new();
     let mut targets = Vec::new();
-    for room in requested_rooms {
-        if !unique_rooms.insert(room.clone()) {
-            continue;
+    if let Resolved::Bound { participant, .. } = &resolved {
+        let mut addresses = super::inbox::visible_addresses(context, participant)?;
+        for room in &requested_rooms {
+            let address = Address {
+                kind: AddressKind::Workspace,
+                name: room.clone(),
+            };
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
         }
-        if !rooms.contains_key(&room) {
-            // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
-            // unregistered room means "this directory has no mailbox", so scan
-            // nothing and, critically, create nothing (a machine-wide hook would
-            // otherwise mint a junk mailbox per project directory ever visited).
-            if snapshot {
-                eprintln!(
-                    "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
-                );
+        for address in addresses {
+            if address.kind == AddressKind::Workspace {
+                crate::mailbox::validate_room_name(&address.name).map_err(|reason| {
+                    AppError::invalid_argument(format!(
+                        "room '{}' is invalid: {reason}",
+                        address.name
+                    ))
+                })?;
+            }
+            let room = if address.kind == AddressKind::Workspace {
+                address.name.clone()
+            } else {
+                super::inbox::address_label(&address)
+            };
+            let inbox = crate::cursor_state::routing::inbox_path(context, &address);
+            if !snapshot
+                && crate::mailbox::read_only_command()
+                && !inbox.parent().is_some_and(Path::is_dir)
+            {
+                return Err(AppError::new(
+                    ErrorCode::NotFound,
+                    format!("watch address directory '{}' does not exist", inbox.display()),
+                    "Initialize the participant/workspace store before starting an enrolled long watch.",
+                ));
+            }
+            let dirs = participant_target_dirs(context, participant, &inbox);
+            targets.push(WatchTarget {
+                channel_seen: HashMap::new(),
+                room,
+                inbox,
+                participant: Some((**participant).clone()),
+                address: Some(address),
+                dirs,
+                seen: HashSet::new(),
+                reported_unreadable: HashSet::new(),
+                scan_failing: false,
+                route_pending: !snapshot,
+            });
+        }
+    }
+    if matches!(resolved, Resolved::Unbound) {
+        for room in requested_rooms {
+            if !unique_rooms.insert(room.clone()) {
                 continue;
             }
-            // A typo'd --room silently watches a fresh empty mailbox forever, so
-            // unlike inbox (whose empty listing is immediately visible) watch warns.
-            eprintln!(
-                "post: warning: room {room:?} is not registered; watching a new empty mailbox"
-            );
-        }
-        let (inbox, _) = context.mailbox_dirs(&room)?;
-        let room_dir = context.root.join(&room);
-        if !snapshot && crate::mailbox::read_only_command() && !room_dir.is_dir() {
-            return Err(AppError::new(
+            if !rooms.contains_key(&room) {
+                // Snapshot is the lifecycle-hook poll and may fire from ANY cwd — an
+                // unregistered room means "this directory has no mailbox", so scan
+                // nothing and, critically, create nothing (a machine-wide hook would
+                // otherwise mint a junk mailbox per project directory ever visited).
+                if snapshot {
+                    eprintln!(
+                    "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
+                );
+                    continue;
+                }
+                // A typo'd --room silently watches a fresh empty mailbox forever, so
+                // unlike inbox (whose empty listing is immediately visible) watch warns.
+                eprintln!(
+                    "post: warning: room {room:?} is not registered; watching a new empty mailbox"
+                );
+            }
+            let (inbox, _) = context.mailbox_dirs(&room)?;
+            let room_dir = context.root.join(&room);
+            if !snapshot && crate::mailbox::read_only_command() && !room_dir.is_dir() {
+                return Err(AppError::new(
                 ErrorCode::NotFound,
                 format!("room directory '{}' does not exist", room_dir.display()),
                 "Enrolled long watch does not create mailboxes; create or initialize the room directory before watching.",
             ));
+            }
+            let dirs = target_dirs(context, &room, &inbox);
+            targets.push(WatchTarget {
+                channel_seen: load_channel_seen(context, &room),
+                room,
+                inbox,
+                participant: None,
+                address: None,
+                dirs,
+                seen: HashSet::new(),
+                reported_unreadable: HashSet::new(),
+                scan_failing: false,
+                route_pending: false,
+            });
         }
-        let dirs = target_dirs(context, &room, &inbox);
-        targets.push(WatchTarget {
-            channel_seen: load_channel_seen(context, &room),
-            room,
-            inbox,
-            dirs,
-            seen: HashSet::new(),
-            scan_failing: false,
-        });
     }
     // Rooms this watcher IS, declared with --own. Scanning is per-room, so a
     // session watching two of its own identities used to deliver room A's send
@@ -328,6 +431,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             &mut targets,
             &owned_rooms,
             &mut emitted_channel_ids,
+            false,
             |_| true,
         );
     }
@@ -341,16 +445,15 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         // Per-channel degradation stays inside scan_batch, unchanged.
         let mut batch = Vec::new();
         for target in &mut targets {
-            batch.extend(scan_batch(
+            batch.extend(scan_watch_target(
                 context,
-                &target.room,
+                target,
                 &owned_rooms,
-                &target.inbox,
-                &target.channel_seen,
-                &mut target.seen,
                 &mut emitted_channel_ids,
+                false,
             )?);
         }
+        dedupe_unreadable_channels(&mut batch);
         let omitted = apply_snapshot_limit(&mut batch, limit);
         if omitted > 0 {
             let noun = if omitted == 1 { "event" } else { "events" };
@@ -363,10 +466,11 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         }
         return Ok(CommandResult::success(String::new()));
     }
-    // Presence first: the watch is live from this moment, and backend
-    // registration (FSEvents especially) can take hundreds of ms — `post who`
-    // must not report a dead watch during that window.
-    touch_heartbeats(context, &targets, interval_ms)?;
+    // Presence starts before backend registration. Registration can be slow,
+    // but a running watch must already be visible to `post who`; the mandatory
+    // first scan below closes the arrival gap after registration completes.
+    let mut admission_warnings = AdmissionWarnings::default();
+    let mut warned_touch_failures = HashSet::new();
     // Register every watch BEFORE the first scan (r2): nothing created in
     // the gap can be missed, because the first pass inside the loop is an
     // unconditional scan. Any registration failure falls back to polling
@@ -375,7 +479,15 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         .iter()
         .flat_map(|target| target.dirs.iter().cloned())
         .collect();
-    let (mut wake, event_mode) = match NotifyWake::register(&desired) {
+    let registration = after_live_presence(
+        context,
+        &targets,
+        interval_ms,
+        &mut admission_warnings,
+        &mut warned_touch_failures,
+        || NotifyWake::register(&desired),
+    )?;
+    let (mut wake, event_mode) = match registration {
         Ok(backend) => (Box::new(backend) as Box<dyn WakeSource>, true),
         Err(error) => {
             eprintln!(
@@ -403,7 +515,25 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
         &mut wake,
         slow_period,
+        admission_warnings,
+        warned_touch_failures,
     )
+}
+
+fn after_live_presence<T>(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    admission_warnings: &mut AdmissionWarnings,
+    warned_touch_failures: &mut HashSet<String>,
+    register: impl FnOnce() -> T,
+) -> AppResult<T> {
+    let (presence_admission, allow_writes) = watch_admission(context, admission_warnings)?;
+    if allow_writes {
+        touch_admitted_heartbeats(context, targets, interval_ms, warned_touch_failures);
+    }
+    drop(presence_admission);
+    Ok(register())
 }
 
 /// First pass is unconditional (r2: scan once immediately after
@@ -422,9 +552,22 @@ fn run_watch_loop(
     digest: bool,
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
+    mut admission_warnings: AdmissionWarnings,
+    mut warned_touch_failures: HashSet<String>,
 ) -> AppResult<CommandResult> {
-    touch_heartbeats(context, targets, interval_ms)?;
-    let mut batch = scan_targets(context, targets, owned_rooms, emitted_channel_ids, |_| true);
+    let (initial_admission, allow_writes) = watch_admission(context, &mut admission_warnings)?;
+    if allow_writes {
+        touch_admitted_heartbeats(context, targets, interval_ms, &mut warned_touch_failures);
+    }
+    let mut batch = scan_targets(
+        context,
+        targets,
+        owned_rooms,
+        emitted_channel_ids,
+        allow_writes,
+        |_| true,
+    );
+    drop(initial_admission);
     if !batch.is_empty() {
         emit(&batch, text, digest)?;
         if once {
@@ -444,7 +587,9 @@ fn run_watch_loop(
     // or slower than ticks (`post who` presence depends on it).
     let mut last_beat = Instant::now();
     loop {
-        batch = match wake.wait(Duration::from_millis(interval_ms)) {
+        let wake_result = wake.wait(Duration::from_millis(interval_ms));
+        let (admission, allow_writes) = watch_admission(context, &mut admission_warnings)?;
+        batch = match wake_result {
             None => {
                 // Backend died mid-run: degrade to polling rather than to
                 // silence, with one warning like the startup fallback. The
@@ -458,13 +603,25 @@ fn run_watch_loop(
                 Vec::new()
             }
             Some(Wake::TimedOut) => {
-                touch_heartbeats(context, targets, interval_ms)?;
+                if allow_writes {
+                    touch_admitted_heartbeats(
+                        context,
+                        targets,
+                        interval_ms,
+                        &mut warned_touch_failures,
+                    );
+                }
                 last_beat = Instant::now();
                 Vec::new()
             }
             Some(Wake::Events(dirs)) => {
-                if last_beat.elapsed() >= Duration::from_millis(interval_ms) {
-                    touch_heartbeats(context, targets, interval_ms)?;
+                if allow_writes && last_beat.elapsed() >= Duration::from_millis(interval_ms) {
+                    touch_admitted_heartbeats(
+                        context,
+                        targets,
+                        interval_ms,
+                        &mut warned_touch_failures,
+                    );
                     last_beat = Instant::now();
                 }
                 // Rescan every affected target through the full existing scan
@@ -474,6 +631,7 @@ fn run_watch_loop(
                     targets,
                     owned_rooms,
                     emitted_channel_ids,
+                    allow_writes,
                     |target| target.dirs.iter().any(|dir| dirs.contains(dir)),
                 )
             }
@@ -490,8 +648,16 @@ fn run_watch_loop(
                 .flat_map(|target| target.dirs.iter().cloned())
                 .collect();
             wake.reconcile(&desired);
-            batch = scan_targets(context, targets, owned_rooms, emitted_channel_ids, |_| true);
+            batch.extend(scan_targets(
+                context,
+                targets,
+                owned_rooms,
+                emitted_channel_ids,
+                allow_writes,
+                |_| true,
+            ));
         }
+        drop(admission);
         if !batch.is_empty() {
             emit(&batch, text, digest)?;
             if once {
@@ -501,12 +667,109 @@ fn run_watch_loop(
     }
 }
 
-fn touch_heartbeats(context: &Context, targets: &[WatchTarget], interval_ms: u64) -> AppResult<()> {
-    for target in targets {
-        let _admission = migration_fence::admit(context, true)?;
-        crate::presence::touch_heartbeat(context, &target.room, interval_ms);
+#[derive(Default)]
+struct AdmissionWarnings {
+    fenced: bool,
+    transient: bool,
+}
+
+fn watch_admission(
+    context: &Context,
+    warnings: &mut AdmissionWarnings,
+) -> AppResult<(crate::migration_fence::LongWatchAdmission, bool)> {
+    let admission = migration_fence::admit_long_watch(context)?;
+    let allow_writes = match &admission {
+        crate::migration_fence::LongWatchAdmission::Active(guard) => {
+            let _ = guard.is_enrolled();
+            warnings.fenced = false;
+            warnings.transient = false;
+            true
+        }
+        crate::migration_fence::LongWatchAdmission::Fenced => {
+            warnings.transient = false;
+            if !warnings.fenced {
+                eprintln!(
+                    "post: warning: migration fence active; watch continues read-only until same-generation recovery"
+                );
+                warnings.fenced = true;
+            }
+            false
+        }
+        crate::migration_fence::LongWatchAdmission::Transient(error) => {
+            warnings.fenced = false;
+            if !warnings.transient {
+                eprintln!(
+                    "post: warning: migration admission temporarily unavailable; watch continues read-only and will retry: {}",
+                    error.message
+                );
+                warnings.transient = true;
+            }
+            false
+        }
+    };
+    Ok((admission, allow_writes))
+}
+
+fn touch_admitted_heartbeats(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    warned_failures: &mut HashSet<String>,
+) {
+    let warnings = touch_admitted_heartbeats_with(
+        context,
+        targets,
+        interval_ms,
+        warned_failures,
+        |participant| crate::participant::touch(context, participant).map(|_| ()),
+    );
+    for error in warnings {
+        eprintln!(
+            "post: warning: participant activity refresh failed (watch continues): {}",
+            error.message
+        );
     }
-    Ok(())
+}
+
+fn touch_admitted_heartbeats_with(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    warned_failures: &mut HashSet<String>,
+    mut touch: impl FnMut(&str) -> AppResult<()>,
+) -> Vec<AppError> {
+    let mut warnings = Vec::new();
+    let mut participants = HashSet::new();
+    for target in targets {
+        if let Some(participant) = target.participant.as_ref() {
+            if participants.insert(participant.id.clone()) {
+                if let Some(error) =
+                    touch_warning_for(&participant.id, touch(&participant.id), warned_failures)
+                {
+                    warnings.push(error);
+                }
+                crate::presence::touch_participant_heartbeat(participant, interval_ms);
+            }
+        } else {
+            crate::presence::touch_heartbeat(context, &target.room, interval_ms);
+        }
+    }
+    warnings
+}
+
+fn touch_warning_for(
+    participant: &str,
+    result: AppResult<()>,
+    warned_failures: &mut HashSet<String>,
+) -> Option<AppError> {
+    match result {
+        Ok(()) => {
+            warned_failures.remove(participant);
+            None
+        }
+        Err(error) if warned_failures.insert(participant.to_owned()) => Some(error),
+        Err(_) => None,
+    }
 }
 
 /// One full scan pass over the selected targets, preserving the old loop's
@@ -517,18 +780,17 @@ fn scan_targets(
     targets: &mut [WatchTarget],
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
+    allow_writes: bool,
     selected: impl Fn(&WatchTarget) -> bool,
 ) -> Vec<WatchDelivery> {
     let mut batch = Vec::new();
     for target in targets.iter_mut().filter(|target| selected(target)) {
-        match scan_batch(
+        match scan_watch_target(
             context,
-            &target.room,
+            target,
             owned_rooms,
-            &target.inbox,
-            &target.channel_seen,
-            &mut target.seen,
             emitted_channel_ids,
+            allow_writes,
         ) {
             Ok(events) => {
                 if target.scan_failing {
@@ -551,12 +813,30 @@ fn scan_targets(
             }
         }
     }
+    // A participant may reach the same channel through several watched
+    // addresses. Dedupe malformed notifications only within this scan: they
+    // must remain eligible for a later repaired parse and normal delivery.
+    dedupe_unreadable_channels(&mut batch);
     batch
+}
+
+fn dedupe_unreadable_channels(batch: &mut Vec<WatchDelivery>) {
+    let mut unreadable_channels = HashSet::new();
+    batch.retain(|delivery| match &delivery.event {
+        WatchEvent::Unreadable {
+            reason: WatchReason::Channel,
+            ..
+        } => unreadable_channels.insert((delivery.source.clone(), delivery.id().to_owned())),
+        _ => true,
+    });
 }
 
 fn refresh_target_dirs(context: &Context, targets: &mut [WatchTarget]) {
     for target in targets {
-        target.dirs = target_dirs(context, &target.room, &target.inbox);
+        target.dirs = target.participant.as_ref().map_or_else(
+            || target_dirs(context, &target.room, &target.inbox),
+            |participant| participant_target_dirs(context, participant, &target.inbox),
+        );
     }
 }
 
@@ -748,6 +1028,306 @@ fn dir_id(path: &Path) -> Option<(u64, u64)> {
         .ok()
         .map(|meta| (meta.dev(), meta.ino()))
 }
+
+fn participant_mail_snapshot(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    allow_routing: bool,
+) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
+    participant_mail_snapshot_after_route_hooks(
+        context,
+        participant,
+        address,
+        allow_routing,
+        || {},
+        || {},
+    )
+}
+
+fn participant_mail_snapshot_after_route_hooks(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+    allow_routing: bool,
+    after_initial_route: impl FnOnce(),
+    after_final_route: impl FnOnce(),
+) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
+    if allow_routing && crate::cursor_state::routing::has_unrouted_mail(context, address)? {
+        crate::cursor_state::routing::route_pending(context, address)?;
+    }
+    after_initial_route();
+
+    let mut mail = collect_participant_mail(context, participant, address)?;
+    if allow_routing && mail.iter().any(|item| item.pending) {
+        // A bridge write can become parseable after the first routing pass but
+        // before eligibility is projected. Route that observed arrival and
+        // rebuild the snapshot so an admitted watch never emits it as pending.
+        crate::cursor_state::routing::route_pending(context, address)?;
+        after_final_route();
+        mail = collect_participant_mail(context, participant, address)?;
+    }
+    if allow_routing {
+        // Bound the admitted batch. A new arrival can enter the final
+        // projection after the last routing pass; defer it without adding its
+        // path to the process-local seen set. The next scan routes and emits it.
+        // Lineage and same-generation-fenced scans keep provisional events.
+        mail.retain(|item| !item.pending);
+    }
+    Ok(mail)
+}
+
+fn collect_participant_mail(
+    context: &Context,
+    participant: &Participant,
+    address: &Address,
+) -> AppResult<Vec<crate::cursor_state::eligibility::EligibleMail>> {
+    let mut mail = crate::cursor_state::eligibility::unread_mail(context, participant, address)?;
+    for id in
+        crate::cursor_state::routing::provisional_pending_for_quiet(context, participant, address)?
+    {
+        let path =
+            crate::cursor_state::routing::inbox_path(context, address).join(format!("{id}.mail"));
+        let parsed = parse_mail(&path)?;
+        mail.push(crate::cursor_state::eligibility::EligibleMail {
+            path,
+            envelope: parsed.envelope,
+            body: parsed.body,
+            recipient: false,
+            own: false,
+            pending: true,
+        });
+    }
+    mail.sort_by(|left, right| left.envelope.id.cmp(&right.envelope.id));
+    Ok(mail)
+}
+
+fn scan_watch_target(
+    context: &Context,
+    target: &mut WatchTarget,
+    owned_rooms: &BTreeSet<String>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
+    allow_writes: bool,
+) -> AppResult<Vec<WatchDelivery>> {
+    let (Some(participant), Some(address)) = (target.participant.as_ref(), target.address.as_ref())
+    else {
+        return scan_batch(
+            context,
+            &target.room,
+            owned_rooms,
+            &target.inbox,
+            &target.channel_seen,
+            &mut target.seen,
+            emitted_channel_ids,
+        );
+    };
+    let allow_routing = allow_writes
+        && target.route_pending
+        && matches!(
+            address.kind,
+            AddressKind::Workspace | AddressKind::Participant
+        );
+    let mut batch = Vec::new();
+    let channel_address = participant.workspace.as_ref().map_or_else(
+        || Address {
+            kind: AddressKind::Participant,
+            name: participant.id.clone(),
+        },
+        |workspace| Address {
+            kind: AddressKind::Workspace,
+            name: workspace.clone(),
+        },
+    );
+    let channel_watch_address = WatchAddress::from_address(&channel_address);
+    let channel_context = if channel_address.kind == AddressKind::Workspace {
+        channel_address.name.clone()
+    } else {
+        super::inbox::address_label(&channel_address)
+    };
+
+    let mail = participant_mail_snapshot(context, participant, address, allow_routing)?;
+    for item in mail {
+        if !target.seen.insert(item.path) {
+            continue;
+        }
+        let preview = Some(sanitize_preview(&item.body));
+        batch.push(WatchDelivery::mail(
+            &target.room,
+            WatchEvent::mail(
+                &target.room,
+                InboxItem::new(context, item.envelope, item.pending),
+                preview,
+            ),
+        ));
+    }
+
+    if let Ok(entries) = std::fs::read_dir(&target.inbox) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("mail")
+                || target.seen.contains(&path)
+            {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let unreadable = match crate::cursor_state::routing::receipt(context, address, &id) {
+                Ok(Some(_)) => false,
+                Ok(None) => parse_mail(&path).is_err(),
+                Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                    crate::cursor_state::routing::warn_once(
+                        crate::cursor_state::routing::receipt_path(context, address, &id),
+                        format!("corrupt routing receipt skipped: {}", error.message),
+                    );
+                    true
+                }
+                Err(error) => return Err(error),
+            };
+            if !unreadable {
+                continue;
+            }
+            target.seen.insert(path);
+            batch.push(WatchDelivery::mail(
+                &target.room,
+                WatchEvent::unreadable_mail(&target.room, id),
+            ));
+        }
+    }
+
+    for channel in crate::channel_state::effective_channels(context, participant)? {
+        let eligible = match crate::cursor_state::eligibility::unread_channel(
+            context,
+            participant,
+            &channel,
+        ) {
+            Ok(eligible) => eligible,
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                scan_unreadable_participant_channel(
+                    context,
+                    participant,
+                    &channel_watch_address,
+                    &channel_context,
+                    &channel,
+                    &mut target.seen,
+                    &mut target.reported_unreadable,
+                    emitted_channel_ids,
+                    &mut batch,
+                )?;
+                continue;
+            }
+            Err(error) => {
+                eprintln!(
+                    "post: warning: skipped channel {:?} during watch scan: {:?}",
+                    channel, error.message
+                );
+                continue;
+            }
+        };
+        for item in eligible {
+            if !target.seen.insert(item.path.clone()) {
+                continue;
+            }
+            let dedupe_id = (channel.clone(), item.message.id.clone());
+            if emitted_channel_ids.contains(&dedupe_id) {
+                continue;
+            }
+            emitted_channel_ids.insert(dedupe_id);
+            batch.push(WatchDelivery::channel(
+                &channel_context,
+                &channel,
+                WatchEvent::channel_message_at(
+                    context,
+                    item.message,
+                    channel_watch_address.clone(),
+                    &channel_context,
+                    Some(sanitize_preview(&item.body)),
+                ),
+            ));
+        }
+    }
+    Ok(batch)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_unreadable_participant_channel(
+    context: &Context,
+    participant: &Participant,
+    channel_watch_address: &WatchAddress,
+    channel_context: &str,
+    channel: &str,
+    seen_paths: &mut HashSet<PathBuf>,
+    reported_unreadable: &mut HashSet<PathBuf>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
+    batch: &mut Vec<WatchDelivery>,
+) -> AppResult<()> {
+    let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    let paths = ChannelPaths::new(context, channel)?;
+    for path in message_files(&paths.messages)? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if cursors.channel_has_seen(channel, id) || seen_paths.contains(&path) {
+            continue;
+        }
+        let dedupe = (channel.to_owned(), id.to_owned());
+        if emitted_channel_ids.contains(&dedupe) {
+            continue;
+        }
+        match parse_channel_message(&path) {
+            Ok(parsed)
+                if parsed.message.from_participant.as_deref() == Some(participant.id.as_str())
+                    || parsed.message.event.is_some() =>
+            {
+                seen_paths.insert(path);
+            }
+            Ok(parsed) => {
+                seen_paths.insert(path);
+                emitted_channel_ids.insert(dedupe);
+                batch.push(WatchDelivery::channel(
+                    channel_context,
+                    channel,
+                    WatchEvent::channel_message_at(
+                        context,
+                        parsed.message,
+                        channel_watch_address.clone(),
+                        channel_context,
+                        Some(sanitize_preview(&parsed.body)),
+                    ),
+                ));
+            }
+            Err(_) if reported_unreadable.insert(path.clone()) => {
+                eprintln!(
+                    "post: warning: unreadable channel message {:?}",
+                    path.display().to_string()
+                );
+                let source = format!("channel:{channel}");
+                if !batch
+                    .iter()
+                    .any(|delivery| delivery.source == source && delivery.id() == id)
+                {
+                    batch.push(WatchDelivery::channel(
+                        channel_context,
+                        channel,
+                        WatchEvent::unreadable_channel_at(
+                            channel_watch_address.clone(),
+                            channel_context,
+                            channel,
+                            id.to_owned(),
+                        ),
+                    ));
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn scan_batch(
     context: &Context,
     room: &str,
@@ -767,7 +1347,7 @@ fn scan_batch(
                 let preview = Some(sanitize_preview(&mail.body));
                 batch.push(WatchDelivery::mail(
                     room,
-                    WatchEvent::mail(room, InboxItem::from(mail.envelope), preview),
+                    WatchEvent::mail(room, InboxItem::new(context, mail.envelope, false), preview),
                 ))
             }
             // Consumed by a concurrent read between scan and parse: no longer unread.
@@ -831,6 +1411,7 @@ fn scan_batch(
                     room,
                     &channel,
                     WatchEvent::channel_message(
+                        context,
                         parsed.message,
                         room,
                         Some(sanitize_preview(&parsed.body)),
@@ -973,8 +1554,41 @@ fn target_dirs(context: &Context, room: &str, inbox: &Path) -> BTreeSet<PathBuf>
         .into_iter()
         .map(|(_, dir)| std::fs::canonicalize(&dir).unwrap_or(dir))
         .collect();
-    dirs.insert(std::fs::canonicalize(inbox).unwrap_or_else(|_| inbox.to_path_buf()));
+    let inbox_watch = existing_watch_anchor(inbox);
+    dirs.insert(std::fs::canonicalize(&inbox_watch).unwrap_or(inbox_watch));
     dirs
+}
+
+fn participant_target_dirs(
+    context: &Context,
+    participant: &Participant,
+    inbox: &Path,
+) -> BTreeSet<PathBuf> {
+    let mut dirs = BTreeSet::new();
+    for channel in
+        crate::channel_state::effective_channels(context, participant).unwrap_or_default()
+    {
+        if let Ok(paths) = ChannelPaths::new(context, &channel) {
+            let dir = std::fs::canonicalize(&paths.messages).unwrap_or(paths.messages);
+            dirs.insert(dir);
+        }
+    }
+    let inbox_watch = existing_watch_anchor(inbox);
+    dirs.insert(std::fs::canonicalize(&inbox_watch).unwrap_or(inbox_watch));
+    dirs
+}
+
+fn existing_watch_anchor(path: &Path) -> PathBuf {
+    let mut candidate = path;
+    loop {
+        if candidate.is_dir() {
+            return candidate.to_path_buf();
+        }
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        candidate = parent;
+    }
 }
 
 /// Each channel's seen-set for `room`, read-only — the startup floor for the
@@ -1066,6 +1680,484 @@ mod tests {
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
 
+    #[test]
+    fn participant_watch_heartbeat_refresh_renews_activity_lease() {
+        let root = crate::test_support::test_root("watch-participant-lease");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant.clone()),
+            address: Some(Address {
+                kind: AddressKind::Workspace,
+                name: "alpha".to_owned(),
+            }),
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        touch_admitted_heartbeats(&context, &targets, 100, &mut HashSet::new());
+        let refreshed = crate::participant::load(&context, &participant.id)
+            .expect("load participant")
+            .expect("participant exists");
+        assert!(refreshed.last_seen.is_some());
+        assert!(refreshed.is_active(std::time::SystemTime::now()));
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn touch_admitted_heartbeats_warns_once_per_failure_episode() {
+        let root = crate::test_support::test_root("watch-touch-warning-episodes");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant),
+            address: None,
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut warned = HashSet::new();
+        let failures = || Err(AppError::invalid_argument("transient touch failure"));
+        assert_eq!(
+            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
+                .len(),
+            1
+        );
+        assert!(touch_admitted_heartbeats_with(
+            &context,
+            &targets,
+            100,
+            &mut warned,
+            |_| failures()
+        )
+        .is_empty());
+        assert!(
+            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| Ok(()))
+                .is_empty()
+        );
+        assert_eq!(
+            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
+                .len(),
+            1
+        );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn watch_presence_is_live_before_backend_registration() {
+        let root = crate::test_support::test_root("watch-pre-registration-presence");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let heartbeat = participant.dir.join("watch.heartbeat");
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant),
+            address: Some(Address {
+                kind: AddressKind::Workspace,
+                name: "alpha".to_owned(),
+            }),
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut admission_warnings = AdmissionWarnings::default();
+        let mut warned_touch_failures = HashSet::new();
+        after_live_presence(
+            &context,
+            &targets,
+            10_000,
+            &mut admission_warnings,
+            &mut warned_touch_failures,
+            || assert!(heartbeat.is_file(), "registration began before presence"),
+        )
+        .expect("publish presence before registration");
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_fast_scan_retries_routing_when_mail_becomes_parseable() {
+        let root = crate::test_support::test_root("watch-route-before-emit");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({"alpha": root.join("alpha")}))
+                .expect("serialize rooms"),
+        )
+        .expect("write rooms");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        crate::participant::touch(&context, &participant.id).expect("activate participant");
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create inbox");
+        let id = "20990916-050000-beef02";
+        let path = inbox.join(format!("{id}.mail"));
+        fs::write(&path, "{partial").expect("write partial arrival");
+
+        let mail = participant_mail_snapshot_after_route_hooks(
+            &context,
+            &participant,
+            &address,
+            true,
+            || {
+                let envelope = serde_json::json!({
+                    "id": id,
+                    "from": "beta",
+                    "to": "alpha",
+                    "kind": "note",
+                    "subject": "bridge",
+                    "sent": "2026-09-16 05:00:00 -0500",
+                    "from_participant": "test-sender",
+                    "address_kind": "workspace"
+                });
+                fs::write(&path, format!("{envelope}\n---\nbridge arrival"))
+                    .expect("complete arrival after first routing attempt");
+            },
+            || {},
+        )
+        .expect("scan mail");
+
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].envelope.id, id);
+        assert!(!mail[0].pending);
+        assert!(
+            crate::cursor_state::routing::receipt(&context, &address, id)
+                .expect("load receipt")
+                .is_some()
+        );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_fast_scan_defers_arrival_after_final_route() {
+        let root = crate::test_support::test_root("watch-final-route-window");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({"alpha": root.join("alpha")}))
+                .expect("serialize rooms"),
+        )
+        .expect("write rooms");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        crate::participant::touch(&context, &participant.id).expect("activate participant");
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create inbox");
+        let first_id = "20990916-050100-beef03";
+        let second_id = "20990916-050101-beef04";
+        let first_path = inbox.join(format!("{first_id}.mail"));
+        let second_path = inbox.join(format!("{second_id}.mail"));
+        fs::write(&first_path, "{partial").expect("write partial first arrival");
+        let mail_bytes = |id: &str, subject: &str| {
+            let envelope = serde_json::json!({
+                "id": id,
+                "from": "beta",
+                "to": "alpha",
+                "kind": "note",
+                "subject": subject,
+                "sent": "2026-09-16 05:01:00 -0500",
+                "from_participant": "test-sender",
+                "address_kind": "workspace"
+            });
+            format!("{envelope}\n---\n{subject}")
+        };
+
+        let first_scan = participant_mail_snapshot_after_route_hooks(
+            &context,
+            &participant,
+            &address,
+            true,
+            || fs::write(&first_path, mail_bytes(first_id, "first")).expect("complete first"),
+            || fs::write(&second_path, mail_bytes(second_id, "second")).expect("write second"),
+        )
+        .expect("first scan");
+        assert_eq!(
+            first_scan
+                .iter()
+                .map(|item| item.envelope.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first_id]
+        );
+        assert!(first_scan.iter().all(|item| !item.pending));
+        assert!(
+            crate::cursor_state::routing::receipt(&context, &address, second_id)
+                .expect("load deferred receipt")
+                .is_none()
+        );
+        let mut seen = first_scan
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<HashSet<_>>();
+        assert!(!seen.contains(&second_path));
+
+        let second_scan = participant_mail_snapshot(&context, &participant, &address, true)
+            .expect("second scan")
+            .into_iter()
+            .filter(|item| seen.insert(item.path.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(second_scan.len(), 1);
+        assert_eq!(second_scan[0].envelope.id, second_id);
+        assert!(!second_scan[0].pending);
+        assert!(
+            crate::cursor_state::routing::receipt(&context, &address, second_id)
+                .expect("load routed receipt")
+                .is_some()
+        );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn participant_fast_scans_never_emit_pending_during_atomic_arrival_burst() {
+        let root = crate::test_support::test_root("watch-route-burst");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({"alpha": root.join("alpha")}))
+                .expect("serialize rooms"),
+        )
+        .expect("write rooms");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        crate::participant::touch(&context, &participant.id).expect("activate participant");
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create inbox");
+
+        let arrival_inbox = inbox.clone();
+        let producer = std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for index in 0..60u32 {
+                let id = format!("20990916-0600{index:02}-{index:06x}");
+                let envelope = serde_json::json!({
+                    "id": id,
+                    "from": "bridge-peer",
+                    "to": "alpha",
+                    "kind": "note",
+                    "subject": "burst",
+                    "sent": "2026-09-16 06:00:00 -0500",
+                    "from_participant": "bridge-peer-participant",
+                    "address_kind": "workspace"
+                });
+                let temporary = arrival_inbox.join(format!(".{id}.tmp"));
+                fs::write(&temporary, format!("{envelope}\n---\nburst {index}"))
+                    .expect("write atomic arrival temp");
+                fs::rename(&temporary, arrival_inbox.join(format!("{id}.mail")))
+                    .expect("publish atomic arrival");
+                ids.push(id);
+                std::thread::sleep(Duration::from_millis(u64::from(index % 4)));
+            }
+            ids
+        });
+
+        let mut seen_paths = HashSet::new();
+        let mut delivered = BTreeSet::new();
+        for _ in 0..2_000 {
+            for item in participant_mail_snapshot(&context, &participant, &address, true)
+                .expect("scan burst")
+            {
+                assert!(!item.pending, "admitted watch exposed provisional mail");
+                if seen_paths.insert(item.path) {
+                    assert!(
+                        delivered.insert(item.envelope.id),
+                        "one arrival emitted more than once"
+                    );
+                }
+            }
+            if producer.is_finished() && delivered.len() == 60 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let ids = producer.join().expect("join arrival producer");
+        assert_eq!(
+            delivered.len(),
+            ids.len(),
+            "some burst arrivals never emitted"
+        );
+        for id in ids {
+            assert!(delivered.contains(&id), "arrival {id} never emitted");
+            assert!(
+                crate::cursor_state::routing::receipt(&context, &address, &id)
+                    .expect("load burst receipt")
+                    .is_some(),
+                "arrival {id} emitted without a receipt"
+            );
+        }
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
+    fn malformed_participant_channel_rings_once_then_repaired_file_delivers() {
+        let root = crate::test_support::test_root("watch-channel-repair");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let channel = "repair";
+        let id = "20260916-050000-000001-acde01";
+        let before_id = "20260916-045959-000001-acde00";
+        let after_id = "20260916-050001-000001-acde02";
+        let messages = root.join(CHANNELS_DIR).join(channel).join("messages");
+        fs::create_dir_all(&messages).expect("create messages");
+        for (sibling_id, subject) in [(before_id, "before"), (after_id, "after")] {
+            let sibling = ChannelMessage {
+                id: sibling_id.to_owned(),
+                from: "beta".to_owned(),
+                channel: channel.to_owned(),
+                subject: subject.to_owned(),
+                sent: "2026-09-16 05:00:00 -0500".to_owned(),
+                from_participant: Some("peer-sibling".to_owned()),
+                from_lineage: None,
+                address_kind: Some("channel".to_owned()),
+                event: None,
+                display_name: None,
+                pfp: None,
+                re: None,
+                mentions: Vec::new(),
+                signature_ref: None,
+                sender_address: None,
+                sender_provenance: None,
+            };
+            fs::write(
+                messages.join(format!("{sibling_id}.msg")),
+                encode_message(&sibling, subject).expect("encode sibling"),
+            )
+            .expect("write sibling");
+        }
+        let path = messages.join(format!("{id}.msg"));
+        fs::write(&path, "malformed").expect("write malformed message");
+        let mut seen = HashSet::new();
+        let mut reported = HashSet::new();
+        let mut emitted = HashSet::new();
+        let mut batch = Vec::new();
+        let watch_address = WatchAddress {
+            kind: "workspace".to_owned(),
+            name: "alpha".to_owned(),
+        };
+
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            &watch_address,
+            "alpha",
+            channel,
+            &mut seen,
+            &mut reported,
+            &mut emitted,
+            &mut batch,
+        )
+        .expect("scan malformed message");
+        assert_eq!(batch.len(), 3);
+        assert!(batch.iter().any(|delivery| delivery.id() == before_id));
+        assert!(batch.iter().any(|delivery| delivery.id() == after_id));
+        assert!(batch.iter().any(|delivery| matches!(
+            &delivery.event,
+            WatchEvent::Unreadable { id: event_id, .. } if event_id == id
+        )));
+        batch.clear();
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            &watch_address,
+            "alpha",
+            channel,
+            &mut seen,
+            &mut reported,
+            &mut emitted,
+            &mut batch,
+        )
+        .expect("rescan unchanged malformed message");
+        assert!(batch.is_empty(), "unchanged corruption rings only once");
+
+        let repaired = ChannelMessage {
+            id: id.to_owned(),
+            from: "beta".to_owned(),
+            channel: channel.to_owned(),
+            subject: "repaired".to_owned(),
+            sent: "2026-09-16 05:00:00 -0500".to_owned(),
+            from_participant: Some("peer-acde01".to_owned()),
+            from_lineage: None,
+            address_kind: Some("channel".to_owned()),
+            event: None,
+            display_name: None,
+            pfp: None,
+            re: None,
+            mentions: Vec::new(),
+            signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
+        };
+        fs::write(
+            &path,
+            encode_message(&repaired, "repaired body").expect("encode repaired message"),
+        )
+        .expect("repair message");
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            &watch_address,
+            "alpha",
+            channel,
+            &mut seen,
+            &mut reported,
+            &mut emitted,
+            &mut batch,
+        )
+        .expect("scan repaired message");
+        assert!(matches!(
+            batch.as_slice(),
+            [WatchDelivery {
+                event: WatchEvent::ChannelMessage { id: event_id, .. },
+                ..
+            }] if event_id == id
+        ));
+        assert!(seen.contains(&path));
+        crate::test_support::trash_test_root(&root);
+    }
+
     fn mail_delivery(room: &str, id: &str, from: &str) -> WatchDelivery {
         WatchDelivery::mail(
             room,
@@ -1074,6 +2166,10 @@ mod tests {
                 InboxItem {
                     id: id.to_owned(),
                     from: from.to_owned(),
+                    origin: "unknown".to_owned(),
+                    reply_to_participant: None,
+                    reply_to_shared: from.to_owned(),
+                    pending: false,
                     kind: MailKind::Note,
                     subject: String::new(),
                     sent: "2026-08-22 00:00:00 +0000".to_owned(),
@@ -1098,9 +2194,17 @@ mod tests {
             room,
             channel,
             WatchEvent::ChannelMessage {
+                address: crate::output::WatchAddress {
+                    kind: "workspace".to_owned(),
+                    name: room.to_owned(),
+                },
+                room: room.to_owned(),
                 channel: channel.to_owned(),
                 id: id.to_owned(),
                 from: from.to_owned(),
+                origin: "unknown".to_owned(),
+                reply_to_participant: None,
+                reply_to_shared: from.to_owned(),
                 subject: String::new(),
                 sent: "2026-08-22 00:00:00 +0000".to_owned(),
                 display_name: None,
@@ -1503,12 +2607,16 @@ body
         // A target with nothing in it yet; the delivery arrives DURING the
         // first wait, as a real filesystem event would.
         let mut targets = vec![WatchTarget {
+            participant: None,
+            address: None,
             channel_seen: HashMap::new(),
             room: "alpha".to_owned(),
             inbox: inbox.clone(),
             dirs: target_dirs(&context, "alpha", &inbox),
             seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
             scan_failing: false,
+            route_pending: false,
         }];
         let wake_dirs = targets[0].dirs.clone();
         let deliver_inbox = inbox.clone();
@@ -1542,12 +2650,83 @@ body
             false,
             &mut wake,
             Duration::from_secs(3600),
+            AdmissionWarnings::default(),
+            HashSet::new(),
         )
         .expect("loop emits and exits");
         assert!(
             room_dir.join("watch.heartbeat").exists(),
             "event mode must still touch presence heartbeats"
         );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn slow_deadline_extends_fast_batch_instead_of_overwriting_it() {
+        struct OneWake {
+            inbox: PathBuf,
+            dirs: BTreeSet<PathBuf>,
+            fired: bool,
+        }
+        impl WakeSource for OneWake {
+            fn wait(&mut self, _timeout: Duration) -> Option<Wake> {
+                assert!(!self.fired, "fast event was lost before emit");
+                self.fired = true;
+                let id = "20260822-000000-fedcba";
+                fs::write(
+                    self.inbox.join(format!("{id}.mail")),
+                    mail_bytes(id, "beta", "alpha"),
+                )
+                .expect("deliver fast-target mail");
+                Some(Wake::Events(self.dirs.clone()))
+            }
+        }
+
+        let root = test_root("watch-fast-slow-merge");
+        let room_dir = root.join("alpha");
+        let inbox = room_dir.join("inbox");
+        fs::create_dir_all(&inbox).expect("create inbox");
+        fs::write(
+            root.join("rooms.json"),
+            format!(r#"{{"alpha":{}}}"#, serde_json::json!(room_dir)),
+        )
+        .expect("write rooms");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut targets = vec![WatchTarget {
+            participant: None,
+            address: None,
+            channel_seen: HashMap::new(),
+            room: "alpha".to_owned(),
+            inbox: inbox.clone(),
+            dirs: target_dirs(&context, "alpha", &inbox),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut wake: Box<dyn WakeSource> = Box::new(OneWake {
+            inbox,
+            dirs: targets[0].dirs.clone(),
+            fired: false,
+        });
+        run_watch_loop(
+            &context,
+            &mut targets,
+            &BTreeSet::new(),
+            &mut HashSet::new(),
+            1000,
+            true,
+            false,
+            false,
+            &mut wake,
+            Duration::ZERO,
+            AdmissionWarnings::default(),
+            HashSet::new(),
+        )
+        .expect("merged fast batch emits exactly once");
         trash_test_root(&root);
     }
 
@@ -1582,12 +2761,16 @@ body
         let mut targets: Vec<WatchTarget> = dirs_by_room
             .iter()
             .map(|(room, inbox)| WatchTarget {
+                participant: None,
+                address: None,
                 channel_seen: HashMap::new(),
                 room: room.clone(),
                 inbox: inbox.clone(),
                 dirs: target_dirs(&context, room, inbox),
                 seen: HashSet::new(),
+                reported_unreadable: HashSet::new(),
                 scan_failing: false,
+                route_pending: false,
             })
             .collect();
         // A's dirs rain events; B's message lands during the first wait and
@@ -1625,6 +2808,8 @@ body
             false,
             &mut wake,
             Duration::from_secs(0),
+            AdmissionWarnings::default(),
+            HashSet::new(),
         )
         .expect("deadline pass emits the starved room's mail");
         assert!(
