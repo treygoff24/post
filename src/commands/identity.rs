@@ -2,7 +2,9 @@ use crate::cli::{IdentityArgs, IdentityCommand, IdentityTermsCommand, IdentityVo
 use crate::command_result::CommandResult;
 use crate::error::{AppResult, ErrorCode};
 use crate::lineage::{Lineage, Member};
-use crate::lineage_store::{self, ContinueResult, LineageSummary, TermsView, VoiceIndex};
+use crate::lineage_store::{
+    self, ContinueResult, CreateResult, LineageSummary, TermsView, VoiceIndex,
+};
 use crate::mailbox::{shell_quote, Context};
 use crate::participant;
 use serde::Serialize;
@@ -92,23 +94,30 @@ pub(super) fn run(
         IdentityCommand::Show(args) => show(context, &args.name, args.voices, pretty),
         IdentityCommand::New(args) => {
             let (acting, _) = participant::require(context)?;
-            let mutation = lineage_store::create(context, &acting, &args.name)?;
-            let (lineage, acting) = mutation.value;
-            receipt(
-                MutationOutput {
-                    ok: true,
-                    event: "new",
-                    participant: acting.id,
-                    lineage: Some(lineage.name),
-                    changed: mutation.changed,
-                    warnings: mutation.warnings,
-                    revisions: None,
-                    terms: None,
-                    terms_digest: None,
-                    hint: None,
-                },
-                pretty,
-            )
+            match lineage_store::create(context, &acting, &args.name)? {
+                CreateResult::Affiliated(mutation) => {
+                    let mutation = *mutation;
+                    let (lineage, acting) = mutation.value;
+                    receipt(
+                        MutationOutput {
+                            ok: true,
+                            event: "new",
+                            participant: acting.id,
+                            lineage: Some(lineage.name),
+                            changed: mutation.changed,
+                            warnings: mutation.warnings,
+                            revisions: None,
+                            terms: None,
+                            terms_digest: None,
+                            hint: None,
+                        },
+                        pretty,
+                    )
+                }
+                CreateResult::NeedsAcknowledgement { lineage, terms } => {
+                    terms_acknowledgement_required(&lineage.name, &terms, json, pretty)
+                }
+            }
         }
         IdentityCommand::Continue(args) => {
             let (acting, _) = participant::require(context)?;
@@ -195,8 +204,13 @@ pub(super) fn run(
                         pretty,
                     )
                 }
-                IdentityVoiceCommand::Withdraw => {
-                    let mutation = lineage_store::withdraw_voice(context, &acting, &author)?;
+                IdentityVoiceCommand::Withdraw(args) => {
+                    let mutation = lineage_store::withdraw_voice(
+                        context,
+                        &acting,
+                        &author,
+                        args.lineage.as_deref(),
+                    )?;
                     let change = mutation.value;
                     receipt(
                         MutationOutput {

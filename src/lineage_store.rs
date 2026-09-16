@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::lineage::{self, Lineage, Member, LINEAGES_DIR};
-use crate::mailbox::{atomic_replace, local_timestamp, Context};
+use crate::mailbox::{atomic_replace, local_timestamp, shell_quote, Context};
 use crate::participant::{self, Participant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -104,6 +104,15 @@ pub(crate) enum ContinueResult {
         warnings: Vec<String>,
         terms: Option<TermsDocument>,
     },
+    NeedsAcknowledgement {
+        lineage: Lineage,
+        terms: TermsDocument,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum CreateResult {
+    Affiliated(Box<Mutation<(Lineage, Participant)>>),
     NeedsAcknowledgement {
         lineage: Lineage,
         terms: TermsDocument,
@@ -258,30 +267,36 @@ pub(crate) fn create(
     context: &Context,
     acting: &Participant,
     name: &str,
-) -> AppResult<Mutation<(Lineage, Participant)>> {
+) -> AppResult<CreateResult> {
     let _lock = participant::lock(context)?;
     lineage::validate_name(context, name)?;
     let mut acting = current_actor(context, acting)?;
     if let Some(existing) = lineage::load(context, name)? {
         if existing.founder == acting.id {
             if acting.lineage.as_deref() == Some(name) {
-                return Ok(Mutation {
+                return Ok(CreateResult::Affiliated(Box::new(Mutation {
                     value: (existing, acting),
                     changed: false,
                     warnings: Vec::new(),
-                });
+                })));
             }
             if acting.lineage.is_none() {
+                if let Some(terms) = terms_document(&existing)? {
+                    return Ok(CreateResult::NeedsAcknowledgement {
+                        lineage: existing,
+                        terms,
+                    });
+                }
                 let (_, at) = local_timestamp()?;
                 acting.lineage = Some(name.to_owned());
                 acting.lineage_since = Some(at.clone());
                 write_participant(&acting)?;
                 let warnings = append_warning(&existing.dir, &at, "new", &acting.id, None);
-                return Ok(Mutation {
+                return Ok(CreateResult::Affiliated(Box::new(Mutation {
                     value: (existing, acting),
                     changed: true,
                     warnings,
-                });
+                })));
             }
             ensure_can_affiliate(&acting, name)?;
         }
@@ -322,11 +337,11 @@ pub(crate) fn create(
         },
         acting,
     );
-    Ok(Mutation {
+    Ok(CreateResult::Affiliated(Box::new(Mutation {
         value,
         changed: true,
         warnings,
-    })
+    })))
 }
 
 pub(crate) fn continue_lineage(
@@ -439,7 +454,18 @@ pub(crate) fn add_voice(
     let voices = lineage.dir.join(VOICES_DIR);
     fs::create_dir_all(&voices)
         .map_err(|error| AppError::io("create lineage voices directory", &voices, error))?;
-    finish_pending_cleanup(&voices, author)?;
+    let cleanup = finish_pending_cleanup(&voices, author)?;
+    let mut warnings = Vec::new();
+    if cleanup.completed_pending {
+        let (_, at) = local_timestamp()?;
+        warnings.extend(append_warning(
+            &lineage.dir,
+            &at,
+            "voice_withdraw",
+            &acting.id,
+            None,
+        ));
+    }
 
     let current = voices.join(format!("{author}.md"));
     let history = voices.join(format!("{author}.history"));
@@ -458,7 +484,7 @@ pub(crate) fn add_voice(
     atomic_replace(&current, body.as_bytes())
         .map_err(|error| AppError::io("write lineage voice", &current, error))?;
     let (_, at) = local_timestamp()?;
-    let warnings = append_warning(
+    warnings.extend(append_warning(
         &lineage.dir,
         &at,
         if revisions == 0 {
@@ -468,7 +494,7 @@ pub(crate) fn add_voice(
         },
         &acting.id,
         None,
-    );
+    ));
     Ok(Mutation {
         value: VoiceChange {
             lineage: lineage.name,
@@ -484,43 +510,63 @@ pub(crate) fn withdraw_voice(
     context: &Context,
     acting: &Participant,
     author: &str,
+    requested_lineage: Option<&str>,
 ) -> AppResult<Mutation<VoiceChange>> {
     ensure_own_voice(acting, author)?;
     let _lock = participant::lock(context)?;
     let acting = current_actor(context, acting)?;
     ensure_own_voice(&acting, author)?;
+    if let Some(name) = requested_lineage {
+        let lineage = require_lineage(context, name)?;
+        return withdraw_selected_voice(&acting, &lineage.name, &lineage.dir, author, false);
+    }
     if let Some(name) = &acting.lineage {
         let dir = context.root.join(LINEAGES_DIR).join(name);
         let voices = dir.join(VOICES_DIR);
-        if let Some(gap) = read_optional_gap(&voices, author)? {
-            if gap.cleanup_pending {
-                let cleanup = finish_pending_cleanup(&voices, author)?;
-                debug_assert!(cleanup.completed_pending);
-                return finish_recovered_withdrawal(&acting, name, &dir);
-            }
-            if voices.join(format!("{author}.md")).is_file() {
-                return withdraw_current_voice(&acting, name, &dir, author, Some(gap));
-            }
-            return Ok(Mutation {
-                value: VoiceChange {
-                    lineage: name.clone(),
-                    revisions: None,
-                    hint: Some(
-                        "no current voice here; to withdraw a voice on another lineage, continue that lineage first"
-                            .to_owned(),
-                    ),
-                },
-                changed: false,
-                warnings: Vec::new(),
-            });
-        }
-        if voices.join(format!("{author}.md")).is_file() {
-            return withdraw_current_voice(&acting, name, &dir, author, None);
+        if read_optional_gap(&voices, author)?.is_some()
+            || voices.join(format!("{author}.md")).is_file()
+        {
+            return withdraw_selected_voice(&acting, name, &dir, author, true);
         }
     }
 
     let (name, dir) = resolve_voice_lineage(context, author)?;
-    withdraw_current_voice(&acting, &name, &dir, author, None)
+    withdraw_selected_voice(&acting, &name, &dir, author, false)
+}
+
+fn withdraw_selected_voice(
+    acting: &Participant,
+    name: &str,
+    dir: &Path,
+    author: &str,
+    current_lineage: bool,
+) -> AppResult<Mutation<VoiceChange>> {
+    let voices = dir.join(VOICES_DIR);
+    let gap = read_optional_gap(&voices, author)?;
+    if gap.is_some_and(|gap| gap.cleanup_pending) {
+        let cleanup = finish_pending_cleanup(&voices, author)?;
+        debug_assert!(cleanup.completed_pending);
+        return finish_recovered_withdrawal(acting, name, dir);
+    }
+    if voices.join(format!("{author}.md")).is_file() {
+        return withdraw_current_voice(acting, name, dir, author, gap);
+    }
+    if gap.is_some() {
+        let hint = current_lineage.then(|| {
+            "no current voice here; to withdraw a voice on another lineage, continue that lineage first"
+                .to_owned()
+        });
+        return Ok(Mutation {
+            value: VoiceChange {
+                lineage: name.to_owned(),
+                revisions: None,
+                hint,
+            },
+            changed: false,
+            warnings: Vec::new(),
+        });
+    }
+    Err(no_voice(author))
 }
 
 fn withdraw_current_voice(
@@ -723,7 +769,10 @@ fn resolve_voice_lineage(
             continue;
         };
         let voices = entry.path().join(VOICES_DIR);
-        if voice_is_current(&voices, author)? {
+        let gap = read_optional_gap(&voices, author)?;
+        let current = voices.join(format!("{author}.md")).is_file();
+        let cleanup_pending = gap.is_some_and(|gap| gap.cleanup_pending);
+        if current || cleanup_pending {
             matches.push((name, entry.path()));
         }
     }
@@ -737,8 +786,12 @@ fn resolve_voice_lineage(
                 "participant '{author}' has voices in several lineages: {}; withdrawal is ambiguous",
                 names.join(", ")
             ))
+            .exact_fix(format!(
+                "post identity voice withdraw --lineage {}",
+                shell_quote(&names[0])
+            ))
             .matches(names)
-            .reason("withdrawal requires exactly one matching current voice"))
+            .reason("withdrawal requires exactly one matching current or pending voice"))
         }
     }
 }
@@ -750,15 +803,6 @@ fn no_voice(author: &str) -> AppError {
         "Add your own voice first with `post identity voice add --body-file PATH`.",
     )
     .reason("the acting participant has no current lineage voice")
-}
-
-fn voice_is_current(voices: &Path, author: &str) -> AppResult<bool> {
-    let current = voices.join(format!("{author}.md"));
-    if !current.is_file() {
-        return Ok(false);
-    }
-    let gap = voices.join(format!("{author}.gap"));
-    Ok(!gap.is_file() || !read_gap(&gap)?.cleanup_pending)
 }
 
 fn read_optional_gap(voices: &Path, author: &str) -> AppResult<Option<GapRecord>> {

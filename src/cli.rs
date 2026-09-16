@@ -209,7 +209,14 @@ pub(crate) enum IdentityVoiceCommand {
     /// Add or replace this participant's current voice from a UTF-8 file.
     Add(IdentityBodyFileArgs),
     /// Withdraw this participant's voice.
-    Withdraw,
+    Withdraw(IdentityVoiceWithdrawArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IdentityVoiceWithdrawArgs {
+    /// Select the lineage containing this participant's voice.
+    #[arg(long, value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub lineage: Option<String>,
 }
 
 #[derive(Debug, Args)]
