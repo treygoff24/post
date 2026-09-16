@@ -312,7 +312,7 @@ function failDiagnostic(eventName) {
 function runPost(args, cwd, { participantId = null, clearParticipant = false, clearConversationKeys = false } = {}) {
   const env = { ...process.env };
   if (participantId) env.POST_PARTICIPANT = participantId;
-  else if (clearParticipant) delete env.POST_PARTICIPANT;
+  else if (clearParticipant || env.POST_PARTICIPANT === "") delete env.POST_PARTICIPANT;
   if (clearConversationKeys) {
     delete env.CLAUDE_CODE_SESSION_ID;
     delete env.CODEX_THREAD_ID;
