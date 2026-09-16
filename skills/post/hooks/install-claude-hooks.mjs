@@ -29,7 +29,7 @@ const ADAPTER = path.join(
   process.env.POST_CLAUDE_HOOK_INSTALL_DIR || path.join(os.homedir(), ".claude", "hooks"),
   "post-claude-mail.mjs"
 );
-const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
+const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
 
 const requestedTarget = process.argv[2];
 // A flag-looking argv is a usage error, not a settings path: without this

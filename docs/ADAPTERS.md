@@ -178,7 +178,7 @@ node skills/post/hooks/install-claude-hooks.mjs ~/.claude/settings.json
 
 The target path is a required argument on purpose — the installer never
 guesses at a live config. It registers the adapter for SessionStart /
-UserPromptSubmit / root PostToolUse in exec form (no shell), merges without
+UserPromptSubmit / root PostToolUse / SessionEnd in exec form (no shell), merges without
 touching unrelated hooks, is idempotent on re-run, and copies the reviewed
 adapter to `~/.claude/hooks/` — that private copy is what future sessions
 execute, so later repo edits never silently change live hook behavior.
@@ -428,7 +428,8 @@ session-start event), each adapter:
    --json`. When the returned participant has a non-empty `lineage`, the
    adapter appends exactly one line:
    `[post] participant <id>, continuing lineage <name>; voices on request: post identity show '<name>' --voices`.
-   An unaffiliated participant receives no identity text at all.
+   Long lineage names are safely shortened with an ellipsis inside the 256-byte
+   line budget. An unaffiliated participant receives no identity text at all.
 
 Claude and Codex have verified native conversation keys, so their payload-key
 bind converges with the harness environment. Cursor and Grok do not; their

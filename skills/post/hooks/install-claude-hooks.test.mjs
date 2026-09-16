@@ -85,12 +85,12 @@ test("preflight refuses an unrunnable binary", () => {
   assert.ok(!fs.existsSync(target));
 });
 
-test("creates a fresh settings file with all three events and copies the adapter", () => {
+test("creates a fresh settings file with lifecycle events and copies the adapter", () => {
   const target = freshSettings();
   const result = run(target);
   assert.equal(result.status, 0, result.stderr);
   const config = JSON.parse(fs.readFileSync(target, "utf8"));
-  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse"]) {
+  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"]) {
     const groups = config.hooks[event];
     assert.equal(groups.length, 1, event);
     assert.deepEqual(groups[0].hooks, [

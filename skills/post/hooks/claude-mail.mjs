@@ -45,6 +45,7 @@ const LIST_CAP = 20;
 const CONTEXT_MAX = 4096;
 const MERGED_CONTEXT_MAX = CONTEXT_MAX + 256;
 const NAME_MAX = 255;
+const IDENTITY_PART_MAX = 4096;
 const UNREADABLE_ID_MAX = 255; // filename-derived stem bound
 const MAIL_ID = /^\d{8}-\d{6}-[0-9a-fA-F]{6}$/;
 const CHANNEL_ID = /^\d{8}-\d{6}-\d{6}-[0-9a-fA-F]{6}$/;
@@ -383,7 +384,7 @@ function safeIdentityPart(value) {
   return (
     typeof value === "string" &&
     value.length > 0 &&
-    Buffer.byteLength(value, "utf8") <= NAME_MAX &&
+    Buffer.byteLength(value, "utf8") <= IDENTITY_PART_MAX &&
     !CONTROL_CHARS.test(value) &&
     !/[\u2028\u2029\r\n]/.test(value) &&
     value !== "." &&
