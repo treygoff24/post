@@ -897,3 +897,15 @@ test("normal events share one absolute deadline across touch and snapshot", () =
   assert.ok(elapsed < 5500, `event exceeded aggregate deadline: ${elapsed}ms`);
   assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
 });
+
+test("an unthrottled PostToolUse shares the same absolute deadline", () => {
+  const stateDir = freshStateDir();
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id: "post-tool-deadline" }, { stateDir });
+  setStub({ events: [], sleep_ms: 3000 });
+  const started = Date.now();
+  const out = run({ hook_event_name: "PostToolUse", session_id: "post-tool-deadline" }, { stateDir, throttleMs: 0 });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 5500, `PostToolUse exceeded aggregate deadline: ${elapsed}ms`);
+  assert.match(out.hookSpecificOutput.additionalContext, /UNKNOWN/);
+});
