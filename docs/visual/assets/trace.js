@@ -26,7 +26,7 @@
       mode: "participants",
       messages: SEED.map(function (m) { return { mid: m.mid, from: m.from, to: m.to }; }),
       seen: { astra: {}, fable: {} },   // participant id -> { messageId: true }
-      roomSeen: {},                     // the single 0.9.0 cursors.json seen set
+      roomSeen: {},                     // the pre-participant cursors.json seen set
       counter: 0,
       readout: null,
       lastEvent: null
@@ -41,7 +41,7 @@
    *   "unread"     the receipt names this participant and the id is unseen
    *   "read"       the receipt names this participant and the id is in its seen set
    *   "suppressed" this participant is the sender, so the receipt excludes it
-   *   "consumed"   0.9.0 only: the shared read moved the file out from under it
+   *   "consumed"   legacy only: the shared read moved the file out from under it
    *   null         nothing routed here
    */
   function cellFor(person, msg) {
@@ -52,7 +52,7 @@
       return state.seen[person.id][msg.mid] ? "read" : "unread";
     }
 
-    // 0.9.0: the sender is the room, so a message from either agent looks
+    // Before participants: the sender is the room, so either agent looks
     // like a message from the room and is suppressed for both of them.
     if (msg.from === "astra" || msg.from === "fable") return "suppressed";
     if (!state.roomSeen[msg.mid]) return "unread";
@@ -153,7 +153,7 @@
       idCol.appendChild(name);
 
       // The label column carries the file that owns this rail's read state.
-      // Under 0.9.0 both rails name the same file. That is the bug, written out.
+      // Before participants both rails name the same file. That is the bug.
       var path = el("span", "rail__pid",
         state.mode === "legacy" ? "tower/cursors.json" : "participants/" + p.pid + "/cursors.json");
       idCol.appendChild(path);
@@ -204,7 +204,7 @@
     var r = state.readout;
     if (r) return r;
     if (state.mode === "legacy") {
-      return "0.9.0 keeps one seen set for the whole room, in tower/cursors.json. " +
+      return "Before participants, Post kept one seen set for the whole room, in tower/cursors.json. " +
         "Both rails above name that same file. One message is dispatched and unread.";
     }
     return "Two participants are bound to the tower workspace address. One message " +
@@ -236,7 +236,7 @@
       var to = btn.getAttribute("data-to");
       var why = null;
       if (full) why = "The field holds " + SLOTS + " messages. Reset it to send another.";
-      else if (to === "ember" && state.mode === "legacy") why = "Lineage addresses do not exist in 0.9.0. Switch to the participant model to send one.";
+      else if (to === "ember" && state.mode === "legacy") why = "Lineage addresses did not exist before participants. Switch to the participant model to send one.";
       btn.disabled = !!why;
       btn.title = why || "";
     });
@@ -269,7 +269,7 @@
         "pending delivery, not unread mail, and nobody's inbox grew.";
     } else if (from === "fable") {
       text = state.mode === "legacy"
-        ? "Fable sent " + mid + " to tower. Under 0.9.0 the sender is the room, and " +
+        ? "Fable sent " + mid + " to tower. Before participants the sender was the room, and " +
           "Astra is also the room, so " + mid + " is suppressed as self on both rails. " +
           "Astra never learns it exists."
         : "Fable sent " + mid + " to tower. Fable's own notification is suppressed, " +
@@ -329,7 +329,7 @@
     });
     state.readout = null;
     announce(mode === "legacy"
-      ? "Switched to the 0.9.0 model. Read state is now one seen set for the whole " +
+      ? "Switched to the pre-participant model. Read state is now one seen set for the whole " +
         "room, and both rails name tower/cursors.json. Any reads were cleared, because " +
         "one model's seen set does not mean anything in the other."
       : "Switched to the participant model. Each rail now names its own cursor file. " +

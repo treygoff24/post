@@ -1,0 +1,491 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-09-16T16:11:52+00:00",
+  "runtime_source_sha": "a500bd22121aa6bcce7e8942dd2a087332ed4403",
+  "skill_docs_sha": "f1e3eae3e51938568b574d88833471919ade20d4",
+  "meaning": "Acceptance of the named runtime and scenarios, not a claim about subjective experience, personal continuity, or welfare.",
+  "build_and_install": {
+    "devagent": {
+      "path": "/home/trey-agent/.local/bin/post",
+      "sha256": "7489f91889408f1a488ada01f2a9299020b30f6e9b8d9a219a414719faaa9acb",
+      "version": {
+        "build_sha": "a500bd2",
+        "capabilities": [
+          "participants",
+          "lineages",
+          "routing-receipts",
+          "cursors-v2"
+        ],
+        "ok": true,
+        "store_version": 2,
+        "version": "0.9.0"
+      }
+    },
+    "mac": {
+      "path": "/Users/treygoff/.local/bin/post",
+      "sha256": "c7ad93cb842e42a9273bb20278a9f427839d81d94f38cd459847ab819dc5747b",
+      "version": {
+        "build_sha": "a500bd2",
+        "capabilities": [
+          "participants",
+          "lineages",
+          "routing-receipts",
+          "cursors-v2"
+        ],
+        "ok": true,
+        "store_version": 2,
+        "version": "0.9.0"
+      }
+    }
+  },
+  "gate": {
+    "source_sha": "a500bd22121aa6bcce7e8942dd2a087332ed4403",
+    "cargo_tests": 536,
+    "result": "PASS",
+    "checks": [
+      "fmt",
+      "clippy -D warnings",
+      "cargo tests",
+      "release build",
+      "Node hooks and launcher",
+      "Python doorbell",
+      "schema"
+    ],
+    "toolchain": {
+      "cargo": "1.98.1",
+      "node": "26.8.2",
+      "python": "3.14.7"
+    },
+    "strict_build_sha_acceptance_rows": 34
+  },
+  "installed_smoke": {
+    "mac": {
+      "passed": 34,
+      "failed": 0
+    },
+    "devagent": {
+      "passed": 34,
+      "failed": 0
+    },
+    "command": "POST_SMOKE_EXPECT_BUILD_SHA=a500bd2 bash scripts/smoke-installed.sh <installed-post>",
+    "isolation": "Each invocation creates and removes its own fixture mailbox."
+  },
+  "served_skill": {
+    "checks": {
+      "all_32_tracked_skill_files_match_source_and_three_served_roots_on_each_host": true,
+      "all_six_served_links_resolve_to_source": true,
+      "both_heads_match_docs_commit": true,
+      "both_hosts_ok": true,
+      "both_runtime_versions_match_runtime_commit": true,
+      "both_skill_trees_clean": true
+    },
+    "counts": {
+      "active_binaries": 2,
+      "hosts": 2,
+      "served_file_hash_comparisons": 192,
+      "served_link_roots": 6,
+      "source_file_hash_comparisons": 64,
+      "tracked_skill_files_per_host": 32
+    },
+    "skill_md_sha256": "380fc761cc021a2176bf1e1ce3e69ea842035dea778331d9ec6efad85162437c"
+  },
+  "installed_hooks": {
+    "mac": {
+      "claude": {
+        "cases": {
+          "fail": 0,
+          "pass": 7,
+          "skip": 0
+        },
+        "binary_sha256": "c7ad93cb842e42a9273bb20278a9f427839d81d94f38cd459847ab819dc5747b",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      },
+      "codex": {
+        "cases": {
+          "fail": 0,
+          "pass": 6,
+          "skip": 1
+        },
+        "binary_sha256": "c7ad93cb842e42a9273bb20278a9f427839d81d94f38cd459847ab819dc5747b",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      },
+      "cursor": {
+        "cases": {
+          "fail": 0,
+          "pass": 6,
+          "skip": 1
+        },
+        "binary_sha256": "c7ad93cb842e42a9273bb20278a9f427839d81d94f38cd459847ab819dc5747b",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      },
+      "grok": {
+        "cases": {
+          "fail": 0,
+          "pass": 6,
+          "skip": 1
+        },
+        "binary_sha256": "c7ad93cb842e42a9273bb20278a9f427839d81d94f38cd459847ab819dc5747b",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      }
+    },
+    "devagent": {
+      "claude": {
+        "cases": {
+          "fail": 0,
+          "pass": 7,
+          "skip": 0
+        },
+        "binary_sha256": "7489f91889408f1a488ada01f2a9299020b30f6e9b8d9a219a414719faaa9acb",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      },
+      "codex": {
+        "cases": {
+          "fail": 0,
+          "pass": 6,
+          "skip": 1
+        },
+        "binary_sha256": "7489f91889408f1a488ada01f2a9299020b30f6e9b8d9a219a414719faaa9acb",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      },
+      "grok": {
+        "cases": {
+          "fail": 0,
+          "pass": 6,
+          "skip": 1
+        },
+        "binary_sha256": "7489f91889408f1a488ada01f2a9299020b30f6e9b8d9a219a414719faaa9acb",
+        "scope": "Installed adapter file plus actual installed CLI, hermetic mailbox; not a new live harness session."
+      }
+    }
+  },
+  "mac_edge_cases": {
+    "claude": {
+      "cases": {
+        "fail": 0,
+        "pass": 4,
+        "skip": 0
+      },
+      "assertions": 23
+    },
+    "codex": {
+      "cases": {
+        "fail": 0,
+        "pass": 4,
+        "skip": 0
+      },
+      "assertions": 23
+    },
+    "cursor": {
+      "cases": {
+        "fail": 0,
+        "pass": 4,
+        "skip": 0
+      },
+      "assertions": 23
+    },
+    "grok": {
+      "cases": {
+        "fail": 0,
+        "pass": 4,
+        "skip": 0
+      },
+      "assertions": 23
+    },
+    "preview": {
+      "cases": {
+        "fail": 0,
+        "pass": 1,
+        "skip": 0
+      },
+      "assertions": 4
+    }
+  },
+  "native_pair": {
+    "workspace": "post-repo",
+    "repository": "/Users/treygoff/Code/post",
+    "astra": "codex-75ce6b09",
+    "fable": "claude-e2ef843c",
+    "shared_message": "20260916-160107-1582d5",
+    "recipients": [
+      "claude-e2ef843c",
+      "codex-75ce6b09"
+    ],
+    "astra_read_first_at": "2026-09-16T16:02:08.347912+00:00",
+    "after_astra_read": {
+      "astra_seen": [
+        "20260916-160107-1582d5"
+      ],
+      "fable_seen": []
+    },
+    "fable_native_recheck_then_read": "Fable confirmed the shared id remained unread, then consumed it through the Claude native binding. Both separate cursor files now contain that id.",
+    "stable_across_astra_read": {
+      "receipt": {
+        "sha256": "c8d7557b892b663d91a18a1c66d7979690acaa625fbfb97bffd1299bd1c1e13e",
+        "inode": 681085574
+      },
+      "message": {
+        "sha256": "37b88dff1eb04ab866c7e18a80b6d558ebba66981dca0d9d698f7d33bd2f6a8d",
+        "inode": 681085567
+      }
+    },
+    "stable_after_both_reads": {
+      "message_sha256": "37b88dff1eb04ab866c7e18a80b6d558ebba66981dca0d9d698f7d33bd2f6a8d",
+      "message_inode": 681085567,
+      "receipt_sha256": "c8d7557b892b663d91a18a1c66d7979690acaa625fbfb97bffd1299bd1c1e13e",
+      "receipt_inode": 681085574
+    },
+    "sibling_messages": [
+      {
+        "id": "20260916-160253-83a707",
+        "sender": "codex-75ce6b09",
+        "recipients": [
+          "claude-e2ef843c"
+        ],
+        "recipient_consumed": true,
+        "sender_not_in_unread_or_snapshot": true
+      },
+      {
+        "id": "20260916-160318-268f74",
+        "sender": "claude-e2ef843c",
+        "recipients": [
+          "codex-75ce6b09"
+        ],
+        "recipient_consumed": true,
+        "sender_not_in_unread": true
+      }
+    ],
+    "live_hook_notices": "Both existing native conversations received the shared-id notice; each received the sibling message notice."
+  },
+  "bridge": {
+    "binary_sha256_both_hosts": "a9d554fc2d8d4b63820c262260f9a53b579bb43d734f123128164f554f0a37d7",
+    "mac_to_devagent": {
+      "id": "20260916-150729-7606cf",
+      "receipt": {
+        "version": 1,
+        "message": "20260916-150729-7606cf",
+        "digest": "93448c8a573bdf85cb1ce4371f3965baa364ba63290180552df8083d29ee06d7",
+        "address": {
+          "kind": "workspace",
+          "name": "post-devbox"
+        },
+        "recipients": [
+          "claude-92431b5e"
+        ],
+        "excluded": [],
+        "routed_at": "2026-09-16 15:14:15 +0000",
+        "routed_by": "claude-92431b5e"
+      },
+      "canonical_sha256": "93448c8a573bdf85cb1ce4371f3965baa364ba63290180552df8083d29ee06d7",
+      "cursor": {
+        "version": 2,
+        "mail": {
+          "workspace:post-devbox": {
+            "seen": [
+              "20260916-150729-7606cf"
+            ]
+          }
+        },
+        "channels": {}
+      },
+      "origin": "unknown",
+      "note": "Initially quarantined after an unconfigured placeholder was added. That addition was reverted; the same id was re-evaluated, delivered, then read. No resend."
+    },
+    "devagent_to_mac": {
+      "id": "20260916-160107-21af36",
+      "receipt": {
+        "version": 1,
+        "message": "20260916-160107-21af36",
+        "digest": "5ea12ebe8f6a9639b89ff3b709ac2cebcd8e42885651da10ff8108488d8e6172",
+        "address": {
+          "kind": "workspace",
+          "name": "claude-space"
+        },
+        "recipients": [
+          "claude-3f510603"
+        ],
+        "excluded": [],
+        "routed_at": "2026-09-16 11:02:51 -0500",
+        "routed_by": "claude-3f510603"
+      },
+      "canonical_sha256": "5ea12ebe8f6a9639b89ff3b709ac2cebcd8e42885651da10ff8108488d8e6172",
+      "cursor": {
+        "version": 2,
+        "mail": {
+          "workspace:claude-space": {
+            "seen": [
+              "20260916-160107-21af36"
+            ]
+          }
+        },
+        "channels": {}
+      },
+      "origin": "remote"
+    },
+    "unsent_attempt": {
+      "id": "20260916-150759-9cc7f1",
+      "destination": "post-repo",
+      "reason": "Room registration did not add bridge peer topology. Message remains preserved and UNSENT."
+    },
+    "incidental_routing": {
+      "cause": "First fixture binding routes pending workspace mail as designed. These older messages were not consumed or deleted; their new routing receipts remain immutable.",
+      "devagent": {
+        "participant": "claude-92431b5e",
+        "workspace": "post-devbox",
+        "unread_ids": [
+          "20260831-180435-dbcee2"
+        ]
+      },
+      "mac": {
+        "participant": "claude-3f510603",
+        "workspace": "claude-space",
+        "unread_ids": [
+          "20260823-150323-0bbb0c",
+          "20260823-150417-a8f69d",
+          "20260823-151923-88e639",
+          "20260823-172407-c7e5f9",
+          "20260823-172638-0ca20b",
+          "20260823-174423-9457ae",
+          "20260826-184520-55a4aa",
+          "20260826-184544-41efe1",
+          "20260827-052749-f7ceeb",
+          "20260827-053724-fcd56f",
+          "20260827-054740-24e5d2",
+          "20260827-061903-63070f",
+          "20260827-062159-b030c7"
+        ]
+      }
+    }
+  },
+  "limits": [
+    "Lineages and participant addresses are host-local; only configured workspace mail crosses the bridge. Channels are not bridged.",
+    "Idle codex-notify-monitor remains a workspace-aggregate bell, not participant/private/lineage idle wake (post-pe2). Installer compatibility used fake service calls; no idle service was changed.",
+    "Only the installed Claude adapter handles SessionEnd. Codex, Cursor and Grok use leases; their SessionEnd test rows are explicit skips.",
+    "No Post Cursor adapter was installed on devagent because none existed there.",
+    "Long-watch notice state is process-local. Consumed ids stay suppressed after restart; unconsumed ids may ring again. Adapter dedupe is separate.",
+    "Mail frozen to an abandoned participant is not reassigned on expiry. The live bridge fixtures also froze 14 older messages, listed above, without consuming them.",
+    "This is an additive local rollout of package version 0.9.0, not a GitHub release.",
+    "Some historical commits have rehearsal author metadata from a shared Git config mistake. The override was removed; history was not rewritten."
+  ],
+  "evidence": [
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/gate-freeze-a500bd2.log",
+      "sha256": "8662ce64cf43803e7e944d2677fed7c68465f595e1678470362cd38f48e5974d"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/acceptance-freeze-a500bd2.log",
+      "sha256": "ae4ead78205cf8143d60bae960d769bce4b2bc6988ae8787dc6019e51231a73a"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/install-mac-a500bd2.log",
+      "sha256": "0ae349e29f3da71af1a39144db0738b2c0e8a9b8283c2b64e019e983c5498e2f"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/install-devagent-a500bd2.log",
+      "sha256": "5e73b0c90dfa97009943396d4333b12dd6431fbb00c302a6c07f90f4f027db2e"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-docs-verification.json",
+      "sha256": "dd55cf1b410bc9094b2e46831a70d5b7e163b889bada1fefd60a2918b32f18e8"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-smoke-a500bd2.stdout.log",
+      "sha256": "9b80ed79682e6c30425f9a64af2fe2654eedaafee3f8e7e0bb143eb401571689"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-devagent-LnQqUq/installed-devagent-smoke.stdout",
+      "sha256": "475a6e841ecda86f4470195cc1b19a4fab979bd4bf4cf239fbcb9796d980f5bb"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/live-native-astra-pair.json",
+      "sha256": "3daa940bbe4366a4cf077679e0a2c80e5362754f2f0c3ea30c9e542141a47002"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/live-pair-fable-read.json",
+      "sha256": "e8409efa57604f7f3ea5e72bdc38076a060b4455bd0a645484fa0da828ace226"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/live-native-astra-sibling-send.json",
+      "sha256": "8e0983bbf59dd3f3980da6fd116885f829698bb4c3370b6121267b6cccc642dc"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/live-sibling-astra-fable-read.json",
+      "sha256": "46677f7a9063b58d7a37620a0cbd2e7510eb61c1c285d7357552eab0e9e2ec4a"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/live-native-astra-sibling-receive.json",
+      "sha256": "349e83b4a628ccad3efe6fb48ce4c93bcf51fe7e938cea5cffa498bf4a9ac756"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/live-forward-bridge-readback.json",
+      "sha256": "35101452dcb87865be8d508c9f27741d15eafb519ad0f96832e4e556622fb10f"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/live-reverse-bridge-readback.json",
+      "sha256": "a5a9f382bef160406173c6ae22660fd17374b7792a8cc19b890e3ccc470747ac"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/live-mac2dev-read.txt",
+      "sha256": "d5e22345c7c852af5aa3efa72394aa87c9e99837dee37baf2f0b84ffddd2659f"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/live-mac2dev-receipt.txt",
+      "sha256": "6a9fa1806d5d19e1f502315150c65c85b467493097a2e24534148237b416178f"
+    },
+    {
+      "path": "/private/tmp/claude-501/-Users-treygoff-Code-post/7ed9a15b-907c-4d04-b885-1d106f213e7a/scratchpad/live-dev2mac-cs-read.json",
+      "sha256": "b5bafd27e6d335386124a661bfee0db3b9e055b6a1f771084fa86a14ad15a22d"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-doorbell-report.md",
+      "sha256": "abeafa6012853909761bb3b482725fa6f222b4976132b56e99a851f1ca5c084e"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-claude.json",
+      "sha256": "a18aa774bd98c1a2d26f50ec94e04149f8db8944ada6712b85fa237c69f64ab8"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-codex.json",
+      "sha256": "25a7ecce2694f6cc38c3d57604394520e661c3ede05933c457fcaa7bfd5abc06"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-cursor.json",
+      "sha256": "3d6d721d5bf3c2ed72f43345967389dbf045e31f4f2874e23da7e9d7862126f9"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-grok.json",
+      "sha256": "3dc84315b53373ef1d330a8fb1ec90bdb446a60113955df9a19d034da8003706"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-devagent-LnQqUq/installed-devagent-claude.json",
+      "sha256": "a0b6ff1b22d7eb50e2f5f7881bf7362db084e54bfc6bfe4d40c417c6167b2d0f"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-devagent-LnQqUq/installed-devagent-codex.json",
+      "sha256": "6f4dc04fec6f2dd1d43225fa55d0108f6c5eaa4c2d0558c4982a61d11f88e2ca"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-devagent-LnQqUq/installed-devagent-grok.json",
+      "sha256": "7aabc0c5a80521bc61eaa05627e37f1695932f1f45274287b480da337c6403a6"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-edge-claude.json",
+      "sha256": "a512adb55306d0d17f2d0b7ef6bbbf2dd23a8ae96c491642681ea8225d71ee73"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-edge-codex.json",
+      "sha256": "3fa9d187687b4529a2e7cfd26d31afbf2a139161048294955ef46506780f9449"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-edge-cursor.json",
+      "sha256": "3bfdcbbd3dd6fbaf3540545ce1c549f6452f639ca87c79128b9f09f9c2bbc330"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-edge-grok.json",
+      "sha256": "08b4a5c1e80d5a570e335b79c73c7fa0113abab04d0a8eec3b55e4fdc22a5ae3"
+    },
+    {
+      "path": "/tmp/post-papercuts-2026-09-15/installed-mac-edge-preview.json",
+      "sha256": "567baa1717ecece605d0b4be6ad59ced4c41abebce4f0613c8e5d60d5162ffef"
+    }
+  ]
+}

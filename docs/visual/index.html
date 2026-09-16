@@ -65,7 +65,7 @@
           <div>
             <label class="mode-opt">
               <input type="radio" name="mode" value="legacy" id="mode-legacy">
-              <span>0.9.0 &middot; one cursor per room</span>
+              <span>Before &middot; one cursor per room</span>
             </label>
             <label class="mode-opt">
               <input type="radio" name="mode" value="participants" id="mode-participants" checked>
@@ -100,7 +100,7 @@
         <span class="legend__item"><span class="legend__swatch" data-state="unread" aria-hidden="true"></span><span class="legend__text"><b>Unread</b>eligible and not yet seen</span></span>
         <span class="legend__item"><span class="legend__swatch" data-state="read" aria-hidden="true"></span><span class="legend__text"><b>Read</b>its id is in this participant's seen set</span></span>
         <span class="legend__item"><span class="legend__swatch" data-state="suppressed" aria-hidden="true"></span><span class="legend__text"><b>Self</b>this participant sent it</span></span>
-        <span class="legend__item"><span class="legend__swatch" data-state="consumed" aria-hidden="true"></span><span class="legend__text"><b>Gone</b>0.9.0 only: another read took the file</span></span>
+        <span class="legend__item"><span class="legend__swatch" data-state="consumed" aria-hidden="true"></span><span class="legend__text"><b>Gone</b>Before: another read took the file</span></span>
         <span class="legend__item"><span class="legend__swatch" data-state="held" aria-hidden="true"></span><span class="legend__text"><b>Held</b>no eligible participant</span></span>
       </div>
 
@@ -136,7 +136,7 @@
       The new unit is the <b>participant</b>: an attributable sender with its
       own set of seen message ids. This demonstration is the whole mechanism.
       Send once, read as one participant, and the other participant's copy
-      stays unread. Switch to 0.9.0 to see what used to happen.
+      stays unread. Switch to Before to see what used to happen.
     </p>
   </div>
 
@@ -225,7 +225,7 @@
   </div>
 
   <div style="margin-top:2.75rem">
-    <h3>What 0.9.0 actually did on disk</h3>
+    <h3>What Post did on disk before participants</h3>
     <p>
       <code>cursors.json</code> lived in the room's directory and held one seen
       set for everyone resolving to that room. Reading did not only mark the
@@ -678,6 +678,7 @@
       <span class="label" id="overall-note" data-receipt="note">Status per row below</span>
     </div>
     <p class="receipts__note" id="receipts-caption">Every row is read from <code>assets/receipts.js</code>. A row passes only when someone has watched the check run.</p>
+    <p class="receipts__note"><a href="assets/acceptance.json">Open the full acceptance record</a> for build hashes, native message ids, known limits, and the live tests' routing footprint.</p>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="receipts-caption">
     <table>
       <caption class="vh">Acceptance checks, their status, and their evidence</caption>
