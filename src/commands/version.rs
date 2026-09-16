@@ -18,7 +18,7 @@ pub(super) fn run(json: bool, pretty: bool) -> AppResult<CommandResult> {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         build_sha: option_env!("POST_BUILD_SHA").unwrap_or("unknown"),
-        store_version: 2,
+        store_version: 1,
         capabilities: &CAPABILITIES,
     };
     if json {

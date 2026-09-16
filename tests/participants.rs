@@ -503,7 +503,10 @@ fn participant_version_json_advertises_store_and_capabilities() {
     assert!(version["build_sha"]
         .as_str()
         .is_some_and(|sha| !sha.is_empty()));
-    assert_eq!(version["capabilities"], serde_json::json!(["participants"]));
+    assert_eq!(
+        version["capabilities"],
+        serde_json::json!(["participants", "lineages"])
+    );
     assert!(tree(&sandbox.mail_root).is_empty());
 }
 
@@ -1041,7 +1044,10 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     );
     assert_success(&output);
     let value: Value = from_stdout(&output);
-    assert_eq!(value["capabilities"], serde_json::json!(["participants"]));
+    assert_eq!(
+        value["capabilities"],
+        serde_json::json!(["participants", "lineages"])
+    );
     assert_eq!(tree(&ambiguous.mail_root), before);
 }
 

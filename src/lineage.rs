@@ -170,6 +170,7 @@ mod tests {
             founder: "test-active".to_owned(),
             created: "2026-09-16T00:00:00Z".to_owned(),
             host: "test".to_owned(),
+            version: 1,
             dir: root.join("lineages/ember"),
         };
         let members = lineage.members(&context).expect("lineage members");

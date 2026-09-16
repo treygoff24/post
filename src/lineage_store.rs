@@ -692,7 +692,7 @@ pub(crate) fn read_history(lineage: &Lineage) -> AppResult<Vec<JournalEntry>> {
 
 fn current_actor(context: &Context, acting: &Participant) -> AppResult<Participant> {
     participant::load(context, &acting.id)?.ok_or_else(|| {
-        AppError::no_participant("run: post participant bind")
+        AppError::no_participant(true)
             .reason("the acting participant record disappeared before the mutation")
     })
 }
@@ -1320,6 +1320,9 @@ mod tests {
             lineage: lineage.map(str::to_owned),
             lineage_since: lineage.map(|_| "2026-09-16 00:00:00 +0000".to_owned()),
             display_name: None,
+            last_seen: Some("2026-09-16T00:00:00Z".to_owned()),
+            lease_hours: 24,
+            ended_at: None,
             dir,
         }
     }
