@@ -259,8 +259,8 @@ pub(crate) fn create(
     acting: &Participant,
     name: &str,
 ) -> AppResult<Mutation<(Lineage, Participant)>> {
-    lineage::validate_name(context, name)?;
     let _lock = participant::lock(context)?;
+    lineage::validate_name(context, name)?;
     let mut acting = current_actor(context, acting)?;
     if let Some(existing) = lineage::load(context, name)? {
         if existing.founder == acting.id {
@@ -283,6 +283,7 @@ pub(crate) fn create(
                     warnings,
                 });
             }
+            ensure_can_affiliate(&acting, name)?;
         }
         return Err(
             AppError::invalid_argument(format!("lineage '{name}' already exists"))

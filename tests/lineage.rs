@@ -1,15 +1,20 @@
 mod common;
 
 use common::{
-    assert_success, from_stderr, from_stdout, register_alpha_beta, stderr, stdout, Sandbox,
+    assert_success, from_stderr, from_stdout, post_command, register_alpha_beta, stderr, stdout,
+    Sandbox,
 };
 use post::output::ErrorEnvelope;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
+use std::thread;
+use std::time::Duration;
 
 fn run_as(sandbox: &Sandbox, participant: &str, args: &[&str]) -> Output {
     sandbox.run_in_env(
@@ -1124,6 +1129,147 @@ fn lineage_new_repair_finishes_founder_affiliation_after_interrupted_create() {
     assert!(sandbox.read_participant(&actor)["lineage_since"].is_string());
     let journal = fs::read_to_string(dir.join("history.jsonl")).expect("repaired journal");
     assert_eq!(journal.matches("\"event\":\"new\"").count(), 1);
+
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let other = sandbox.test_participant("pact");
+    assert_success(&run_as(&sandbox, &other, &["identity", "new", "ash"]));
+    assert_success(&run_as(&sandbox, &actor, &["identity", "continue", "ash"]));
+    let dir = sandbox.mail_root.join("lineages/ember");
+    fs::create_dir_all(dir.join("voices")).expect("interrupted lineage directory");
+    fs::write(
+        dir.join("lineage.json"),
+        format!(
+            "{{\"version\":1,\"name\":\"ember\",\"created\":\"now\",\"founder\":\"{actor}\",\"host\":\"test\"}}\n"
+        ),
+    )
+    .expect("interrupted lineage record");
+    let refused = run_as(&sandbox, &actor, &["identity", "new", "ember"]);
+    assert!(!refused.status.success());
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert!(error.error.message.contains("already affiliated"));
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post identity leave")
+    );
+    assert_eq!(sandbox.read_participant(&actor)["lineage"], "ash");
+}
+
+#[cfg(unix)]
+#[test]
+fn lineage_new_validation_waits_for_participants_lock() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let room = sandbox.path.join("ember-room");
+    fs::create_dir_all(&room).expect("colliding room path");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms")).expect("rooms JSON");
+    rooms["ember"] = Value::String(room.to_string_lossy().into_owned());
+    fs::write(
+        &rooms_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rooms).expect("rooms JSON")
+        ),
+    )
+    .expect("register colliding room");
+
+    let lock_path = sandbox.mail_root.join(".participants.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("participants lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut command = post_command();
+    let mut child = command
+        .args(["identity", "new", "ember"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &actor)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn identity new under participants lock");
+    thread::sleep(Duration::from_secs(2));
+    assert!(
+        child.try_wait().expect("poll blocked validation").is_none(),
+        "lineage name validation must happen after .participants.lock is acquired"
+    );
+    drop(lock);
+    let output = child.wait_with_output().expect("finish identity new");
+    assert!(!output.status.success());
+    assert_eq!(
+        from_stderr::<ErrorEnvelope>(&output).error.code,
+        "invalid_argument"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lineage_new_revalidates_room_collision_after_acquiring_participants_lock() {
+    let sandbox = Sandbox::new();
+    let actor = sandbox.test_participant("claude-space");
+    let lock_path = sandbox.mail_root.join(".participants.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("participants lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let mut command = post_command();
+    let mut child = command
+        .args(["identity", "new", "ember"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &actor)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn identity new under participants lock");
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        child
+            .try_wait()
+            .expect("poll blocked identity new")
+            .is_none(),
+        "identity new must wait for .participants.lock"
+    );
+
+    let room = sandbox.path.join("ember-room");
+    fs::create_dir_all(&room).expect("colliding room path");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms")).expect("rooms JSON");
+    rooms["ember"] = Value::String(room.to_string_lossy().into_owned());
+    fs::write(
+        &rooms_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rooms).expect("rooms JSON")
+        ),
+    )
+    .expect("register colliding room while identity new waits");
+    drop(lock);
+
+    let output = child.wait_with_output().expect("finish identity new");
+    assert!(!output.status.success());
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error.error.message.contains("registered workspace room"));
+    assert!(!sandbox
+        .mail_root
+        .join("lineages/ember/lineage.json")
+        .exists());
+    assert!(sandbox.read_participant(&actor)["lineage"].is_null());
 }
 
 #[test]
