@@ -72,7 +72,7 @@ impl Participant {
             return ParticipantState::Ended;
         }
         let Some(last_seen) = self.last_seen.as_deref() else {
-            return ParticipantState::Active;
+            return ParticipantState::Stale;
         };
         let Some(last_seen) = parse_rfc3339(last_seen) else {
             return ParticipantState::Stale;
@@ -83,6 +83,16 @@ impl Participant {
             }
             Err(_) => ParticipantState::Active,
             _ => ParticipantState::Stale,
+        }
+    }
+
+    pub(crate) fn state_label(&self, now: SystemTime) -> &'static str {
+        if self.ended_at.is_some() {
+            "ended"
+        } else if self.last_seen.is_none() {
+            "no lease record"
+        } else {
+            self.state(now).as_str()
         }
     }
 }
@@ -374,9 +384,8 @@ pub(crate) fn end(context: &Context, id: &str) -> AppResult<Participant> {
     if participant.ended_at.is_some() {
         return Ok(participant);
     }
-    let (ended_at, lease_hours) = activity_from_env()?;
+    let ended_at = format_rfc3339(SystemTime::now())?;
     participant.last_seen = Some(ended_at.clone());
-    participant.lease_hours = lease_hours;
     participant.ended_at = Some(ended_at);
     write_record(&participant)?;
     Ok(participant)
@@ -1063,8 +1072,8 @@ fn parse_rfc3339(value: &str) -> Option<SystemTime> {
 fn parse_digits(bytes: &[u8], start: usize, length: usize) -> Option<i64> {
     let digits = bytes.get(start..start.checked_add(length)?)?;
     digits.iter().try_fold(0_i64, |value, byte| {
-        byte.is_ascii_digit()
-            .then_some(value * 10 + i64::from(byte - b'0'))
+        let digit = (*byte).checked_sub(b'0').filter(|digit| *digit <= 9)?;
+        value.checked_mul(10)?.checked_add(i64::from(digit))
     })
 }
 
@@ -1299,11 +1308,11 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_lease_boundary_legacy_and_end_are_explicit() {
+    fn lifecycle_lease_boundary_missing_record_and_end_are_explicit() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let inside = lifecycle_participant(Some("2023-11-13T22:13:21Z"), 24, None);
         let outside = lifecycle_participant(Some("2023-11-13T22:13:19Z"), 24, None);
-        let legacy = lifecycle_participant(None, 24, None);
+        let missing_lease = lifecycle_participant(None, 24, None);
         let ended = lifecycle_participant(
             Some("2023-11-14T22:13:20Z"),
             24,
@@ -1311,7 +1320,8 @@ mod tests {
         );
         assert!(inside.is_active(now));
         assert!(!outside.is_active(now));
-        assert!(legacy.is_active(now), "legacy records remain active");
+        assert_eq!(missing_lease.state(now), super::ParticipantState::Stale);
+        assert!(!missing_lease.is_active(now));
         assert!(!ended.is_active(now));
     }
 
@@ -1325,14 +1335,21 @@ mod tests {
     }
 
     #[test]
-    fn list_active_filters_stale_and_ended_without_dropping_legacy() {
+    fn list_active_requires_a_current_lease_record() {
         let root = test_root("participant-list-active");
         let context = Context {
             root: root.clone(),
             home: root.clone(),
         };
         for (id, lifecycle) in [
-            ("test-legacy", serde_json::json!({})),
+            ("test-missing-lease", serde_json::json!({})),
+            (
+                "test-active",
+                serde_json::json!({
+                    "last_seen": "2099-01-01T00:00:00Z",
+                    "lease_hours": 24
+                }),
+            ),
             (
                 "test-stale",
                 serde_json::json!({
@@ -1373,7 +1390,7 @@ mod tests {
             .into_iter()
             .map(|participant| participant.id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["test-legacy"]);
+        assert_eq!(ids, vec!["test-active"]);
         trash_test_root(&root);
     }
 }

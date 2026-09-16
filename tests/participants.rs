@@ -1698,6 +1698,68 @@ fn participant_lifecycle_touch_end_and_bind_reactivation() {
 }
 
 #[test]
+fn participant_lifecycle_missing_lease_is_stale_until_rebind() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let bound = sandbox.bind_claude("missing-lease-rebind", &alpha, Some("alpha"));
+    let id = participant_id(&bound).to_owned();
+    edit_participant(&sandbox, &id, |record| {
+        record.remove("last_seen");
+        record.insert("lineage".to_owned(), Value::String("ember".to_owned()));
+    });
+
+    let before = sandbox.run_as_participant(&["who"], &id, &alpha);
+    assert_success(&before);
+    let before: Value = from_stdout(&before);
+    assert_eq!(before["participant"]["state"], "no lease record");
+
+    let rebound = sandbox.run_as_claude(
+        &["participant", "bind", "--json"],
+        "missing-lease-rebind",
+        &alpha,
+    );
+    assert_success(&rebound);
+    let rebound: Value = from_stdout(&rebound);
+    assert_eq!(participant_id(&rebound), id);
+    assert_eq!(rebound["participant"]["workspace"], "alpha");
+    assert_eq!(rebound["participant"]["lineage"], "ember");
+    assert!(rebound["participant"]["last_seen"].as_str().is_some());
+
+    let after = sandbox.run_as_participant(&["who"], &id, &alpha);
+    assert_success(&after);
+    let after: Value = from_stdout(&after);
+    assert_eq!(after["participant"]["state"], "active");
+}
+
+#[test]
+fn participant_lifecycle_malformed_timestamps_are_config_errors_not_panics() {
+    for (suffix, timestamp) in [
+        ("letter", "2026-09-16T0x:00:00Z"),
+        ("low-byte", "2026-09-16T0/:00:00Z"),
+    ] {
+        let sandbox = Sandbox::new();
+        let (alpha, _beta) = register_alpha_beta(&sandbox);
+        let key = format!("malformed-lifecycle-time-{suffix}");
+        let bound = sandbox.bind_claude(&key, &alpha, Some("alpha"));
+        let id = participant_id(&bound).to_owned();
+        edit_participant(&sandbox, &id, |record| {
+            record.insert("last_seen".to_owned(), Value::String(timestamp.to_owned()));
+        });
+
+        let output = sandbox.run_as_participant(&["participant", "list"], &id, &alpha);
+        assert_eq!(
+            output.status.code(),
+            Some(78),
+            "{timestamp}: stderr: {}",
+            common::stderr(&output)
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid");
+        assert!(error.error.message.contains("RFC3339"));
+    }
+}
+
+#[test]
 fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
@@ -1839,7 +1901,10 @@ fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
     let active_id = participant_id(&active).to_owned();
     let stale_id = participant_id(&stale).to_owned();
     let ended_id = participant_id(&ended).to_owned();
-    let legacy_id = sandbox.test_participant("alpha");
+    let missing_lease_id = sandbox.test_participant("alpha");
+    edit_participant(&sandbox, &missing_lease_id, |record| {
+        record.remove("last_seen");
+    });
     edit_participant(&sandbox, &stale_id, |record| {
         record.insert(
             "last_seen".to_owned(),
@@ -1868,8 +1933,8 @@ fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
     assert_eq!(rows[active_id.as_str()]["state"], "active");
     assert_eq!(rows[stale_id.as_str()]["state"], "stale");
     assert_eq!(rows[ended_id.as_str()]["state"], "ended");
-    assert_eq!(rows[legacy_id.as_str()]["state"], "active");
-    assert!(rows[legacy_id.as_str()]["last_seen"].is_null());
+    assert_eq!(rows[missing_lease_id.as_str()]["state"], "no lease record");
+    assert!(rows[missing_lease_id.as_str()]["last_seen"].is_null());
     assert!(who["activity_note"]
         .as_str()
         .is_some_and(|note| note.contains("not reassigned")));
@@ -1884,11 +1949,13 @@ fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(messages.contains(&stale_id), "{messages}");
+    assert!(messages.contains(&missing_lease_id), "{messages}");
+    assert!(messages.contains("no lease record"), "{messages}");
     assert!(messages.contains("not reassigned"), "{messages}");
 }
 
 #[test]
-fn participant_lifecycle_rejects_invalid_lease_without_touching_record() {
+fn participant_lifecycle_validates_renewal_lease_but_end_preserves_it() {
     let unbound = Sandbox::new_unseeded();
     for command in ["touch", "end"] {
         let output = unbound.run_as_claude(
@@ -1927,7 +1994,22 @@ fn participant_lifecycle_rejects_invalid_lease_without_touching_record() {
     assert_eq!(error.error.code, "invalid_argument");
     assert!(error.error.message.contains("positive integer"));
     assert_eq!(
-        fs::read(path).expect("participant after invalid touch"),
+        fs::read(&path).expect("participant after invalid touch"),
         before
     );
+
+    let ended = sandbox.run_in_env(
+        &["participant", "end", "--json"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", &id),
+            ("POST_PARTICIPANT_LEASE_HOURS", "bogus"),
+        ],
+    );
+    assert_success(&ended);
+    let ended: Value = from_stdout(&ended);
+    assert_eq!(ended["participant"]["lease_hours"], 24);
+    assert!(ended["participant"]["ended_at"].as_str().is_some());
+    assert_eq!(sandbox.read_participant(&id)["lease_hours"], 24);
 }

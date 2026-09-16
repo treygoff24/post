@@ -336,16 +336,32 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
         if participant.state(now) != crate::participant::ParticipantState::Stale {
             continue;
         }
+        let (suffix, message, suggested_fix) = if participant.last_seen.is_none() {
+            (
+                "no_lease_record",
+                format!(
+                    "participant '{}' has no lease record and is inactive for new recipient selection; mail already frozen to it is not reassigned",
+                    participant.id
+                ),
+                "Run `post participant bind` or `post participant touch` only from that live session.",
+            )
+        } else {
+            (
+                "stale",
+                format!(
+                    "participant '{}' is stale; mail already frozen to it is not reassigned when its lease expires",
+                    participant.id
+                ),
+                "Use `post participant touch` only from that live session, or `post participant end` when ending it explicitly.",
+            )
+        };
         checks.push(check(
-            &format!("participant.{}.stale", participant.id),
+            &format!("participant.{}.{suffix}", participant.id),
             DoctorSeverity::Info,
             &participant.dir.join("participant.json"),
-            &format!(
-                "participant '{}' is stale; mail already frozen to it is not reassigned when its lease expires",
-                participant.id
-            ),
+            &message,
             false,
-            "Use `post participant touch` only from that live session, or `post participant end` when ending it explicitly.",
+            suggested_fix,
         ));
     }
 }

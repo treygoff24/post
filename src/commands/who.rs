@@ -50,7 +50,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             let (unread, pending) = mail_counts(context, participant)?;
             WhoActingParticipant {
                 status: "bound".to_owned(),
-                state: Some(participant.state(now).as_str().to_owned()),
+                state: Some(participant.state_label(now).to_owned()),
                 last_seen: participant.last_seen.clone(),
                 id: Some(participant.id.clone()),
                 harness: Some(participant.harness.clone()),
@@ -89,7 +89,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     for participant in participant_records {
         let (unread, pending) = mail_counts(context, &participant)?;
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
-        let state = participant.state(now).as_str().to_owned();
+        let state = participant.state_label(now).to_owned();
         participants.push(WhoParticipant {
             id: participant.id,
             harness: participant.harness,
@@ -117,7 +117,10 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 "participant: {}  state={}  last-seen={}  harness={}  provenance={}  workspace={}  lineage={}  unread={:?}  pending={:?}\n",
                 acting.id.as_deref().unwrap_or("unbound"),
                 acting.state.as_deref().unwrap_or("unbound"),
-                acting.last_seen.as_deref().unwrap_or("legacy"),
+                acting
+                    .last_seen
+                    .as_deref()
+                    .unwrap_or("no lease record"),
                 acting.harness.as_deref().unwrap_or("unbound"),
                 acting.provenance.as_deref().unwrap_or("unbound"),
                 acting.workspace.as_deref().unwrap_or("none"),
@@ -128,7 +131,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         }
         for entry in &participants {
             let live = if entry.live_watch { "yes" } else { "no" };
-            let seen = entry.last_seen.as_deref().unwrap_or("legacy");
+            let seen = entry.last_seen.as_deref().unwrap_or("no lease record");
             let watch_seen = entry.watch_last_seen.as_deref().unwrap_or("never");
             rendered.push_str(&format!(
                 "participant {}  state={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}  unread={:?}  pending={:?}\n",
@@ -143,7 +146,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         }
         if participants
             .iter()
-            .any(|participant| participant.state == "stale")
+            .any(|participant| matches!(participant.state.as_str(), "stale" | "no lease record"))
         {
             rendered.push_str(&format!("activity-note: {STALE_DELIVERY_NOTE}\n"));
         }
@@ -160,7 +163,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     let count = participants.len();
     let activity_note = participants
         .iter()
-        .any(|participant| participant.state == "stale")
+        .any(|participant| matches!(participant.state.as_str(), "stale" | "no lease record"))
         .then(|| STALE_DELIVERY_NOTE.to_owned());
     CommandResult::json(
         &WhoOutput {

@@ -115,7 +115,14 @@ mod tests {
             home: root.clone(),
         };
         for (id, lifecycle) in [
-            ("test-active", serde_json::json!({})),
+            (
+                "test-active",
+                serde_json::json!({
+                    "last_seen": "2099-01-01T00:00:00Z",
+                    "lease_hours": 24
+                }),
+            ),
+            ("test-missing-lease", serde_json::json!({})),
             (
                 "test-stale",
                 serde_json::json!({
@@ -161,9 +168,10 @@ mod tests {
         };
         let members = lineage.members(&context).expect("lineage members");
         assert!(members["test-active"].active);
+        assert!(!members["test-missing-lease"].active);
         assert!(!members["test-stale"].active);
         assert!(!members["test-ended"].active);
-        assert_eq!(members.len(), 3, "inactive affiliation remains historical");
+        assert_eq!(members.len(), 4, "inactive affiliation remains historical");
         trash_test_root(&root);
     }
 }

@@ -426,7 +426,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "Channel sends bounce with crossed_send when unseen ordinary messages from others exist in the channel; --anyway delivers regardless. Direct mail is unaffected.",
             "Channel descriptions are norms carriers any member may update; presence (post who) never reports PIDs.",
             "sender_address and sender_provenance are self-declared transport metadata — evidence about how `from` was resolved, never a credential; participant-binding means the bound participant supplied the reply address without a --from or POST_FROM assertion; authority comes only from signature verification, and post never synthesizes either field.",
-            "Participant activity affects new recipient selection only. Legacy records without last_seen remain active; read-only commands never refresh last_seen. Mail already frozen to a participant is durable and is not reassigned when that participant becomes stale.",
+            "Participant activity affects new recipient selection only. A record without last_seen has no lease record and remains stale until bind or touch; read-only commands never refresh last_seen. Mail already frozen to a participant is durable and is not reassigned when that participant becomes stale.",
         ]),
         environment: fields(&[
             "POST_MAIL_ROOT: absolute mailbox root override — a supported first-class root (r2.1); must be absolute, defaults to $HOME/.claude-mail",
