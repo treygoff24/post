@@ -99,8 +99,8 @@ const MAIL_A = {
   sent: "2026-07-30 01:01:01 -0500",
   reason: "mail",
 };
-const TYPED_PARTICIPANT = { ...MAIL_A, room: undefined, id: "20260730-010101-abc111", address: { kind: "participant", name: "grok-abc12345" } };
-const TYPED_LINEAGE = { ...MAIL_A, room: undefined, id: "20260730-010101-abc112", address: { kind: "lineage", name: "ember" } };
+const TYPED_PARTICIPANT = { ...MAIL_A, room: undefined, id: "20260730-010101-abc111", address: { kind: "participant", name: "grok-abc123456789" } };
+const TYPED_LINEAGE = { ...MAIL_A, room: undefined, id: "20260730-010101-abc112", address: { kind: "lineage", name: "Ember Grove!" } };
 const TYPED_WORKSPACE = { ...MAIL_A, room: "tower", id: "20260730-010101-abc113", address: { kind: "workspace", name: "tower" } };
 
 test("unreadable channels use distinct current keys; legacy identity is not acknowledged", () => {
@@ -213,17 +213,19 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
 });
 
-test("typed participant, lineage, and workspace addresses render without poisoning valid siblings", () => {
+test("typed 12-hex participant, lineage, and workspace addresses render without poisoning valid siblings", () => {
   const stateDir = freshStateDir();
   const malformed = { ...TYPED_PARTICIPANT, id: "20260730-010101-abc114", address: { kind: "participant", name: "BAD" } };
-  setStub({ events: [TYPED_PARTICIPANT, TYPED_LINEAGE, TYPED_WORKSPACE, malformed, MAIL_A] });
+  const malformedColon = { ...TYPED_LINEAGE, id: "20260730-010101-abc116", address: { kind: "lineage", name: "bad:name" } };
+  const malformedControl = { ...TYPED_LINEAGE, id: "20260730-010101-abc117", address: { kind: "lineage", name: "bad\u0001name" } };
+  setStub({ events: [TYPED_PARTICIPANT, TYPED_LINEAGE, TYPED_WORKSPACE, malformed, malformedColon, malformedControl, MAIL_A] });
   const out = run({ ...BASE, hookEventName: "UserPromptSubmit", session_id: "typed-addresses" }, { stateDir });
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /direct to you/);
-  assert.match(context, /lineage ember/);
+  assert.match(context, /lineage Ember Grove!/);
   assert.match(context, /room tower/);
   assert.match(context, /20260730-010101-abc111/);
-  assert.doesNotMatch(context, /abc114/);
+  assert.doesNotMatch(context, /abc114|abc116|abc117/);
 });
 
 test("pending typed events render as pending rather than unread", () => {
