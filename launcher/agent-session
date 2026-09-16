@@ -10,16 +10,18 @@
 #   POST_SENDER_ADDRESS   <harness>.<repo-key>.<uuid>  (opaque, non-routable)
 #   POST_HARNESS          the harness slug
 #   POST_REPO_KEY         <repo-slug>-<8-hex hash of the realpathed repo root>
+#   POST_PARTICIPANT      participant bound from <harness> + launch UUID
 #
 # The pin is resolved from --room (validated, exported as a declaration —
 # registration is NOT required for direct mail), else by reverse lookup of
 # the launch cwd against `post rooms` (longest registered path containing
 # cwd wins, realpath on both sides). A failed, missing, or unparseable
 # lookup is reported as exactly that — never as "no room matched". When
-# nothing pins, NO pin is exported: post falls back to cwd inference with
-# `inferred-*` provenance. The helper never synthesizes identity, and stale
-# inherited POST_FROM/POST_SENDER_ADDRESS is always cleared first: a fresh
-# launch is a fresh instance.
+# nothing pins, NO pin is exported. Before vendor exec, the helper asks post
+# to bind the launch UUID as the conversation key and exports the resulting
+# participant id. Stale inherited identity is always cleared first: a fresh
+# launch is a fresh instance. Bootstrap fails open so mail can never prevent
+# the vendor itself from launching.
 #
 # Identity primitives are validated, not trusted: a present-but-broken
 # uuidgen/shasum fails the launch loudly instead of minting garbage or
@@ -50,6 +52,10 @@ fail() {
 
 note() {
     printf 'agent-session: %s\n' "$1" >&2
+}
+
+participant_bootstrap_failed() {
+    note "participant bind failed; continuing without POST_PARTICIPANT"
 }
 
 valid_slug() {
@@ -237,7 +243,7 @@ resolve_vendor() {
 
 doctor() {
     rc=0
-    for var in POST_HARNESS POST_REPO_KEY POST_SENDER_ADDRESS; do
+    for var in POST_HARNESS POST_REPO_KEY POST_SENDER_ADDRESS POST_PARTICIPANT; do
         eval "value=\${$var:-}"
         if [ -n "$value" ]; then
             printf 'agent-session doctor: %s=%s\n' "$var" "$value"
@@ -256,12 +262,12 @@ process.exit((parsed?.rooms ?? []).some((r) => r?.name === pin) ? 0 : 1);
 ' ; then
                 printf 'agent-session doctor: pin names a registered room\n'
             else
-                printf 'agent-session doctor: WARNING — pin does not name a registered room; channel commands will refuse (direct mail still works)\n'
+                printf 'agent-session doctor: WARNING — pin does not name a registered room; participant bootstrap and channel commands will refuse, but vendor launch remains fail-open\n'
                 rc=1
             fi
         fi
     else
-        printf 'agent-session doctor: POST_FROM is not set (fallback tier: post infers identity from cwd at send time)\n'
+        printf 'agent-session doctor: POST_FROM is not set (participant bind resolves workspace context from the launch cwd)\n'
     fi
     exit "$rc"
 }
@@ -317,11 +323,11 @@ if [ "${AGENT_SESSION_CHAIN:-}" = "$$" ] && [ -n "${POST_SENDER_ADDRESS:-}" ]; t
 fi
 
 # A fresh launch is a fresh instance: stale inherited identity never survives.
-unset POST_FROM POST_SENDER_ADDRESS
+unset POST_FROM POST_SENDER_ADDRESS POST_PARTICIPANT
 
 if [ -n "$room" ]; then
     pin=$room
-    pin_note="pinned room '$pin' for this session (explicit --room; a declaration, registration not required for direct mail)"
+    pin_note="pinned room '$pin' for this session (explicit --room; participant bootstrap requires a registered room)"
 else
     pin=$(resolve_room_from_cwd)
     lookup_rc=$?
@@ -329,19 +335,19 @@ else
         0) pin_note="pinned room '$pin' for this session" ;;
         3)
             pin=''
-            pin_note="no registered room contains this directory; no pin exported (post will infer from cwd, provenance inferred-*)"
+            pin_note="no registered room contains this directory; no pin exported (participant bind will use the launch cwd)"
             ;;
         4)
             pin=''
-            pin_note="room lookup unavailable (node not found); no pin exported (post will infer from cwd, provenance inferred-*)"
+            pin_note="room lookup unavailable (node not found); no pin exported (participant bind will use the launch cwd)"
             ;;
         5)
             pin=''
-            pin_note="room lookup unavailable (post not found); no pin exported (post will infer from cwd, provenance inferred-*)"
+            pin_note="room lookup unavailable (post not found); no pin exported (participant bootstrap will fail open)"
             ;;
         *)
             pin=''
-            pin_note="room lookup FAILED (post rooms errored or returned unparseable output); no pin exported (post will infer from cwd, provenance inferred-*)"
+            pin_note="room lookup FAILED (post rooms errored or returned unparseable output); no pin exported (participant bind will use the launch cwd)"
             ;;
     esac
 fi
@@ -367,6 +373,43 @@ POST_SENDER_ADDRESS=$address
 POST_HARNESS=$harness
 POST_REPO_KEY=$key
 export POST_SENDER_ADDRESS POST_HARNESS POST_REPO_KEY
+
+# The launcher UUID is the conversation key. Explicit --key bootstrap ignores
+# ambient participant/native keys, so this always selects this launch's record.
+# Capture all bind output: a failed mail bootstrap gets exactly one diagnostic
+# from this helper and can never prevent the vendor command from executing.
+binding_json=''
+if command -v "$POST_BIN" >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    if [ -n "$pin" ]; then
+        binding_json=$("$POST_BIN" participant bind \
+            --harness "$harness" --key "$uuid" --workspace "$pin" --json 2>/dev/null) || binding_json=''
+    else
+        binding_json=$("$POST_BIN" participant bind \
+            --harness "$harness" --key "$uuid" --json 2>/dev/null) || binding_json=''
+    fi
+fi
+if [ -n "$binding_json" ]; then
+    participant=$(printf '%s' "$binding_json" | node -e '
+const fs = require("node:fs");
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+const id = parsed?.participant?.id ?? parsed?.id;
+if (typeof id !== "string" || id.length === 0 || /[\s\x00-\x1f\x7f]/.test(id)) process.exit(1);
+process.stdout.write(id);
+') || participant=''
+else
+    participant=''
+fi
+if [ -n "$participant" ]; then
+    POST_PARTICIPANT=$participant
+    export POST_PARTICIPANT
+else
+    participant_bootstrap_failed
+fi
 
 resolve_vendor "$1" || fail "cannot resolve vendor command '$1' on PATH without recursing into the shim; is the real binary installed?"
 shift
