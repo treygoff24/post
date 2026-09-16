@@ -767,6 +767,87 @@ fn routing_join_refuses_unknown_participant_records_without_breaking_listing() {
 }
 
 #[test]
+fn routing_join_corrupt_rebound_member_fails_closed_on_actor_block() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let gamma_a = sandbox.path.join("gamma-a");
+    let gamma_b = sandbox.path.join("gamma-b");
+    fs::create_dir(&gamma_a).expect("gamma A workspace");
+    fs::create_dir(&gamma_b).expect("gamma B workspace");
+    register_room(&sandbox, "gamma-a", &gamma_a);
+    register_room(&sandbox, "gamma-b", &gamma_b);
+    let alpha_actor = bind(&sandbox, "rebind-scope-alpha", &alpha, "alpha");
+    let gamma_actor = bind(&sandbox, "rebind-scope-gamma", &gamma_a, "gamma-a");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--join", "--json"],
+        &gamma_actor,
+        &gamma_a,
+    ));
+    let rebound = sandbox.run_as_participant(
+        &["participant", "bind", "--workspace", "gamma-b", "--json"],
+        &gamma_actor,
+        &gamma_b,
+    );
+    assert_success(&rebound);
+    let rebound: Value = from_stdout(&rebound);
+    assert_eq!(rebound["participant"]["workspace"], "gamma-b");
+
+    fs::write(
+        sandbox
+            .mail_root
+            .join("participants")
+            .join(&gamma_actor)
+            .join("participant.json"),
+        b"{corrupt",
+    )
+    .expect("corrupt rebound participant record");
+    for (from, to) in [
+        ("alpha", "gamma-b"),
+        ("gamma-b", "alpha"),
+        ("*", "gamma-b"),
+        ("beta", "*"),
+    ] {
+        fs::write(
+            sandbox.mail_root.join("rules.json"),
+            serde_json::to_vec(&json!({
+                "blocked": [{
+                    "from": from,
+                    "to": to,
+                    "reason": "possibly involves the actor"
+                }]
+            }))
+            .expect("serialize actor block"),
+        )
+        .expect("write actor block");
+
+        let refused =
+            sandbox.run_as_participant(&["chat", "tax", "--join", "--json"], &alpha_actor, &alpha);
+        assert!(
+            !refused.status.success(),
+            "join unexpectedly admitted for {from} -> {to}"
+        );
+        let error: post::output::ErrorEnvelope = common::from_stderr(&refused);
+        assert_eq!(error.error.code, "config_invalid");
+        assert!(error.error.message.contains(&gamma_actor));
+        assert!(error.error.message.contains("participant.json"));
+        assert!(error.error.suggested_fix.contains("fix the named file"));
+    }
+
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        r#"{"blocked":[{"from":"beta","to":"gamma-b","reason":"unrelated to alpha"}]}"#,
+    )
+    .expect("write unrelated block");
+    let admitted =
+        sandbox.run_as_participant(&["chat", "tax", "--join", "--json"], &alpha_actor, &alpha);
+    assert!(admitted.status.success(), "{}", common::stderr(&admitted));
+    assert!(common::stderr(&admitted).contains("skipped corrupt participant"));
+    let admitted: Value = from_stdout(&admitted);
+    assert_eq!(admitted["room"], "alpha");
+    assert_eq!(admitted["already_member"], false);
+}
+
+#[test]
 fn routing_pending_is_labeled_and_excluded_from_unread_across_read_and_watch() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);

@@ -235,8 +235,7 @@ pub(crate) fn participants_for_join_validation(
             Ok(Some(participant)) => participant,
             Ok(None) => {
                 let path = entry.path().join("participant.json");
-                if invalid_record_could_block(&id, evidence.get(&id), actor, actor_address, blocked)
-                {
+                if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
                     return Err(crate::error::AppError::config(
                         &path,
                         format!(
@@ -250,8 +249,7 @@ pub(crate) fn participants_for_join_validation(
                 continue;
             }
             Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
-                if invalid_record_could_block(&id, evidence.get(&id), actor, actor_address, blocked)
-                {
+                if invalid_record_could_block(evidence.get(&id), actor, actor_address, blocked) {
                     return Err(crate::error::AppError::config(
                         &entry.path().join("participant.json"),
                         format!(
@@ -359,17 +357,20 @@ fn join_evidence(
 }
 
 fn invalid_record_could_block(
-    id: &str,
-    addresses: Option<&BTreeSet<String>>,
+    membership_evidence: Option<&BTreeSet<String>>,
     actor: &Participant,
     actor_address: &str,
     blocked: &[BlockingRule],
 ) -> bool {
-    addresses.is_some_and(|addresses| {
-        addresses
-            .iter()
-            .any(|address| has_blocked_pair(actor_address, &actor.id, address, id, blocked))
-    })
+    membership_evidence.is_some_and(|addresses| !addresses.is_empty())
+        && blocked.iter().any(|rule| {
+            rule.from == "*"
+                || rule.to == "*"
+                || rule.from == actor_address
+                || rule.to == actor_address
+                || rule.from == actor.id
+                || rule.to == actor.id
+        })
 }
 
 fn has_blocked_pair(
