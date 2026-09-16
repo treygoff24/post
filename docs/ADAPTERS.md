@@ -425,17 +425,23 @@ session-start event), each adapter:
    context but never the sender. A failed or malformed bind emits one setup
    diagnostic and performs no snapshot or state write; the next event retries.
 3. Runs `post watch --snapshot` as usual, then reads `post participant show
-   --json`. When the returned participant has a non-empty `lineage`, the
-   adapter appends exactly one line:
+   --json`. Cursor and Grok have no verified native shell key, so a fresh
+   setup (and each retry after an incomplete setup) first appends one neutral
+   bootstrap line:
+   `[post] participant <id>; prefix Post commands with POST_PARTICIPANT=<id>`.
+   When the returned participant has a non-empty `lineage`, every adapter may
+   append one separate line:
    `[post] participant <id>, continuing lineage <name>; voices on request: post identity show '<name>' --voices`.
-   Long lineage names are safely shortened with an ellipsis inside the 256-byte
-   line budget. An unaffiliated participant receives no identity text at all.
+   Long lineage prose is bounded to 256 bytes; if the full quoted command does
+   not fit, the command is omitted in favor of `post identity show --help` so
+   it is never truncated. An unaffiliated participant receives no lineage or
+   voice text, but Cursor/Grok still receive the neutral bootstrap line.
 
 Claude and Codex have verified native conversation keys, so their payload-key
-bind converges with the harness environment. Cursor and Grok do not; their
-affiliated line also includes `bootstrap: prefix with POST_PARTICIPANT=<id>`;
-it notes that exporting the same value is safe only in a genuinely persistent
-shell, and an export is never assumed to persist across tool shells.
+bind converges with the harness environment. Cursor and Grok do not; prefix
+each Post command with the neutral `POST_PARTICIPANT=<id>` binding (or export
+it in a genuinely persistent shell). An export is never assumed to persist
+across tool shells.
 The adapter
 passes that participant explicitly to `watch` and `participant show`, and
 persists it for later lifecycle events.
@@ -443,15 +449,14 @@ Claude also attempts `post participant end` on `SessionEnd`; Codex, Cursor,
 and Grok do not expose a reliable session-end hook, so they make no end call.
 Prompt events and PostToolUse scans attempt `post participant touch`; an older
 binary that lacks these commands is tolerated with one bounded warning.
-For Grok, a capability-mismatch repair notice is committed once so the next
-prompt can still fall through to the normal watch path while setup remains
-unavailable.
+For Grok, a capability-mismatch repair notice does not commit initialized state:
+the next prompt retries capability verification and binding before any scan.
 
 The participant id is an attributable conversation binding, not a credential.
 A lineage is standing with optional, authored voices; no adapter injects a voice
 or a self-description before explicit affiliation and an on-request inspection.
 The merged session-start context remains bounded to 4,352 bytes (the 4 KiB mail
-notice plus a 256-byte participant line).
+notice plus bounded participant binding/lineage lines).
 
 The three layers are deliberately separate: layer 1 is the participant and its
 reply address, mechanically minted from a conversation key and never an
@@ -468,8 +473,9 @@ lineage, voice, or terms file can alter authority.
    gets you the SessionStart notice, which is most of the value.
 2. **Establish the participant.** On session start, check `post version --json`,
    bind from the session cwd using the validated payload key (or an explicit
-   `POST_PARTICIPANT`), and read `post participant show --json` only to append
-   the single affiliated-lineage line described above. A probe failure,
+   `POST_PARTICIPANT`), then run `post watch --snapshot` and read `post
+   participant show --json` only to append the neutral binding and optional
+   affiliated-lineage lines described above. A probe failure,
    capability mismatch, or malformed bind emits one bounded setup diagnostic
    and stops before any instruction text; retry on the next event.
 3. **Run `post watch --snapshot` from the session's cwd.** Let post resolve

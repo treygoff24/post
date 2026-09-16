@@ -366,9 +366,13 @@ function identityLine(result) {
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
     const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices`;
     if (Buffer.byteLength(render(lineage), "utf8") <= 256) return render(lineage);
+    const prefix = `[post] participant ${id}, continuing lineage `;
+    const suffix = "; voices on request: post identity show --help";
+    const available = 256 - Buffer.byteLength(prefix + suffix, "utf8") - Buffer.byteLength("…", "utf8");
+    if (available <= 0) return null;
     const chars = [...lineage];
-    while (chars.length > 0 && Buffer.byteLength(render(`${chars.join("")}…`), "utf8") > 256) chars.pop();
-    return chars.length > 0 ? render(`${chars.join("")}…`) : null;
+    while (chars.length > 0 && Buffer.byteLength(chars.join(""), "utf8") > available) chars.pop();
+    return `${prefix}${chars.join("")}…${suffix}`;
   } catch {
     return null;
   }
@@ -389,12 +393,6 @@ function safeIdentityPart(value) {
     value !== ".." &&
     !/[\\/]/.test(value)
   );
-}
-
-function appendIdentity(context, line) {
-  if (!line || Buffer.byteLength(line, "utf8") > 256) return context;
-  const merged = context ? `${context}\n${line}` : line;
-  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
 function appendLine(context, line) {
@@ -557,7 +555,7 @@ function main() {
   if (eventName === "SessionStart") {
     identity = identityLine(runPost(["participant", "show", "--json"], input.cwd, { participantId, clearConversationKeys: true, deadline }));
   }
-  const context = appendLine(appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+  const context = appendLine(appendLine(fresh.length === 0 ? "" : contextFor(fresh), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
   const payload = context
     ? { hookSpecificOutput: { hookEventName: eventName, additionalContext: context } }
     : {};

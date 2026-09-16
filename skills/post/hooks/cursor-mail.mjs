@@ -360,14 +360,25 @@ function identityLine(result) {
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
-    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices; bootstrap: prefix with POST_PARTICIPANT=${id}; export POST_PARTICIPANT=${id} only if shell persists`;
+    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices`;
     if (Buffer.byteLength(render(lineage), "utf8") <= 256) return render(lineage);
+    const prefix = `[post] participant ${id}, continuing lineage `;
+    const suffix = "; voices on request: post identity show --help";
+    const available = 256 - Buffer.byteLength(prefix + suffix, "utf8") - Buffer.byteLength("…", "utf8");
+    if (available <= 0) return null;
     const chars = [...lineage];
-    while (chars.length > 0 && Buffer.byteLength(render(`${chars.join("")}…`), "utf8") > 256) chars.pop();
-    return chars.length > 0 ? render(`${chars.join("")}…`) : null;
+    while (chars.length > 0 && Buffer.byteLength(chars.join(""), "utf8") > available) chars.pop();
+    return `${prefix}${chars.join("")}…${suffix}`;
   } catch {
     return null;
   }
+}
+
+function bindingLine(id) {
+  const line = safeIdentityPart(id)
+    ? `[post] participant ${id}; prefix Post commands with POST_PARTICIPANT=${id}`
+    : null;
+  return line && Buffer.byteLength(line, "utf8") <= 256 ? line : null;
 }
 
 function shellQuote(value) {
@@ -385,12 +396,6 @@ function safeIdentityPart(value) {
     value !== ".." &&
     !/[\\/]/.test(value)
   );
-}
-
-function appendIdentity(context, line) {
-  if (!line || Buffer.byteLength(line, "utf8") > 256) return context;
-  const merged = context ? `${context}\n${line}` : line;
-  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
 function appendLine(context, line) {
@@ -485,6 +490,7 @@ function main() {
   }
   const needsSetup = eventName === "sessionStart" || !state.participantId || (explicit && explicit !== state.participantId);
   let participantId = state.participantId;
+  let setupPerformed = false;
   if (needsSetup) {
     if (eventName === "sessionStart") {
       const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true, deadline }));
@@ -498,6 +504,7 @@ function main() {
       tryEmit(setupPayload(eventName, PARTICIPANT_SETUP_FAILED));
       return;
     }
+    setupPerformed = true;
   }
 
   if (eventName === "postToolUse") {
@@ -517,7 +524,7 @@ function main() {
     const nextState = { ...state, participantId, lifecycleWarned: state.lifecycleWarned || touchFailed, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
     const identity = eventName === "sessionStart" ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
-    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    const context = appendLine(appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", setupPerformed ? bindingLine(participantId) : null), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
     deliverThenCommit(stateFile, context ? noticePayload(eventName, context) : payload, nextState);
     return;
   }
@@ -538,7 +545,7 @@ function main() {
     const nextState = { ...state, participantId, lifecycleWarned: state.lifecycleWarned || touchFailed, failStreak: state.failStreak + 1 };
     const payload = nextState.failStreak === 1 ? failDiagnostic(eventName) : {};
     const identity = eventName === "sessionStart" ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
-    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    const context = appendLine(appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", setupPerformed ? bindingLine(participantId) : null), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
     deliverThenCommit(stateFile, context ? noticePayload(eventName, context) : payload, nextState);
     return;
   }
@@ -555,7 +562,7 @@ function main() {
   if (eventName === "sessionStart") {
     identity = identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline }));
   }
-  const context = appendLine(appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+  const context = appendLine(appendLine(appendLine(fresh.length === 0 ? "" : contextFor(fresh), setupPerformed ? bindingLine(participantId) : null), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
   const payload = context ? noticePayload(eventName, context) : {};
   deliverThenCommit(stateFile, payload, nextState);
 }

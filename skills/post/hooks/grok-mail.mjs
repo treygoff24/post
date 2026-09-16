@@ -351,14 +351,25 @@ function identityLine(result) {
     const id = participant?.id ?? value?.id;
     const lineage = participant?.lineage ?? value?.lineage;
     if (!safeIdentityPart(id) || !safeIdentityPart(lineage)) return null;
-    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices; bootstrap: prefix with POST_PARTICIPANT=${id}; export POST_PARTICIPANT=${id} only if shell persists`;
+    const render = (name) => `[post] participant ${id}, continuing lineage ${name}; voices on request: post identity show ${shellQuote(name)} --voices`;
     if (Buffer.byteLength(render(lineage), "utf8") <= 256) return render(lineage);
+    const prefix = `[post] participant ${id}, continuing lineage `;
+    const suffix = "; voices on request: post identity show --help";
+    const available = 256 - Buffer.byteLength(prefix + suffix, "utf8") - Buffer.byteLength("…", "utf8");
+    if (available <= 0) return null;
     const chars = [...lineage];
-    while (chars.length > 0 && Buffer.byteLength(render(`${chars.join("")}…`), "utf8") > 256) chars.pop();
-    return chars.length > 0 ? render(`${chars.join("")}…`) : null;
+    while (chars.length > 0 && Buffer.byteLength(chars.join(""), "utf8") > available) chars.pop();
+    return `${prefix}${chars.join("")}…${suffix}`;
   } catch {
     return null;
   }
+}
+
+function bindingLine(id) {
+  const line = safeIdentityPart(id)
+    ? `[post] participant ${id}; prefix Post commands with POST_PARTICIPANT=${id}`
+    : null;
+  return line && Buffer.byteLength(line, "utf8") <= 256 ? line : null;
 }
 
 function shellQuote(value) {
@@ -376,12 +387,6 @@ function safeIdentityPart(value) {
     value !== ".." &&
     !/[\\/]/.test(value)
   );
-}
-
-function appendIdentity(context, line) {
-  if (!line || Buffer.byteLength(line, "utf8") > 256) return context;
-  const merged = context ? `${context}\n${line}` : line;
-  return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
 function appendLine(context, line) {
@@ -473,21 +478,20 @@ function main() {
 
   // Grok exposes only UserPromptSubmit; treat the first prompt as SessionStart
   // for participant setup and capability gating.
-  const firstPrompt = !state.initialized;
+  const firstPrompt = !state.initialized || !state.participantId;
   const deadline = firstPrompt ? Date.now() + SESSION_DEADLINE_MS : null;
   const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
   if (participantConflict(sessionRaw, explicit)) {
     tryEmit(setupPayload("[post] POST_PARTICIPANT conflicts with this hook session key; unset it to bind from the payload or use the matching participant id"));
     return;
   }
-  const needsSetup = !state.initialized || (explicit && explicit !== state.participantId);
+  const needsSetup = !state.initialized || !state.participantId || (explicit && explicit !== state.participantId);
   let participantId = state.participantId;
+  let setupPerformed = false;
   if (needsSetup) {
     const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true, deadline }));
     if (versionError) {
-      if (tryEmit(setupPayload(versionError)) && versionError === PARTICIPANTS_MISSING) {
-        writeState(stateFile, { ...state, initialized: true, participantId: null });
-      }
+      tryEmit(setupPayload(versionError));
       return;
     }
     participantId = setupParticipant(cwd, sessionRaw, deadline);
@@ -495,6 +499,7 @@ function main() {
       tryEmit(setupPayload(PARTICIPANT_SETUP_FAILED));
       return;
     }
+    setupPerformed = true;
   }
 
   const touchFailed = participantId ? lifecycleWarning(cwd, participantId, "touch", deadline) : false;
@@ -510,7 +515,7 @@ function main() {
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
     const identity = firstPrompt ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
-    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    const context = appendLine(appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", setupPerformed ? bindingLine(participantId) : null), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
     deliverThenCommit(stateFile, context ? setupPayload(context) : payload, nextState);
     return;
   }
@@ -537,7 +542,7 @@ function main() {
     };
     const payload = nextState.failStreak === 1 ? failDiagnostic() : {};
     const identity = firstPrompt ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline })) : null;
-    const context = appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+    const context = appendLine(appendLine(appendLine(payload?.hookSpecificOutput?.additionalContext ?? "", setupPerformed ? bindingLine(participantId) : null), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
     deliverThenCommit(stateFile, context ? setupPayload(context) : payload, nextState);
     return;
   }
@@ -554,7 +559,7 @@ function main() {
   const identity = firstPrompt
     ? identityLine(runPost(["participant", "show", "--json"], cwd, { participantId, clearConversationKeys: true, deadline }))
     : null;
-  const context = appendLine(appendIdentity(fresh.length === 0 ? "" : contextFor(fresh), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
+  const context = appendLine(appendLine(appendLine(fresh.length === 0 ? "" : contextFor(fresh), setupPerformed ? bindingLine(participantId) : null), identity), !state.lifecycleWarned && touchFailed ? LIFECYCLE_WARNING : null);
   const payload = context
     ? { hookSpecificOutput: { hookEventName: CANONICAL_EVENT, additionalContext: context } }
     : {};

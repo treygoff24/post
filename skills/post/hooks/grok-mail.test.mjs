@@ -706,6 +706,7 @@ test("capability mismatch stays retryable until the binary is upgraded", () => {
   const first = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(first.hookSpecificOutput.additionalContext, /lacks the participants capability/);
   assert.equal(fs.existsSync(path.join(stateDir, "session-cap-once.json")), false);
+  assert.deepEqual(allStubCalls().at(-1).args, ["version", "--json"]);
   setStub({ events: [MAIL_A] });
   const second = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(second.hookSpecificOutput.additionalContext, /20260730-010101-aaa111/);
