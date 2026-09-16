@@ -301,7 +301,7 @@ fn nonempty_catchup_to_dev_null_refuses_without_cursor() {
 }
 
 #[test]
-fn malformed_mail_warns_and_valid_mail_moves() {
+fn malformed_mail_warns_and_valid_mail_is_seen_without_moving() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     let inbox = sandbox.mail_root.join("beta/inbox");
@@ -327,7 +327,7 @@ fn malformed_mail_warns_and_valid_mail_moves() {
     assert_eq!(output.status.code(), Some(0), "stderr: {:?}", output.stderr);
     let parsed: CatchupOutput = from_stdout(&output);
     assert_eq!(parsed.count, 1);
-    assert!(common::stderr(&output).contains("left malformed mail"));
+    assert!(common::stderr(&output).contains("left unroutable mail"));
     assert!(inbox.join(format!("{valid_id}.mail")).exists());
     assert!(inbox.join(format!("{malformed_id}.mail")).exists());
 }

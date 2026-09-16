@@ -505,7 +505,7 @@ fn participant_version_json_advertises_store_and_capabilities() {
         .is_some_and(|sha| !sha.is_empty()));
     assert_eq!(
         version["capabilities"],
-        serde_json::json!(["participants", "routing-receipts", "cursors-v2"])
+        serde_json::json!(["participants", "lineages", "routing-receipts", "cursors-v2"])
     );
     assert!(tree(&sandbox.mail_root).is_empty());
 }
@@ -1054,7 +1054,7 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     let value: Value = from_stdout(&output);
     assert_eq!(
         value["capabilities"],
-        serde_json::json!(["participants", "routing-receipts", "cursors-v2"])
+        serde_json::json!(["participants", "lineages", "routing-receipts", "cursors-v2"])
     );
     assert_eq!(tree(&ambiguous.mail_root), before);
 }
@@ -1305,7 +1305,8 @@ fn participant_round2_resolution_errors_are_advisory_on_read_only_surfaces() {
         &malformed.path,
         &[("POST_PARTICIPANT", "broken")],
     );
-    assert_success(&who);
+    assert!(who.status.success());
+    assert!(common::stderr(&who).contains("skipped corrupt participant"));
     let who: Value = from_stdout(&who);
     assert!(who["participant_error"]
         .as_str()
@@ -1732,7 +1733,7 @@ fn participant_lifecycle_missing_lease_is_stale_until_rebind() {
 }
 
 #[test]
-fn participant_lifecycle_malformed_timestamps_are_config_errors_not_panics() {
+fn participant_lifecycle_malformed_timestamps_are_skipped_and_doctor_names_them() {
     for (suffix, timestamp) in [
         ("letter", "2026-09-16T0x:00:00Z"),
         ("low-byte", "2026-09-16T0/:00:00Z"),
@@ -1747,15 +1748,27 @@ fn participant_lifecycle_malformed_timestamps_are_config_errors_not_panics() {
         });
 
         let output = sandbox.run_as_participant(&["participant", "list"], &id, &alpha);
-        assert_eq!(
-            output.status.code(),
-            Some(78),
-            "{timestamp}: stderr: {}",
-            common::stderr(&output)
-        );
-        let error: ErrorEnvelope = from_stderr(&output);
-        assert_eq!(error.error.code, "config_invalid");
-        assert!(error.error.message.contains("RFC3339"));
+        assert_eq!(output.status.code(), Some(0));
+        assert!(common::stderr(&output).contains("skipped corrupt participant"));
+        assert!(common::stderr(&output).contains("RFC3339"));
+        let listed: Value = from_stdout(&output);
+        assert!(!listed["participants"]
+            .as_array()
+            .expect("participants")
+            .iter()
+            .any(|participant| participant["id"] == id));
+
+        let doctor = sandbox.run_as_participant(&["doctor"], &id, &alpha);
+        assert_eq!(doctor.status.code(), Some(1));
+        let doctor: Value = from_stdout(&doctor);
+        assert!(doctor["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .any(|check| check["id"] == format!("participant.{id}.invalid")
+                && check["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("RFC3339"))));
     }
 }
 
