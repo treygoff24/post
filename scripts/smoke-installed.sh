@@ -35,43 +35,48 @@ setup_prerequisites || exit 1
 # Portable bounded process wait. Poll first so the final wait only reaps an
 # already-exited child. A timed-out child is terminated, then killed if needed.
 wait_for_pid() {
-    wait_pid=$1
-    wait_polls=${2:-100}
     wait_attempt=0
-    while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_attempt" -lt "$wait_polls" ]; do
+    while kill -0 "$1" 2>/dev/null && [ "$wait_attempt" -lt "${2:-100}" ]; do
         sleep 0.1
         wait_attempt=$((wait_attempt + 1))
     done
-    if ! kill -0 "$wait_pid" 2>/dev/null; then
-        wait "$wait_pid"
+    if ! kill -0 "$1" 2>/dev/null; then
+        wait "$1"
         return $?
     fi
 
-    kill "$wait_pid" 2>/dev/null || true
+    stop_pid_descendants "$1"
+    kill "$1" 2>/dev/null || true
     wait_attempt=0
-    while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_attempt" -lt 20 ]; do
+    while kill -0 "$1" 2>/dev/null && [ "$wait_attempt" -lt 20 ]; do
         sleep 0.1
         wait_attempt=$((wait_attempt + 1))
     done
-    if kill -0 "$wait_pid" 2>/dev/null; then
-        kill -9 "$wait_pid" 2>/dev/null || true
+    if kill -0 "$1" 2>/dev/null; then
+        stop_pid_descendants "$1"
+        kill -9 "$1" 2>/dev/null || true
         wait_attempt=0
-        while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_attempt" -lt 20 ]; do
+        while kill -0 "$1" 2>/dev/null && [ "$wait_attempt" -lt 20 ]; do
             sleep 0.1
             wait_attempt=$((wait_attempt + 1))
         done
     fi
-    if ! kill -0 "$wait_pid" 2>/dev/null; then
-        wait "$wait_pid" 2>/dev/null || true
+    if ! kill -0 "$1" 2>/dev/null; then
+        wait "$1" 2>/dev/null || true
     fi
     return 124
 }
 
-stop_pid() {
+stop_pid_descendants() {
     [ -n "$1" ] || return 0
     for stop_pid_child in $(pgrep -P "$1" 2>/dev/null); do
         stop_pid "$stop_pid_child"
     done
+}
+
+stop_pid() {
+    [ -n "$1" ] || return 0
+    stop_pid_descendants "$1"
     kill "$1" 2>/dev/null || true
     wait_for_pid "$1" 20 >/dev/null 2>&1 || true
 }
@@ -729,6 +734,24 @@ PY
             return 1
         fi
         capture_json "$PS_BASE/row09-a-read.json" as_a read "$id" --json || return 1
+        capture_json "$PS_BASE/row09-canary-send.json" as_c send --to workspace:smoke \
+            --subject row09-canary --body "streaming restart canary" --json || return 1
+        canary=$(mail_id_from "$PS_BASE/row09-canary-send.json")
+        [ -n "$canary" ] || { ROW_REASON="streaming restart canary send returned no envelope id"; return 1; }
+        if ! run_bounded_exec "$PS_WORK" "$PS_BASE/row09-a-streaming.ndjson" \
+            "$PS_BASE/row09-a-streaming.err" 100 env \
+            CLAUDE_CODE_SESSION_ID="$PS_A_KEY" "$PS_BIN" watch --room smoke --once --json; then
+            ROW_REASON="A restarted streaming watch failed or timed out"
+            return 1
+        fi
+        if ! jq -e -s --arg id "$id" --arg canary "$canary" \
+            '([.[] | select(.id==$canary and .address=={kind:"workspace",name:"smoke"})] | length) == 1 and ([.[] | select(.id==$id)] | length) == 0' \
+            "$PS_BASE/row09-a-streaming.ndjson" >/dev/null 2>&1; then
+            ROW_REASON="restarted streaming watcher missed the canary or rang A's durably consumed id"
+            return 1
+        fi
+        capture_json "$PS_BASE/row09-a-canary-read.json" as_a read "$canary" --json || return 1
+        assert_jq "$PS_BASE/row09-a-canary-read.json" '.envelope.id == $id' --arg id "$canary" || return 1
         if ! run_bounded_exec "$PS_WORK" "$PS_BASE/row09-a-restart.ndjson" \
             "$PS_BASE/row09-a-restart.err" 100 env \
             CLAUDE_CODE_SESSION_ID="$PS_A_KEY" "$PS_BIN" watch --room smoke --snapshot --json; then
@@ -851,8 +874,17 @@ PY
         missing=$(jq -r '.participant.id' "$PS_BASE/lifecycle-missing.json")
         stale_file="$PS_ROOT/participants/$stale/participant.json"
         missing_file="$PS_ROOT/participants/$missing/participant.json"
-        jq '.last_seen="2000-01-01T00:00:00Z" | .lease_hours=1' "$stale_file" >"$stale_file.tmp" && mv "$stale_file.tmp" "$stale_file"
-        jq 'del(.last_seen)' "$missing_file" >"$missing_file.tmp" && mv "$missing_file.tmp" "$missing_file"
+        if ! jq '.last_seen="2000-01-01T00:00:00Z" | .lease_hours=1' \
+            "$stale_file" >"$stale_file.tmp"; then
+            ROW_REASON="could not seed stale participant for lifecycle who"
+            return 1
+        fi
+        mv "$stale_file.tmp" "$stale_file" || { ROW_REASON="could not publish stale participant for lifecycle who"; return 1; }
+        if ! jq 'del(.last_seen)' "$missing_file" >"$missing_file.tmp"; then
+            ROW_REASON="could not seed no-lease participant for lifecycle who"
+            return 1
+        fi
+        mv "$missing_file.tmp" "$missing_file" || { ROW_REASON="could not publish no-lease participant for lifecycle who"; return 1; }
         capture_json "$PS_BASE/lifecycle-end.json" as_participant "$ended" participant end --json || return 1
         capture_json "$PS_BASE/lifecycle-who.json" as_a who --json || return 1
         assert_jq "$PS_BASE/lifecycle-who.json" \
@@ -876,9 +908,17 @@ from datetime import datetime, timedelta, timezone
 print((datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
 PY
 )
-        jq --arg seen "$stale_seen" '.last_seen=$seen | .lease_hours=1' \
-            "$stale_file" >"$stale_file.tmp" && mv "$stale_file.tmp" "$stale_file"
-        jq 'del(.last_seen)' "$missing_file" >"$missing_file.tmp" && mv "$missing_file.tmp" "$missing_file"
+        if ! jq --arg seen "$stale_seen" '.last_seen=$seen | .lease_hours=1' \
+            "$stale_file" >"$stale_file.tmp"; then
+            ROW_REASON="could not seed stale participant for lifecycle fan-out"
+            return 1
+        fi
+        mv "$stale_file.tmp" "$stale_file" || { ROW_REASON="could not publish stale participant for lifecycle fan-out"; return 1; }
+        if ! jq 'del(.last_seen)' "$missing_file" >"$missing_file.tmp"; then
+            ROW_REASON="could not seed no-lease participant for lifecycle fan-out"
+            return 1
+        fi
+        mv "$missing_file.tmp" "$missing_file" || { ROW_REASON="could not publish no-lease participant for lifecycle fan-out"; return 1; }
         capture_json "$PS_BASE/lifecycle-fanout-end.json" as_participant "$ended" participant end --json || return 1
         capture_json "$PS_BASE/lifecycle-fanout-send.json" as_c send --to workspace:smoke \
             --subject lifecycle-fanout --body "active recipients only" --json || return 1
@@ -904,11 +944,16 @@ PY
         assert_jq "$receipt" '([.recipients[]] | index($id)) != null' --arg id "$frozen" || return 1
         capture_json "$PS_BASE/lifecycle-frozen-end.json" as_participant "$frozen" participant end --json || return 1
         participant_file="$PS_ROOT/participants/$frozen/participant.json"
-        cp "$participant_file" "$PS_BASE/lifecycle-frozen-ended.json" || { ROW_REASON="could not snapshot ended participant"; return 1; }
+        frozen_ended=2000-01-01T00:00:00Z
+        if ! jq --arg ended "$frozen_ended" '.last_seen=$ended | .ended_at=$ended' \
+            "$participant_file" >"$participant_file.tmp"; then
+            ROW_REASON="could not seed ended participant timestamps for frozen read"
+            return 1
+        fi
+        mv "$participant_file.tmp" "$participant_file" || { ROW_REASON="could not publish ended participant timestamps for frozen read"; return 1; }
         capture_json "$PS_BASE/lifecycle-frozen-read.json" as_participant "$frozen" read "$id" --json || return 1
         assert_jq "$PS_BASE/lifecycle-frozen-read.json" '.envelope.id == $id' --arg id "$id" || return 1
-        cmp -s "$participant_file" "$PS_BASE/lifecycle-frozen-ended.json" || { ROW_REASON="consuming read reactivated or changed ended participant"; return 1; }
-        assert_jq "$participant_file" '.ended_at != null' || return 1
+        assert_jq "$participant_file" '.ended_at == $ended' --arg ended "$frozen_ended" || return 1
         cursor="$PS_ROOT/participants/$frozen/cursors.json"
         [ -f "$cursor" ] || { ROW_REASON="ended participant cursor missing after consumption"; return 1; }
         assert_jq "$cursor" \
@@ -937,6 +982,15 @@ PY
             ROW_REASON="unbound JSON snapshot failed or timed out"
             return 1
         fi
+        expected_unbound='participant: unbound (run: post participant bind)'
+        /usr/bin/grep -Fxq -- "$expected_unbound" "$PS_BASE/unbound-watch-plain.err" || {
+            ROW_REASON="unbound plain snapshot omitted the participant bind diagnostic"
+            return 1
+        }
+        /usr/bin/grep -Fxq -- "$expected_unbound" "$PS_BASE/unbound-watch-json.err" || {
+            ROW_REASON="unbound JSON snapshot omitted the participant bind diagnostic"
+            return 1
+        }
         if ! python3 - "$PS_BASE/unbound-watch-plain.ndjson" "$PS_BASE/unbound-watch-json.ndjson" <<'PY'
 import json
 import sys
@@ -1295,9 +1349,10 @@ legacy_smoke() (
 
     legacy_parse_conflict() {
         require_legacy_setup || return 1
-        parse_rc=0
-        POST_PARTICIPANT="$LEGACY_BETA_ID" "$BIN" watch --room beta \
-            --from now --snapshot >/dev/null 2>&1 || parse_rc=$?
+        run_bounded_exec "$BASE/beta" "$BASE/parse-conflict.out" \
+            "$BASE/parse-conflict.err" 100 env POST_PARTICIPANT="$LEGACY_BETA_ID" \
+            "$BIN" watch --room beta --from now --snapshot
+        parse_rc=$?
         [ "$parse_rc" -eq 2 ] || {
             LEGACY_REASON="--from now --snapshot expected exit 2, got $parse_rc"
             return 1
@@ -1393,10 +1448,7 @@ legacy_smoke() (
     legacy_channels_count() {
         require_legacy_setup || return 1
         channel=legacy-count
-        prepare_catchup_channel "$channel" || {
-            LEGACY_REASON="could not prepare count channel"
-            return 1
-        }
+        prepare_catchup_channel "$channel" || return 1
         ( cd "$BASE/beta" && POST_PARTICIPANT="$LEGACY_BETA_ID" \
             "$BIN" channels >"$BASE/channels-before-catchup.json" ) || {
             LEGACY_REASON="channels listing failed"
@@ -1413,10 +1465,7 @@ legacy_smoke() (
     legacy_catchup_persistence() {
         require_legacy_setup || return 1
         channel=legacy-catchup
-        prepare_catchup_channel "$channel" || {
-            LEGACY_REASON="could not prepare catchup channel"
-            return 1
-        }
+        prepare_catchup_channel "$channel" || return 1
         first_id=$(json_field "$BASE/$channel-send-1.json" '.message.id') || {
             LEGACY_REASON="first catchup setup send returned no id: $(legacy_json_actual "$BASE/$channel-send-1.json")"
             return 1
@@ -1939,8 +1988,20 @@ legacy_smoke() (
 )
 
 SMOKE_FAILURES=0
-participants_smoke "$BIN" || SMOKE_FAILURES=$((SMOKE_FAILURES + 1))
-legacy_smoke "$BIN" || SMOKE_FAILURES=$((SMOKE_FAILURES + 1))
+participants_rc=0
+participants_smoke "$BIN" || participants_rc=$?
+case "$participants_rc" in
+    0) ;;
+    130|143) exit "$participants_rc" ;;
+    *) SMOKE_FAILURES=$((SMOKE_FAILURES + 1)) ;;
+esac
+legacy_rc=0
+legacy_smoke "$BIN" || legacy_rc=$?
+case "$legacy_rc" in
+    0) ;;
+    130|143) exit "$legacy_rc" ;;
+    *) SMOKE_FAILURES=$((SMOKE_FAILURES + 1)) ;;
+esac
 if [ "$SMOKE_FAILURES" -eq 0 ]; then
     printf 'SMOKE PASS\n'
     exit 0
