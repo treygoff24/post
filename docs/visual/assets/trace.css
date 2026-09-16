@@ -1,0 +1,1299 @@
+/* ============================================================================
+   Trace — a printed channel record.
+   Visual world for the Post participants explainer. See ../DIRECTION.md.
+   Every rule, tick and mark on this page carries information. Nothing here is
+   present because a page usually has one.
+   ========================================================================= */
+
+@font-face {
+  font-family: "Newsreader";
+  src: url("fonts/Newsreader.woff2") format("woff2-variations");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Newsreader";
+  src: url("fonts/Newsreader-Italic.woff2") format("woff2-variations");
+  font-weight: 200 800;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: "Archivo";
+  src: url("fonts/Archivo.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: block;
+}
+
+/* ---------------------------------------------------------------- tokens - */
+
+:root {
+  /* Chart stock. Light, chosen from the use scene: reading at length,
+     in the morning, wanting to trust what you read. */
+  --paper:        #f2ede3;
+  --paper-inset:  #e8e1d3;
+  --paper-deep:   #ded5c3;
+
+  --ink:          #181713;
+  --ink-2:        #565049;
+  --ink-3:        #645d4f;
+
+  --rule:         #d3cabb;
+  --rule-major:   #b6ab96;
+
+  /* Channel inks. Hue identifies whose channel it is and never carries
+     read state; state is fill, strike and words. */
+  --ch-a:         #b03a1e;   /* Astra   */
+  --ch-a-wash:    #f6e4dd;
+  --ch-b:         #1c4d6a;   /* Fable   */
+  --ch-b-wash:    #dde8ef;
+  --ch-c:         #47591f;   /* a third */
+  --ch-c-wash:    #e6ead7;
+
+  --alert:        #7a5709;
+  --alert-wash:   #f4e9cf;
+
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans:  "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --mono:  "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --measure: 66ch;
+  --rail-pitch: 4.9rem;       /* narrowest an event slot may become */
+  --gutter: clamp(1.25rem, 4vw, 4rem);
+  --page: 78rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur: 420ms;
+
+  --focus: 0 0 0 2px var(--paper), 0 0 0 4px var(--ink);
+}
+
+/* ---------------------------------------------------------------- reset -- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scrollbar-color: var(--rule-major) var(--paper);
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-variation-settings: "opsz" 16, "wght" 400;
+  font-size: clamp(1.0625rem, 0.95rem + 0.4vw, 1.1875rem);
+  line-height: 1.62;
+  font-feature-settings: "kern", "liga", "calt";
+}
+
+/* The browser surfaces we did not draw still belong to the palette. */
+::selection { background: var(--ch-a-wash); color: var(--ink); }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: var(--paper); }
+::-webkit-scrollbar-thumb {
+  background: var(--rule-major);
+  border: 3px solid var(--paper);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: 2px;
+}
+
+img, svg { max-width: 100%; }
+
+/* ------------------------------------------------------------ typography - */
+
+h1, h2, h3, h4 {
+  font-family: var(--serif);
+  text-wrap: balance;
+  margin: 0;
+}
+
+h2 {
+  font-variation-settings: "opsz" 48, "wght" 450;
+  font-size: clamp(2rem, 1.3rem + 2.8vw, 3.25rem);
+  line-height: 1.04;
+  letter-spacing: -0.025em;
+}
+
+h3 {
+  font-variation-settings: "opsz" 28, "wght" 560;
+  font-size: clamp(1.3rem, 1.1rem + 0.8vw, 1.65rem);
+  line-height: 1.18;
+  letter-spacing: -0.015em;
+}
+
+h4 {
+  font-variation-settings: "opsz" 18, "wght" 620;
+  font-size: 1.0625rem;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+}
+
+p { margin: 0 0 1.1em; max-width: var(--measure); }
+p:last-child { margin-bottom: 0; }
+
+a {
+  color: inherit;
+  text-decoration-color: var(--rule-major);
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+a:hover { text-decoration-color: var(--ch-a); }
+
+strong { font-variation-settings: "opsz" 16, "wght" 650; }
+em { font-style: italic; }
+
+code, .mono, kbd {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  font-variation-settings: "wght" 450;
+  font-feature-settings: "kern", "calt";
+  letter-spacing: -0.01em;
+}
+
+/* Tracked condensed caps: the caption voice of the record. */
+.label {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 86, "wght" 620;
+  font-size: 0.6875rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  line-height: 1.2;
+  display: inline-block;
+}
+
+.label--ink { color: var(--ink-2); }
+.label .mono { text-transform: none; letter-spacing: 0; font-size: 1em; }
+
+.num {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 92, "wght" 500;
+  font-feature-settings: "tnum";
+}
+
+/* ----------------------------------------------------------- page frame -- */
+
+/* The reading rail. One instrument runs the length of the document: a hairline
+   with a tick per section and a marker at the reader's own position. */
+.rail-spine {
+  position: fixed;
+  left: max(0.75rem, calc((100vw - var(--page)) / 2 - 2.5rem));
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--rule);
+  z-index: 40;
+  pointer-events: none;
+}
+.rail-spine__ticks { position: absolute; inset: 0; }
+.rail-spine__tick {
+  position: absolute;
+  left: -3px;
+  width: 7px;
+  height: 1px;
+  background: var(--rule-major);
+}
+.rail-spine__cursor {
+  position: absolute;
+  left: -2px;
+  width: 5px;
+  height: 5px;
+  background: var(--ch-a);
+  transform: translateY(-50%);
+  transition: top 120ms linear;
+}
+@media (max-width: 1180px) { .rail-spine { display: none; } }
+
+.shell {
+  max-width: var(--page);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 0.75rem 1.25rem;
+  z-index: 100;
+  font-family: var(--sans);
+  font-size: 0.875rem;
+}
+.skip:focus { left: 1rem; top: 1rem; }
+
+section { scroll-margin-top: 2rem; }
+
+/* Section head: a single-rail mark, the smallest of the three scales at which
+   the channel field appears. */
+.sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  border-top: 1px solid var(--ink);
+  padding-top: 0.75rem;
+  margin-bottom: 2.25rem;
+}
+.sec-head__mark {
+  flex: 0 0 auto;
+  width: 3.75rem;
+  height: 1.05rem;
+  margin-top: 0.5rem;
+}
+.sec-head__text { flex: 1 1 auto; min-width: 0; }
+.sec-head__kicker {
+  display: block;
+  margin-bottom: 0.55rem;
+}
+.sec-head__lede {
+  font-variation-settings: "opsz" 24, "wght" 350;
+  font-size: clamp(1.0625rem, 1rem + 0.35vw, 1.25rem);
+  color: var(--ink-2);
+  line-height: 1.45;
+  max-width: 46ch;
+  margin-top: 0.85rem;
+}
+
+/* ------------------------------------------------------------- masthead -- */
+
+.masthead {
+  padding: clamp(0.9rem, 2.4vh, 1.75rem) 0 0;
+}
+
+.masthead__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 2rem;
+  align-items: baseline;
+  border-bottom: 1px solid var(--ink);
+  padding-bottom: 0.7rem;
+}
+.masthead__wordmark {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 80, "wght" 760;
+  font-size: 0.8125rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+.masthead__meta {
+  margin-left: auto;
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------- opening -- */
+/* The first viewport is the instrument. A narrow brief on the left carries the
+   headline, the computed acceptance line and one paragraph of orientation; the
+   working field takes the rest of the row. On a phone the order is headline,
+   status, field, then the orientation paragraph, so the mode switch and both
+   named rails arrive before any long prose. */
+
+.opening {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.85rem;
+  padding: 0.95rem 0 0;
+  align-items: start;
+}
+.opening__title {
+  font-variation-settings: "opsz" 60, "wght" 400;
+  font-size: clamp(1.625rem, 1.2rem + 1.5vw, 2.625rem);
+  line-height: 1.02;
+  letter-spacing: -0.024em;
+  max-width: 19ch;
+  margin: 0;
+  text-wrap: balance;
+}
+.opening__status {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.7rem;
+  border-top: 1px solid var(--alert);
+  border-bottom: 1px solid var(--alert);
+  background: var(--alert-wash);
+  padding: 0.45rem 0.75rem;
+  font-variation-settings: "opsz" 14, "wght" 450;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.opening__status .label { color: var(--alert); }
+.opening__status[data-status="pass"] {
+  border-color: var(--ch-c);
+  background: var(--ch-c-wash);
+}
+.opening__status[data-status="pass"] .label { color: var(--ch-c); }
+.opening__status[data-status="fail"] {
+  border-color: var(--ch-a);
+  background: var(--ch-a-wash);
+}
+.opening__status[data-status="fail"] .label { color: var(--ch-a); }
+
+.opening__deck {
+  margin: 0.4rem 0 0;
+  font-variation-settings: "opsz" 20, "wght" 380;
+  font-size: clamp(1.0625rem, 0.98rem + 0.3vw, 1.1875rem);
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 44ch;
+}
+.opening__deck b {
+  color: var(--ink);
+  font-variation-settings: "opsz" 20, "wght" 600;
+}
+
+@media (min-width: 64rem) {
+  .opening {
+    grid-template-columns: minmax(17rem, 0.62fr) minmax(0, 1.6fr);
+    grid-template-rows: auto auto 1fr;
+    grid-template-areas:
+      "title  field"
+      "status field"
+      "deck   field";
+    column-gap: clamp(2rem, 3vw, 3rem);
+    row-gap: 1.1rem;
+    padding-top: clamp(1.25rem, 3.2vh, 2.25rem);
+  }
+  .opening__title  { grid-area: title; font-size: clamp(2.25rem, 0.9rem + 2vw, 2.875rem); }
+  .opening__deck   { grid-area: deck; margin: 0; font-size: 1.0625rem; align-self: start; }
+  .opening__status { grid-area: status; }
+  .opening > .field { grid-area: field; }
+}
+
+.opening__after {
+  display: grid;
+  gap: 0 clamp(1.75rem, 4vw, 3rem);
+  margin-top: clamp(2.5rem, 6vh, 4rem);
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--ink);
+  max-width: 100%;
+}
+.opening__after p { max-width: 58ch; }
+.opening__subhead {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 84, "wght" 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  margin: 0 0 0.6rem;
+  color: var(--ink);
+}
+@media (min-width: 52rem) {
+  .opening__after { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+/* ============================================================ THE FIELD == */
+/* The instrument. Full size here; a two-rail glyph inline in prose; a
+   single-rail mark on section heads. One grammar, three scales.            */
+
+.field {
+  margin: 0;
+  border: 1px solid var(--ink);
+  background: var(--paper-inset);
+  position: relative;
+  container-type: inline-size;
+  container-name: field;
+}
+
+.field__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.5rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--rule-major);
+  background: var(--paper);
+}
+.field__head .label { color: var(--ink-2); }
+
+.field__mode {
+  display: flex;
+  margin-left: auto;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  min-width: 0;
+  padding: 0;
+  margin-block: 0;
+  margin-inline-end: 0;
+}
+.field__mode div { display: flex; }
+.mode-opt { position: relative; display: flex; }
+.mode-opt input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.mode-opt span {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 88, "wght" 600;
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.45rem 0.85rem;
+  color: var(--ink-2);
+  white-space: nowrap;
+  transition: background 140ms linear, color 140ms linear;
+}
+.mode-opt + .mode-opt span { border-left: 1px solid var(--rule-major); }
+.mode-opt input:checked + span { background: var(--ink); color: var(--paper); }
+.mode-opt input:focus-visible + span { box-shadow: inset var(--focus); }
+.mode-opt:hover input:not(:checked) + span { background: var(--paper-deep); }
+
+.field__plot {
+  position: relative;
+  padding: 1.35rem 1rem 1rem;
+  --label-w: 11rem;
+}
+
+.field__origin {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  gap: 0 0.6rem;
+  align-items: center;
+  margin-bottom: 0.2rem;
+}
+.field__origin-label {
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+}
+.field__origin-track {
+  position: relative;
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+}
+.field__origin-track .slot { min-height: 2.5rem; }
+.field__origin-track::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  border-top: 1px dashed var(--rule-major);
+}
+
+/* the routing fan: real geometry, drawn from the address down to the rails */
+.field__fan {
+  display: block;
+  width: 100%;
+  height: 1.6rem;
+  margin-left: calc(var(--label-w) + 0.6rem);
+  width: calc(100% - var(--label-w) - 0.6rem);
+  overflow: visible;
+}
+.field__fan path {
+  fill: none;
+  stroke-width: 1;
+  stroke-dasharray: var(--len, 100);
+  stroke-dashoffset: var(--len, 100);
+}
+.field__fan path.is-live {
+  animation: draw var(--dur) var(--ease-out) forwards;
+}
+@keyframes draw { to { stroke-dashoffset: 0; } }
+
+/* ------- rails -------- */
+
+.rails { display: flex; flex-direction: column; }
+
+.rail {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  gap: 0 0.6rem;
+  align-items: stretch;
+  border-top: 1px solid var(--rule);
+}
+.rail:first-child { border-top: 0; }
+
+.rail__id {
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 0.55rem 0.55rem 0.55rem 0;
+  border-right: 2px solid var(--ch);
+}
+.rail__name {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 86, "wght" 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ch);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+/* the per-participant mark: shape, so the rails read without colour */
+.rail__glyph { width: 9px; height: 9px; flex: 0 0 auto; }
+.rail__pid {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+  font-variation-settings: "wght" 420;
+  letter-spacing: -0.02em;
+}
+.rail__count {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 92, "wght" 520;
+  font-feature-settings: "tnum";
+  font-size: 0.6875rem;
+  color: var(--ink-2);
+  letter-spacing: 0.02em;
+}
+
+.rail__track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-height: 4.1rem;
+}
+.rail__track::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  border-top: 1px solid var(--ch);
+  opacity: 0.55;
+}
+
+/* the legacy rail: one track, two names bracketed onto it */
+.rail--shared .rail__id { border-right-color: var(--ink); }
+.rail--shared .rail__name { color: var(--ink); }
+.rail--shared .rail__track::before { border-top-color: var(--ink); opacity: 0.7; }
+
+/* ------- events -------- */
+
+.slot {
+  position: relative;
+  flex: 1 1 0;
+  min-width: var(--rail-pitch);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 4.1rem;
+}
+/* The time ruling: one hairline per slot boundary, aligned to the slots by
+   construction rather than by a background offset that can drift. */
+.slot::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; right: 0;
+  width: 1px;
+  background: var(--rule);
+}
+/* The dispatch line: drawn only through slots that carry a message, so the
+   length of the column tells you how far that message routed. */
+.slot[data-has]::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--rule-major);
+}
+
+.ev {
+  position: relative;
+  width: 3.6rem;
+  min-height: 2.4rem;
+  border: 1.5px solid var(--ch);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  background: var(--paper-inset);
+  padding: 0.2rem 0.1rem;
+}
+.ev__tick {
+  position: absolute;
+  top: -0.55rem;
+  left: 50%;
+  width: 1px;
+  height: 0.5rem;
+  background: var(--ch);
+  transform: translateX(-50%);
+}
+.ev__id {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-variation-settings: "wght" 500;
+  letter-spacing: -0.03em;
+  color: var(--ink-2);
+}
+.ev__state {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 84, "wght" 700;
+  font-size: 0.625rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* UNREAD: solid fill, raised tick. */
+.ev[data-state="unread"] {
+  background: var(--ch);
+  border-color: var(--ch);
+}
+.ev[data-state="unread"] .ev__id { color: var(--paper); font-variation-settings: "wght" 400; }
+.ev[data-state="unread"] .ev__state { color: var(--paper); }
+
+/* READ: hollow, struck through. */
+/* No subtree opacity: at 0.9 it composited Astra's label down to 4.43:1. */
+.ev[data-state="read"] { background: var(--paper); border-style: solid; }
+.ev[data-state="read"] .ev__state { color: var(--ch); }
+.ev[data-state="read"]::after {
+  content: "";
+  position: absolute;
+  left: -0.3rem;
+  right: -0.3rem;
+  top: 50%;
+  border-top: 1.5px solid var(--ch);
+}
+
+/* SUPPRESSED: this participant is the sender; the routing receipt excludes it. */
+/* Opaque stock, not transparent: the rail and dispatch hairlines would
+   otherwise cross behind the label text. */
+.ev[data-state="suppressed"] {
+  background: var(--paper-inset);
+  border-style: dotted;
+  border-color: var(--ink-3);
+  min-height: 2.05rem;
+}
+.ev[data-state="suppressed"] .ev__id { color: var(--ink-3); }
+.ev[data-state="suppressed"] .ev__state { color: var(--ink-3); }
+
+/* CONSUMED: the legacy defect, drawn. The copy is gone, not read. */
+.ev[data-state="consumed"] {
+  background: var(--paper-inset);
+  border-style: dashed;
+  border-color: var(--alert);
+}
+.ev[data-state="consumed"] .ev__id { color: var(--alert); }
+.ev[data-state="consumed"] .ev__state { color: var(--alert); }
+.ev[data-state="consumed"]::after,
+.ev[data-state="consumed"]::before {
+  content: "";
+  position: absolute;
+  left: -0.15rem;
+  right: -0.15rem;
+  top: 50%;
+  border-top: 1.5px solid var(--alert);
+}
+.ev[data-state="consumed"]::after  { transform: rotate(32deg); }
+.ev[data-state="consumed"]::before { transform: rotate(-32deg); }
+
+.ev--origin {
+  width: 3.6rem;
+  min-height: 1.7rem;
+  border-color: var(--ink-3);
+  border-width: 1px;
+  background: var(--paper);
+}
+.ev--origin .ev__state { color: var(--ink-2); font-variation-settings: "wdth" 84, "wght" 600; }
+.ev--origin .ev__tick { display: none; }
+
+/* No fill mode: the resting style is the visible one, so an element is never
+   left at the keyframe's starting opacity if animation does not run. */
+.ev.is-arriving { animation: land var(--dur) var(--ease-out); }
+@keyframes land {
+  from { opacity: 0; transform: translateY(-0.9rem); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ------- held row -------- */
+
+.held {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  gap: 0 0.6rem;
+  align-items: center;
+  border-top: 1px dashed var(--rule-major);
+  margin-top: 0.3rem;
+  padding-top: 0.6rem;
+}
+.held__id {
+  text-align: right;
+  padding-right: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+}
+.held__track {
+  display: flex;
+  align-items: center;
+  min-height: 3.2rem;
+  gap: 0;
+}
+.held__track .slot { min-height: 3.2rem; }
+.held__track .slot::after { background: none; }
+.held__empty {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 88, "wght" 450;
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  font-style: normal;
+  padding-left: 0.2rem;
+}
+.ev--held { border-color: var(--alert); border-style: solid; background: var(--alert-wash); }
+.ev--held .ev__state { color: var(--alert); }
+.ev--held .ev__id { color: var(--ink-2); }
+
+/* ------- readout + controls -------- */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.6rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--rule-major);
+  background: var(--paper);
+}
+.legend__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.legend__swatch {
+  position: relative;
+  width: 1.5rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  border: 1.5px solid var(--ink-3);
+  background: var(--paper);
+}
+.legend__swatch[data-state="unread"] { background: var(--ink); border-color: var(--ink); }
+.legend__swatch[data-state="read"]::after {
+  content: ""; position: absolute; left: -0.2rem; right: -0.2rem; top: 50%;
+  border-top: 1.5px solid var(--ink);
+}
+.legend__swatch[data-state="read"] { border-color: var(--ink); }
+.legend__swatch[data-state="suppressed"] { border-style: dotted; background: transparent; }
+.legend__swatch[data-state="consumed"] { border-style: dashed; border-color: var(--alert); }
+.legend__swatch[data-state="consumed"]::before,
+.legend__swatch[data-state="consumed"]::after {
+  content: ""; position: absolute; left: -0.1rem; right: -0.1rem; top: 50%;
+  border-top: 1.5px solid var(--alert);
+}
+.legend__swatch[data-state="consumed"]::before { transform: rotate(34deg); }
+.legend__swatch[data-state="consumed"]::after  { transform: rotate(-34deg); }
+.legend__swatch[data-state="held"] { border-color: var(--alert); background: var(--alert-wash); }
+.legend__text {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 92, "wght" 450;
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  line-height: 1.3;
+}
+.legend__text b {
+  font-variation-settings: "wdth" 88, "wght" 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.6875rem;
+  color: var(--ink);
+  margin-right: 0.3rem;
+}
+
+.field__readout {
+  border-top: 1px solid var(--ink);
+  background: var(--paper);
+  padding: 0.7rem 1rem;
+  display: flex;
+  gap: 0.6rem 1rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.field__readout p {
+  margin: 0;
+  max-width: 60ch;
+  font-variation-settings: "opsz" 15, "wght" 400;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.field__readout .label { flex: 0 0 auto; }
+
+.controls {
+  border-top: 1px solid var(--rule-major);
+  background: var(--paper);
+  padding: 0.85rem 1rem 1rem;
+  display: grid;
+  gap: 0.85rem;
+}
+.controls__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.controls__row > .label { flex: 0 0 7.5rem; }
+
+.btn {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 96, "wght" 600;
+  font-size: 0.8125rem;
+  letter-spacing: 0.015em;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 120ms linear, color 120ms linear, transform 120ms var(--ease-out);
+}
+.btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; border-style: dashed; }
+.btn--a { border-color: var(--ch-a); color: var(--ch-a); }
+.btn--a:hover:not(:disabled) { background: var(--ch-a); color: var(--paper); }
+.btn--b { border-color: var(--ch-b); color: var(--ch-b); }
+.btn--b:hover:not(:disabled) { background: var(--ch-b); color: var(--paper); }
+.btn--quiet { border-color: var(--rule-major); color: var(--ink-2); }
+
+.sim-note {
+  border-top: 1px solid var(--rule);
+  padding: 0.6rem 1rem 0.75rem;
+  background: var(--paper-deep);
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 92, "wght" 450;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  letter-spacing: 0.005em;
+}
+.sim-note b {
+  font-variation-settings: "wdth" 92, "wght" 700;
+  color: var(--ink);
+}
+
+.vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------- inline glyph - */
+/* the field at its middle scale, sitting in a line of prose */
+
+.glyph {
+  display: inline-block;
+  vertical-align: -0.18em;
+  width: 3.4em;
+  height: 1.05em;
+  margin: 0 0.12em;
+}
+
+/* --------------------------------------------------------------- layout -- */
+
+.band { padding: clamp(3.5rem, 9vh, 6.5rem) 0; }
+.band--tint { background: var(--paper-inset); }
+.band--ink {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.cols {
+  display: grid;
+  gap: clamp(1.75rem, 4vw, 3rem);
+}
+@media (min-width: 58rem) {
+  .cols--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cols--2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .cols--aside { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+}
+
+/* -------------------------------------------------- the definition register */
+/* Not cards. A ruled register: term, then what it does, then what it cannot. */
+
+.reg { border-top: 2px solid var(--ink); }
+.reg__term {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding-top: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+.reg__term h3 { color: var(--ch, var(--ink)); }
+.reg dl { margin: 0; }
+.reg dt {
+  border-top: 1px solid var(--rule);
+  padding-top: 0.55rem;
+  margin-top: 0.9rem;
+}
+.reg dd {
+  margin: 0.3rem 0 0;
+  font-variation-settings: "opsz" 15, "wght" 400;
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.reg dd strong { color: var(--ink); font-variation-settings: "opsz" 15, "wght" 640; }
+.reg dd .mono { color: var(--ink); }
+.reg dt .label { color: var(--ink-3); }
+.reg--cannot dd { color: var(--ink-2); }
+
+/* ------------------------------------------------------------- the voices */
+
+.voices { display: grid; gap: 0; border-top: 2px solid var(--ink); }
+
+.voice {
+  display: grid;
+  gap: 0.25rem 1.5rem;
+  padding: 1.4rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+@media (min-width: 52rem) {
+  .voice { grid-template-columns: 13rem minmax(0, 1fr); }
+}
+.voice__by {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-top: 0.25rem;
+}
+.voice__pid {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--ink-2);
+  font-variation-settings: "wght" 480;
+  letter-spacing: -0.02em;
+}
+.voice__when { color: var(--ink-3); }
+.voice__text {
+  font-variation-settings: "opsz" 17, "wght" 400;
+  max-width: 60ch;
+}
+.voice__text p { max-width: none; }
+.voice--dissent { border-left: 0; }
+.voice--dissent .voice__text { font-style: italic; }
+.voice--gap .voice__text {
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 92, "wght" 450;
+  font-size: 0.875rem;
+  border: 1px dashed var(--rule-major);
+  padding: 0.9rem 1rem;
+  background: var(--paper-inset);
+}
+
+/* ------------------------------------------------------- choices diagram - */
+
+.choices {
+  display: grid;
+  gap: 1px;
+  background: var(--rule-major);
+  border: 1px solid var(--rule-major);
+}
+@media (min-width: 46rem) { .choices { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 72rem) { .choices { grid-template-columns: repeat(5, 1fr); } }
+.choice {
+  background: var(--paper);
+  padding: 1.15rem 1.15rem 1.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.choice svg { height: 2.5rem; width: auto; }
+.choice h3 {
+  margin-top: 0.15rem;
+  font-variation-settings: "opsz" 20, "wght" 620;
+  font-size: 1.1875rem;
+  line-height: 1.22;
+  letter-spacing: -0.008em;
+}
+.choice p {
+  font-variation-settings: "opsz" 15, "wght" 400;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  margin: 0;
+}
+.choice__tools {
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+/* -------------------------------------------------------------- limits -- */
+
+.band--ink { --rule: #3a3731; --rule-major: #524d45; --ink-3: #a29788; }
+.band--ink .sec-head { border-top-color: var(--paper); }
+.band--ink h2, .band--ink h3 { color: var(--paper); }
+.band--ink .sec-head__lede { color: #c8bfb0; }
+.band--ink p { color: #ddd5c8; }
+
+.limits { border-top: 1px solid var(--rule-major); }
+.limit {
+  display: grid;
+  gap: 0.35rem 2rem;
+  padding: 1.15rem 0;
+  border-bottom: 1px solid var(--rule-major);
+}
+@media (min-width: 52rem) {
+  .limit { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); align-items: start; }
+}
+.limit h3 {
+  font-variation-settings: "opsz" 22, "wght" 500;
+  font-size: 1.1875rem;
+  letter-spacing: -0.01em;
+  color: var(--paper);
+}
+.limit p {
+  margin: 0;
+  font-variation-settings: "opsz" 15, "wght" 380;
+  font-size: 0.9375rem;
+  line-height: 1.58;
+  max-width: 58ch;
+}
+.limit .mono { color: #e7dfd2; }
+
+/* ------------------------------------------------------------- receipts - */
+
+.receipts {
+  border: 1px solid var(--ink);
+  background: var(--paper);
+}
+.receipts__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  align-items: center;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--ink);
+  background: var(--paper-inset);
+}
+.stamp {
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 86, "wght" 720;
+  font-size: 0.6875rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  padding: 0.28rem 0.6rem;
+  border: 1.5px solid currentColor;
+}
+.stamp:not([class*="stamp--"]) { color: var(--ink-2); border-style: dashed; }
+.stamp--pending { color: var(--alert); }
+.stamp--pass    { color: var(--ch-c); }
+.stamp--fail    { color: var(--ch-a); }
+
+.receipt__detail {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  margin-top: 0.15rem;
+}
+.receipt__none { color: var(--ink-3); }
+
+.receipts table {
+  width: 100%;
+  border-collapse: collapse;
+  font-feature-settings: "tnum";
+}
+.receipts__note {
+  margin: 0;
+  padding: 0.85rem 1rem 0.55rem;
+  color: var(--ink-2);
+  font-variation-settings: "opsz" 15, "wght" 400;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  max-width: 62ch;
+}
+.receipts th, .receipts td {
+  text-align: left;
+  padding: 0.55rem 1rem;
+  border-top: 1px solid var(--rule);
+  vertical-align: top;
+  font-size: 0.9375rem;
+  font-variation-settings: "opsz" 15, "wght" 400;
+}
+.receipts thead th {
+  border-top: 1px solid var(--rule-major);
+  font-family: var(--sans);
+  font-variation-settings: "wdth" 88, "wght" 650;
+  font-size: 0.6875rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.receipts td:first-child { width: 42%; }
+.receipts td .mono { color: var(--ink-2); font-size: 0.8125rem; }
+.receipts tr[data-status="pending"] td { color: var(--ink-2); }
+
+.cmds { border-top: 2px solid var(--ink); margin-top: 3rem; padding-top: 1.25rem; }
+.cmd {
+  display: grid;
+  gap: 0.2rem 1.5rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+@media (min-width: 52rem) {
+  .cmd { grid-template-columns: minmax(0, 24rem) minmax(0, 1fr); align-items: baseline; }
+}
+.cmd code {
+  display: block;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.cmd p {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-variation-settings: "opsz" 15, "wght" 400;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.notice {
+  border: 1px solid var(--alert);
+  background: var(--alert-wash);
+  padding: 0.85rem 1rem;
+  margin-bottom: 1.5rem;
+  max-width: 52rem;
+}
+.notice p {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-variation-settings: "opsz" 15, "wght" 400;
+  line-height: 1.55;
+  max-width: 68ch;
+}
+.notice .label { color: var(--alert); display: block; margin-bottom: 0.35rem; }
+
+/* --------------------------------------------------------------- colophon */
+
+.colophon {
+  border-top: 1px solid var(--ink);
+  padding: 1.5rem 0 4rem;
+  display: grid;
+  gap: 1rem 3rem;
+}
+@media (min-width: 52rem) {
+  .colophon { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+}
+.colophon p {
+  font-size: 0.875rem;
+  font-variation-settings: "opsz" 14, "wght" 400;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 58ch;
+}
+.colophon .sig {
+  font-variation-settings: "opsz" 28, "wght" 400;
+  font-style: italic;
+  font-size: 1.25rem;
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------- responsive */
+
+@media (max-width: 56rem) {
+  :root { --rail-pitch: 3.6rem; }
+  .field__plot { --label-w: 7rem; }
+}
+
+@container field (max-width: 44rem) {
+  .field__head { align-items: stretch; }
+  .field__mode { margin-left: 0; width: 100%; }
+  .field__mode div { width: 100%; }
+  .mode-opt { flex: 1 1 50%; }
+  .mode-opt span { width: 100%; text-align: center; white-space: normal; padding: 0.45rem 0.5rem; }
+}
+
+/* Labels move above their rails; the field shows fewer events, not smaller
+   ones. Driven by the field's own width, so the compact sibling diagram in a
+   narrow column gets the same treatment as the main field on a phone. */
+@container field (max-width: 34rem) {
+  .field__plot { --label-w: 0rem; padding: 1rem 0.75rem 0.85rem; }
+  .field__origin,
+  .rail,
+  .held { grid-template-columns: minmax(0, 1fr); gap: 0.35rem; }
+  .field__origin-label,
+  .rail__id,
+  .held__id {
+    text-align: left;
+    align-items: baseline;
+    justify-content: flex-start;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0 0 0.3rem;
+    border-right: 0;
+    border-bottom: 2px solid var(--ch, var(--ink));
+    width: 100%;
+  }
+  .rail--shared .rail__id { border-bottom-color: var(--ink); }
+  .rail { padding-top: 0.55rem; }
+  .slot { min-width: 3.9rem; }
+  .field__fan { display: none; }
+  .rail__track, .held__track { min-height: 3.6rem; }
+}
+
+@media (max-width: 40rem) {
+  :root { --rail-pitch: 4.1rem; }
+  .controls__row > .label { flex: 0 0 100%; }
+  .masthead__meta { margin-left: 0; gap: 0.6rem 1.25rem; align-items: baseline; }
+  .masthead__repo { display: none; }
+  .masthead__bar { gap: 0.45rem 1.5rem; padding-bottom: 0.55rem; }
+}
+
+/* The acceptance table has three columns of real content. Below the width
+   where they fit, it becomes a keyboard-reachable scroll region rather than
+   losing its table semantics to a display swap. */
+.table-scroll { overflow-x: auto; }
+.table-scroll:focus-visible { box-shadow: var(--focus); }
+.receipts table { min-width: 31rem; }
+
+/* ------------------------------------------------------------ reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .field__fan path { stroke-dashoffset: 0; }
+}
+
+@media print {
+  .rail-spine, .controls, .field__mode { display: none; }
+  body { background: #fff; }
+}
