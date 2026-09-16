@@ -282,6 +282,16 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         for address in addresses {
             let room = super::inbox::address_label(&address);
             let inbox = crate::cursor_state::routing::inbox_path(context, &address);
+            if !snapshot
+                && crate::mailbox::read_only_command()
+                && !inbox.parent().is_some_and(Path::is_dir)
+            {
+                return Err(AppError::new(
+                    ErrorCode::NotFound,
+                    format!("watch address directory '{}' does not exist", inbox.display()),
+                    "Initialize the participant/workspace store before starting an enrolled long watch.",
+                ));
+            }
             let dirs = participant_target_dirs(context, participant, &inbox);
             targets.push(WatchTarget {
                 channel_seen: HashMap::new(),
@@ -841,10 +851,56 @@ fn scan_watch_target(
         ));
     }
 
+    if let Ok(entries) = std::fs::read_dir(&target.inbox) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("mail")
+                || target.seen.contains(&path)
+            {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if crate::cursor_state::routing::receipt(context, address, &id)?.is_some()
+                || parse_mail(&path).is_ok()
+            {
+                continue;
+            }
+            target.seen.insert(path);
+            batch.push(WatchDelivery::mail(
+                &target.room,
+                WatchEvent::unreadable_mail(&target.room, id),
+            ));
+        }
+    }
+
     for channel in crate::channel_state::effective_channels(context, participant)? {
-        for item in
-            crate::cursor_state::eligibility::unread_channel(context, participant, &channel)?
-        {
+        let eligible = match crate::cursor_state::eligibility::unread_channel(
+            context,
+            participant,
+            &channel,
+        ) {
+            Ok(eligible) => eligible,
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                scan_unreadable_participant_channel(
+                    context,
+                    participant,
+                    &target.room,
+                    &channel,
+                    &mut target.seen,
+                    emitted_channel_ids,
+                    &mut batch,
+                )?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        for item in eligible {
             if !target.seen.insert(item.path.clone()) {
                 continue;
             }
@@ -866,6 +922,41 @@ fn scan_watch_target(
         }
     }
     Ok(batch)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_unreadable_participant_channel(
+    context: &Context,
+    participant: &Participant,
+    room: &str,
+    channel: &str,
+    seen_paths: &mut HashSet<PathBuf>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
+    batch: &mut Vec<WatchDelivery>,
+) -> AppResult<()> {
+    let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    let paths = ChannelPaths::new(context, channel)?;
+    for path in message_files(&paths.messages)? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if cursors.channel_has_seen(channel, id) || !seen_paths.insert(path.clone()) {
+            continue;
+        }
+        let dedupe = (channel.to_owned(), id.to_owned());
+        if emitted_channel_ids.contains(&dedupe) {
+            continue;
+        }
+        if parse_channel_message(&path).is_err() {
+            emitted_channel_ids.insert(dedupe);
+            batch.push(WatchDelivery::channel(
+                room,
+                channel,
+                WatchEvent::unreadable_channel(room, channel, id.to_owned()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn scan_batch(
