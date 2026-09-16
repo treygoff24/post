@@ -4,6 +4,7 @@
 // throwaway HOME/mail root; the real mailbox is never touched.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,12 @@ const REPO = path.resolve(LAUNCHER_DIR, "..");
 const BIN = cargoReleaseBin(REPO);
 
 const ADDRESS_RE = /^[a-z0-9-]+\.[a-z0-9-]+-[0-9a-f]{8}\.[0-9a-f-]+$/;
+const PARTICIPANT_BINDING_KEYS = [
+  "POST_PARTICIPANT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CODEX_THREAD_ID",
+  "CODEX_SESSION_ID",
+];
 
 function sandbox() {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "agent-session-test-"));
@@ -33,6 +40,48 @@ function sandbox() {
   return { work, home, mail, roomDir };
 }
 
+function isolatedEnv(sb, overrides = {}) {
+  const env = {
+    ...process.env,
+    HOME: sb.home,
+    POST_MAIL_ROOT: sb.mail,
+    AGENT_SESSION_POST_BIN: BIN,
+  };
+  for (const key of PARTICIPANT_BINDING_KEYS) delete env[key];
+  return { ...env, ...overrides };
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function launcherUuid(address) {
+  return address.split(".").at(-1);
+}
+
+function expectedParticipantId(harness, conversationKey) {
+  return `${harness}-${sha256(conversationKey).slice(0, 8)}`;
+}
+
+function readParticipant(sb, id) {
+  return JSON.parse(
+    fs.readFileSync(path.join(sb.mail, "participants", id, "participant.json"), "utf8")
+  );
+}
+
+function participantRecords(sb) {
+  const root = path.join(sb.mail, "participants");
+  if (!fs.existsSync(root)) return [];
+  return fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        fs.existsSync(path.join(root, entry.name, "participant.json"))
+    )
+    .map((entry) => readParticipant(sb, entry.name));
+}
+
 /// Launch `agent-session <args> -- node -e <print env>` and return the child
 /// process's identity environment plus the helper's stderr.
 function launch(args, { cwd, env = {}, sb }) {
@@ -43,18 +92,12 @@ function launch(args, { cwd, env = {}, sb }) {
       "--",
       process.execPath,
       "-e",
-      'const keys=["POST_FROM","POST_SENDER_ADDRESS","POST_HARNESS","POST_REPO_KEY"];console.log(JSON.stringify(Object.fromEntries(keys.map(k=>[k,process.env[k]??null]))))',
+      'const keys=["POST_FROM","POST_SENDER_ADDRESS","POST_HARNESS","POST_REPO_KEY","POST_PARTICIPANT"];console.log(JSON.stringify(Object.fromEntries(keys.map(k=>[k,process.env[k]??null]))))',
     ],
     {
       cwd,
       encoding: "utf8",
-      env: {
-        ...process.env,
-        HOME: sb.home,
-        POST_MAIL_ROOT: sb.mail,
-        AGENT_SESSION_POST_BIN: BIN,
-        ...env,
-      },
+      env: isolatedEnv(sb, env),
       timeout: 15000,
     }
   );
@@ -156,6 +199,18 @@ test("each launch mints a distinct address", () => {
   }
 });
 
+test("launcher exports no participant and does not mint one by itself", () => {
+  const sb = sandbox();
+  try {
+    const result = launch(["--harness", "claude-code"], { cwd: sb.roomDir, sb });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.env.POST_PARTICIPANT, null);
+    assert.deepEqual(participantRecords(sb), []);
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
 test("usage errors are loud: bad slug, missing --, missing command", () => {
   const sb = sandbox();
   try {
@@ -212,17 +267,12 @@ test("end to end: a send through the helper records declared-env + the address",
         "--",
         "sh",
         "-c",
-        `cd '${outside}' && '${BIN}' send --to receiver --body 'via helper' --json`,
+        `cd '${outside}' && '${BIN}' participant bind --json >/dev/null && '${BIN}' send --to receiver --body 'via helper' --json`,
       ],
       {
         cwd: sb.roomDir,
         encoding: "utf8",
-        env: {
-          ...process.env,
-          HOME: sb.home,
-          POST_MAIL_ROOT: sb.mail,
-          AGENT_SESSION_POST_BIN: BIN,
-        },
+        env: isolatedEnv(sb),
         timeout: 15000,
       }
     );
@@ -232,6 +282,55 @@ test("end to end: a send through the helper records declared-env + the address",
     assert.equal(sent.envelope.sender_provenance, "declared-env");
     assert.match(sent.envelope.sender_address, ADDRESS_RE);
     assert.ok(sent.envelope.sender_address.startsWith("claude-code."));
+    const conversationKey = launcherUuid(sent.envelope.sender_address);
+    const expectedId = expectedParticipantId("claude-code", conversationKey);
+    assert.equal(sent.envelope.from_participant, expectedId);
+    const participant = readParticipant(sb, expectedId);
+    assert.equal(participant.harness, "claude-code");
+    assert.equal(participant.conversation_key_digest, sha256(conversationKey));
+    assert.equal(participant.workspace, "pinned-room");
+  } finally {
+    fs.rmSync(sb.work, { recursive: true, force: true });
+  }
+});
+
+test("native conversation key outranks fresh launcher addresses across relaunches", () => {
+  const sb = sandbox();
+  try {
+    const nativeKey = "12345678-1234-4abc-8def-123456789abc";
+    const bind = () => {
+      const result = spawnSync(
+        HELPER,
+        [
+          "--harness",
+          "launcher-test",
+          "--",
+          "sh",
+          "-c",
+          `printf '%s\\n' "$POST_SENDER_ADDRESS"; '${BIN}' participant bind --json`,
+        ],
+        {
+          cwd: sb.roomDir,
+          encoding: "utf8",
+          env: isolatedEnv(sb, { CLAUDE_CODE_SESSION_ID: nativeKey }),
+          timeout: 15000,
+        }
+      );
+      assert.equal(result.status, 0, result.stderr);
+      const [address, ...bindingLines] = result.stdout.trim().split("\n");
+      return { address, binding: JSON.parse(bindingLines.join("\n")) };
+    };
+
+    const first = bind();
+    const second = bind();
+    assert.notEqual(first.address, second.address, "the launcher still mints per-launch addresses");
+    assert.equal(first.binding.id, second.binding.id);
+    const expectedId = expectedParticipantId("claude", nativeKey);
+    assert.equal(first.binding.id, expectedId);
+    const participant = readParticipant(sb, expectedId);
+    assert.equal(participant.harness, "claude");
+    assert.equal(participant.conversation_key_digest, sha256(nativeKey));
+    assert.equal(participantRecords(sb).length, 1);
   } finally {
     fs.rmSync(sb.work, { recursive: true, force: true });
   }
@@ -306,7 +405,7 @@ test("boundary: a very long launch path still mints a <=256-byte address that se
     fs.mkdirSync(path.join(sb.home, "receiver-room"), { recursive: true });
     fs.writeFileSync(
       path.join(sb.mail, "rooms.json"),
-      JSON.stringify({ receiver: "~/receiver-room" }) + "\n"
+      JSON.stringify({ receiver: "~/receiver-room", "long-sender": longDir }) + "\n"
     );
     const result = spawnSync(
       HELPER,
@@ -318,17 +417,12 @@ test("boundary: a very long launch path still mints a <=256-byte address that se
         "--",
         "sh",
         "-c",
-        `'${BIN}' send --to receiver --body 'from the long path' --json`,
+        `'${BIN}' participant bind --json >/dev/null && '${BIN}' send --to receiver --body 'from the long path' --json`,
       ],
       {
         cwd: longDir,
         encoding: "utf8",
-        env: {
-          ...process.env,
-          HOME: sb.home,
-          POST_MAIL_ROOT: sb.mail,
-          AGENT_SESSION_POST_BIN: BIN,
-        },
+        env: isolatedEnv(sb),
         timeout: 15000,
       }
     );
@@ -339,6 +433,13 @@ test("boundary: a very long launch path still mints a <=256-byte address that se
       `address must fit the transport bound: ${sent.envelope.sender_address.length}`
     );
     assert.match(sent.envelope.sender_address, ADDRESS_RE);
+    const conversationKey = launcherUuid(sent.envelope.sender_address);
+    const expectedId = expectedParticipantId("claude-code", conversationKey);
+    assert.equal(sent.envelope.from_participant, expectedId);
+    const participant = readParticipant(sb, expectedId);
+    assert.equal(participant.harness, "claude-code");
+    assert.equal(participant.conversation_key_digest, sha256(conversationKey));
+    assert.equal(participant.workspace, "long-sender");
   } finally {
     fs.rmSync(sb.work, { recursive: true, force: true });
   }
