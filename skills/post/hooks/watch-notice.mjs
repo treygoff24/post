@@ -150,18 +150,29 @@ function isStringFields(event, fields) {
   return fields.every((field) => typeof event[field] === "string");
 }
 
+function validRoute(event) {
+  if (event.address === undefined) return safeName(event.room);
+  const address = event.address;
+  return address !== null && typeof address === "object" &&
+    ["workspace", "participant", "lineage"].includes(address.kind) &&
+    safeName(address.name) &&
+    (event.room === undefined ||
+      (address.kind === "workspace" && event.room === address.name));
+}
+
 function validSnapshotEvent(event) {
   if (!event || typeof event !== "object" || Array.isArray(event)) return false;
   switch (event.event) {
     case "mail":
       return (
-        isStringFields(event, ["room", "id", "from", "kind", "subject", "sent", "reason"]) &&
+        isStringFields(event, ["id", "from", "kind", "subject", "sent", "reason"]) &&
         event.reason === "mail" &&
-        safeName(event.room) &&
+        validRoute(event) &&
         MAIL_ID.test(event.id)
       );
     case "channel_message":
       return (
+        (event.address === undefined || validRoute(event)) &&
         isStringFields(event, ["channel", "id", "from", "subject", "sent", "reason"]) &&
         (event.reason === "channel" || event.reason === "mention") &&
         safeName(event.channel) &&
@@ -169,10 +180,10 @@ function validSnapshotEvent(event) {
       );
     case "unreadable":
       return (
-        isStringFields(event, ["room", "id", "reason"]) &&
+        isStringFields(event, ["id", "reason"]) &&
         (event.reason === "mail" || event.reason === "channel") &&
         (event.reason !== "channel" || event.channel === undefined || safeUnreadableChannel(event.channel)) &&
-        safeName(event.room) &&
+        validRoute(event) &&
         safeUnreadableId(event.id)
       );
     default:

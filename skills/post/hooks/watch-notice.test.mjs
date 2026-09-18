@@ -271,3 +271,27 @@ test("long-running mode still emits one line per flushed batch then exits with t
   assert.match(lines[0], /20260730-010101-aaa111/);
   assert.ok(!lines[0].includes("SECRET"));
 });
+
+
+test("typed participant and lineage mail wake native monitors without UNKNOWN", () => {
+  for (const kind of ["participant", "lineage", "workspace"]) {
+    setStub({ events: [{ ...MAIL_A, room: undefined, address: {kind, name: "grok-0732ab78"} }] });
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /UNKNOWN/);
+    assert.match(result.stdout, /Direct mail id/);
+    assert.match(result.stdout, /20260730-010101-aaa111/);
+  }
+});
+
+test("typed unreadable mail stays count-only and rejects conflicting aliases", () => {
+  const event = { event: "unreadable", address: {kind: "participant", name: "grok-0732ab78"}, id: "corrupt-entry", reason: "mail" };
+  setStub({events: [event]});
+  assert.match(run().stdout, /Unreadable mail: 1 item/);
+  for (const address of [null, {kind: "bogus", name: "valid"}, {kind: "participant", name: "bad\\nname"}]) {
+    setStub({events: [{...event, address}]});
+    assert.match(run().stdout, /UNKNOWN/);
+  }
+  setStub({events: [{...event, room: "other"}]});
+  assert.match(run().stdout, /UNKNOWN/);
+});
