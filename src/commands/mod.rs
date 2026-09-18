@@ -186,7 +186,10 @@ fn participant_required(command: &Command) -> bool {
     use crate::cli::{IdentityCommand, ProfileCommand};
     match command {
         Command::Participant(crate::cli::ParticipantArgs {
-            command: crate::cli::ParticipantCommand::Touch | crate::cli::ParticipantCommand::End,
+            command:
+                crate::cli::ParticipantCommand::Touch
+                | crate::cli::ParticipantCommand::End
+                | crate::cli::ParticipantCommand::Notice { .. },
         }) => true,
         Command::Send(_) | Command::Catchup(_) => true,
         Command::Read(args) => {

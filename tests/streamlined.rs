@@ -187,3 +187,11 @@ fn notice_query_is_read_only_and_ack_persists_across_rebinds() {
     let value: serde_json::Value = from_stdout(&query());
     assert!(value["notice"].is_null());
 }
+
+#[test]
+fn unbound_notice_ack_refuses_before_initializing_mailbox() {
+    let sandbox = Sandbox::new_unseeded();
+    let output = sandbox.run_without_identity(&["participant", "notice", "--ack"], &sandbox.path);
+    assert!(!output.status.success());
+    assert!(!sandbox.mail_root.exists());
+}
