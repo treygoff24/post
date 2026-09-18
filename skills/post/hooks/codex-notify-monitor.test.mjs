@@ -705,3 +705,65 @@ test("failed channel delivery retries without losing eligibility", () => {
   assert.equal(promptCount(), before + 2);
   assert.equal(fs.existsSync(state), true);
 });
+
+test("typed visible mail routes survive a selected-channel snapshot and dedupe separately", () => {
+  const state = path.join(ROOT, "typed-mail.json");
+  const { room, ...mail } = MAIL;
+  const routes = ["workspace", "participant", "lineage"].map((kind) => ({
+    ...mail, address: { kind, name: "visible-seat" },
+  }));
+  setControl({ postStdout: [...routes, CHANNEL].map(JSON.stringify).join("\n") });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state, channels: "commons" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+  assert.match(calls(CMUX_CALLS).at(-1).at(-1), /3 direct messages.*1 selected channel message/);
+  assert.equal(new Set(JSON.parse(fs.readFileSync(state)).seen).size, 4);
+  assert.equal(run({ state, channels: "commons" }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+});
+
+test("typed workspace and legacy mail share dedupe identity", () => {
+  const state = path.join(ROOT, "typed-legacy.json");
+  setControl({ postStdout: JSON.stringify(MAIL) });
+  assert.equal(run({ state }).status, 0);
+  const before = calls(CMUX_CALLS).length;
+  setControl({ postStdout: JSON.stringify({ ...MAIL, address: { kind: "workspace", name: MAIL.room } }) });
+  assert.equal(run({ state }).status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before);
+});
+
+test("invalid typed routes and contradictory room aliases fail closed", () => {
+  const { room, ...mail } = MAIL;
+  const invalid = [
+    { ...mail, address: null },
+    { ...mail, address: { kind: "unknown", name: "sol" } },
+    { ...mail, address: { kind: "participant", name: "bad\nname" } },
+    { ...MAIL, address: { kind: "workspace", name: "other" } },
+    { ...MAIL, address: { kind: "participant", name: "sol" } },
+    { ...mail, address: { kind: "lineage" } },
+    { ...CHANNEL, room: "sol", address: { kind: "workspace", name: "other" } },
+    { event: "unreadable", reason: "mail", id: "bad", address: { kind: "participant", name: "../bad" } },
+  ];
+  const before = calls(CMUX_CALLS).length;
+  for (const [i, event] of invalid.entries()) {
+    const state = path.join(ROOT, `typed-invalid-${i}.json`);
+    setControl({ postStdout: JSON.stringify(event) });
+    assert.notEqual(run({ state }).status, 0);
+    assert.equal(fs.existsSync(state), false);
+  }
+  assert.equal(calls(CMUX_CALLS).length, before);
+});
+
+test("typed unreadable mail and channels retain their existing redacted behavior", () => {
+  const state = path.join(ROOT, "typed-unreadable.json");
+  const events = ["workspace", "participant", "lineage"].flatMap((kind) => [
+    { event: "unreadable", address: { kind, name: "visible-seat" }, id: "SECRET", reason: "mail" },
+    { event: "unreadable", address: { kind, name: "visible-seat" }, id: "SECRET", reason: "channel", channel: "commons" },
+  ]);
+  setControl({ postStdout: events.map(JSON.stringify).join("\n") });
+  const result = run({ state, channels: "commons" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!calls(CMUX_CALLS).at(-1).join(" ").includes("SECRET"));
+  assert.equal(JSON.parse(fs.readFileSync(state)).seen.length, 4);
+});

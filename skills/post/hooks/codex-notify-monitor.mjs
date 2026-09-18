@@ -146,20 +146,41 @@ function isStringFields(event, fields) {
   return fields.every((field) => typeof event[field] === "string");
 }
 
+function validRoute(event, allowedRooms) {
+  if (event.address === undefined) {
+    return safeName(event.room) && allowedRooms.has(event.room);
+  }
+  const address = event.address;
+  // Bound Post snapshots include all visible typed addresses, not only the
+  // requested workspace. Post owns visibility; room is only a workspace alias.
+  return address !== null && typeof address === "object" &&
+    ["workspace", "participant", "lineage"].includes(address.kind) &&
+    safeName(address.name) &&
+    (event.room === undefined ||
+      (address.kind === "workspace" && event.room === address.name));
+}
+
+function routeRef(event) {
+  if (event.address === undefined || event.address.kind === "workspace") {
+    return event.address?.name ?? event.room;
+  }
+  return `${event.address.kind}:${event.address.name}`;
+}
+
 function validMail(event, allowedRooms) {
   return (
     event?.event === "mail" &&
-    isStringFields(event, ["room", "id", "from", "kind", "subject", "sent", "reason"]) &&
+    isStringFields(event, ["id", "from", "kind", "subject", "sent", "reason"]) &&
     event.reason === "mail" &&
-    safeName(event.room) &&
-    allowedRooms.has(event.room) &&
+    validRoute(event, allowedRooms) &&
     MAIL_ID.test(event.id)
   );
 }
 
-function validChannelMessage(event) {
+function validChannelMessage(event, allowedRooms) {
   return (
     event?.event === "channel_message" &&
+    (event.address === undefined || validRoute(event, allowedRooms)) &&
     isStringFields(event, ["channel", "id", "from", "subject", "sent", "reason"]) &&
     (event.reason === "channel" || event.reason === "mention") &&
     safeName(event.channel) &&
@@ -170,11 +191,10 @@ function validChannelMessage(event) {
 function validUnreadable(event, allowedRooms) {
   return (
     event?.event === "unreadable" &&
-    isStringFields(event, ["room", "id", "reason"]) &&
+    isStringFields(event, ["id", "reason"]) &&
     (event.reason === "mail" || event.reason === "channel") &&
     (event.reason !== "channel" || event.channel === undefined || safeUnreadableChannel(event.channel)) &&
-    safeName(event.room) &&
-    allowedRooms.has(event.room) &&
+    validRoute(event, allowedRooms) &&
     safeUnreadableId(event.id)
   );
 }
@@ -187,16 +207,16 @@ function eventKey(event) {
     if (event.reason === "channel") {
       return event.channel === undefined ? LEGACY_CHANNEL_EPISODE : JSON.stringify(["unreadable", event.channel, event.id]);
     }
-    return JSON.stringify(["unreadable-mail", event.room, event.id]);
+    return JSON.stringify(["unreadable-mail", routeRef(event), event.id]);
   }
   if (event.event === "channel_message") return `channel:${event.channel}:${event.id}`;
-  return `${event.room}:${event.id}`;
+  return `${routeRef(event)}:${event.id}`;
 }
 
 function eventRef(event) {
   if (event.event === "unreadable") return "unreadable delivery";
   if (event.event === "channel_message") return `#${event.channel}:${event.id}`;
-  return `${event.room}:${event.id}`;
+  return `${routeRef(event)}:${event.id}`;
 }
 
 function waitingSummary(directCount, channelCount) {
@@ -303,7 +323,7 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
           if (!validMail(event, allowedRooms)) malformed = true;
           else eligible.push(event);
         } else if (event?.event === "channel_message") {
-          if (!validChannelMessage(event)) malformed = true;
+          if (!validChannelMessage(event, allowedRooms)) malformed = true;
           else if (selectedChannels.has(event.channel)) eligible.push(event);
         } else if (event?.event === "unreadable") {
           if (!validUnreadable(event, allowedRooms)) malformed = true;
