@@ -381,12 +381,17 @@ fn preview(body: &str) -> String {
 fn search_framing(mode: FramingMode, has_channels: bool) -> Framing {
     if !has_channels {
         return match mode {
-            FramingMode::Auto | FramingMode::Full => Framing::default(),
+            FramingMode::Auto => Framing::default(),
+            FramingMode::Full => Framing::full(),
             FramingMode::Compact => Framing::compact(),
         };
     }
     match mode {
-        FramingMode::Auto | FramingMode::Full => Framing {
+        FramingMode::Auto => Framing {
+            source: "multiple_ai_agents".to_owned(),
+            ..Framing::default()
+        },
+        FramingMode::Full => Framing {
             source: "multiple_ai_agents".to_owned(),
             authority: false,
             laws: vec![
@@ -429,31 +434,38 @@ fn render_text(
             || "mail".to_owned(),
             |channel| format!("channel #{}", output::sanitize_text_header(channel)),
         );
-        rendered.push_str(&format!(
-            "{source} {} from {} at {} subject={:?} preview={} own={} pending={} already_read={}\n",
-            output::sanitize_text_header(&result.id),
-            output::sanitize_text_header(&result.from),
-            output::sanitize_text_header(&result.sent),
-            output::sanitize_text_header(&result.subject),
-            output::sanitize_text_body(&result.preview),
-            result.own,
-            result.pending,
-            result.already_read,
+        rendered.push_str(&format!("{source}\n"));
+        rendered.push_str(&output::message_header(
+            &result.from,
+            &result.sent,
+            &result.id,
+            output::reply_address(
+                result.reply_to_participant.as_deref(),
+                &result.reply_to_shared,
+            ),
+            None,
+            &result.subject,
+            None,
         ));
-        output::render_reply_metadata(
-            &mut rendered,
-            &result.origin,
-            result.reply_to_participant.as_deref(),
-            &result.reply_to_shared,
-        );
+        for (label, present) in [
+            ("own", result.own),
+            ("pending", result.pending),
+            ("already_read", result.already_read),
+        ] {
+            if present {
+                rendered.push_str(&format!("{label}=true\n"));
+            }
+        }
+        output::render_gutter_body(&mut rendered, &result.preview);
+        rendered.push('\n');
     }
-    rendered.push_str(&format!("post: {} match(es)\n", results.len()));
     rendered
 }
 
 fn render_framing(rendered: &mut String, framing: FramingMode, has_channels: bool) {
     match framing {
-        FramingMode::Auto | FramingMode::Compact => {
+        FramingMode::Auto => {}
+        FramingMode::Compact => {
             rendered.push_str("--- AI AGENT SEARCH (compact framing) ---\n");
             if has_channels {
                 rendered.push_str(output::LAW_COMPACT_MULTI);

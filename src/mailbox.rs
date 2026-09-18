@@ -485,9 +485,11 @@ pub(crate) fn resolve_framing(flag: Option<crate::cli::FramingMode>) -> crate::c
         return crate::cli::FramingMode::Auto;
     };
     match raw.to_str() {
-        Some("auto") => crate::cli::FramingMode::Auto,
+        // Existing agent launchers export compact. Let those already-running
+        // sessions adopt quiet output at binary cutover without a restart.
+        // Explicit --framing compact above still requests the diagnostic banner.
+        Some("auto" | "compact") => crate::cli::FramingMode::Auto,
         Some("full") => crate::cli::FramingMode::Full,
-        Some("compact") => crate::cli::FramingMode::Compact,
         other => {
             eprintln!(
                 "post: warning: {POST_FRAMING_ENV} value {} is invalid (expected auto|full|compact); using auto",

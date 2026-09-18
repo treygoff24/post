@@ -1267,9 +1267,11 @@ fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_or
         );
         assert!(!text.contains("crossed the bridge"), "{args:?}: {text}");
         if args[0] != "watch" {
-            assert!(text.contains("origin: unknown"), "{args:?}: {text}");
+            assert!(text.contains("reply=mystery"), "{args:?}: {text}");
             assert!(
-                text.contains("sender not known on this host"),
+                !text.lines().any(
+                    |line| line.starts_with("mystery ·") && line.contains("reply=participant:")
+                ),
                 "{args:?}: {text}"
             );
         }
@@ -1279,8 +1281,13 @@ fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_or
     let text = common::stdout(&catchup);
     assert!(!text.contains("participant:missing-local"), "{text}");
     assert!(!text.contains("crossed the bridge"), "{text}");
-    assert!(text.contains("origin: unknown"), "{text}");
-    assert!(text.contains("sender not known on this host"), "{text}");
+    assert!(text.contains("reply=mystery"), "{text}");
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("mystery ·") && line.contains("reply=participant:")),
+        "{text}"
+    );
 
     for (participant, cwd) in [(&actor, &alpha), (&peer, &beta)] {
         assert_success(&sandbox.run_as_participant(
@@ -1313,9 +1320,11 @@ fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_or
         let text = common::stdout(&output);
         assert!(!text.contains("crossed the bridge"), "{args:?}: {text}");
         if args[0] != "watch" {
-            assert!(text.contains("origin: unknown"), "{args:?}: {text}");
+            assert!(text.contains("reply=mystery"), "{args:?}: {text}");
             assert!(
-                text.contains("sender not known on this host"),
+                !text.lines().any(
+                    |line| line.starts_with("mystery ·") && line.contains("reply=participant:")
+                ),
                 "{args:?}: {text}"
             );
         }
@@ -1324,8 +1333,13 @@ fn routing_text_renderers_do_not_invent_private_or_bridge_replies_for_unknown_or
     assert_success(&catchup);
     let text = common::stdout(&catchup);
     assert!(!text.contains("crossed the bridge"));
-    assert!(text.contains("origin: unknown"), "{text}");
-    assert!(text.contains("sender not known on this host"), "{text}");
+    assert!(text.contains("reply=mystery"), "{text}");
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("mystery ·") && line.contains("reply=participant:")),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1487,7 +1501,7 @@ fn routing_text_read_modes_share_own_pending_and_consumption_state() {
     let reread = pending.run_as_participant(&["read", direct_id, "--peek"], &actor, &solo);
     assert_success(&reread);
     let text = common::stdout(&reread);
-    assert!(text.contains("exact-id cursor"), "{text}");
+    assert!(text.contains("already_read=true"), "{text}");
     assert!(!text.contains("read/archive"), "{text}");
 }
 
@@ -1610,10 +1624,7 @@ fn routing_legacy_read_history_keeps_legacy_already_read_wording() {
     let read = sandbox.run_without_identity(&["read", id, "--room", "alpha", "--peek"], &alpha);
     assert_success(&read);
     let text = common::stdout(&read);
-    assert!(
-        text.contains("served from the read/archive store"),
-        "{text}"
-    );
+    assert!(text.contains("already_read=true"), "{text}");
     assert!(!text.contains("participant's exact-id cursor"), "{text}");
     assert!(!text.contains("canonical mail stayed in place"), "{text}");
 }
@@ -2093,7 +2104,7 @@ fn routing_workspace_less_chat_state_stays_under_participant_directory() {
         .join(&id)
         .join("cursors.json")
         .exists());
-    assert!(sandbox
+    assert!(!sandbox
         .mail_root
         .join("participants")
         .join(&id)

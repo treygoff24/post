@@ -824,16 +824,16 @@ impl CatchupRemainderIndex {
 
 fn mail_framing(mode: FramingMode) -> output::Framing {
     match mode {
-        FramingMode::Auto => output::Framing::compact(),
-        FramingMode::Full => output::Framing::default(),
+        FramingMode::Auto => output::Framing::default(),
+        FramingMode::Full => output::Framing::full(),
         FramingMode::Compact => output::Framing::compact(),
     }
 }
 
 fn channel_framing(mode: FramingMode) -> output::ChannelFraming {
     match mode {
-        FramingMode::Auto => output::ChannelFraming::compact(),
-        FramingMode::Full => output::ChannelFraming::default(),
+        FramingMode::Auto => output::ChannelFraming::default(),
+        FramingMode::Full => output::ChannelFraming::full(),
         FramingMode::Compact => output::ChannelFraming::compact(),
     }
 }
@@ -974,7 +974,7 @@ fn null_stdout_refusal(selector: &Selector, count: usize) -> AppError {
 }
 
 fn render_text(
-    room: &str,
+    _room: &str,
     targets: &[CatchupTarget],
     count: usize,
     framing: FramingMode,
@@ -995,7 +995,7 @@ fn render_text(
             CatchupTarget::Mail {
                 messages, count, ..
             } if *count > 0 => {
-                rendered.push_str(&format!("=== mail ({count} unread) ===\n"));
+                rendered.push_str(&format!("mail · {count} unread\n\n"));
                 for item in messages {
                     render_mail_item(&mut rendered, item);
                 }
@@ -1007,9 +1007,8 @@ fn render_text(
                 ..
             } if *count > 0 => {
                 rendered.push_str(&format!(
-                    "=== #{} ({count} unread; reading as {}) ===\n",
-                    output::sanitize_text_header(channel),
-                    output::sanitize_text_header(room)
+                    "#{} · {count} unread\n\n",
+                    output::sanitize_text_header(channel)
                 ));
                 for item in messages {
                     render_channel_item(&mut rendered, item);
@@ -1018,13 +1017,13 @@ fn render_text(
             _ => {}
         }
     }
-    rendered.push_str(&format!("post: caught up ({count} unread)\n"));
     rendered
 }
 
 fn render_framing(rendered: &mut String, framing: FramingMode, has_channel: bool) {
     match framing {
-        FramingMode::Auto | FramingMode::Compact => {
+        FramingMode::Auto => {}
+        FramingMode::Compact => {
             rendered.push_str("--- AI AGENT CATCHUP (compact framing) ---\n");
             if has_channel {
                 rendered.push_str(output::LAW_COMPACT_MULTI);
@@ -1057,92 +1056,50 @@ fn render_framing(rendered: &mut String, framing: FramingMode, has_channel: bool
 
 fn render_mail_item(rendered: &mut String, item: &CatchupMailItem) {
     let envelope = &item.envelope;
-    let subject = if envelope.subject.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "   Subject: {}",
-            output::sanitize_text_header(&envelope.subject)
-        )
-    };
-    rendered.push_str(&format!(
-        "--- {}   Kind: {}   {}   {}{subject} ---\n",
-        output::sender_label(
+    rendered.push_str(&output::message_header(
+        &output::sender_label(
             &envelope.from,
             envelope.display_name.as_deref(),
-            envelope.pfp.as_deref()
+            envelope.pfp.as_deref(),
         ),
-        envelope.kind,
-        output::sanitize_text_header(&envelope.sent),
-        output::sanitize_text_header(&envelope.id),
+        &envelope.sent,
+        &envelope.id,
+        output::reply_address(
+            item.envelope.reply_to_participant.as_deref(),
+            &item.envelope.reply_to_shared,
+        ),
+        None,
+        &envelope.subject,
+        Some(&envelope.kind.to_string()),
     ));
-    if let Some(sentence) = envelope
-        .sender_provenance
-        .as_deref()
-        .and_then(output::provenance_sentence)
-    {
-        rendered.push_str(&format!("Sender evidence: {sentence}\n"));
-    }
-    if let Some(address) = envelope.sender_address.as_deref() {
-        rendered.push_str(&format!(
-            "Sender address: {} (self-declared instance tag, opaque and non-routable)\n",
-            output::sanitize_text_header(address)
-        ));
-    }
-    super::inbox::render_reply_targets(
-        rendered,
-        &item.envelope.origin,
-        item.envelope.reply_to_participant.as_deref(),
-        &item.envelope.reply_to_shared,
-    );
     output::render_gutter_body(rendered, &item.body);
+    rendered.push('\n');
 }
 
 fn render_channel_item(rendered: &mut String, item: &ChatMessageItem) {
     let message: &ChannelMessage = &item.message;
-    let event = message
-        .event
-        .as_deref()
-        .map(|event| format!("[{event}] "))
-        .unwrap_or_default();
-    let subject = if message.subject.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "   Subject: {}",
-            output::sanitize_text_header(&message.subject)
-        )
-    };
-    rendered.push_str(&format!(
-        "--- {event}{}   {}   {}{subject} ---\n",
-        output::sender_label(
+    rendered.push_str(&output::message_header(
+        &output::sender_label(
             &message.from,
             message.display_name.as_deref(),
-            message.pfp.as_deref()
+            message.pfp.as_deref(),
         ),
-        output::sanitize_text_header(&message.sent),
-        output::sanitize_text_header(&message.id),
+        &message.sent,
+        &message.id,
+        output::reply_address(item.reply_to_participant.as_deref(), &item.reply_to_shared),
+        message.re.as_deref(),
+        &message.subject,
+        message.event.as_deref(),
     ));
-    if let Some(sentence) = message
-        .sender_provenance
-        .as_deref()
-        .and_then(output::provenance_sentence)
-    {
-        rendered.push_str(&format!("[sender evidence: {sentence}]\n"));
+    if let Some(verified) = item.signed_verified {
+        rendered.push_str(if verified {
+            "[signature verified]\n"
+        } else {
+            "[SIGNATURE FAILED]\n"
+        });
     }
-    if let Some(address) = message.sender_address.as_deref() {
-        rendered.push_str(&format!(
-            "[sender address: {} — self-declared instance tag, opaque and non-routable]\n",
-            output::sanitize_text_header(address)
-        ));
-    }
-    super::inbox::render_reply_targets(
-        rendered,
-        &item.origin,
-        item.reply_to_participant.as_deref(),
-        &item.reply_to_shared,
-    );
     output::render_gutter_body(rendered, &item.body);
+    rendered.push('\n');
 }
 
 impl CatchupTarget {
@@ -1175,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn nonempty_text_has_one_compact_banner() {
+    fn nonempty_text_has_no_policy_banner() {
         let targets = vec![CatchupTarget::Mail {
             framing: output::Framing::default(),
             messages: Vec::new(),
@@ -1184,8 +1141,8 @@ mod tests {
             has_more: None,
         }];
         let rendered = render_text("alpha", &targets, 1, FramingMode::Auto);
-        assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 1);
-        assert!(rendered.contains(output::LAW_COMPACT));
+        assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 0);
+        assert!(!rendered.contains(output::LAW_COMPACT));
     }
 
     #[test]

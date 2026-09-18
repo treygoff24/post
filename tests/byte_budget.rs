@@ -770,7 +770,7 @@ fn budget_caps_json_pretty_and_text_after_utf8_and_escape_encoding() {
 }
 
 #[test]
-fn auto_text_peeks_never_stamp_banner_day_and_only_consuming_success_does() {
+fn auto_text_peeks_and_consuming_reads_never_stamp_banner_day() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, "banner-budget", "beta");
@@ -788,7 +788,7 @@ fn auto_text_peeks_never_stamp_banner_day_and_only_consuming_success_does() {
         &beta,
     );
     assert_success(&first_peek);
-    assert!(common::stdout(&first_peek).contains("READ THIS FRAMING FIRST"));
+    assert!(!common::stdout(&first_peek).contains("READ THIS FRAMING FIRST"));
     assert!(
         !sandbox.mail_root.join("beta/banner-day").exists(),
         "cursorless budget inspection must not stamp banner-day"
@@ -796,7 +796,7 @@ fn auto_text_peeks_never_stamp_banner_day_and_only_consuming_success_does() {
 
     let ordinary_peek = sandbox.run_in(&["chat", "banner-budget", "--peek"], None, &beta);
     assert_success(&ordinary_peek);
-    assert!(common::stdout(&ordinary_peek).contains("READ THIS FRAMING FIRST"));
+    assert!(!common::stdout(&ordinary_peek).contains("READ THIS FRAMING FIRST"));
     assert!(
         !sandbox.mail_root.join("beta/banner-day").exists(),
         "unbudgeted peeks are read-only too"
@@ -828,13 +828,13 @@ fn auto_text_peeks_never_stamp_banner_day_and_only_consuming_success_does() {
         &beta,
     );
     assert_success(&read);
-    assert!(common::stdout(&read).contains("READ THIS FRAMING FIRST"));
-    assert!(consuming.mail_root.join("beta/banner-day").exists());
+    assert!(!common::stdout(&read).contains("READ THIS FRAMING FIRST"));
+    assert!(!consuming.mail_root.join("beta/banner-day").exists());
     assert_eq!(seen_ids(&consuming, "beta", "banner-consume"), vec![id]);
 }
 
 #[test]
-fn fenced_auto_text_keeps_the_read_only_full_wall_despite_an_old_stamp() {
+fn fenced_auto_text_stays_quiet_and_preserves_old_stamp() {
     let sandbox = Sandbox::new_unseeded();
     seed_fence_store(&sandbox, r#"{"state":"fenced","generation":7}"#);
     seed_channel_fixture(&sandbox);
@@ -856,14 +856,14 @@ fn fenced_auto_text_keeps_the_read_only_full_wall_despite_an_old_stamp() {
     let cwd = sandbox.home.join("dest");
     let ordinary = sandbox.run_in(&["chat", "tax", "--peek"], None, &cwd);
     assert_success(&ordinary);
-    assert!(common::stdout(&ordinary).contains("READ THIS FRAMING FIRST"));
+    assert!(!common::stdout(&ordinary).contains("READ THIS FRAMING FIRST"));
     let budgeted = sandbox.run_in(
         &["chat", "tax", "--peek", "--max-bytes", "3000"],
         None,
         &cwd,
     );
     assert_success(&budgeted);
-    assert!(common::stdout(&budgeted).contains("READ THIS FRAMING FIRST"));
+    assert!(!common::stdout(&budgeted).contains("READ THIS FRAMING FIRST"));
     assert_eq!(fs::read(&banner).expect("banner after"), before);
     assert_eq!(
         fs::metadata(&banner)
@@ -896,8 +896,8 @@ fn consuming_banner_state_uses_raw_room_identity_not_sanitized_display() {
 
     let output = sandbox.run_in(&["chat", "identity"], None, &raw_path);
     assert_success(&output);
-    assert!(common::stdout(&output).contains("Reading as room: alpha"));
-    assert!(sandbox.mail_root.join(raw_room).join("banner-day").exists());
+    assert!(common::stdout(&output).contains("#identity"));
+    assert!(!sandbox.mail_root.join(raw_room).join("banner-day").exists());
     assert!(
         !sandbox.mail_root.join("alpha/banner-day").exists(),
         "display sanitization must not redirect banner state to another room"

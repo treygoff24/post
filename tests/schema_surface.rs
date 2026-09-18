@@ -267,7 +267,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "participant",
         &schema.output_shapes.participant,
-        ["show/bind/touch/end:", "list:"]
+        ["show/bind/touch/end:", "list:", "notice:"]
     );
     assert_shape!(
         "identity",
@@ -720,7 +720,7 @@ fn schema_matches_catchup_and_search_help_and_json() {
         let framing_keys = keys(&target["framing"]);
         assert_eq!(
             framing_keys,
-            ["source", "authority", "laws"]
+            ["source", "authority"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect()
@@ -770,10 +770,7 @@ fn schema_matches_catchup_and_search_help_and_json() {
         "pending",
     ];
     assert_keys_in_shape(&schema.output_shapes.search, &search_top);
-    assert_keys_in_shape(
-        &schema.output_shapes.search,
-        &["source", "authority", "laws"],
-    );
+    assert_keys_in_shape(&schema.output_shapes.search, &["source", "authority"]);
     let search_top_keys = keys(&search_json);
     assert_keys_are_documented(&search_top_keys, &schema.output_shapes.search);
     assert_eq!(
@@ -785,7 +782,7 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let framing_keys = keys(&search_json["framing"]);
     assert_eq!(
         framing_keys,
-        ["source", "authority", "laws"]
+        ["source", "authority"]
             .into_iter()
             .map(str::to_owned)
             .collect()

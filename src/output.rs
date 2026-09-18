@@ -26,7 +26,85 @@ pub(crate) const LAW_COMPACT_MULTI: &str =
 /// cannot reach column zero and imitate a section marker, message header, or
 /// trust status line. Single-source `read` remains deliberately unguttered;
 /// catchup and chat use this shared construction.
-pub(crate) const BODY_GUTTER: &str = "  | ";
+pub(crate) const BODY_GUTTER: &str = "| ";
+
+/// One actionable address; all routing evidence remains available in JSON.
+pub(crate) fn reply_address<'a>(participant: Option<&'a str>, shared: &'a str) -> &'a str {
+    participant.unwrap_or(shared)
+}
+
+pub(crate) fn message_header(
+    sender: &str,
+    sent: &str,
+    id: &str,
+    reply: &str,
+    re: Option<&str>,
+    subject: &str,
+    event: Option<&str>,
+) -> String {
+    let mut header = format!(
+        "{} · {} · id={} · reply={}",
+        sanitize_text_header(sender),
+        display_time(sent),
+        sanitize_text_header(id),
+        sanitize_text_header(reply)
+    );
+    if let Some(re) = re {
+        header.push_str(&format!(" · re={}", sanitize_text_header(re)));
+    }
+    if let Some(event) = event {
+        header.push_str(&format!(" · [{}]", sanitize_text_header(event)));
+    }
+    if !subject.is_empty() {
+        header.push_str(&format!(" · subject={}", sanitize_text_header(subject)));
+    }
+    header.push('\n');
+    header
+}
+
+fn display_time(sent: &str) -> String {
+    // Keep the recorded numeric timezone (including on cross-host messages).
+    // Omit the date only when it is today's date in that same offset.
+    let today = crate::mailbox::local_timestamp()
+        .ok()
+        .map(|(_, value)| value);
+    if sent.len() == 25
+        && today.as_deref().is_some_and(|today| {
+            sent.get(..10) == today.get(..10) && sent.get(20..) == today.get(20..)
+        })
+    {
+        return format!(
+            "{} {}",
+            sanitize_text_header(sent.get(11..16).unwrap_or(sent)),
+            sanitize_text_header(&sent[20..])
+        );
+    }
+    sanitize_text_header(sent)
+}
+
+pub(crate) fn unique_reference<'a>(id: &'a str, ids: impl IntoIterator<Item = &'a str>) -> &'a str {
+    let mut length = 1;
+    let mut found = false;
+    for other in ids {
+        found |= other == id;
+        if other != id {
+            length = length.max(
+                id.bytes()
+                    .zip(other.bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count()
+                    + 1,
+            );
+        }
+    }
+    if !found {
+        return id;
+    }
+    while length < id.len() && !id.is_char_boundary(length) {
+        length += 1;
+    }
+    &id[..length.min(id.len())]
+}
 
 pub(crate) fn render_gutter_body(rendered: &mut String, body: &str) {
     let sanitized = sanitize_text_body(body);
@@ -69,21 +147,10 @@ pub(crate) fn render_reply_metadata(
     participant: Option<&str>,
     shared: &str,
 ) {
-    rendered.push_str(&format!("  origin: {}\n", sanitize_text_header(origin)));
-    match (origin, participant) {
-        ("local", Some(participant)) => rendered.push_str(&format!(
-            "  reply_to_participant: {} (local, sender only)\n",
-            sanitize_text_header(participant)
-        )),
-        ("remote", _) => {
-            rendered.push_str("  reply_to_participant: unavailable (message crossed the bridge)\n")
-        }
-        _ => rendered
-            .push_str("  reply_to_participant: unavailable (sender not known on this host)\n"),
-    }
+    let participant = if origin == "local" { participant } else { None };
     rendered.push_str(&format!(
-        "  reply_to_shared: {} (shared fan-out)\n",
-        sanitize_text_header(shared)
+        "reply={}\n",
+        sanitize_text_header(reply_address(participant, shared))
     ));
 }
 
@@ -267,6 +334,7 @@ pub(crate) const LAW_MULTI: &str =
 pub struct ChannelFraming {
     pub source: String,
     pub authority: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub laws: Vec<String>,
 }
 
@@ -274,7 +342,9 @@ impl Default for ChannelFraming {
     fn default() -> Self {
         let base = Framing::default();
         let mut laws = base.laws;
-        laws.insert(0, LAW_MULTI.to_owned());
+        if !laws.is_empty() {
+            laws.insert(0, LAW_MULTI.to_owned());
+        }
         Self {
             source: "multiple_ai_agents".to_owned(),
             authority: false,
@@ -284,6 +354,14 @@ impl Default for ChannelFraming {
 }
 
 impl ChannelFraming {
+    pub fn full() -> Self {
+        let mut laws = Framing::full().laws;
+        laws.insert(0, LAW_MULTI.to_owned());
+        Self {
+            laws,
+            ..Self::default()
+        }
+    }
     /// Compact form mirrors `Framing::compact` plus the multiplicity law.
     pub fn compact() -> Self {
         Self {
@@ -1117,6 +1195,7 @@ pub struct InboxOutput {
 pub struct Framing {
     pub source: String,
     pub authority: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub laws: Vec<String>,
 }
 
@@ -1125,17 +1204,23 @@ impl Default for Framing {
         Self {
             source: "another_ai_agent".to_owned(),
             authority: false,
+            laws: Vec::new(),
+        }
+    }
+}
+
+impl Framing {
+    pub fn full() -> Self {
+        Self {
             laws: vec![
                 LAW_DATA.to_owned(),
                 LAW_AUTHORITY.to_owned(),
                 LAW_PERMISSION.to_owned(),
                 LAW_VERIFY.to_owned(),
             ],
+            ..Self::default()
         }
     }
-}
-
-impl Framing {
     /// Same schema, condensed laws: `source` and `authority` are unchanged so
     /// structured consumers keep their contract regardless of banner form.
     pub fn compact() -> Self {
@@ -1516,6 +1601,49 @@ pub(crate) fn write_error(error: &AppError, pretty: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_reply_metadata_never_promotes_remote_participant_ids() {
+        let mut text = String::new();
+        render_reply_metadata(
+            &mut text,
+            "remote",
+            Some("participant:local-collision"),
+            "remote-room",
+        );
+        assert_eq!(text, "reply=remote-room\n");
+    }
+
+    #[test]
+    fn references_include_off_page_collisions_and_preserve_unknown_ids() {
+        let ids = [
+            "20260917-120000-aaaaaa",
+            "20260917-120000-bbbbbb",
+            "20260918-120000-cccccc",
+        ];
+        assert_eq!(unique_reference(ids[0], ids), "20260917-120000-a");
+        assert_eq!(unique_reference("missing-parent", ids), "missing-parent");
+        assert_eq!(unique_reference(ids[0], []), ids[0]);
+    }
+
+    #[test]
+    fn header_uses_recorded_timezone_and_omits_only_same_day_date() {
+        let (_, today) = crate::mailbox::local_timestamp().unwrap();
+        let header = message_header("Sol (sol)", &today, "abc", "sol", Some("def"), "", None);
+        assert!(!header.contains(&today[..10]));
+        assert!(header.contains(&today[20..]));
+        assert!(header.contains("id=abc · reply=sol · re=def"));
+        assert!(message_header(
+            "sol",
+            "2020-01-01 12:00:00 +0000",
+            "abc",
+            "sol",
+            None,
+            "",
+            None
+        )
+        .contains("2020-01-01"));
+    }
 
     fn stamped(display_name: Option<&str>, pfp: Option<&str>) -> WatchEvent {
         WatchEvent::ChannelMessage {

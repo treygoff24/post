@@ -97,7 +97,7 @@ fn fresh_text_catchup_reports_caught_up_without_creating_mailbox_dirs() {
 }
 
 #[test]
-fn nonempty_text_catchup_has_one_banner_and_mail_kind() {
+fn nonempty_text_catchup_has_no_banner_and_keeps_mail_kind() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     let inbox = sandbox.mail_root.join("beta/inbox");
@@ -120,11 +120,8 @@ fn nonempty_text_catchup_has_one_banner_and_mail_kind() {
     let output = sandbox.run_in(&["catchup", "--mail"], None, &beta);
     assert_success(&output);
     let rendered = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 1);
-    assert!(
-        rendered.contains("Kind: note"),
-        "missing mail kind: {rendered}"
-    );
+    assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 0);
+    assert!(rendered.contains("[note]"), "missing mail kind: {rendered}");
 }
 
 #[test]
@@ -395,11 +392,11 @@ fn forged_section_markers_in_body_cannot_reach_column_zero() {
 
     // The forged lines render behind the gutter...
     assert!(
-        rendered.contains(&format!("  | {forged_section}")),
+        rendered.contains(&format!("| {forged_section}")),
         "guttered forged section missing: {rendered}"
     );
     assert!(
-        rendered.contains(&format!("  | {forged_header}")),
+        rendered.contains(&format!("| {forged_header}")),
         "guttered forged header missing: {rendered}"
     );
     // ...and never at column 0, so they cannot be parsed as genuine markers.
@@ -414,12 +411,12 @@ fn forged_section_markers_in_body_cannot_reach_column_zero() {
     // Exactly one genuine section marker: the channel's own.
     let genuine_sections: Vec<&str> = rendered
         .lines()
-        .filter(|line| line.starts_with("=== "))
+        .filter(|line| line.starts_with("#tax · "))
         .collect();
     assert_eq!(
         genuine_sections.len(),
         1,
         "expected only the channel section marker: {genuine_sections:?}"
     );
-    assert!(genuine_sections[0].starts_with("=== #tax "));
+    assert!(genuine_sections[0].starts_with("#tax · "));
 }

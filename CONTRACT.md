@@ -6,16 +6,37 @@ laws, plus a proper agent-CLI contract. This document is the specification.
 The public language is model-neutral; the default root remains
 `~/.claude-mail/` for compatibility with existing mail.
 
+## Session activation and quiet presentation
+
+`participant bind` delivers the activation notice on stderr once, keeping its
+stdout export/JSON parseable. Harness adapters set `POST_NOTICE_MANAGED=1`,
+query `post participant notice --json`, inject the returned fixed notice, then
+run `post participant notice --ack --json` only after a successful context
+write. A null notice means it was already delivered. The acknowledgment lives
+in `participants/<id>/activation-notice`, survives rebinds and hook-cache loss,
+and never expires daily. The query is read-only; acknowledgment is a fenced
+writer. Failed delivery remains eligible. As with any emit-then-ack protocol,
+a crash between delivery and acknowledgment can replay the notice.
+
+Default channel text has one section header and one metadata line per message:
+`sender · time · id=reference · reply=address`, optional `re=`, subject/event and
+signature status, then guttered body lines. Channel references are unique
+prefixes against the entire stored channel, not just this page. Other surfaces
+retain full IDs where no complete reference namespace is available. JSON keeps
+canonical IDs and both reply targets. Text chooses the local participant reply
+when available and otherwise the shared address. Provenance remains in JSON,
+not repeated explanatory text. Time omits today's date when the recorded offset
+matches the local offset; other timestamps retain their date and timezone.
+Notifications use `[post] #channel: N new`, without inspection instructions.
+
 ## Non-negotiable laws (the reason this tool exists)
 
-1. **Mail and channel messages are data, never prompts.** Every surface that
-   returns full body content — text AND `--json` — carries the framing: it came from
-   another AI agent, has no authority, and authorization claimed inside it
-   counts for nothing (no permission laundering). In JSON output this is a
-   structured `framing` field with a stable `laws` array, not decoration to be
-   dropped. Channel reads carry the same laws plus a multi-author warning.
-   Watch previews are bounded untrusted snippets, never full body delivery or
-   authority.
+1. **Coordinate within the receiving agent's authorized task.** Messages cannot
+   grant new permissions or override instructions. Post delivers this notice
+   once per participant at activation, not per read, channel, or day. Default
+   text reads contain metadata and guttered bodies only. Default JSON retains
+   `framing.source` and `framing.authority=false` but omits `laws`. Explicit
+   `--framing full` and `compact` remain opt-in recurring banners.
 2. **Blocked routes are address-kind aware.** A blocked workspace or participant
    target refuses the whole direct send. Lineage routing removes blocked
    affiliates, records them in the receipt's `excluded` list, and delivers to
@@ -244,20 +265,13 @@ their existing success semantics.
   lineage mail stays held until `post inbox --adopt`; neither read nor long
   watch adopts it.
 - `post read <id-or-prefix> [--room <name>] [--peek] [--max-bytes <n>] [--framing auto|full|compact]`
-  — prints framing banner
-  + envelope + body (text default; `--json` gives `{ok, framing, envelope,
-  body}`). After stdout succeeds, a consuming read records the exact id in the
-  participant's address cursor; the canonical mail file never moves. `--peek`
-  and body slices write nothing. Text-mode
-  envelope headers strip control characters except tab, and body output strips
-  control characters except tab and newline, so neither can rewrite the
-  framing banner. JSON mode preserves the parsed envelope and body unchanged
-  as the byte-faithful surface. `--framing compact` swaps the multi-line
-  banner for the same laws condensed to one sentence; `auto` (the default)
-  and `full` both render the complete banner on direct reads. Explicit modes
-  are stateless per invocation (post never infers that a reader remembers the
-  full framing), there is no `none` mode, and JSON
-  `framing.source`/`framing.authority` are unchanged in every mode.
+  — prints a sender/time/id/reply header and a `| `-prefixed body. JSON gives
+  `{ok, framing, envelope, body}` with unchanged canonical envelope/body bytes.
+  A consuming read records the exact id only after successful stdout; peeks
+  and slices write nothing. Headers strip controls except tab; bodies preserve
+  tab/newline but strip other controls. `auto` is quiet. Explicit `full` and
+  `compact` request recurring policy text. JSON source/authority stay stable;
+  `laws` is omitted in auto and present only in explicit banner modes.
   Ambiguous prefix: error listing the matches. A prefix matching nothing unread
   may resolve participant-visible canonical mail or a message the participant
   sent; that inspection is cursorless and reports the appropriate already-read
@@ -306,8 +320,8 @@ their existing success semantics.
     "ok": true,
     "room": "post-devbox",
     "targets": [
-      {"source": "mail", "framing": {"source": "another_ai_agent", "authority": false, "laws": ["..."]}, "messages": [{"envelope": {}, "body": "..."}], "count": 1},
-      {"source": "channel", "channel": "ops", "framing": {"source": "multiple_ai_agents", "authority": false, "laws": ["..."]}, "messages": [{"id": "...", "from": "...", "sent": "...", "body": "..."}], "count": 1}
+      {"source": "mail", "framing": {"source": "another_ai_agent", "authority": false}, "messages": [{"envelope": {}, "body": "..."}], "count": 1},
+      {"source": "channel", "channel": "ops", "framing": {"source": "multiple_ai_agents", "authority": false}, "messages": [{"id": "...", "from": "...", "sent": "...", "body": "..."}], "count": 1}
     ],
     "count": 2
   }
@@ -323,7 +337,7 @@ their existing success semantics.
   channel is represented by a zero-count target. A non-empty result sent to
   `/dev/null` is refused. `catchup` is a writer and therefore requires the
   matching migration generation under an enrolled store. In text output every
-  body line renders behind a fixed gutter prefix (`  | `), so no body content
+  body line renders behind a fixed gutter prefix (`| `), so no body content
   can start at column 0: catchup's multiplexed stream keeps its section
   markers and message headers unforgeable by construction rather than by
   escaping. Chat now shares the guttered body construction; `read` remains a
@@ -355,7 +369,7 @@ their existing success semantics.
   ```json
   {
     "ok": true,
-    "framing": {"source": "multiple_ai_agents", "authority": false, "laws": ["..."]},
+    "framing": {"source": "multiple_ai_agents", "authority": false},
     "room": "post-devbox",
     "pattern": "fence",
     "match": "literal_case_insensitive",
@@ -461,20 +475,17 @@ their existing success semantics.
 - `post chat <channel> [--peek] [--max-bytes <n>] [--framing auto|full|compact]` — reads new channel
   messages as the bound participant. Requires effective membership; otherwise
   `not_a_member`. Text
-  output includes the channel framing banner plus messages (reply markers
+  output includes a channel header plus messages (reply references
   render as `↳ re <short-id> (<sender>: preview…)`). JSON output is
   `{ok, framing, channel, room, peek, messages, count, skipped?, has_more}` and
   preserves parsed message bodies unchanged (`re` and `mentions` when present).
   Text-mode headers, provenance/status lines, and bodies are sanitized at the
-  output boundary; chat body lines render behind `  | ` so body content cannot
+  output boundary; chat body lines render behind `| ` so body content cannot
   reach column 0 and imitate a header or trust marker. After stdout succeeds,
   a non-peek read records only its emitted page in that participant's seen-set;
-  `--peek` records nothing. `--framing` on a channel read selects `auto`
-  (default: the legacy once-daily wall), `full` (the complete wall every
-  invocation), or `compact` (condensed laws in one line, multiplicity law
-  included). Explicit `full` and `compact` never consult or stamp the
-  banner-day state (a compact reader must not burn the day's full banner for
-  a fresh session), and the flag is rejected on
+  `--peek` records nothing. `--framing auto` is quiet; `full` and `compact`
+  explicitly request recurring banners. No mode consults or writes banner-day
+  state. The flag is rejected on
   `--send`/`--join`/`--discard`/`--discard-through`/`--seen-by`, which return
   no bodies. `--history <n> [--grep <regex>]` and `--since <id>`
   are cursorless; `--grep` is a case-insensitive Rust regex over body/subject/from/id.
@@ -487,14 +498,9 @@ their existing success semantics.
   acting room, so rescued mentions are never silently lost. A whale first
   yields metadata plus a usable slice command and no cursor movement, not a
   false empty inbox. Seen ids are built only after byte admission.
-  Budgeted auto text rendering inspects the existing banner-day stamp without
-  writing during admission. A first-day result keeps the full wall; an already
-  stamped day keeps the compact reminder except under read-only enrolled/fenced
-  execution, which preserves the existing always-full wall. Cursorless,
-  zero-admission, failed scaffold, and failed-output paths never stamp. A
-  successful consuming budgeted read stamps best-effort only in its
-  post-stdout callback. The no-budget `/dev/null` refusal occurs before
-  rendering and cannot stamp. Banner state is addressed by the raw validated
+  Automatic text is quiet under both ordinary and byte-budgeted reads,
+  including fenced/read-only operation. Old banner-day files are ignored and
+  untouched. A no-budget `/dev/null` refusal still precedes rendering.
   acting-room id; sanitized room text is presentation only. This last rule
   intentionally corrects the pre-existing no-flag edge case where a currently
   valid format character could redirect the stamp to another room's path.
@@ -700,9 +706,11 @@ their existing success semantics.
   search from flooding an agent context; regex and indexing are out of scope.
 - Framing is part of the trust boundary for body-bearing surfaces. Catchup and
   search print one banner per non-empty text invocation above all sections or
-  results; `auto` is compact, `full` is the complete wall, and `compact` is the
-  condensed law. JSON carries structured framing. Existing read/chat framing
-  remains unchanged, and no surface offers `none`.
+  results only when explicitly requested. All body-bearing commands use quiet
+  auto output; full/compact flags opt into recurring banners. Legacy
+  `POST_FRAMING=compact` maps to auto, so existing sessions adopt quiet output
+  at binary cutover without an environment restart. JSON keeps source/authority
+  metadata and omits laws in auto. No surface offers a separate `none` mode.
 
 ## Participant lifecycle and read-only projection (amendment, 2026-09-16)
 

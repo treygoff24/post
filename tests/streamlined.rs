@@ -12,7 +12,17 @@ fn default_channel_reads_are_quiet_and_actionable() {
         assert_success(&sandbox.run_in(&["chat", "tax", "--join"], None, cwd));
     }
     let sent: ChatSendOutput = from_stdout(&sandbox.run_in(
-        &["chat", "tax", "--send", "--anyway", "--body", "Tests pass.\nReady for review.", "--json"], None, &alpha,
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "Tests pass.\nReady for review.",
+            "--json",
+        ],
+        None,
+        &alpha,
     ));
     for _ in 0..2 {
         let result = sandbox.run_in(&["chat", "tax", "--peek"], None, &beta);
@@ -23,11 +33,35 @@ fn default_channel_reads_are_quiet_and_actionable() {
         assert!(!text.contains("reply_to_"), "{text}");
         assert!(text.contains("reply=participant:"), "{text}");
         assert!(text.contains("id="), "{text}");
-        assert!(text.contains("| Tests pass.\n| Ready for review."), "{text}");
+        assert!(
+            text.contains("| Tests pass.\n| Ready for review."),
+            "{text}"
+        );
         // The printed reference actually resolves, rather than a decorative short suffix.
-        let header = text.lines().find(|line| line.contains("Tests pass.") == false && line.contains("id=") && line.contains("reply=participant:")).unwrap();
-        let id = header.split("id=").nth(1).unwrap().split_whitespace().next().unwrap();
-        let read = sandbox.run_in(&["chat", "tax", "--message", id, "--json"], None, &beta);
+        let header = text
+            .lines()
+            .rfind(|line| line.contains("id=") && !line.contains("[join]"))
+            .unwrap();
+        let id = header
+            .split("id=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let read = sandbox.run_in(
+            &[
+                "chat",
+                "tax",
+                "--message",
+                id,
+                "--max-bytes",
+                "4096",
+                "--json",
+            ],
+            None,
+            &beta,
+        );
         assert_success(&read);
         assert!(String::from_utf8_lossy(&read.stdout).contains(&sent.message.id));
     }
@@ -39,9 +73,117 @@ fn default_channel_reads_are_quiet_and_actionable() {
 #[test]
 fn bind_activation_notice_is_once_per_participant_not_process_or_channel() {
     let sandbox = Sandbox::new();
-    for (key, expected) in [("first", true), ("first", false), ("second", true), ("first", false)] {
-        let result = sandbox.run(&["participant", "bind", "--harness", "shell", "--key", key, "--json"]);
+    for (key, expected) in [
+        ("first", true),
+        ("first", false),
+        ("second", true),
+        ("first", false),
+    ] {
+        let result = sandbox.run(&[
+            "participant",
+            "bind",
+            "--harness",
+            "shell",
+            "--key",
+            key,
+            "--json",
+        ]);
         assert_success(&result);
-        assert_eq!(String::from_utf8_lossy(&result.stderr).contains(NOTICE), expected);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr).contains(NOTICE),
+            expected
+        );
     }
+}
+
+#[test]
+fn real_harness_hooks_deliver_notice_once_and_survive_lost_hook_cache() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for (harness, event) in [
+        ("claude", "SessionStart"),
+        ("codex", "SessionStart"),
+        ("cursor", "sessionStart"),
+        ("grok", "UserPromptSubmit"),
+    ] {
+        let sandbox = Sandbox::new();
+        let readonly_stdout = sandbox.path.join("readonly-stdout");
+        std::fs::write(&readonly_stdout, b"").unwrap();
+        for (key, cache, expected, broken_stdout) in [
+            ("one", "cache-a", false, true),
+            ("one", "cache-a", true, false),
+            ("one", "cache-a", false, false),
+            ("one", "cache-b", false, false),
+            ("two", "cache-b", true, false),
+        ] {
+            let mut command = Command::new("node");
+            command
+                .arg(format!(
+                    "{}/skills/post/hooks/{harness}-mail.mjs",
+                    env!("CARGO_MANIFEST_DIR")
+                ))
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("HOME", &sandbox.home)
+                .env("POST_MAIL_ROOT", &sandbox.mail_root)
+                .env(
+                    format!("POST_{}_HOOK_BIN", harness.to_uppercase()),
+                    env!("CARGO_BIN_EXE_post"),
+                )
+                .env(
+                    format!("POST_{}_HOOK_STATE_DIR", harness.to_uppercase()),
+                    sandbox.path.join(cache),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if broken_stdout {
+                command.stdout(Stdio::from(std::fs::File::open(&readonly_stdout).unwrap()));
+            }
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    serde_json::to_string(&serde_json::json!({
+                        "hook_event_name": event, "session_id": key, "cwd": sandbox.path
+                    }))
+                    .unwrap()
+                    .as_bytes(),
+                )
+                .unwrap();
+            let result = child.wait_with_output().unwrap();
+            assert!(result.status.success());
+            if broken_stdout {
+                assert!(std::fs::read(&readonly_stdout).unwrap().is_empty());
+                continue;
+            }
+            let payload: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            let context = payload["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or("");
+            assert_eq!(
+                context.contains(NOTICE),
+                expected,
+                "{harness} {key} {cache}: {payload}"
+            );
+        }
+    }
+}
+
+#[test]
+fn notice_query_is_read_only_and_ack_persists_across_rebinds() {
+    let sandbox = Sandbox::new();
+    let query = || sandbox.run(&["participant", "notice", "--json"]);
+    for _ in 0..2 {
+        let result = query();
+        assert_success(&result);
+        let value: serde_json::Value = from_stdout(&result);
+        assert_eq!(value["notice"], NOTICE);
+    }
+    assert_success(&sandbox.run(&["participant", "notice", "--ack", "--json"]));
+    assert_success(&sandbox.run(&["participant", "bind", "--json"]));
+    let value: serde_json::Value = from_stdout(&query());
+    assert!(value["notice"].is_null());
 }

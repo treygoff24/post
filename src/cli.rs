@@ -119,6 +119,11 @@ pub(crate) struct ParticipantArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ParticipantCommand {
+    /// Read the pending activation notice; --ack records successful delivery by a harness adapter.
+    Notice {
+        #[arg(long)]
+        ack: bool,
+    },
     /// Show the acting participant, or unbound when none is bound.
     Show,
     /// Bind this harness conversation, minting its deterministic participant only when absent.
@@ -500,11 +505,11 @@ pub(crate) struct ChatArgs {
     #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
 
-    /// Banner form for body-returning reads: auto (default, once-daily full
-    /// wall), full (every invocation), or compact (one-line reminder).
+    /// Banner form for body-returning reads: auto (default, quiet), full
+    /// (every invocation), or compact (one-line reminder).
     /// Rejected on send/join/discard/discard-through/seen-by, which return no
     /// bodies and must not look like they honored it.
-    /// Banner form when absent: POST_FRAMING env (auto|full|compact), else
+    /// Presentation when absent: POST_FRAMING env (auto|full|compact), else
     /// auto. An explicit value always wins over the environment.
     #[arg(long, value_enum, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file"])]
     pub framing: Option<FramingMode>,
@@ -707,19 +712,15 @@ pub(crate) struct OwnerInitArgs {
 }
 
 /// How much framing a body-returning read prints. The laws bind in every
-/// mode; compact is for sessions that have already internalized the full
-/// text. Explicit modes (full, compact) are stateless — post never infers
-/// that a reader remembers — and never touch the banner-day state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+/// mode. Automatic reads are quiet; explicit full/compact retain opt-in banners.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum FramingMode {
-    /// Legacy presentation (default; byte-compatible): full laws everywhere
-    /// except text chat, which shows the full wall once per room per day and
-    /// a one-line reminder for the rest of the day.
+    /// Quiet message headers and bodies; activation notice is once per participant.
     #[default]
     Auto,
-    /// Force the full multi-line trust-boundary banner on every invocation.
+    /// Force the full multi-line banner on every invocation.
     Full,
-    /// One-line reminder carrying the same laws in condensed form.
+    /// Explicitly request a condensed policy banner on every invocation.
     Compact,
 }
 
@@ -736,7 +737,7 @@ pub(crate) struct ReadArgs {
     /// Read without moving the message to read/.
     #[arg(long)]
     pub peek: bool,
-    /// Banner form when absent: POST_FRAMING env (auto|full|compact), else
+    /// Presentation when absent: POST_FRAMING env (auto|full|compact), else
     /// auto. An explicit value always wins over the environment.
     #[arg(long, value_enum)]
     pub framing: Option<FramingMode>,

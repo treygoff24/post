@@ -193,10 +193,10 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /20260722-010101-aaa111/);
-  assert.match(context, /New channel message\(s\): #ops \(1\)/);
+  assert.match(context, /#ops: 1 new/);
   assert.ok(!context.includes("20260722-020202-000002-bbb222"));
   assert.doesNotMatch(context, /untrusted|carries no authority/);
-  assert.match(context, /run from the project directory/);
+  assert.doesNotMatch(context, /run from the project directory/);
   assert.ok(!context.includes("SECRET"), "subject must be omitted");
   assert.ok(!context.includes("secret-sender"), "sender must be omitted");
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
@@ -245,7 +245,7 @@ test("mail for the cwd-resolved room is accepted and named", () => {
     { stateDir: freshStateDir() }
   );
   assert.match(out.hookSpecificOutput.additionalContext, /room sol/);
-  assert.match(out.hookSpecificOutput.additionalContext, /post read <id>/);
+  assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /post read <id>/);
   assert.ok(!out.hookSpecificOutput.additionalContext.includes("--room codex"));
 });
 
@@ -476,7 +476,7 @@ test("valid unreadable events stay count-only and never echo the id", () => {
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /Unreadable mail: 1 item/);
   assert.ok(!context.includes("corrupt-stem-xyz"));
-  assert.match(context, /#ops \(1\)/);
+  assert.match(context, /#ops: 1 new/);
   assert.ok(!context.includes(CHAN_B.id));
 });
 
@@ -555,8 +555,8 @@ test("a huge distinct-channel backlog bounds the channel summary", () => {
     { stateDir }
   );
   const context = out.hookSpecificOutput.additionalContext;
-  assert.match(context, /#chan0 \(1\)/);
-  assert.match(context, /#chan19 \(1\)/);
+  assert.match(context, /#chan0: 1 new/);
+  assert.match(context, /#chan19: 1 new/);
   assert.match(context, /\+5 more/);
   assert.ok(!context.includes("#chan20"));
   assert.ok(!context.includes(channels[0].id), "channel ids stay out of context");
@@ -725,6 +725,7 @@ test("SessionStart binds before snapshot with the session cwd", () => {
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "codex", "--key", "bind-order", "--json"],
+    ["participant", "notice", "--json"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],
   ]);

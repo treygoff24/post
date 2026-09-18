@@ -179,7 +179,7 @@ test("channel-only snapshot names the channels, not a phantom mail room", () => 
     { stateDir: freshStateDir() }
   );
   const context = out.hookSpecificOutput.additionalContext;
-  assert.match(context, /New channel message\(s\): #ops \(1\)\./);
+  assert.match(context, /#ops: 1 new/);
   assert.ok(!context.includes("Unread agent mail"));
   assert.ok(!context.includes("SECRET-CHANNEL-SUBJECT"));
   assert.ok(!context.includes("secret-peer"));
@@ -204,10 +204,10 @@ test("SessionStart surfaces the launch backlog with metadata only", () => {
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /room claude-space/);
   assert.match(context, /20260730-010101-aaa111/);
-  assert.match(context, /New channel message\(s\): #ops \(1\)/);
+  assert.match(context, /#ops: 1 new/);
   assert.ok(!context.includes("20260730-020202-000002-bbb222"));
   assert.doesNotMatch(context, /untrusted|carries no authority/);
-  assert.match(context, /post read <id>/);
+  assert.doesNotMatch(context, /post read <id>/);
   assert.ok(!context.includes("SECRET"), "subject must be omitted");
   assert.ok(!context.includes("secret-sender"), "sender must be omitted");
   assert.ok(!context.includes("secret-peer"), "channel sender must be omitted");
@@ -507,7 +507,7 @@ test("valid unreadable events stay count-only and never echo the id", () => {
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /Unreadable mail: 1 item/);
   assert.ok(!context.includes("corrupt-stem-xyz"));
-  assert.match(context, /#ops \(1\)/);
+  assert.match(context, /#ops: 1 new/);
   assert.ok(!context.includes(CHAN_B.id));
 });
 
@@ -557,8 +557,8 @@ test("a huge distinct-channel backlog bounds the channel summary", () => {
     { stateDir }
   );
   const context = out.hookSpecificOutput.additionalContext;
-  assert.match(context, /#chan0 \(1\)/);
-  assert.match(context, /#chan19 \(1\)/);
+  assert.match(context, /#chan0: 1 new/);
+  assert.match(context, /#chan19: 1 new/);
   assert.match(context, /\+5 more/);
   assert.ok(!context.includes("#chan20"));
   assert.ok(!context.includes(channels[0].id), "channel ids stay out of context");
@@ -737,9 +737,10 @@ test("capability mismatch stays retryable until the binary is upgraded", () => {
   setStub({ events: [MAIL_A] });
   const second = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(second.hookSpecificOutput.additionalContext, /20260730-010101-aaa111/);
-  assert.deepEqual(allStubCalls().slice(-5).map((call) => call.args), [
+  assert.deepEqual(allStubCalls().slice(-6).map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "grok", "--key", "cap-once", "--json"],
+    ["participant", "notice", "--json"],
     ["participant", "touch"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],
@@ -767,6 +768,7 @@ test("first prompt binds before snapshot with the session cwd", () => {
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "grok", "--key", "bind-order", "--json"],
+    ["participant", "notice", "--json"],
     ["participant", "touch"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],
@@ -804,9 +806,10 @@ test("legacy initialized state without a participant retries setup", () => {
   fs.writeFileSync(stateFile, JSON.stringify({ initialized: true, participantId: null, seen: [] }));
   setStub({ events: [], bind_stdout: JSON.stringify({ ok: true, status: "bound", id: "grok-legacy123", participant: { id: "grok-legacy123", lineage: null } }) });
   run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "legacy-state" }, { stateDir });
-  assert.deepEqual(allStubCalls().slice(-5).map((call) => call.args), [
+  assert.deepEqual(allStubCalls().slice(-6).map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "grok", "--key", "legacy-state", "--json"],
+    ["participant", "notice", "--json"],
     ["participant", "touch"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],

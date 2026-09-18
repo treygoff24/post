@@ -100,13 +100,13 @@ test("mail and channel events render one metadata-only line", () => {
   const line = lines[0];
   assert.match(line, /room claude-space/);
   assert.match(line, /20260730-010101-aaa111/);
-  assert.match(line, /New channel message\(s\): #ops \(1\)/);
+  assert.match(line, /#ops: 1 new/);
   assert.ok(!line.includes(CHAN_B.id), "channel ids stay out of the notice");
   assert.ok(!line.includes("SECRET"), "subject must be omitted");
   assert.ok(!line.includes("secret-sender"), "sender must be omitted");
   assert.ok(!line.includes("secret-peer"), "channel sender must be omitted");
   assert.doesNotMatch(line, /untrusted|carries no authority/);
-  assert.match(line, /post read <id>/);
+  assert.doesNotMatch(line, /post read <id>/);
 });
 
 test("channel-only snapshot names the channels, not a phantom mail room", () => {
@@ -114,7 +114,7 @@ test("channel-only snapshot names the channels, not a phantom mail room", () => 
   const result = run(["--snapshot"]);
   assert.equal(result.status, 0, result.stderr);
   const line = result.stdout.trim();
-  assert.match(line, /New channel message\(s\): #ops \(1\)\./);
+  assert.match(line, /#ops: 1 new/);
   assert.ok(!line.includes("Unread agent mail"));
   assert.ok(!line.includes("SECRET-CHANNEL-SUBJECT"));
   assert.ok(!line.includes("secret-peer"));
@@ -138,7 +138,7 @@ test("valid unreadable events stay count-only and never echo the id", () => {
   const line = result.stdout.trim();
   assert.match(line, /Unreadable mail: 1 item/);
   assert.ok(!line.includes("corrupt-stem-xyz"));
-  assert.match(line, /#ops \(1\)/);
+  assert.match(line, /#ops: 1 new/);
   assert.ok(!line.includes(CHAN_B.id));
 });
 

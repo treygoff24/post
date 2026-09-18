@@ -314,7 +314,7 @@ test("installed adapter copy runs end-to-end with the release CLI", () => {
       },
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), {});
+    assert.match(JSON.parse(result.stdout).hookSpecificOutput.additionalContext, /Post connects you with other agents/);
     const participantDirs = fs.readdirSync(path.join(mailRoot, "participants"))
       .filter((entry) => entry.startsWith("codex-"));
     assert.equal(participantDirs.length, 1);

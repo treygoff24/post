@@ -326,7 +326,8 @@ fn read_state(context: &Context) -> AppResult<Option<FenceState>> {
     parsed.into_state(&path).map(Some)
 }
 
-pub(crate) fn conservative_read_mode(context: &Context) -> bool {
+#[cfg(test)]
+fn conservative_read_mode(context: &Context) -> bool {
     if std::env::var_os(GENERATION_ENV).is_some() {
         return true;
     }
@@ -598,6 +599,7 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         | Command::Participant(crate::cli::ParticipantArgs {
             command:
                 crate::cli::ParticipantCommand::Bind(_)
+                | crate::cli::ParticipantCommand::Notice { ack: true }
                 | crate::cli::ParticipantCommand::Touch
                 | crate::cli::ParticipantCommand::End,
         })

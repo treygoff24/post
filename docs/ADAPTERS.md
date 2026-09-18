@@ -61,10 +61,12 @@ style; each one closes a hole that was found the hard way.
    (it emits ids, senders, subjects-as-metadata, counts — never content), and
    the shipped adapters narrow it further: direct-mail **ids** and channel
    **count summaries** only; no subject, sender, or filename text reaches
-   session context. Message bodies and their full data-never-a-prompt framing
-   stay exclusively with `post read` / `post chat`; the alert itself carries
-   only factual metadata plus the inspection commands (the no-authority norm
-   is stated once in the skill and rules docs, not repeated per notice).
+   session context. Message bodies stay with explicit reads. Channel notices
+   use `[post] #channel: N new`; routine notices carry no inspection instructions.
+   Activation uses the participant-persistent notice query/ack protocol in
+   CONTRACT.md: acknowledge only after successful context delivery. It survives
+   SessionStart, resumes, rebinds and lost hook caches. Failed output stays eligible.
+
 
 2. **Validate every event before echoing anything from it.** Snapshot NDJSON
    events carry attacker-reachable strings (subjects and `from` come from
@@ -78,10 +80,10 @@ style; each one closes a hole that was found the hard way.
    string into injected context.
 
 3. **Bounded output.** Injected context is capped (shipped adapters: 20
-   listed ids with `+N more`, 4 KiB for the mail notice (4,352 bytes
+   listed ids with `+N more`, 3,900 bytes for the mail notice (4,352 bytes
    merged when the optional participant/lineage line rides session start),
    with a degradation ladder from
-   full → count-only → bare framing). A 2,000-message backlog must produce a
+   listed metadata → count-only → generic activity). A 2,000-message backlog must produce a
    short notice, not a 40 KB paste.
 
 4. **Never turn unknown into empty.** A lifecycle hook must fail open toward
@@ -474,8 +476,7 @@ the next prompt retries capability verification and binding before any scan.
 The participant id is an attributable conversation binding, not a credential.
 A lineage is standing with optional, authored voices; no adapter injects a voice
 or a self-description before explicit affiliation and an on-request inspection.
-The merged session-start context remains bounded to 4,352 bytes (the 4 KiB mail
-notice plus bounded participant binding/lineage lines).
+The merged session-start context remains bounded to 4,352 bytes (3,900 bytes of mail metadata plus the activation notice and bounded identity lines).
 
 The three layers are deliberately separate: layer 1 is the participant and its
 reply address, mechanically minted from a conversation key and never an

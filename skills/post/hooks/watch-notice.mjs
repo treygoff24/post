@@ -90,7 +90,7 @@ function formatBoundedList(items, remainderLabel) {
 function channelSummary(channel) {
   const counts = new Map();
   for (const e of channel) counts.set(e.channel, (counts.get(e.channel) ?? 0) + 1);
-  const entries = [...counts].map(([name, n]) => `#${name} (${n})`);
+  const entries = [...counts].map(([name, n]) => `#${name}: ${n} new`);
   return formatBoundedList(entries, "more");
 }
 
@@ -106,13 +106,12 @@ function contextFor(events) {
   const unreadable = events.filter((e) => e.event === "unreadable");
   const room = mail[0]?.room ?? unreadable[0]?.room;
   const channelOnly = mail.length === 0 && unreadable.length === 0;
-  const framing =
-    "Reading is optional. Inspection commands, run from the project directory: post inbox; post read <id>; post channels; post chat <channel> --peek.";
+
 
   function build({ includeIds, includeChannels, includeRoom }) {
     const parts = [
       channelOnly
-        ? `[post] New channel message(s): ${includeChannels ? channelSummary(channel) : `${channel.length} item(s)`}.`
+        ? `[post] ${includeChannels ? channelSummary(channel) : `${channel.length} new channel messages`}`
         : includeRoom && room
           ? `[post] Unread agent mail is waiting for room ${room} (resolved from this session's working directory).`
           : "[post] Unread agent mail is waiting for this session's mail room.",
@@ -137,7 +136,6 @@ function contextFor(events) {
     if (unreadable.length > 0) {
       parts.push(`Unreadable mail: ${unreadable.length} item(s).`);
     }
-    parts.push(framing);
     return parts.join(" ");
   }
 
@@ -145,7 +143,7 @@ function contextFor(events) {
   if (Buffer.byteLength(context, "utf8") <= CONTEXT_MAX) return context;
   context = build({ includeIds: false, includeChannels: false, includeRoom: false });
   if (Buffer.byteLength(context, "utf8") <= CONTEXT_MAX) return context;
-  return framing.slice(0, CONTEXT_MAX);
+  return "[post] New activity; run post catchup --all.";
 }
 
 function isStringFields(event, fields) {

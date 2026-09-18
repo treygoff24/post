@@ -35,6 +35,22 @@ pub(super) fn run(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     match args.command {
+        ParticipantCommand::Notice { ack } => {
+            let (participant, _) = participant::require(context)?;
+            if ack {
+                let _lock = participant::lock(context)?;
+                participant::acknowledge_notice(&participant)?;
+            }
+            CommandResult::json(
+                &serde_json::json!({
+                    "ok": true,
+                    "notice": if !ack && participant::notice_pending(&participant) {
+                        Some(participant::ACTIVATION_NOTICE)
+                    } else { None },
+                }),
+                pretty,
+            )
+        }
         ParticipantCommand::Show => show(context, pretty),
         ParticipantCommand::Bind(args) => {
             if args.harness.is_some() && args.key.is_none() && !args.fresh {
@@ -88,6 +104,9 @@ pub(super) fn run(
             let participant =
                 participant::bind(context, &cwd, args.workspace.as_deref(), bootstrap)?;
             crate::cursor_state::routing::route_for_participant(context, &participant)?;
+            if std::env::var_os("POST_NOTICE_MANAGED").is_none() {
+                participant::emit_activation_notice(context, &participant)?;
+            }
             if bootstrap.is_some() && !json {
                 return Ok(CommandResult::success(format!(
                     "export POST_PARTICIPANT={}\n",
