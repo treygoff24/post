@@ -1,13 +1,14 @@
-# Post message output: source handoff, runtime held
+# Post message output: deployed on devbox
 
 Trey approved the quiet-output refactor on 2026-09-17. His cutover instruction:
 "spin up a mac-side agent so it can pull this update to the mac, then we'll
 execute the runtime update simultaneously" because agents are coordinating
 across both machines.
 
-**Installation remains held:** Source preparation and verification
-are complete below; the installed binaries, hook copies, watchers and bridge
-must wait for Trey's coordinated cutover. No GitHub push or release was requested.
+**Hold lifted:** On 2026-09-17 at 21:38 CDT, Trey said all agents had moved to
+the devbox and authorized: "full send just go ahead and do it". The active
+devbox binary and existing Post hook scripts are now deployed at `c2feda0`.
+No Mac deployment, GitHub publication or agent-session restart occurred.
 
 ## Changes
 
@@ -60,7 +61,7 @@ The gate covers fmt, clippy, Rust tests, release build, hook and launcher tests,
 Python doorbell tests and schema output. No numerical coverage measurement was
 produced, and macOS execution is not verified here.
 
-## Runtime boundary and Mac handoff
+## Original runtime boundary (superseded by the deployment below)
 
 The source is on Forgejo `origin/main` after closeout. The Mac agent should
 inspect its checkout and pull that source without installing it. Coordinate
@@ -79,3 +80,59 @@ that is not a binary/hook cutover.
 Bead: `post-49f`. The pre-existing Beads JSONL/Dolt mismatch still causes the
 CLI to refuse auto-export; no ledger import or overwrite was attempted. This
 receipt carries the cross-host handoff independently of that local ledger issue.
+
+
+## Devbox deployment
+
+Deployment bead: `post-inq`. Source build `c2feda0` is installed at
+`~/.local/bin/post`. SHA-256:
+`1c8179a93ab18ee83d161bf84c331f6e0c7296b040f24fa8603d5d412a2cd3dd`.
+
+The existing Codex, Claude and Grok adapters and Grok watch-notice helper now
+match the source files byte-for-byte. Active Codex/Claude profile configs share
+these adapter paths. Hook registrations were preserved. No Cursor Post hooks
+were installed previously, so deployment did not add a new integration.
+
+The first installation exposed overlapping hook calls issuing duplicate
+activation notices. `a135b9a` reproduced the failure on all four source adapters
+(4-6 notices for six concurrent events). `c2feda0` adds a PID-owned reservation
+under the participant registry lock, with release on success/failure and
+reclamation when the owner exits. Failed-output and lost-cache tests still pass.
+
+Verification at the corrected build:
+
+- Canonical gate passed: 545 Rust tests, 289 hook tests, 34 launcher tests and
+  41 doorbell tests, plus fmt, clippy, release build and schema.
+- Installed smoke passed with `POST_SMOKE_EXPECT_BUILD_SHA=c2feda0`.
+- Six simultaneous events against each installed Codex/Claude/Grok adapter
+  produced one notice; repeats and a fresh hook cache produced none.
+- A non-consuming live `#astra` peek rendered quiet headers under the inherited
+  compact environment. No message bodies were persisted in the receipt.
+- All installed file hashes match the rollout manifest.
+
+### Evidence and rollback
+
+Local evidence: `/var/tmp/post-deployment-gate.log`,
+`/var/tmp/post-runtime-final-smoke.log`, and
+`/var/tmp/post-runtime-final-receipt.json`.
+
+Both swaps used same-directory temporary files and atomic rename, preserving
+loaded executables and existing sessions. Rollback files were retained at:
+
+- `~/.local/state/post/rollbacks/20260918T024243Z-quiet-output/` (original runtime)
+- `~/.local/state/post/rollbacks/20260918T025431Z-activation-claims/` (first quiet build)
+
+Each directory has a manifest with target paths and before/after hashes. No
+watcher, bridge or agent process was restarted. A pre-existing D-state Post
+process was left alone on its original inode.
+
+Pre-existing conditions, unchanged by deployment:
+
+- `/usr/local/bin/post` is an older root-owned fallback. Noninteractive sudo
+  requires a password; it was not replaced. Active agent PATHs and installed
+  hooks resolve the updated user binary instead.
+- Live doctor still reports five findings: missing workspace for
+  `dwp-portals-phase1`, and missing inbox/read directories for `fable-devbox`
+  and `warrant`. The before/after findings are identical; no mailbox repair
+  was folded into this deployment.
+- The Beads JSONL/Dolt auto-export mismatch remains as recorded above.
