@@ -40,6 +40,11 @@ fs.writeFileSync(
     "const args = process.argv.slice(2);",
     `fs.appendFileSync(${JSON.stringify(POST_CALLS)}, JSON.stringify(args) + "\\n");`,
     `const control = JSON.parse(fs.readFileSync(${JSON.stringify(CONTROL)}, "utf8"));`,
+    'if (args[0] === "participant" && args[1] === "show") {',
+    '  process.stdout.write(control.participantStdout ?? JSON.stringify({ok:true,status:"bound",id:process.env.POST_PARTICIPANT || "shell-test",participant:{id:process.env.POST_PARTICIPANT || "shell-test",workspace:"ops"}}));',
+    "  process.exit(control.participantExit ?? 0);",
+    "}",
+    'if (control.expectedParticipant && process.env.POST_PARTICIPANT !== control.expectedParticipant) process.exit(91);',
     'if (args[0] === "rooms") {',
     "  if (control.roomsStdout) process.stdout.write(control.roomsStdout);",
     "  if (control.roomsStderr) process.stderr.write(control.roomsStderr);",
@@ -142,6 +147,7 @@ function run(args, control = OK, env = {}) {
       POST_CODEX_DOORBELL_HERDR_BIN: HERDR,
       POST_CODEX_DOORBELL_SYSTEMCTL_BIN: SYSTEMCTL,
       POST_MAIL_ROOT: undefined,
+      POST_PARTICIPANT: undefined,
       ...env,
     },
   });
@@ -169,6 +175,7 @@ test("state path collisions refuse before systemctl without changing targets", (
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     const target = path.join(ROOT, `target-${kind}`);
     fs.mkdirSync(target, { mode: 0o755 });
+    fs.chmodSync(target, 0o755);
     if (kind === "file") fs.writeFileSync(dir, "keep");
     else fs.symlinkSync(target, dir);
     const before = calls(SYSTEMCTL_CALLS).length;
@@ -464,3 +471,50 @@ test("systemctl lifecycle failures are reported after files are materialized", (
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+test("pins the validated current or explicit participant for systemd", () => {
+  for (const explicit of [undefined, "shell-explicit"]) {
+    const home = homeFor(`participant-${explicit ?? "current"}`);
+    const result = run(["--room", "ops", "--agent", AGENT], {
+      ...OK, expectedParticipant: explicit ?? "shell-test",
+    }, {
+      POST_CODEX_DOORBELL_HOME: home, POST_PARTICIPANT: explicit,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(unitPath(home, "service"), "utf8"),
+      new RegExp(`^Environment=POST_PARTICIPANT=${explicit ?? "shell-test"}$`, "m"));
+  }
+});
+
+test("unbound, mismatched and unsafe participant identities refuse before writes", () => {
+  const bound = {ok: true, status: "bound", id: "shell-test", participant: {id: "shell-test", workspace: "ops"}};
+  const cases = [
+    {participantExit: 1},
+    {participantStdout: "not-json"},
+    {participantStdout: JSON.stringify({ok: true, status: "unbound"})},
+    {participantStdout: JSON.stringify({...bound, participant: {...bound.participant, workspace: "other"}})},
+    {participantStdout: JSON.stringify({...bound, id: "shell-other"})},
+    {participantStdout: JSON.stringify({...bound, id: "shell-%n", participant: {...bound.participant, id: "shell-%n"}})},
+    {participantStdout: JSON.stringify({...bound, id: "shell-x\nEnvironment=BAD=yes", participant: {...bound.participant, id: "shell-x\nEnvironment=BAD=yes"}})},
+  ];
+  for (const [index, control] of cases.entries()) {
+    const home = homeFor(`participant-refusal-${index}`);
+    const installDir = path.join(home, "hooks");
+    const before = calls(SYSTEMCTL_CALLS).length;
+    const result = run(["--room", "ops", "--agent", AGENT], {...OK, ...control}, {
+      POST_CODEX_DOORBELL_HOME: home, POST_CODEX_DOORBELL_INSTALL_DIR: installDir,
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /participant/);
+    assertNoArtifacts(home, installDir);
+    assert.equal(calls(SYSTEMCTL_CALLS).length, before);
+  }
+  const home = homeFor("participant-explicit-mismatch");
+  const result = run(["--room", "ops", "--agent", AGENT], {
+    ...OK, participantStdout: JSON.stringify(bound),
+  }, {POST_PARTICIPANT: "shell-other", POST_CODEX_DOORBELL_HOME: home,
+    POST_CODEX_DOORBELL_INSTALL_DIR: path.join(home, "hooks")});
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /does not match POST_PARTICIPANT/);
+  assertNoArtifacts(home, path.join(home, "hooks"));
+});

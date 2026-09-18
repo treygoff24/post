@@ -11,6 +11,9 @@
 // ~/.config/systemd/user/, and enables the timer. The job snapshots the exact
 // room and wakes the exact Herdr agent
 // only when it is unfocused and idle/done (see codex-notify-monitor.mjs).
+// The acting participant is resolved via `post participant show` (honoring an
+// explicit POST_PARTICIPANT), validated against --room, and pinned into the unit.
+// Unbound or mismatched identities abort without creating or rebinding anyone.
 // When POST_MAIL_ROOT is set at install time it must be absolute and is
 // pinned verbatim into the unit Environment=, so systemd runs the
 // monitor against the same mail root the preflight saw; when unset the key
@@ -239,6 +242,34 @@ function isChannelRow(entry) {
   );
 }
 
+function resolveParticipant(postBin, room) {
+  const result = spawnSync(postBin, ["participant", "show"], {
+    encoding: "utf8",
+    timeout: 4000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    fail("preflight failed: `post participant show`; select an existing bound POST_PARTICIPANT, then re-run");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    fail("preflight failed: `post participant show` printed malformed output");
+  }
+  if (parsed?.ok !== true || parsed.status !== "bound" || !safeName(parsed.id) ||
+      parsed.participant?.id !== parsed.id) {
+    fail("preflight failed: acting participant is unbound or malformed; select an existing bound POST_PARTICIPANT, then re-run");
+  }
+  if (process.env.POST_PARTICIPANT !== undefined && process.env.POST_PARTICIPANT !== parsed.id) {
+    fail("preflight failed: resolved participant does not match POST_PARTICIPANT");
+  }
+  if (parsed.participant.workspace !== room) {
+    fail(`preflight failed: participant '${parsed.id}' is not bound to room '${room}'; select the intended participant, then re-run`);
+  }
+  return parsed.id;
+}
+
 function preflight(postBin, herdrBin, room, agent, channels) {
   const rooms = spawnSync(postBin, ["rooms"], {
     encoding: "utf8",
@@ -429,10 +460,12 @@ function serviceContent({
   postBin,
   herdrBin,
   mailRoot,
+  participant,
   paths,
 }) {
   const envLines = [
     `Environment=HOME=${unitQuote(paths.home)}`,
+    `Environment=POST_PARTICIPANT=${unitQuote(participant)}`,
     `Environment=POST_CODEX_NOTIFY_POST_BIN=${unitQuote(postBin)}`,
     `Environment=POST_CODEX_NOTIFY_HERDR_BIN=${unitQuote(herdrBin)}`,
     `Environment=POST_CODEX_NOTIFY_HERDR_AGENT=${unitQuote(agent)}`,
@@ -594,6 +627,9 @@ function install(opts) {
     "systemctl"
   );
   const paths = derivedPaths(opts.agent);
+  const participant = resolveParticipant(postBin, opts.room);
+  // Probe using the same explicit identity systemd will use, not a harness key.
+  process.env.POST_PARTICIPANT = participant;
   // Preflight registration, optional channel membership, the exact room
   // snapshot, and the exact Herdr target before any write.
   preflight(postBin, herdrBin, opts.room, opts.agent, opts.channels);
@@ -643,6 +679,7 @@ function install(opts) {
     postBin,
     herdrBin,
     mailRoot,
+    participant,
     paths,
   });
   const timer = timerContent({ agent: opts.agent, intervalSeconds: opts.intervalSeconds });
