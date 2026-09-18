@@ -599,7 +599,11 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         | Command::Participant(crate::cli::ParticipantArgs {
             command:
                 crate::cli::ParticipantCommand::Bind(_)
-                | crate::cli::ParticipantCommand::Notice { ack: true }
+                | crate::cli::ParticipantCommand::Notice { ack: true, .. }
+                | crate::cli::ParticipantCommand::Notice { claim: Some(_), .. }
+                | crate::cli::ParticipantCommand::Notice {
+                    release: Some(_), ..
+                }
                 | crate::cli::ParticipantCommand::Touch
                 | crate::cli::ParticipantCommand::End,
         })

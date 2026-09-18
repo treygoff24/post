@@ -10,12 +10,15 @@ The public language is model-neutral; the default root remains
 
 `participant bind` delivers the activation notice on stderr once, keeping its
 stdout export/JSON parseable. Harness adapters set `POST_NOTICE_MANAGED=1`,
-query `post participant notice --json`, inject the returned fixed notice, then
+claim `post participant notice --claim <adapter-pid> --json`, inject the returned fixed notice, then
 run `post participant notice --ack --json` only after a successful context
-write. A null notice means it was already delivered. The acknowledgment lives
+write, then release the PID claim with `--release <adapter-pid>` on success
+or failure. `busy=true` means another live adapter owns delivery; retry later.
+Otherwise a null notice means it was already delivered. Claims are serialized
+under the registry lock, and a dead owner can be replaced. The acknowledgment lives
 in `participants/<id>/activation-notice`, survives rebinds and hook-cache loss,
-and never expires daily. The query is read-only; acknowledgment is a fenced
-writer. Failed delivery remains eligible. As with any emit-then-ack protocol,
+and never expires daily. The plain query is read-only; claim, release and acknowledgment are fenced
+writers. Failed delivery remains eligible. As with any emit-then-ack protocol,
 a crash between delivery and acknowledgment can replay the notice.
 
 Default channel text has one section header and one metadata line per message:

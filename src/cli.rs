@@ -121,8 +121,14 @@ pub(crate) struct ParticipantArgs {
 pub(crate) enum ParticipantCommand {
     /// Read the pending activation notice; --ack records successful delivery by a harness adapter.
     Notice {
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["claim", "release"])]
         ack: bool,
+        /// Reserve delivery for this live adapter PID; competing adapters report busy.
+        #[arg(long, value_name = "PID", conflicts_with = "release", value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
+        claim: Option<u32>,
+        /// Release this adapter PID's reservation after failed output.
+        #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
+        release: Option<u32>,
     },
     /// Show the acting participant, or unbound when none is bound.
     Show,

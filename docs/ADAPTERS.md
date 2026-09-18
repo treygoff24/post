@@ -63,8 +63,10 @@ style; each one closes a hole that was found the hard way.
    **count summaries** only; no subject, sender, or filename text reaches
    session context. Message bodies stay with explicit reads. Channel notices
    use `[post] #channel: N new`; routine notices carry no inspection instructions.
-   Activation uses the participant-persistent notice query/ack protocol in
-   CONTRACT.md: acknowledge only after successful context delivery. It survives
+   Activation uses the participant-persistent notice claim/ack/release protocol in
+   CONTRACT.md: claim with the adapter PID, acknowledge only after successful
+   context delivery, and release on success or failure. Competing hooks wait
+   for the live owner; the next hook can reclaim a dead owner. It survives
    SessionStart, resumes, rebinds and lost hook caches. Failed output stays eligible.
 
 

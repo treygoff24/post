@@ -46,7 +46,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let commands = vec![
         command(
             "participant",
-            "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant touch | post participant end | post participant list | post participant notice [--ack]",
+            "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant touch | post participant end | post participant list | post participant notice [--ack | --claim <pid> | --release <pid>]",
             "JSON",
             "show/list are read-only; bind is the only participant minting path and refreshes last_seen, preserves an existing lease_hours unless POST_PARTICIPANT_LEASE_HOURS is explicit (new records default to 24), clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen and likewise preserves the recorded lease unless explicitly overridden; end sets ended_at idempotently",
         ),
@@ -151,7 +151,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         participant: fields(&[
             "show/bind/touch/end: ok, status=bound|unbound|ended, id?, participant? (last_seen?, lease_hours, ended_at?), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
             "list: ok, participants, count",
-            "notice: ok, notice=string|null; read-only query, --ack is a fenced writer recording successful activation-notice delivery",
+            "notice: ok, notice=string|null, busy; plain query is read-only; --claim PID reserves delivery under the registry lock (busy for a live competing owner), --release PID releases only that owner, --ack records delivery; all three flags are fenced writers; dead owner claims are reclaimable",
         ]),
         identity: fields(&[
             "list: ok, lineages without voice bodies",

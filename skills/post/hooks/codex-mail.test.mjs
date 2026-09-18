@@ -63,7 +63,14 @@ function setStub({ exit = 0, events = [], stdout, version, show, bind_stdout, bi
 
 function allStubCalls() {
   try {
-    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    return fs.readFileSync(CALLS, "utf8").split("\n").filter(Boolean).map((line) => {
+      const call = JSON.parse(line);
+      if (call.args[1] === "notice" && call.args[2] === "--claim") {
+        assert.match(call.args[3], /^[1-9][0-9]*$/);
+        call.args[3] = "<adapter-pid>";
+      }
+      return call;
+    });
   } catch {
     return [];
   }
@@ -725,7 +732,7 @@ test("SessionStart binds before snapshot with the session cwd", () => {
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "codex", "--key", "bind-order", "--json"],
-    ["participant", "notice", "--json"],
+    ["participant", "notice", "--claim", "<adapter-pid>", "--json"],
     ["watch", "--snapshot"],
     ["participant", "show", "--json"],
   ]);

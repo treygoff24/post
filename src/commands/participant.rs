@@ -35,16 +35,34 @@ pub(super) fn run(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     match args.command {
-        ParticipantCommand::Notice { ack } => {
+        ParticipantCommand::Notice {
+            ack,
+            claim,
+            release,
+        } => {
             let (participant, _) = participant::require(context)?;
+            let _lock = if ack || claim.is_some() || release.is_some() {
+                Some(participant::lock(context)?)
+            } else {
+                None
+            };
             if ack {
-                let _lock = participant::lock(context)?;
                 participant::acknowledge_notice(&participant)?;
             }
+            if let Some(pid) = release {
+                participant::release_notice(&participant, pid)?;
+            }
+            let pending = !ack && release.is_none() && participant::notice_pending(&participant);
+            let busy = pending
+                && claim
+                    .map(|pid| participant::claim_notice(&participant, pid))
+                    .transpose()?
+                    == Some(false);
             CommandResult::json(
                 &serde_json::json!({
                     "ok": true,
-                    "notice": if !ack && participant::notice_pending(&participant) {
+                    "busy": busy,
+                    "notice": if pending && !busy {
                         Some(participant::ACTIVATION_NOTICE)
                     } else { None },
                 }),

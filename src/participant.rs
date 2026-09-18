@@ -30,6 +30,44 @@ pub(crate) fn acknowledge_notice(participant: &Participant) -> AppResult<()> {
         .map_err(|error| AppError::io("record activation notice", &path, error))
 }
 
+/// Call under the participant registry lock. A dead adapter cannot strand a
+/// reservation; competing live adapters must not inject the same notice.
+pub(crate) fn claim_notice(participant: &Participant, pid: u32) -> AppResult<bool> {
+    let path = participant.dir.join("activation-claim");
+    if let Some(owner) = notice_owner(participant)? {
+        let alive = unsafe { libc::kill(owner as libc::pid_t, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        if alive && owner != pid {
+            return Ok(false);
+        }
+    }
+    atomic_replace(&path, pid.to_string().as_bytes())
+        .map_err(|error| AppError::io("reserve activation notice", &path, error))?;
+    Ok(true)
+}
+
+fn notice_owner(participant: &Participant) -> AppResult<Option<u32>> {
+    let path = participant.dir.join("activation-claim");
+    read_bounded_optional(&path, 16)?
+        .map(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| text.parse::<u32>().ok())
+                .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+                .ok_or_else(|| AppError::config(&path, "invalid activation claim PID"))
+        })
+        .transpose()
+}
+
+pub(crate) fn release_notice(participant: &Participant, pid: u32) -> AppResult<()> {
+    if notice_owner(participant)? == Some(pid) {
+        let path = participant.dir.join("activation-claim");
+        fs::remove_file(&path)
+            .map_err(|error| AppError::io("release activation notice", &path, error))?;
+    }
+    Ok(())
+}
+
 /// Serialize direct CLI delivery so concurrent binds cannot repeat the notice.
 /// Adapters use the query/ack protocol instead, committing only after injection.
 pub(crate) fn emit_activation_notice(
@@ -38,11 +76,12 @@ pub(crate) fn emit_activation_notice(
 ) -> AppResult<()> {
     use std::io::Write;
     let _lock = lock(context)?;
-    if notice_pending(participant) {
+    if notice_pending(participant) && claim_notice(participant, std::process::id())? {
         writeln!(std::io::stderr().lock(), "[post] {ACTIVATION_NOTICE}").map_err(|error| {
             AppError::io("write activation notice", Path::new("<stderr>"), error)
         })?;
         acknowledge_notice(participant)?;
+        release_notice(participant, std::process::id())?;
     }
     Ok(())
 }

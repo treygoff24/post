@@ -195,3 +195,41 @@ fn unbound_notice_ack_refuses_before_initializing_mailbox() {
     assert!(!output.status.success());
     assert!(!sandbox.mail_root.exists());
 }
+
+#[test]
+fn activation_claim_serializes_live_owners_and_recovers_after_owner_exit() {
+    use std::process::{Child, Command};
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let sandbox = Sandbox::new();
+    let mut other = OwnedChild(Command::new("sleep").arg("30").spawn().unwrap());
+    let mine = std::process::id().to_string();
+    let theirs = other.0.id().to_string();
+    let claim = |pid: &str| -> serde_json::Value {
+        let output = sandbox.run(&["participant", "notice", "--claim", pid, "--json"]);
+        assert_success(&output);
+        from_stdout(&output)
+    };
+    assert_eq!(claim(&mine)["notice"], NOTICE);
+    assert_eq!(claim(&theirs)["busy"], true);
+    assert_success(&sandbox.run(&["participant", "notice", "--release", &theirs]));
+    assert_eq!(
+        claim(&theirs)["busy"],
+        true,
+        "a different PID cannot release the owner"
+    );
+    assert_success(&sandbox.run(&["participant", "notice", "--release", &mine]));
+    assert_eq!(claim(&theirs)["notice"], NOTICE);
+    other.0.kill().unwrap();
+    other.0.wait().unwrap();
+    assert_eq!(
+        claim(&mine)["notice"],
+        NOTICE,
+        "a dead owner cannot strand activation"
+    );
+}

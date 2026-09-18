@@ -501,10 +501,11 @@ let activationDelivery = null;
 function prepareActivation(cwd, participantId, state, deadline) {
   if (state.activationSeen && state.participantId === participantId) return;
   const options = { participantId, clearConversationKeys: true, deadline };
-  const result = runPost(["participant", "notice", "--json"], cwd, options);
+  const result = runPost(["participant", "notice", "--claim", String(process.pid), "--json"], cwd, options);
   try {
     const value = JSON.parse(result.stdout);
     if (result.status !== 0 || value.ok !== true || !(value.notice === null || typeof value.notice === "string")) return;
+    if (value.busy === true) return;
     // Only Post's fixed notice is injected, never arbitrary subprocess prose.
     const notice = ACTIVATION_NOTICE;
     if (value.notice !== null && value.notice !== notice) return;
@@ -668,5 +669,8 @@ try {
   main();
 } catch {
   tryEmit({});
+}
+if (activationDelivery?.notice) {
+  runPost(["participant", "notice", "--release", String(process.pid), "--json"], activationDelivery.cwd, { ...activationDelivery.options, deadline: null });
 }
 process.exit(0);
