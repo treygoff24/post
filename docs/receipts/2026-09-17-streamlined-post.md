@@ -115,7 +115,6 @@ Verification at the corrected build:
 Local evidence: `/var/tmp/post-deployment-gate.log`,
 `/var/tmp/post-runtime-final-smoke.log`, and
 `/var/tmp/post-runtime-final-receipt.json`.
-
 Both swaps used same-directory temporary files and atomic rename, preserving
 loaded executables and existing sessions. Rollback files were retained at:
 
