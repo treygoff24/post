@@ -328,7 +328,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "room",
             "pattern",
             "match",
-            "results[] (source, channel?, id, from, origin, reply_to_participant?, reply_to_shared, sent, subject, preview, matched, own?, pending?, already_read?, kind? for mail)",
+            "results[] (source, channel?, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, sent, subject, preview, matched, own?, pending?, already_read?, kind? for mail)",
             "count",
             "limit",
             "truncated",
@@ -347,9 +347,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "announced (set/clear; channels that received the change event)",
         ]),
         watch: fields(&[
-            "mail: event, address{kind,name}, room? (workspace only), id, from, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?",
+            "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?",
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
-            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
+            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]),
         who: fields(&[

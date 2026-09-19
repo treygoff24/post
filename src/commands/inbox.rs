@@ -150,11 +150,13 @@ fn list_bound(
             } else {
                 format!("  {:?}", mail.subject)
             };
-            let sender = output::sender_label_quoted(
-                &mail.from,
-                mail.display_name.as_deref(),
-                mail.pfp.as_deref(),
-            );
+            let sender = output::sender_label_quoted(output::SenderAttribution {
+                from: &mail.from,
+                from_participant: mail.from_participant.as_deref(),
+                from_lineage: mail.from_lineage.as_deref(),
+                display_name: mail.display_name.as_deref(),
+                pfp: mail.pfp.as_deref(),
+            });
             rendered.push_str(&format!(
                 "{}  [{}] from {}{}\n",
                 output::sanitize_text_header(&mail.id),
@@ -296,17 +298,34 @@ pub(crate) fn render_reply_targets(
 
 #[cfg(test)]
 mod profile_render_tests {
-    use crate::output::sender_label_quoted;
+    use crate::output::{sender_label_quoted, SenderAttribution};
+
+    fn attribution<'a>(
+        from: &'a str,
+        display_name: Option<&'a str>,
+        pfp: Option<&'a str>,
+    ) -> SenderAttribution<'a> {
+        SenderAttribution {
+            from,
+            from_participant: None,
+            from_lineage: None,
+            display_name,
+            pfp,
+        }
+    }
 
     #[test]
     fn inbox_line_sender_absent_profile_is_byte_identical() {
-        assert_eq!(sender_label_quoted("beta", None, None), "\"beta\"");
+        assert_eq!(
+            sender_label_quoted(attribution("beta", None, None)),
+            "\"beta\""
+        );
     }
 
     #[test]
     fn inbox_line_sender_renders_stamped_profile() {
         assert_eq!(
-            sender_label_quoted("beta", Some("Lantern"), Some("🏮")),
+            sender_label_quoted(attribution("beta", Some("Lantern"), Some("🏮"))),
             "🏮 Lantern (\"beta\")"
         );
     }

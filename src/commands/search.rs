@@ -257,6 +257,8 @@ fn collect_mail(
             channel: None,
             id: id.clone(),
             from: envelope.from.clone(),
+            from_participant: envelope.from_participant.clone(),
+            from_lineage: envelope.from_lineage.clone(),
             origin: reply.origin,
             reply_to_participant: reply.participant,
             reply_to_shared: reply.shared,
@@ -312,6 +314,8 @@ fn collect_channel(
             channel: Some(channel_name.to_owned()),
             id: id.clone(),
             from: message.from.clone(),
+            from_participant: message.from_participant.clone(),
+            from_lineage: message.from_lineage.clone(),
             origin: reply.origin,
             reply_to_participant: reply.participant,
             reply_to_shared: reply.shared,
@@ -436,7 +440,13 @@ fn render_text(
         );
         rendered.push_str(&format!("{source}\n"));
         rendered.push_str(&output::message_header(
-            &result.from,
+            &output::sender_label(output::SenderAttribution {
+                from: &result.from,
+                from_participant: result.from_participant.as_deref(),
+                from_lineage: result.from_lineage.as_deref(),
+                display_name: None,
+                pfp: None,
+            }),
             &result.sent,
             &result.id,
             output::reply_address(

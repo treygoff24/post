@@ -16,6 +16,8 @@ fn watch_text_line_includes_sanitized_preview_cap_at_80_chars() {
         InboxItem {
             id: "20260831-224243-test01".to_owned(),
             from: "test-sender".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "test-sender".to_owned(),
@@ -61,6 +63,8 @@ fn watch_text_line_sanitizes_control_characters_and_newlines() {
         InboxItem {
             id: "20260831-224243-test02".to_owned(),
             from: "test-sender".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "test-sender".to_owned(),
@@ -97,6 +101,8 @@ fn watch_text_line_neutralizes_square_brackets_to_prevent_fencepost_forging() {
         InboxItem {
             id: "20260831-224243-test03".to_owned(),
             from: "test-sender".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "test-sender".to_owned(),
@@ -135,6 +141,8 @@ fn watch_channel_message_includes_preview() {
         channel: "test-channel".to_owned(),
         id: "20260831-224243-test04".to_owned(),
         from: "test-sender".to_owned(),
+        from_participant: None,
+        from_lineage: None,
         origin: "unknown".to_owned(),
         reply_to_participant: None,
         reply_to_shared: "test-sender".to_owned(),
@@ -180,6 +188,8 @@ fn watch_ndjson_includes_preview_field() {
         InboxItem {
             id: "20260831-224243-test06".to_owned(),
             from: "test-sender".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "test-sender".to_owned(),
@@ -206,6 +216,8 @@ fn watch_ndjson_omits_preview_field_when_none() {
         InboxItem {
             id: "20260831-224243-test07".to_owned(),
             from: "test-sender".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "test-sender".to_owned(),
@@ -232,6 +244,8 @@ fn watch_text_marks_pending_mail() {
         InboxItem {
             id: "20260916-050004-aa0004".to_owned(),
             from: "beta".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "beta".to_owned(),
@@ -426,6 +440,9 @@ fn watch_typed_snapshot_contract_matches_checked_in_ndjson_fixture() {
             event["sent"] = json!(sent);
             if !event["reply_to_participant"].is_null() {
                 event["reply_to_participant"] = json!("participant:test-sender");
+            }
+            if !event["from_participant"].is_null() {
+                event["from_participant"] = json!("test-sender");
             }
             event
         })

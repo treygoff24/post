@@ -615,6 +615,10 @@ pub struct SearchResult {
     pub channel: Option<String>,
     pub id: String,
     pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_participant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lineage: Option<String>,
     #[serde(default)]
     pub origin: String,
     #[serde(default)]
@@ -765,6 +769,10 @@ pub struct SeenByOutput {
 pub struct InboxItem {
     pub id: String,
     pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_participant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lineage: Option<String>,
     #[serde(default)]
     pub origin: String,
     #[serde(default)]
@@ -806,6 +814,8 @@ impl From<Envelope> for InboxItem {
             kind,
             subject,
             sent,
+            from_participant,
+            from_lineage,
             display_name,
             pfp,
             sender_address,
@@ -815,6 +825,8 @@ impl From<Envelope> for InboxItem {
         Self {
             id,
             from,
+            from_participant,
+            from_lineage,
             origin: "unknown".to_owned(),
             reply_to_participant,
             reply_to_shared,
@@ -894,6 +906,10 @@ pub enum WatchEvent {
         channel: String,
         id: String,
         from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_participant: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_lineage: Option<String>,
         #[serde(default)]
         origin: String,
         #[serde(default)]
@@ -1078,6 +1094,8 @@ impl WatchEvent {
             channel,
             subject,
             sent,
+            from_participant,
+            from_lineage,
             event: _,
             display_name,
             pfp,
@@ -1098,6 +1116,8 @@ impl WatchEvent {
             channel,
             id,
             from,
+            from_participant,
+            from_lineage,
             origin: reply.origin,
             reply_to_participant: reply.participant,
             reply_to_shared: reply.shared,
@@ -1132,11 +1152,13 @@ impl WatchEvent {
                 // refuses control characters, but hand-written mail can carry
                 // them (the contract keeps such mail readable and sanitizes
                 // at render), and a newline here would forge an event line.
-                let sender = sender_label_quoted(
-                    &item.from,
-                    item.display_name.as_deref(),
-                    item.pfp.as_deref(),
-                );
+                let sender = sender_label_quoted(SenderAttribution {
+                    from: &item.from,
+                    from_participant: item.from_participant.as_deref(),
+                    from_lineage: item.from_lineage.as_deref(),
+                    display_name: item.display_name.as_deref(),
+                    pfp: item.pfp.as_deref(),
+                });
                 let preview = preview.as_ref().map_or(String::new(), |p| format!("  {p}"));
                 let pending = if item.pending { "  pending" } else { "" };
                 format!(
@@ -1155,6 +1177,8 @@ impl WatchEvent {
                 channel,
                 id,
                 from,
+                from_participant,
+                from_lineage,
                 subject,
                 display_name,
                 pfp,
@@ -1167,7 +1191,13 @@ impl WatchEvent {
                 } else {
                     format!("  {subject:?}")
                 };
-                let sender = sender_label_quoted(from, display_name.as_deref(), pfp.as_deref());
+                let sender = sender_label_quoted(SenderAttribution {
+                    from,
+                    from_participant: from_participant.as_deref(),
+                    from_lineage: from_lineage.as_deref(),
+                    display_name: display_name.as_deref(),
+                    pfp: pfp.as_deref(),
+                });
                 let mention = if *reason == WatchReason::Mention {
                     "@ "
                 } else {
@@ -1523,49 +1553,83 @@ pub(crate) fn json_len<T: Serialize>(value: &T, pretty: bool) -> Result<usize, A
         })
 }
 
-/// Render a sender for text surfaces: `"🧊 Name (room)"` when a profile was
-/// stamped at send time, or the bare sanitized room id — byte-identical to
-/// the pre-profile rendering — when absent. Identity (`from`) is always
-/// visible; name and pfp are presentation only and pass through the same
-/// header sanitizer as everything else on the line.
-fn sender_label_impl(
-    rendered_from: String,
-    display_name: Option<&str>,
-    pfp: Option<&str>,
-) -> String {
-    if display_name.is_none() && pfp.is_none() {
+/// Immutable sender fields stamped on a message. Keeping them together makes
+/// it difficult for a text projection to accidentally fall back to the shared
+/// workspace profile while silently dropping the acting lineage.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SenderAttribution<'a> {
+    pub from: &'a str,
+    pub from_participant: Option<&'a str>,
+    pub from_lineage: Option<&'a str>,
+    pub display_name: Option<&'a str>,
+    pub pfp: Option<&'a str>,
+}
+
+impl<'a> From<&'a Envelope> for SenderAttribution<'a> {
+    fn from(envelope: &'a Envelope) -> Self {
+        Self {
+            from: &envelope.from,
+            from_participant: envelope.from_participant.as_deref(),
+            from_lineage: envelope.from_lineage.as_deref(),
+            display_name: envelope.display_name.as_deref(),
+            pfp: envelope.pfp.as_deref(),
+        }
+    }
+}
+
+impl<'a> From<&'a crate::model::ChannelMessage> for SenderAttribution<'a> {
+    fn from(message: &'a crate::model::ChannelMessage) -> Self {
+        Self {
+            from: &message.from,
+            from_participant: message.from_participant.as_deref(),
+            from_lineage: message.from_lineage.as_deref(),
+            display_name: message.display_name.as_deref(),
+            pfp: message.pfp.as_deref(),
+        }
+    }
+}
+
+/// Render the acting lineage and participant when stamped, followed by the
+/// shared reply address. A workspace profile is only the legacy/session-only
+/// fallback: its name and pfp must never impersonate an affiliated actor.
+fn sender_label_impl(rendered_from: String, sender: SenderAttribution<'_>) -> String {
+    if let Some(lineage) = sender.from_lineage {
+        let lineage = sanitize_text_header(lineage);
+        if !lineage.is_empty() {
+            let participant = sender
+                .from_participant
+                .map(sanitize_text_header)
+                .filter(|participant| !participant.is_empty())
+                .map_or_else(String::new, |participant| format!(" [{participant}]"));
+            return format!("{lineage}{participant} ({rendered_from})");
+        }
+    }
+    if sender.display_name.is_none() && sender.pfp.is_none() {
         return rendered_from;
     }
     let mut label = String::new();
-    if let Some(pfp) = pfp {
+    if let Some(pfp) = sender.pfp {
         label.push_str(&sanitize_text_header(pfp));
         label.push(' ');
     }
-    if let Some(name) = display_name {
+    if let Some(name) = sender.display_name {
         label.push_str(&sanitize_text_header(name));
         label.push(' ');
     }
     format!("{label}({rendered_from})")
 }
 
-/// Render a sender for text surfaces: `"🧊 Name (room)"` when a profile was
-/// stamped at send time, or the bare sanitized room id — byte-identical to
-/// the pre-profile rendering — when absent. Identity (`from`) is always
-/// visible; name and pfp are presentation only. This function and its
-/// quoted twin are the ONLY owners of the id-suffix invariant.
-pub(crate) fn sender_label(from: &str, display_name: Option<&str>, pfp: Option<&str>) -> String {
-    sender_label_impl(sanitize_text_header(from), display_name, pfp)
+/// This function and its quoted twin are the only owners of the reply-address
+/// suffix invariant.
+pub(crate) fn sender_label(sender: SenderAttribution<'_>) -> String {
+    sender_label_impl(sanitize_text_header(sender.from), sender)
 }
 
 /// Quoted-id variant for machine-parsed lines (watch --text, inbox --text)
 /// that debug-quote `from` because hand-written mail can carry control
 /// characters. Same suffix invariant, same single implementation.
-pub(crate) fn sender_label_quoted(
-    from: &str,
-    display_name: Option<&str>,
-    pfp: Option<&str>,
-) -> String {
-    sender_label_impl(format!("{from:?}"), display_name, pfp)
+pub(crate) fn sender_label_quoted(sender: SenderAttribution<'_>) -> String {
+    sender_label_impl(format!("{:?}", sender.from), sender)
 }
 
 pub(crate) fn sanitize_text_header(value: &str) -> String {
@@ -1655,6 +1719,8 @@ mod tests {
             channel: "tax".to_owned(),
             id: "20260722-013000-000001-aaa111".to_owned(),
             from: "alpha".to_owned(),
+            from_participant: None,
+            from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
             reply_to_shared: "alpha".to_owned(),
@@ -1669,29 +1735,60 @@ mod tests {
         }
     }
 
+    fn attribution<'a>(
+        from: &'a str,
+        display_name: Option<&'a str>,
+        pfp: Option<&'a str>,
+    ) -> SenderAttribution<'a> {
+        SenderAttribution {
+            from,
+            from_participant: None,
+            from_lineage: None,
+            display_name,
+            pfp,
+        }
+    }
+
     #[test]
     fn sender_label_absent_profile_is_bare_room_id() {
-        assert_eq!(sender_label("alpha", None, None), "alpha");
+        assert_eq!(sender_label(attribution("alpha", None, None)), "alpha");
     }
 
     #[test]
     fn sender_label_renders_pfp_name_and_id() {
         assert_eq!(
-            sender_label("alpha", Some("Snowplow"), Some("🧊")),
+            sender_label(attribution("alpha", Some("Snowplow"), Some("🧊"))),
             "🧊 Snowplow (alpha)"
         );
         assert_eq!(
-            sender_label("alpha", Some("Snowplow"), None),
+            sender_label(attribution("alpha", Some("Snowplow"), None)),
             "Snowplow (alpha)"
         );
-        assert_eq!(sender_label("alpha", None, Some("🧊")), "🧊 (alpha)");
+        assert_eq!(
+            sender_label(attribution("alpha", None, Some("🧊"))),
+            "🧊 (alpha)"
+        );
     }
 
     #[test]
     fn sender_label_sanitizes_control_characters() {
         assert_eq!(
-            sender_label("alpha", Some("Snow\nplow"), None),
+            sender_label(attribution("alpha", Some("Snow\nplow"), None)),
             "Snowplow (alpha)"
+        );
+    }
+
+    #[test]
+    fn sender_label_prefers_sanitized_lineage_and_participant_to_workspace_profile() {
+        assert_eq!(
+            sender_label(SenderAttribution {
+                from: "atlas",
+                from_participant: Some("codex-0ea0d6a0\n"),
+                from_lineage: Some("row\nan"),
+                display_name: Some("Cairn"),
+                pfp: Some("🪨"),
+            }),
+            "rowan [codex-0ea0d6a0] (atlas)"
         );
     }
 
@@ -1720,6 +1817,8 @@ mod tests {
             InboxItem {
                 id: "20260722-013000-000002-bbb222".to_owned(),
                 from: "beta".to_owned(),
+                from_participant: None,
+                from_lineage: None,
                 origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: "beta".to_owned(),
@@ -1743,6 +1842,8 @@ mod tests {
             InboxItem {
                 id: "20260722-013000-000002-bbb222".to_owned(),
                 from: "beta".to_owned(),
+                from_participant: None,
+                from_lineage: None,
                 origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: "beta".to_owned(),
@@ -1766,6 +1867,8 @@ mod tests {
             InboxItem {
                 id: "20260722-013000-000002-bbb222".to_owned(),
                 from: "beta".to_owned(),
+                from_participant: None,
+                from_lineage: None,
                 origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: "beta".to_owned(),

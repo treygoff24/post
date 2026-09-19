@@ -96,12 +96,26 @@ pub(crate) fn validate_name(context: &Context, name: &str) -> AppResult<()> {
             .input(name)
             .reason(reason)
     })?;
-    if context.load_rooms()?.contains_key(name) {
+    let rooms = context.load_rooms()?;
+    if rooms.contains_key(name) {
         return Err(AppError::invalid_argument(format!(
             "lineage name '{name}' is already a registered workspace room"
         ))
         .input(name)
         .reason("lineage names cannot collide with registered rooms"));
+    }
+    let candidate = crate::profile::skeleton(name);
+    if !candidate.is_empty() {
+        if let Some(workspace) = rooms
+            .keys()
+            .find(|workspace| crate::profile::skeleton(workspace) == candidate)
+        {
+            return Err(AppError::invalid_argument(format!(
+                "lineage name '{name}' imitates registered workspace '{workspace}'"
+            ))
+            .input(name)
+            .reason("lineage names cannot imitate workspace or signed-owner identifiers"));
+        }
     }
     Ok(())
 }

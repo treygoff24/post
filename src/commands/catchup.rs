@@ -1057,11 +1057,7 @@ fn render_framing(rendered: &mut String, framing: FramingMode, has_channel: bool
 fn render_mail_item(rendered: &mut String, item: &CatchupMailItem) {
     let envelope = &item.envelope;
     rendered.push_str(&output::message_header(
-        &output::sender_label(
-            &envelope.from,
-            envelope.display_name.as_deref(),
-            envelope.pfp.as_deref(),
-        ),
+        &output::sender_label(output::SenderAttribution::from(&envelope.envelope)),
         &envelope.sent,
         &envelope.id,
         output::reply_address(
@@ -1079,11 +1075,7 @@ fn render_mail_item(rendered: &mut String, item: &CatchupMailItem) {
 fn render_channel_item(rendered: &mut String, item: &ChatMessageItem) {
     let message: &ChannelMessage = &item.message;
     rendered.push_str(&output::message_header(
-        &output::sender_label(
-            &message.from,
-            message.display_name.as_deref(),
-            message.pfp.as_deref(),
-        ),
+        &output::sender_label(output::SenderAttribution::from(message)),
         &message.sent,
         &message.id,
         output::reply_address(item.reply_to_participant.as_deref(), &item.reply_to_shared),

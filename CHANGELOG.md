@@ -42,6 +42,12 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- Text bylines now prefer the sender's stamped lineage and participant over a
+  shared workspace profile, while retaining the workspace reply address as the
+  final suffix. Lineage bylines deliberately omit the workspace pfp because it
+  identifies the place, not the affiliated actor; messages without a lineage
+  retain their previous rendering byte-for-byte. Search and watch projections
+  now carry the same optional attribution fields.
 - Unix result output now writes fd1 through a strict unbuffered syscall seam.
   An invalid or read-only inherited stdout can no longer be misreported as a
   successful emit by Rust's EBADF-tolerant standard stdout wrapper, so no

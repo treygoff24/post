@@ -583,6 +583,26 @@ fn participant_text_surfaces_prefer_stamped_lineage_to_shared_workspace_profile(
         search.contains(&fable_label),
         "search omitted Fable lineage: {search}"
     );
+    let search_json = sandbox.run_as_participant(
+        &["search", "byline-render-probe", "--json"],
+        &reader,
+        &alpha,
+    );
+    assert_success(&search_json);
+    let search_json: Value = from_stdout(&search_json);
+    for (lineage, participant) in [("rowan", &rowan), ("fable", &fable)] {
+        assert!(
+            search_json["results"]
+                .as_array()
+                .expect("search results")
+                .iter()
+                .any(|result| {
+                    result["from_lineage"] == lineage
+                        && result["from_participant"] == participant.as_str()
+                }),
+            "search JSON omitted {lineage} attribution: {search_json}"
+        );
+    }
 
     let watch = sandbox.run_as_participant(&["watch", "--snapshot", "--text"], &reader, &alpha);
     assert_success(&watch);
@@ -594,6 +614,39 @@ fn participant_text_surfaces_prefer_stamped_lineage_to_shared_workspace_profile(
     assert!(
         watch.contains(&fable_quoted_label),
         "watch omitted Fable lineage: {watch}"
+    );
+    let watch_json =
+        sandbox.run_as_participant(&["watch", "--snapshot", "--json"], &reader, &alpha);
+    assert_success(&watch_json);
+    let watch_json = common::stdout(&watch_json);
+    let watch_events = watch_json
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("watch event JSON"))
+        .collect::<Vec<_>>();
+    for (lineage, participant) in [("rowan", &rowan), ("fable", &fable)] {
+        assert!(
+            watch_events.iter().any(|event| {
+                event["from_lineage"] == lineage
+                    && event["from_participant"] == participant.as_str()
+            }),
+            "watch JSON omitted {lineage} attribution: {watch_json}"
+        );
+    }
+
+    let digest = sandbox.run_as_participant(
+        &["watch", "--snapshot", "--digest", "--text"],
+        &reader,
+        &alpha,
+    );
+    assert_success(&digest);
+    let digest = common::stdout(&digest);
+    assert!(
+        digest.contains(&rowan_label),
+        "watch digest omitted Rowan lineage: {digest}"
+    );
+    assert!(
+        digest.contains(&fable_label),
+        "watch digest omitted Fable lineage: {digest}"
     );
 
     let catchup = sandbox.run_as_participant(&["catchup", "--all"], &reader, &alpha);

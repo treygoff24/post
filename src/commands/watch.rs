@@ -74,6 +74,37 @@ impl WatchDelivery {
         }
     }
 
+    fn sender_label(&self) -> Option<String> {
+        match &self.event {
+            WatchEvent::Mail { item, .. } => Some(crate::output::sender_label(
+                crate::output::SenderAttribution {
+                    from: &item.from,
+                    from_participant: item.from_participant.as_deref(),
+                    from_lineage: item.from_lineage.as_deref(),
+                    display_name: item.display_name.as_deref(),
+                    pfp: item.pfp.as_deref(),
+                },
+            )),
+            WatchEvent::ChannelMessage {
+                from,
+                from_participant,
+                from_lineage,
+                display_name,
+                pfp,
+                ..
+            } => Some(crate::output::sender_label(
+                crate::output::SenderAttribution {
+                    from,
+                    from_participant: from_participant.as_deref(),
+                    from_lineage: from_lineage.as_deref(),
+                    display_name: display_name.as_deref(),
+                    pfp: pfp.as_deref(),
+                },
+            )),
+            WatchEvent::Unreadable { .. } => None,
+        }
+    }
+
     fn reason(&self) -> WatchReason {
         match &self.event {
             WatchEvent::Mail { reason, .. }
@@ -108,6 +139,8 @@ struct WatchDigest {
     preview: Option<String>,
     #[serde(skip)]
     sender_counts: Vec<(String, usize)>,
+    #[serde(skip)]
+    sender_label_counts: Vec<(String, usize)>,
 }
 
 impl WatchDigest {
@@ -138,9 +171,9 @@ impl WatchDigest {
                 self.count
             );
         }
-        let show_counts = self.sender_counts.iter().any(|(_, count)| *count > 1);
+        let show_counts = self.sender_label_counts.iter().any(|(_, count)| *count > 1);
         let mut senders = self
-            .sender_counts
+            .sender_label_counts
             .iter()
             .take(5)
             .map(|(sender, count)| {
@@ -152,7 +185,7 @@ impl WatchDigest {
                 }
             })
             .collect::<Vec<_>>();
-        let omitted = self.sender_counts.len().saturating_sub(5);
+        let omitted = self.sender_label_counts.len().saturating_sub(5);
         if omitted > 0 {
             senders.push(format!("+{omitted} more"));
         }
@@ -211,6 +244,7 @@ fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
                     pending: delivery.pending(),
                     preview: None,
                     sender_counts: Vec::new(),
+                    sender_label_counts: Vec::new(),
                 });
                 index
             }
@@ -233,6 +267,17 @@ fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
                 *count += 1;
             } else {
                 digest.sender_counts.push((sender.to_owned(), 1));
+            }
+        }
+        if let Some(sender) = delivery.sender_label() {
+            if let Some((_, count)) = digest
+                .sender_label_counts
+                .iter_mut()
+                .find(|(existing, _)| existing == &sender)
+            {
+                *count += 1;
+            } else {
+                digest.sender_label_counts.push((sender, 1));
             }
         }
     }
@@ -2219,6 +2264,8 @@ mod tests {
                 InboxItem {
                     id: id.to_owned(),
                     from: from.to_owned(),
+                    from_participant: None,
+                    from_lineage: None,
                     origin: "unknown".to_owned(),
                     reply_to_participant: None,
                     reply_to_shared: from.to_owned(),
@@ -2255,6 +2302,8 @@ mod tests {
                 channel: channel.to_owned(),
                 id: id.to_owned(),
                 from: from.to_owned(),
+                from_participant: None,
+                from_lineage: None,
                 origin: "unknown".to_owned(),
                 reply_to_participant: None,
                 reply_to_shared: from.to_owned(),
@@ -2348,6 +2397,46 @@ mod tests {
         assert_eq!(
             singletons[0].text_line(),
             "mail: 2 new (alpha, beta)  test preview [m1..m2]\n"
+        );
+    }
+
+    #[test]
+    fn digest_text_distinguishes_lineages_that_share_one_workspace() {
+        let mut rowan = channel_delivery("atlas", "ops", "c1", "atlas", WatchReason::Channel);
+        let mut fable = channel_delivery("atlas", "ops", "c2", "atlas", WatchReason::Channel);
+        if let WatchEvent::ChannelMessage {
+            from_participant,
+            from_lineage,
+            display_name,
+            pfp,
+            ..
+        } = &mut rowan.event
+        {
+            *from_participant = Some("codex-rowan".to_owned());
+            *from_lineage = Some("rowan".to_owned());
+            *display_name = Some("Cairn".to_owned());
+            *pfp = Some("🪨".to_owned());
+        }
+        if let WatchEvent::ChannelMessage {
+            from_participant,
+            from_lineage,
+            display_name,
+            pfp,
+            ..
+        } = &mut fable.event
+        {
+            *from_participant = Some("claude-fable".to_owned());
+            *from_lineage = Some("fable".to_owned());
+            *display_name = Some("Cairn".to_owned());
+            *pfp = Some("🪨".to_owned());
+        }
+
+        let digests = digest_batch(&[rowan, fable]);
+
+        assert_eq!(digests[0].from, vec!["atlas"]);
+        assert_eq!(
+            digests[0].text_line(),
+            "#ops: 2 new (rowan [codex-rowan] (atlas), fable [claude-fable] (atlas))  test preview [c1..c2] [--since 'c!']\n"
         );
     }
 
