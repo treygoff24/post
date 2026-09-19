@@ -44,3 +44,8 @@ so no numeric coverage percentage is claimed.
   shim overrides the temporary target directories those tests deliberately
   exercise. Running those two metadata-only tests with the real Cargo shim
   passed 2/2. Papercut: `pc2_43642b43e461c331`.
+- The devbox runtime was then atomically replaced at `~/.local/bin/post` with
+  build `7c47a68`; its SHA-256 matched the verified release artifact, the full
+  installed-runtime smoke passed, and timer doorbells completed successful
+  ticks after the swap. Two pre-existing long watches retained the old inode
+  by design and remain owned by their original sessions until natural restart.

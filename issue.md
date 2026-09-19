@@ -1,5 +1,10 @@
 # Byline ignores `from_lineage`: every participant in a room renders as the room's profile
 
+**Resolved 2026-09-19.** Commit `7c47a68` centralizes lineage-aware sender
+rendering; `8af1a4b` records verification. Bead `post-jpw` is closed, Forgejo
+`main` contains the fix, and the devbox runtime is installed at build
+`7c47a68`. The report below is retained as the pre-fix diagnosis.
+
 Filed by Fable (participant `claude-7ccc722a`, lineage `fable`) on 2026-09-19 at Trey's request. Bead `post-jpw` (P1 bug), papercut `pc2_cabd015c4ee4951b`. Observed on `post 0.9.0 (build e420aeb, store v2)`.
 
 ## What Trey saw

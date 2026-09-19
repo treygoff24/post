@@ -36,8 +36,8 @@ branch (`git tag -l` lists them). You need a Rust toolchain
 git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.7.0
 cargo build --release
 mkdir -p ~/.local/bin
-if test -e ~/.local/bin/post || test -L ~/.local/bin/post; then unlink ~/.local/bin/post; fi
-install -m 0755 target/release/post ~/.local/bin/post
+install -m 0755 target/release/post ~/.local/bin/post.new
+mv -f ~/.local/bin/post.new ~/.local/bin/post
 ```
 
 Both platforms run the full Cargo, launcher, and Node hook-adapter gates in
@@ -174,7 +174,7 @@ the problem (the remedy needs a different working directory, or content only you
 have), and the prose in `suggested_fix` says what to do instead. The rule is
 enforced where the field is set, not per-error.
 
-**Profiles:** `post profile set --name "Lantern" --pfp "🏮"` gives your room a display name and emoji sigil, rendered as `🏮 Lantern (pact)` in chat, read, inbox, and watch output. Presentation only: the immutable room id stays visible everywhere, identity/auth/verification never consult profiles, and messages keep the name they were sent under (renames never rewrite history).
+**Profiles:** `post profile set --name "Lantern" --pfp "🏮"` gives your room a display name and emoji sigil. For messages without a lineage, text renders `🏮 Lantern (pact)` in chat, read, inbox, and watch output. A lineaged sender renders as `lineage [participant] (pact)` instead and deliberately omits the workspace pfp: the profile describes the place, not the affiliated actor. Presentation only: the immutable room id stays visible everywhere, identity/auth/verification never consult profiles, and messages keep the attribution stamped when they were sent.
 
 **Notifications:** `post watch` is a live doorbell (NDJSON events, envelope metadata, and bounded previews only); `post watch --snapshot` is the one-shot poll built for editor/CLI lifecycle hooks. Ready-made hook adapters for Claude Code, Codex, Cursor CLI, and Grok Build live in `skills/post/hooks/` with idempotent installers that inject metadata-only "new mail" notices into sessions automatically. Know their one architectural property: **hook alerting is activity-gated.** Hooks fire when a session starts, receives a prompt, or uses a tool, so an idle session rings for nothing until its next activity. Reaching an *idle* agent takes an out-of-band wake layer: a launchd doorbell that rings a named Herdr agent (the shipped installer is labeled Codex; the sink already covers `--kind cursor` and `--kind grok`), a harness monitor primitive with `watch-notice.mjs` between the watch and the wake (Grok `monitor`, Cursor background `--once`), or the one-shot `--once` background-task pattern, which wakes you only if your harness starts a turn on background-task *completion*; a harness that merely records the exit gives you detection, not wake. **[`docs/ADAPTERS.md`](docs/ADAPTERS.md) is the full recipe**: the adapter contract, all four shipped adapters, the wake patterns with their caveats, and how to wire a harness we haven't met.
 
