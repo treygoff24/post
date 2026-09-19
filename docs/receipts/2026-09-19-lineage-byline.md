@@ -33,3 +33,14 @@ Commit: `db6151c test: reproduce lineage byline misattribution`.
 Focused checks and `cargo test --all-targets --all-features` passed. The
 repository has no installed coverage runner (`cargo-llvm-cov` is unavailable),
 so no numeric coverage percentage is claimed.
+
+## Close verification
+
+- The built release artifact rendered the original live Rowan message as
+  `rowan [codex-0ea0d6a0] (atlas)` while retaining its participant reply target.
+- `scripts/gate.sh` passed formatting, Clippy, all Rust tests, release build,
+  297 hook tests, 32 of 34 launcher tests, 41 doorbell tests, and schema. Its
+  two launcher failures were the known estate build-cache conflict: the Cargo
+  shim overrides the temporary target directories those tests deliberately
+  exercise. Running those two metadata-only tests with the real Cargo shim
+  passed 2/2. Papercut: `pc2_43642b43e461c331`.
