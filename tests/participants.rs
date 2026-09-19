@@ -478,6 +478,138 @@ fn participant_typed_targets_write_canonical_store_and_stamp_sender_fields() {
 }
 
 #[test]
+fn participant_text_surfaces_prefer_stamped_lineage_to_shared_workspace_profile() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let rowan = sandbox.bind_codex("byline-rowan", &alpha, Some("alpha"));
+    let rowan = participant_id(&rowan).to_owned();
+    let fable = sandbox.bind_claude("byline-fable", &alpha, Some("alpha"));
+    let fable = participant_id(&fable).to_owned();
+    let reader = sandbox.bind_claude("byline-reader", &alpha, Some("alpha"));
+    let reader = participant_id(&reader).to_owned();
+
+    for (participant, lineage) in [(&rowan, "rowan"), (&fable, "fable")] {
+        edit_participant(&sandbox, participant, |record| {
+            record.insert("lineage".to_owned(), Value::String(lineage.to_owned()));
+            record.insert(
+                "lineage_since".to_owned(),
+                Value::String("2026-09-19T20:00:00Z".to_owned()),
+            );
+        });
+    }
+    assert_success(&sandbox.run_as_participant(
+        &["profile", "set", "--name", "Cairn", "--pfp", "🪨"],
+        &rowan,
+        &alpha,
+    ));
+
+    for participant in [&rowan, &fable, &reader] {
+        assert_success(&sandbox.run_as_participant(
+            &["chat", "shared-byline", "--join", "--json"],
+            participant,
+            &alpha,
+        ));
+    }
+    for (participant, body) in [
+        (&rowan, "rowan-byline-render-probe"),
+        (&fable, "fable-byline-render-probe"),
+    ] {
+        assert_success(&sandbox.run_as_participant(
+            &[
+                "chat",
+                "shared-byline",
+                "--send",
+                "--anyway",
+                "--body",
+                body,
+                "--json",
+            ],
+            participant,
+            &alpha,
+        ));
+    }
+    let mail = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{reader}"),
+            "--body",
+            "rowan-byline-render-probe mail",
+            "--json",
+        ],
+        &rowan,
+        &alpha,
+    );
+    assert_success(&mail);
+    let mail: Value = from_stdout(&mail);
+    let mail_id = mail["envelope"]["id"].as_str().expect("mail id");
+
+    let rowan_label = format!("rowan [{rowan}] (alpha)");
+    let fable_label = format!("fable [{fable}] (alpha)");
+    let rowan_quoted_label = format!("rowan [{rowan}] (\"alpha\")");
+    let fable_quoted_label = format!("fable [{fable}] (\"alpha\")");
+
+    let chat = sandbox.run_as_participant(
+        &["chat", "shared-byline", "--history", "20"],
+        &reader,
+        &alpha,
+    );
+    assert_success(&chat);
+    let chat = common::stdout(&chat);
+    assert!(chat.contains(&rowan_label), "chat omitted lineage: {chat}");
+    assert!(chat.contains(&fable_label), "chat omitted lineage: {chat}");
+
+    let inbox = sandbox.run_as_participant(&["inbox", "--text"], &reader, &alpha);
+    assert_success(&inbox);
+    let inbox = common::stdout(&inbox);
+    assert!(
+        inbox.contains(&rowan_quoted_label),
+        "inbox omitted lineage: {inbox}"
+    );
+
+    let read = sandbox.run_as_participant(&["read", mail_id, "--peek"], &reader, &alpha);
+    assert_success(&read);
+    let read = common::stdout(&read);
+    assert!(read.contains(&rowan_label), "read omitted lineage: {read}");
+
+    let search = sandbox.run_as_participant(&["search", "byline-render-probe"], &reader, &alpha);
+    assert_success(&search);
+    let search = common::stdout(&search);
+    assert!(
+        search.contains(&rowan_label),
+        "search omitted Rowan lineage: {search}"
+    );
+    assert!(
+        search.contains(&fable_label),
+        "search omitted Fable lineage: {search}"
+    );
+
+    let watch = sandbox.run_as_participant(&["watch", "--snapshot", "--text"], &reader, &alpha);
+    assert_success(&watch);
+    let watch = common::stdout(&watch);
+    assert!(
+        watch.contains(&rowan_quoted_label),
+        "watch omitted Rowan lineage: {watch}"
+    );
+    assert!(
+        watch.contains(&fable_quoted_label),
+        "watch omitted Fable lineage: {watch}"
+    );
+
+    let catchup = sandbox.run_as_participant(&["catchup", "--all"], &reader, &alpha);
+    assert_success(&catchup);
+    let catchup = common::stdout(&catchup);
+    assert!(
+        catchup.contains(&rowan_label),
+        "catchup omitted Rowan lineage: {catchup}"
+    );
+    assert!(
+        catchup.contains(&fable_label),
+        "catchup omitted Fable lineage: {catchup}"
+    );
+}
+
+#[test]
 fn participant_old_format_envelope_still_parses() {
     let old: post::output::Envelope = serde_json::from_value(serde_json::json!({
         "id": "20260916-010203-abcdef",
@@ -1190,6 +1322,25 @@ fn participant_review_rooms_add_rejects_existing_lineage_name() {
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "invalid_argument");
     assert!(error.error.message.contains("lineage"));
+}
+
+#[test]
+fn participant_identity_new_rejects_lineage_that_imitates_a_workspace() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let actor = sandbox.test_participant("alpha");
+
+    let output =
+        sandbox.run_as_participant(&["identity", "new", "A l p h a", "--json"], &actor, &alpha);
+
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(
+        error.error.message.contains("imitates")
+            && error.error.message.contains("workspace 'alpha'"),
+        "unexpected error: {}",
+        error.error.message
+    );
 }
 
 #[test]
