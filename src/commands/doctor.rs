@@ -313,25 +313,60 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
                         .as_ref()
                         .and_then(|result| result.as_ref().ok())
                         .and_then(crate::mailbox::resolved_owner_room);
-                    for (room, profile) in &profiles {
+                    let participants = crate::participant::list(context).unwrap_or_default();
+                    for (key, profile) in &profiles {
                         let mut cleaned = profile.clone();
-                        if !rooms.contains_key(room)
-                            || crate::profile::drop_invalid_fields(
+                        if let Some(id) = crate::profile::participant_of_key(key) {
+                            // Participant-keyed: validate against the participant's
+                            // reply address (its workspace, else its id).
+                            let own_room = participants
+                                .iter()
+                                .find(|record| record.id == id)
+                                .and_then(|record| record.workspace.clone())
+                                .unwrap_or_else(|| id.to_owned());
+                            if crate::profile::drop_invalid_fields(
                                 &mut cleaned,
-                                room,
+                                &own_room,
                                 rooms,
                                 owner_room,
-                            )
-                        {
-                            checks.push(check(
-                                &format!("profiles.{room}.inert"),
-                                DoctorSeverity::Warning,
-                                &profiles_path,
-                                "stored profile entry no longer validates (or its room is unregistered) and will not stamp or render",
-                                false,
-                                "Re-run `post profile set` from that room, or remove the entry.",
-                            ));
+                            ) {
+                                checks.push(check(
+                                    &format!("profiles.{key}.inert"),
+                                    DoctorSeverity::Warning,
+                                    &profiles_path,
+                                    "stored profile entry no longer validates and will not stamp or render",
+                                    false,
+                                    "Re-run `post profile set` as that participant, or remove the entry.",
+                                ));
+                            }
+                            continue;
                         }
+                        // Legacy workspace-keyed entry: shared by every participant
+                        // bound to that workspace, so it never stamps (2026-09-22).
+                        let bound: Vec<&str> = participants
+                            .iter()
+                            .filter(|record| record.workspace.as_deref() == Some(key.as_str()))
+                            .map(|record| record.id.as_str())
+                            .collect();
+                        // Never auto-migrated: `participant::list` skips malformed
+                        // records, so "sole participant" cannot be proven from it and
+                        // a persona could land on the wrong survivor. Each participant
+                        // claims its own; the first `set` from that workspace retires
+                        // the entry.
+                        let message = match bound.len() {
+                            0 => "legacy workspace-keyed profile no longer stamps and no participant is bound to that workspace".to_owned(),
+                            n => format!(
+                                "legacy workspace-keyed profile no longer stamps ({n} participant(s) bound to '{key}' render without it)"
+                            ),
+                        };
+                        checks.push(check(
+                            &format!("profiles.{key}.legacy_workspace_key"),
+                            DoctorSeverity::Warning,
+                            &profiles_path,
+                            &message,
+                            false,
+                            "Each participant runs `post profile set --name ... --pfp ...`; the first set from that workspace retires the legacy entry. Or remove the entry by hand.",
+                        ));
                     }
                 }
             }

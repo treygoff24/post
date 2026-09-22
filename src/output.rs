@@ -619,6 +619,10 @@ pub struct SearchResult {
     pub from_participant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_lineage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pfp: Option<String>,
     #[serde(default)]
     pub origin: String,
     #[serde(default)]
@@ -1589,34 +1593,48 @@ impl<'a> From<&'a crate::model::ChannelMessage> for SenderAttribution<'a> {
     }
 }
 
-/// Render the acting lineage and participant when stamped, followed by the
-/// shared reply address. A workspace profile is only the legacy/session-only
-/// fallback: its name and pfp must never impersonate an affiliated actor.
+/// Render the sender: an explicit stamped profile (pfp + display name) first,
+/// else the acting lineage, each followed by the `[participant]` id when
+/// stamped and always by the shared reply address. Since 2026-09-22 a stamped
+/// profile is the acting participant's own (never a shared workspace persona),
+/// so it is the most specific presentation available and outranks the
+/// lineage; the participant id and reply address stay visible either way.
 fn sender_label_impl(rendered_from: String, sender: SenderAttribution<'_>) -> String {
+    let participant = sender
+        .from_participant
+        .map(sanitize_text_header)
+        .filter(|participant| !participant.is_empty())
+        .map_or_else(String::new, |participant| format!(" [{participant}]"));
+    let mut label = String::new();
+    if let Some(pfp) = sender.pfp {
+        let pfp = sanitize_text_header(pfp);
+        if !pfp.is_empty() {
+            label.push_str(&pfp);
+            label.push(' ');
+        }
+    }
+    if let Some(name) = sender.display_name {
+        let name = sanitize_text_header(name);
+        if !name.is_empty() {
+            label.push_str(&name);
+            label.push(' ');
+        }
+    }
+    if !label.is_empty() {
+        let label = label.trim_end();
+        return format!("{label}{participant} ({rendered_from})");
+    }
     if let Some(lineage) = sender.from_lineage {
         let lineage = sanitize_text_header(lineage);
         if !lineage.is_empty() {
-            let participant = sender
-                .from_participant
-                .map(sanitize_text_header)
-                .filter(|participant| !participant.is_empty())
-                .map_or_else(String::new, |participant| format!(" [{participant}]"));
             return format!("{lineage}{participant} ({rendered_from})");
         }
     }
-    if sender.display_name.is_none() && sender.pfp.is_none() {
-        return rendered_from;
-    }
-    let mut label = String::new();
-    if let Some(pfp) = sender.pfp {
-        label.push_str(&sanitize_text_header(pfp));
-        label.push(' ');
-    }
-    if let Some(name) = sender.display_name {
-        label.push_str(&sanitize_text_header(name));
-        label.push(' ');
-    }
-    format!("{label}({rendered_from})")
+    // No profile, no lineage: still a distinguishable actor when a participant
+    // is stamped (two session-only participants in one workspace must not
+    // render identically). Legacy mail without a participant stays the bare
+    // reply address, byte-identical to before.
+    format!("{rendered_from}{participant}")
 }
 
 /// This function and its quoted twin are the only owners of the reply-address
@@ -1779,7 +1797,9 @@ mod tests {
     }
 
     #[test]
-    fn sender_label_prefers_sanitized_lineage_and_participant_to_workspace_profile() {
+    fn sender_label_prefers_own_profile_then_lineage_and_keeps_participant() {
+        // A stamped profile is the participant's own since 2026-09-22, so it
+        // outranks the lineage; the participant id and reply address stay.
         assert_eq!(
             sender_label(SenderAttribution {
                 from: "atlas",
@@ -1787,6 +1807,17 @@ mod tests {
                 from_lineage: Some("row\nan"),
                 display_name: Some("Cairn"),
                 pfp: Some("🪨"),
+            }),
+            "🪨 Cairn [codex-0ea0d6a0] (atlas)"
+        );
+        // No profile: lineage + participant, as before.
+        assert_eq!(
+            sender_label(SenderAttribution {
+                from: "atlas",
+                from_participant: Some("codex-0ea0d6a0"),
+                from_lineage: Some("rowan"),
+                display_name: None,
+                pfp: None,
             }),
             "rowan [codex-0ea0d6a0] (atlas)"
         );

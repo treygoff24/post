@@ -1,8 +1,17 @@
-//! Room profiles: display names + emoji pfps. PRESENTATION ONLY — identity
-//! is always the immutable room id. Auth, routing, blocks, cursors, and
-//! signed-message verification never consult a profile. Profiles are stamped
-//! into message envelopes at send time so history renders as-sent (renames
-//! never rewrite the transcript).
+//! Participant profiles: display names + emoji pfps. PRESENTATION ONLY —
+//! identity is always the immutable participant id and reply address. Auth,
+//! routing, blocks, cursors, and signed-message verification never consult a
+//! profile. Profiles are stamped into message envelopes at send time so
+//! history renders as-sent (renames never rewrite the transcript).
+//!
+//! Keying (2026-09-22): a profile belongs to ONE participant and is stored
+//! under the typed key `participant:<id>`. Bare (workspace-keyed) entries are
+//! the pre-2026-09-22 format; they were shared by every participant bound to
+//! that workspace, which let a newly bound participant inherit another
+//! participant's persona. Bare entries never stamp; `post doctor` reports
+//! them (never auto-migrated: `participant::list` skips malformed records,
+//! so "sole participant" cannot be proven), and `post profile set` by a
+//! participant bound to that workspace retires the entry.
 
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{atomic_replace, Context};
@@ -17,6 +26,18 @@ use crate::mailbox::refused_profile_char;
 
 pub(crate) const PROFILES_FILE: &str = "profiles.json";
 pub(crate) const MAX_NAME_CHARS: usize = 32;
+pub(crate) const PARTICIPANT_KEY_PREFIX: &str = "participant:";
+
+/// Registry key for a participant's own profile.
+pub(crate) fn participant_key(participant_id: &str) -> String {
+    format!("{PARTICIPANT_KEY_PREFIX}{participant_id}")
+}
+
+/// The participant id behind a typed registry key, or None for a legacy
+/// (workspace-keyed) entry.
+pub(crate) fn participant_of_key(key: &str) -> Option<&str> {
+    key.strip_prefix(PARTICIPANT_KEY_PREFIX)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
@@ -123,12 +144,17 @@ pub(crate) fn validate_display_name(
 /// Validate a pfp: exactly one grapheme cluster (so multi-codepoint emoji
 /// like ⚖️ and 👩‍🚀 pass while two-emoji strings fail), no control characters,
 /// not ASCII (an ASCII pfp like "[" would just be line noise), and unique
-/// across rooms so the sigil actually identifies.
+/// among the participants that are ACTIVE now (`active` ids) plus registered
+/// legacy rooms, so the sigil identifies among the agents actually present. An
+/// ended or stale participant's entry does not lock its sigil forever (a later
+/// session continuing the same lineage may take it back); a sigil is
+/// presentation, not authority.
 pub(crate) fn validate_pfp(
     pfp: &str,
     own_room: &str,
     profiles: &ProfileMap,
     rooms: &RoomMap,
+    active: &std::collections::BTreeSet<String>,
 ) -> AppResult<()> {
     let mut graphemes = pfp.graphemes(true);
     let first = graphemes.next();
@@ -147,12 +173,17 @@ pub(crate) fn validate_pfp(
     if pfp.is_ascii() {
         return Err(invalid("pfp must be an emoji, not ASCII", pfp));
     }
-    // Uniqueness only counts registered rooms: an unregistered (hand-edited)
-    // entry never stamps or renders, so it must not squat a sigil either.
-    for (room, profile) in profiles {
-        if room != own_room && rooms.contains_key(room) && profile.pfp.as_deref() == Some(pfp) {
+    // Uniqueness counts participant-keyed entries and registered legacy
+    // rooms: an unregistered (hand-edited) bare entry never stamps or
+    // renders, so it must not squat a sigil either.
+    for (key, profile) in profiles {
+        let counts = match participant_of_key(key) {
+            Some(id) => active.contains(id),
+            None => rooms.contains_key(key),
+        };
+        if key != own_room && counts && profile.pfp.as_deref() == Some(pfp) {
             return Err(invalid(
-                &format!("pfp is already the sigil of room '{room}'"),
+                &format!("pfp is already the sigil of '{key}'"),
                 pfp,
             ));
         }
@@ -160,21 +191,27 @@ pub(crate) fn validate_pfp(
     Ok(())
 }
 
-/// Resolve the profile to stamp for `room` at send time, re-validating the
-/// registry values: a hand-edited profiles.json must be inert as an
-/// injection or imitation path, so invalid fields are dropped (never
-/// stamped) rather than trusted because they are on disk. Unregistered
-/// senders (free-form --from names) get no profile at all — profiles are a
-/// per-room contract. Cross-room pfp uniqueness is deliberately not
-/// re-checked here: a duplicated sigil is cosmetic, not an injection.
-pub(crate) fn stamp_for(context: &Context, room: &str, rooms: &RoomMap) -> Profile {
-    if !rooms.contains_key(room) {
-        return Profile::default();
-    }
+/// Resolve the profile to stamp for the acting `participant_id` (replying as
+/// `room`) at send time, re-validating the registry values: a hand-edited
+/// profiles.json must be inert as an injection or imitation path, so invalid
+/// fields are dropped (never stamped) rather than trusted because they are on
+/// disk. Only the participant's own `participant:<id>` entry stamps; a legacy
+/// workspace-keyed entry never does (it was shared by every participant in
+/// the workspace, which is the identity collision this rule closes).
+/// Cross-entry pfp uniqueness is deliberately not re-checked here: a
+/// duplicated sigil is cosmetic, not an injection.
+pub(crate) fn stamp_for(
+    context: &Context,
+    participant_id: &str,
+    room: &str,
+    rooms: &RoomMap,
+) -> Profile {
     let Ok(mut profiles) = load_profiles(context) else {
         return Profile::default();
     };
-    let mut profile = profiles.remove(room).unwrap_or_default();
+    let mut profile = profiles
+        .remove(&participant_key(participant_id))
+        .unwrap_or_default();
     // Send-time stamping is transport and never loads the trust anchor (A0a
     // Decision 3 column). The room registry already reserves a configured
     // owner's room id (registration is enforced at owner load), so the only
@@ -306,34 +343,35 @@ mod tests {
                 pfp: Some("👻".to_owned()),
             },
         );
-        validate_pfp("⚖️", "pact", &profiles, &room_map).expect("VS16 emoji is one grapheme");
-        validate_pfp("👩‍🚀", "pact", &profiles, &room_map).expect("ZWJ emoji is one grapheme");
-        validate_pfp("👻", "pact", &profiles, &room_map)
+        let active: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        validate_pfp("⚖️", "pact", &profiles, &room_map, &active).expect("VS16 emoji is one grapheme");
+        validate_pfp("👩‍🚀", "pact", &profiles, &room_map, &active).expect("ZWJ emoji is one grapheme");
+        validate_pfp("👻", "pact", &profiles, &room_map, &active)
             .expect("unregistered entry does not reserve a sigil");
         assert!(
-            validate_pfp("🏮🐋", "pact", &profiles, &room_map).is_err(),
+            validate_pfp("🏮🐋", "pact", &profiles, &room_map, &active).is_err(),
             "two emoji"
         );
         assert!(
-            validate_pfp("x", "pact", &profiles, &room_map).is_err(),
+            validate_pfp("x", "pact", &profiles, &room_map, &active).is_err(),
             "ascii"
         );
         assert!(
-            validate_pfp("", "pact", &profiles, &room_map).is_err(),
+            validate_pfp("", "pact", &profiles, &room_map, &active).is_err(),
             "empty"
         );
         assert!(
-            validate_pfp("🐋", "pact", &profiles, &room_map).is_err(),
+            validate_pfp("🐋", "pact", &profiles, &room_map, &active).is_err(),
             "taken sigil"
         );
-        validate_pfp("🐋", "atlasos", &profiles, &room_map).expect("re-setting own sigil ok");
+        validate_pfp("🐋", "atlasos", &profiles, &room_map, &active).expect("re-setting own sigil ok");
         assert!(
-            validate_pfp("\u{202E}", "pact", &profiles, &room_map).is_err(),
+            validate_pfp("\u{202E}", "pact", &profiles, &room_map, &active).is_err(),
             "bidi pfp"
         );
         // U+2028 is a single non-ASCII grapheme — the Grok CRITICAL.
         assert!(
-            validate_pfp("\u{2028}", "pact", &profiles, &room_map).is_err(),
+            validate_pfp("\u{2028}", "pact", &profiles, &room_map, &active).is_err(),
             "line-separator pfp"
         );
         assert!(
@@ -368,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn stamp_for_drops_invalid_registry_values_and_freeform_senders() {
+    fn stamp_for_uses_only_the_participants_own_entry_and_drops_invalid_values() {
         use crate::mailbox::Context;
         use std::fs;
         let root = crate::test_support::test_root("profile-stamp");
@@ -380,11 +418,14 @@ mod tests {
             r#"{"alpha": "/tmp", "trey": "/tmp"}"#,
         )
         .expect("rooms");
-        // Hand-edited registry: imitation name, two-emoji pfp, plus one
-        // valid entry for an unregistered sender.
+        // Hand-edited registry: an imitation name + two-emoji pfp under one
+        // participant, a valid entry under another participant, and a legacy
+        // workspace-keyed entry that must never stamp for anyone.
         fs::write(
             root.join(PROFILES_FILE),
-            r#"{"alpha": {"name": "trey", "pfp": "🏮🐋"}, "ghost": {"name": "Ghost", "pfp": "👻"}}"#,
+            r#"{"participant:test-bad": {"name": "trey", "pfp": "🏮🐋"},
+                "participant:test-good": {"name": "Lantern", "pfp": "🏮"},
+                "alpha": {"name": "Shared Persona", "pfp": "👻"}}"#,
         )
         .expect("profiles");
         let context = Context {
@@ -397,11 +438,21 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let stamped = stamp_for(&context, "alpha", &rooms);
-        assert_eq!(stamped.name, None, "imitation name must not stamp");
-        assert_eq!(stamped.pfp, None, "two-emoji pfp must not stamp");
-        let ghost = stamp_for(&context, "ghost", &rooms);
-        assert_eq!(ghost, Profile::default(), "free-form sender never stamps");
+        let bad = stamp_for(&context, "test-bad", "alpha", &rooms);
+        assert_eq!(bad.name, None, "imitation name must not stamp");
+        assert_eq!(bad.pfp, None, "two-emoji pfp must not stamp");
+        let good = stamp_for(&context, "test-good", "alpha", &rooms);
+        assert_eq!(good.name.as_deref(), Some("Lantern"));
+        assert_eq!(good.pfp.as_deref(), Some("🏮"));
+        // A participant with no entry of its own, bound to a workspace that
+        // still has a legacy entry, gets NOTHING: the workspace persona is not
+        // inherited (the 2026-09-22 identity collision).
+        let fresh = stamp_for(&context, "test-fresh", "alpha", &rooms);
+        assert_eq!(fresh, Profile::default(), "legacy workspace entry never stamps");
+        // Session-only participant (reply address == its id, unregistered)
+        // stamps its own entry: registration of the room is not required.
+        let solo = stamp_for(&context, "test-good", "test-good", &rooms);
+        assert_eq!(solo.name.as_deref(), Some("Lantern"));
         crate::test_support::trash_test_root(&root);
     }
 }

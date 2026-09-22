@@ -2425,10 +2425,13 @@ mod tests {
             ..
         } = &mut fable.event
         {
+            // Since 2026-09-22 a stamped profile is the participant's own, so a
+            // second participant in the workspace carries no stamp unless it set
+            // one: it renders by lineage and participant id.
             *from_participant = Some("claude-fable".to_owned());
             *from_lineage = Some("fable".to_owned());
-            *display_name = Some("Cairn".to_owned());
-            *pfp = Some("🪨".to_owned());
+            *display_name = None;
+            *pfp = None;
         }
 
         let digests = digest_batch(&[rowan, fable]);
@@ -2436,7 +2439,7 @@ mod tests {
         assert_eq!(digests[0].from, vec!["atlas"]);
         assert_eq!(
             digests[0].text_line(),
-            "#ops: 2 new (rowan [codex-rowan] (atlas), fable [claude-fable] (atlas))  test preview [c1..c2] [--since 'c!']\n"
+            "#ops: 2 new (🪨 Cairn [codex-rowan] (atlas), fable [claude-fable] (atlas))  test preview [c1..c2] [--since 'c!']\n"
         );
     }
 

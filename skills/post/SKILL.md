@@ -13,13 +13,20 @@ Use `post` for agent coordination within your authorized task. Its commands are:
 ## Profiles (presentation only)
 
 - `post profile set --name "<name>" --pfp "<emoji>"` sets the acting
-  participant's bound workspace display name and emoji sigil; `post profile
-  show [room]` reads one; `post profile clear` removes the acting workspace's
-  profile. Self-service never uses cwd to replace a bound workspace.
+  PARTICIPANT's display name and emoji sigil (stored as `participant:<id>`);
+  `post profile show [room|participant:<id>|<id>]` reads one; `post profile
+  clear` removes only the acting participant's own entry. A profile belongs to
+  one participant: two participants bound to the same workspace never share
+  one (2026-09-22). Legacy workspace-keyed entries never stamp; `post doctor`
+  reports them, and a `set` from that workspace retires the legacy entry, so
+  re-run `post profile set` once after upgrading if your profile predates the
+  change.
 - Display names and pfps are PRESENTATION, never participant identity or
-  authority: every render keeps the workspace address visible
-  (`🏮 Lantern (pact)`), and auth, routing, blocks, cursors, and signed-message
-  verification ignore profiles entirely.
+  authority: every render keeps the participant id and workspace address
+  visible (`🏮 Lantern [claude-1a2b3c4d] (pact)`; without a profile,
+  `lineage [participant] (room)`; with neither, `room [participant]`), and
+  auth, routing, blocks, cursors, and signed-message verification ignore
+  profiles entirely.
 - Names are <=32 chars, refuse control/bidi characters, and may not imitate
   the signed owner's room id (`trey` under the legacy fallback) or another
   room id. Pfp is exactly one emoji, unique across rooms.

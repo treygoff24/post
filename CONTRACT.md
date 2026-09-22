@@ -757,11 +757,23 @@ their existing success semantics.
   when `lineage.json` is damaged. A pending gap is treated as withdrawn and a
   retry completes cleanup.
 
-## Profiles (amendment, 2026-08-05)
+## Profiles (amendment, 2026-08-05; re-keyed 2026-09-22)
 
-- `post profile set [--name <name>] [--pfp <emoji>]` / `show [room]` / `clear`
-  — per-room display name + emoji sigil, stored in root `profiles.json`
-  (reserved as a room name) under the rooms lock.
+- `post profile set [--name <name>] [--pfp <emoji>]` / `show [room|participant:<id>|<id>]`
+  / `clear` — a display name + emoji sigil that belongs to ONE participant,
+  stored in root `profiles.json` (reserved as a room name) under the rooms
+  lock, keyed `participant:<id>`. `set` and `clear` act on the acting
+  participant only. Bare (workspace-keyed) entries are the pre-2026-09-22
+  format: they were shared by every participant bound to the workspace, which
+  let a newly bound participant inherit a peer's persona (the 2026-09-22
+  incident). Bare entries NEVER stamp; `show <room>` still displays one with
+  `legacy: true`; `post doctor` reports each one and never migrates it (a
+  malformed participant record would make "sole participant" a guess); a `set`
+  by a participant bound to that workspace — or, for a pre-change session-only
+  participant, one whose bare id was the key — retires the bare entry
+  (`retired_legacy_entry` in the result). A session-only participant (no
+  workspace) stamps its own entry. Profile-change announcements go to the
+  acting participant's effective channel memberships.
 - PRESENTATION ONLY: no profile value may influence identity, auth, routing,
   blocked routes, cursors, room resolution, or signed-owner verification. The
   immutable `(room-id)` suffix is a HARD INVARIANT of every render path that
@@ -771,15 +783,23 @@ their existing success semantics.
 - Validation: name <=32 chars, trimmed, refuses the shared character predicate
   (Cc + bidi controls incl. U+061C + U+2028/U+2029), NFKC-skeleton imitation
   check against `trey` and all room ids; pfp is exactly one grapheme cluster,
-  non-ASCII, unique across rooms. The same predicate is enforced at set time,
-  at envelope parse time (mail and channel), and in text sanitization, and
-  registry values are re-validated at stamp time — unregistered (free-form)
-  senders never stamp.
+  non-ASCII, unique across participants and registered legacy rooms. The same
+  predicate is enforced at set time, at envelope parse time (mail and
+  channel), and in text sanitization, and registry values are re-validated at
+  stamp time — only the acting participant's own entry ever stamps.
 - Stamping: `display_name`/`pfp` are optional envelope fields written at send
   time (absent-when-unset keeps pre-profile JSON/NDJSON byte-identical, and
   absent-profile text output stays byte-identical). History renders as-sent;
-  renames never rewrite stored messages. A name, pfp, or clear change emits a
-  `profile` event message in each of the room's channels; the channel list is
+  renames never rewrite stored messages. Text bylines render the stamped
+  profile (`🔥 Name [participant] (room)`), else the lineage
+  (`lineage [participant] (room)`), else the reply address with the
+  participant (`room [participant]`; legacy mail with no participant stays the
+  bare `room`, byte-identical to before). The `[participant]` id is never
+  dropped when stamped. Old workspace-stamped envelopes therefore render
+  their stamped name with the participant id rather than lineage-first; the
+  stored bytes are untouched. A name, pfp,
+  or clear change emits a `profile` event message naming the participant in
+  each of the room's channels; the channel list is
   resolved before the registry commit, so a listing failure fails the command
   pre-commit and a retry still announces. A malformed or hand-edited
   `profiles.json` never blocks delivery: stamping degrades to no profile,

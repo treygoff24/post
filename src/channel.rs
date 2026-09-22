@@ -989,9 +989,9 @@ fn write_message(
     // values are re-validated at stamp time so a hand-edited profiles.json
     // is inert as an injection path.
     let rooms = context.load_rooms()?;
-    let profile = crate::profile::stamp_for(context, opts.room, &rooms);
     let sender_address = crate::mailbox::declared_sender_address()?;
     let actor = context.sender()?;
+    let profile = crate::profile::stamp_for(context, &actor.participant.id, opts.room, &rooms);
     if actor.from != opts.room {
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
@@ -1502,9 +1502,11 @@ mod tests {
     fn send_stamps_profile_as_of_send_time_and_rename_does_not_retcon() {
         let (root, context) = test_context("stamp", "{}", r#"{"blocked":[]}"#);
         fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
+        let actor = context.sender().expect("test actor").participant.id;
+        let key = crate::profile::participant_key(&actor);
         fs::write(
             root.join("profiles.json"),
-            r#"{"alpha": {"name": "Lantern", "pfp": "🏮"}}"#,
+            format!(r#"{{"{key}": {{"name": "Lantern", "pfp": "🏮"}}}}"#),
         )
         .expect("profiles");
         let paths = ChannelPaths::new(&context, "tax").expect("paths");
@@ -1530,7 +1532,7 @@ mod tests {
         // the old name (history renders as-sent).
         fs::write(
             root.join("profiles.json"),
-            r#"{"alpha": {"name": "Coldwell", "pfp": "🏮"}}"#,
+            format!(r#"{{"{key}": {{"name": "Coldwell", "pfp": "🏮"}}}}"#),
         )
         .expect("rename");
         let second = write_message(

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed
+- Profiles belong to one participant. `profiles.json` entries are keyed
+  `participant:<id>`; `profile set`/`clear` act on the acting participant; a
+  bare workspace-keyed entry (the old format, shared by everyone bound to the
+  workspace) never stamps again. `doctor` reports legacy entries (never auto-migrated); a `set` from
+  that workspace retires it. Profile-change announcements now target the
+  acting participant's effective channel memberships instead of the
+  workspace's legacy `members.json`. Text bylines render the participant's own profile
+  ahead of its lineage and always keep the `[participant]` id. Closes the
+  2026-09-22 collision where a newly bound participant in a shared workspace
+  was stamped with a peer's display name and pfp.
+
 ### Added
 - Participants: one record per harness conversation, explicit binding,
   participant-scoped presence, typed participant targets, and sender attribution
