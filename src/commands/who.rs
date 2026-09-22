@@ -5,12 +5,13 @@ use crate::mailbox::Context;
 use crate::output::{self, WhoActingParticipant, WhoOutput, WhoParticipant, WhoRoom};
 use crate::participant::Resolved;
 use crate::presence;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const STALE_DELIVERY_NOTE: &str = "mail already frozen to a stale participant is not reassigned when its lease expires; activity affects new recipient selection only";
 
 pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
+    let room_filter_requested = !args.room.is_empty();
     let selected: Vec<String> = if args.room.is_empty() {
         rooms.keys().cloned().collect()
     } else {
@@ -23,9 +24,23 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         }
         unique
     };
+    // `--room` restricts the whole report, not just the legacy heartbeat rows:
+    // a scoped request must not answer with every participant on the host. A
+    // participant belongs to a room through the workspace it bound in (the same
+    // field `post who` prints); a session-only participant has no workspace and
+    // is therefore not part of a scoped report.
+    //
+    // `scope` is `None` when `--room` was omitted, and that difference is load
+    // bearing: `selected` then holds EVERY registered room (the heartbeat rows
+    // an unscoped caller expects), so filtering participant rows through it
+    // would look like no filter at all while silently dropping every
+    // session-only participant -- the ones whose only address is their own id,
+    // which the unscoped command promises to list.
+    let scope: Option<BTreeSet<&str>> =
+        room_filter_requested.then(|| selected.iter().map(String::as_str).collect());
     let mut legacy_rooms = Vec::new();
-    for room in selected {
-        let presence = presence::read_presence(context, &room)?;
+    for room in &selected {
+        let presence = presence::read_presence(context, room)?;
         legacy_rooms.push(WhoRoom {
             room: presence.room,
             live_watch: presence.live_watch,
@@ -87,6 +102,15 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         Err(error) => return Err(error),
     };
     for participant in participant_records {
+        if let Some(scope) = scope.as_ref() {
+            if !participant
+                .workspace
+                .as_deref()
+                .is_some_and(|workspace| scope.contains(workspace))
+            {
+                continue;
+            }
+        }
         let (unread, pending) = mail_counts(context, &participant)?;
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
         let state = participant.state_label(now).to_owned();

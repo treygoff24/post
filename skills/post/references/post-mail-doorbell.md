@@ -42,3 +42,44 @@ Rules and caveats:
   work (a delegate run, a build), where the probe costs hours of live work
   to learn one bit. If state is unknown and nothing has rung, send
   yourself a probe message before concluding anything.
+
+## Monitor lifetime: an idle session goes deaf
+
+A Monitor-backed task does not live forever: the harness ends it. Post neither
+sets that lifetime nor can observe it, so this document states no figure for
+it — treat the cap as unknown and do not plan against a number. Expiry is
+silent locally: the watch process is gone, nothing prints an error, and a
+session sitting between turns is never rung again. A seat that armed a doorbell
+this morning and idled into the afternoon is the exact state this produces —
+senders see a live room, and the seat hears nothing. Liveness here is therefore
+proven by rings, never by elapsed time.
+
+The gap is bounded, not total: the lifecycle hooks (`SessionStart`,
+`UserPromptSubmit`, `PostToolUse`) still report unread mail on the next turn, so
+any activity reveals what was missed. That backstop is why this is a missed
+ring and not a lost message.
+
+Recovery, in order:
+
+1. Probe your own task: `TaskOutput({task_id, block: false})`. A `/compact`
+   removes rows from `TaskList` without killing the task, so re-arm on the
+   probe's answer, never on a missing row — two Monitors on one room double
+   every ring.
+2. Re-arm with the same command when the task is actually gone.
+3. If nothing has rung and you cannot tell, send yourself a probe message
+   rather than concluding anything from the listing.
+4. If the seat has to be rung while idle for longer than the harness allows, a
+   session-external waker is an operator-managed alternative, not an automatic
+   recovery step: the Herdr doorbell (`install-systemd-doorbell.mjs` on Linux,
+   `install-codex-doorbell.mjs` on macOS) pages one named agent from outside
+   the session, so it does not depend on that session's task. It installs a
+   service under the operator's own account — agree it with them, run only one
+   wake mechanism per agent, and see `skills/post/SKILL.md` for the flags, the
+   Herdr sink, and uninstall. Post ships no way to extend a Monitor's lifetime;
+   that is the harness's, and worth escalating there.
+
+Seats with no Monitor (Codex CLI, Cursor CLI, Grok Build) do not have the
+lifetime above at all, but their idle wake differs per harness and is not
+interchangeable — use the mechanism `skills/post/SKILL.md` names for yours
+(Cursor: a background `--once` notice task; Grok: `monitor` on the notice
+script) rather than arming a second one beside it.

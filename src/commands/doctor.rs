@@ -448,6 +448,31 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
                         "Restore or repair this participant's channels.json from a backup; other participants remain usable.",
                     ));
                 }
+                // Runtime reads degrade an unusable cursors.json to an empty
+                // snapshot and re-report consumed history as unread: a doorbell
+                // built on that participant then rings as if every backlog
+                // message were new. The degrade is deliberate (fail open), so
+                // doctor warns rather than repairs -- and `--fix` never touches
+                // cursor state.
+                //
+                // The suggested fix is deliberately NOT "move it aside": the
+                // file is the participant's only record of what it has already
+                // read, so discarding it re-reports the whole backlog and loses
+                // the evidence of whatever made it unreadable. Post has no safe
+                // automated repair to offer, and this says so rather than
+                // turning data loss into the recipe.
+                if let Some(reason) = crate::cursor_state::participant_cursor_defect(&participant) {
+                    checks.push(check(
+                        &format!("participant.{id}.cursors_unusable"),
+                        DoctorSeverity::Warning,
+                        &participant.dir.join(crate::cursor_state::CURSORS_FILE),
+                        &format!(
+                            "participant cursor state is unusable ({reason}); reads report already-consumed history as unread until it is repaired"
+                        ),
+                        false,
+                        "Post has no safe automated repair for this: keep the file as evidence, and either repair it in place after copying it for forensics (fix the JSON, keep the existing ids) or restore a known-good backup of it. Discarding it is not a repair -- it destroys the only record of what this participant has read.",
+                    ));
+                }
             }
         }
     }

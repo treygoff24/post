@@ -24,7 +24,11 @@ a crash between delivery and acknowledgment can replay the notice.
 Default channel text has one section header and one metadata line per message:
 `sender · time · id=reference · reply=address`, optional `re=`, subject/event and
 signature status, then guttered body lines. Channel references are unique
-prefixes against the entire stored channel, not just this page. Other surfaces
+prefixes against the entire stored channel, not just this page, and a reference
+that is shorter than the id it names is marked with `…` so it cannot be mistaken
+for the whole id. The mark is presentation only: `--re`, `--message`, `--seen-by`
+and `--discard-through` strip it, so the printed token is still a token post
+accepts back (id and re alike). Other surfaces
 retain full IDs where no complete reference namespace is available. JSON keeps
 canonical IDs and both reply targets. Text chooses the local participant reply
 when available and otherwise the shared address. Provenance remains in JSON,
@@ -202,7 +206,14 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
 - Missing, malformed, unknown-field, wrong-version, invalid-id, symlinked, or
   non-regular cursor state is advisory-invalid on read-only loads: the whole
   snapshot becomes empty, one sanitized warning goes to stderr, and eligible
-  messages are treated as unread. A consuming writer refuses an unsafe or
+  messages are treated as unread. `post watch` states that on what it emits
+  rather than leaving it to the warning: every event projected from such a
+  participant carries `"cursor_unusable": true` (the key is absent when the
+  state is readable, so a healthy event keeps its exact previous shape), a
+  `--text` event line from it is prefixed `[cursor unusable: re-reporting
+  history]`, and a `--digest --text` group from it renders `<count> re-reported
+  cursor unusable` in place of `<count> new`. Nothing is reset, rewritten, or filtered; the
+  degrade is reported as what it is. A consuming writer refuses an unsafe or
   unwritable cursor/lock path rather than claiming persistence. `doctor`
   diagnoses these files but never repairs them.
 - Room-level `cursors.json`, `channel-state.json`, and `read/` are legacy,
@@ -530,7 +541,10 @@ their existing success semantics.
   optional lineage/workspace, watch state, and separate `unread` and `pending`
   address maps. A legacy row without `last_seen` reports `state: "no lease
   record"` and is stale for recipient selection. `legacy_rooms` retains old
-  room heartbeat rows. It never reports PIDs or process information.
+  room heartbeat rows. `--room` scopes the report to the participants bound to
+  the selected rooms; omitting it is the whole host, which includes
+  session-only participants (no workspace) whose only address is their own id.
+  It never reports PIDs or process information.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
 - `post doctor [--fix] [--brief]` — validates root exists, rooms.json/rules.json parse
@@ -547,6 +561,11 @@ their existing success semantics.
   invalid legacy file is inert rollback evidence and the existing
   `channel_state.<room>.invalid` check is downgraded from error to warning.
   Suggested fixes direct an operator to inspect or repair cursor state by hand.
+  Participant cursor state gets the same treatment through
+  `participant.<id>.cursors_unusable` (warning): the file is diagnosed, never
+  discarded or repaired, and its suggested fix says so -- preserving the ids is
+  the repair, because the seen-set is the only record of what that participant
+  has read.
   `--fix` creates missing dirs/defaults only — never touches rules content,
   mail, channel history, membership, cursor state, or cursor locks. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
@@ -601,7 +620,12 @@ their existing success semantics.
   events add `id`, `reason: mail|channel`, and `channel` when the failure is a
   channel message. Channel events add `channel`, `id`, `from`, `origin`, the
   reply targets, `subject`, `sent`, `reason: channel|mention`, and optional
-  `preview`. A bound participant suppresses only channel messages whose
+  `preview`. An event projected from a participant whose cursor state exists but
+  cannot be read adds `cursor_unusable: true` (absent otherwise, so a readable
+  participant's event is byte-identical to the pre-marker form); in `--text`
+  mode such an event line is prefixed `[cursor unusable: re-reporting history]`,
+  because the projection then reports consumed history as unread rather than
+  fresh traffic. A bound participant suppresses only channel messages whose
   `from_participant` is itself; `--own` remains a legacy unbound-snapshot
   control.
   Known bridge transport evidence or a bridged `from` workspace sets
@@ -611,8 +635,11 @@ their existing success semantics.
   With `--digest`, each batch instead emits one object per `(address, source)`
   group, ordered by the first underlying event:
   `{"event":"digest", address, room?, source, count, first_id, last_id, from,
-  reason, pending?, preview?}`. `pending: true` is present when the group is
-  provisional. A digest aggregate has no origin or reply target.
+  reason, pending?, preview?, cursor_unusable?}`. `pending: true` is present
+  when the group is provisional; `cursor_unusable: true` is present when the
+  group was projected from unusable participant cursor state, and the group's
+  text says `re-reported cursor unusable` instead of `new`. A digest aggregate
+  has no origin or reply target.
   `source` is `mail` or `channel:<name>`; `from` de-duplicates senders in
   arrival order and caps them at five followed by `"+N more"`; `reason` is the
   shared per-event reason or `mixed`. Readable ring lines carry a trailing

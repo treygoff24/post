@@ -1442,8 +1442,13 @@ fn unbound_rooms_listing_is_complete_and_read_only_with_many_rooms() {
 
 /// Rooms and channels are disjoint namespaces; a channel name reaching `--to`
 /// used to produce a flat "room is unknown" that never mentioned the other verb.
+/// The correction is prose only: a channel carries no message kind, `post chat`
+/// has no --from, and the original stdin stream is not preserved in a
+/// correction (this refusal does not read stdin), so no `post chat ... --send`
+/// command can be this invocation. Every such refusal must publish no command,
+/// send nothing, and move no cursor.
 #[test]
-fn send_to_a_channel_names_the_channel_verb_and_the_fix_runs() {
+fn send_to_a_channel_names_the_channel_verb_and_never_publishes_a_command() {
     let sandbox = Sandbox::new();
     let alpha = sandbox.home.join("claude-space");
     fs::create_dir_all(&alpha).expect("create room dir");
@@ -1452,89 +1457,126 @@ fn send_to_a_channel_names_the_channel_verb_and_the_fix_runs() {
         None,
         &alpha,
     ));
+    // A backlog makes cursor movement observable: a refusal that consumed or
+    // acknowledged anything would show up in the store snapshot below.
+    let unread = "20260922-163423-000001-abcdef";
+    write_channel_message(&sandbox, "tax", unread, "beta", "", "unread backlog");
+    let channels = sandbox.mail_root.join("channels");
+    let before = snapshot_tree(&channels);
 
-    for recipient in ["tax", "#tax"] {
-        let output = sandbox.run_in(
-            &[
+    let cases: Vec<(Vec<&str>, Option<&str>, &str)> = vec![
+        (
+            vec!["send", "--to", "tax", "--body", "inline"],
+            None,
+            "inline --body",
+        ),
+        (
+            vec!["send", "--to", "tax"],
+            Some("stdin body\n"),
+            "body on default stdin",
+        ),
+        (
+            vec!["send", "--to", "tax", "--body-file", "-"],
+            Some("dash stdin body\n"),
+            "--body-file -",
+        ),
+        (
+            vec![
                 "send",
                 "--to",
-                recipient,
+                "tax",
+                "--kind",
+                "note",
+                "--body",
+                "explicit note",
+            ],
+            None,
+            "explicit --kind note",
+        ),
+        (
+            vec![
+                "send", "--to", "tax", "--kind", "signal", "--body", "signal",
+            ],
+            None,
+            "non-default --kind",
+        ),
+        (
+            vec![
+                "send",
+                "--to",
+                "tax",
                 "--from",
                 "claude-space",
                 "--body",
-                "x",
+                "from",
             ],
             None,
-            &alpha,
+            "explicit --from",
+        ),
+        (
+            vec!["send", "--to", "#tax", "--body", "sigil"],
+            None,
+            "leading-# spelling",
+        ),
+    ];
+    for (args, input, label) in cases {
+        let output = sandbox.run_in(&args, input, &alpha);
+        assert_eq!(
+            output.status.code(),
+            Some(65),
+            "{label}: {}",
+            stderr(&output)
         );
-        assert_eq!(output.status.code(), Some(65), "recipient {recipient}");
         let error: ErrorEnvelope = from_stderr(&output);
-        assert_eq!(error.error.code, "unknown_room");
+        assert_eq!(error.error.code, "unknown_room", "{label}");
         assert!(
             error.error.message.contains("is a channel, not a room"),
-            "recipient {recipient} got: {}",
+            "{label} got: {}",
             error.error.message
         );
-        let fix = error
-            .error
-            .details
-            .exact_fix
-            .clone()
-            .expect("channel recipient must carry an exact_fix");
-        assert!(fix.contains("post chat"), "fix was: {fix}");
-        // The '#' is a rendering convention, never part of the channel's name.
-        // Asserting the absence of "'#tax'" was decoration: an unquoted `#tax`
-        // also passes it, and in a POSIX shell `#` opens a comment, so that
-        // "fix" would degrade to a bare `post chat`. Pin the quoted form.
-        assert!(
-            fix.contains("'tax'"),
-            "fix must name the shell-quoted channel: {fix}"
+        assert_eq!(
+            error.error.details.exact_fix, None,
+            "{label} carries kind, sender, or body state no `post chat --send` command can reproduce: {:?}",
+            error.error.details.exact_fix
         );
-        assert!(!fix.contains('#'), "fix must strip the # sigil: {fix}");
-
-        // The test says the fix runs. Run it.
-        let applied = sandbox.run_fix(&fix, &alpha);
+        // Prose is still a remedy: it must name the channel verb and channel,
+        // and say how the body and subject get re-supplied.
         assert!(
-            applied.status.success(),
-            "exact_fix must run as written for {recipient}; `{fix}` failed: {}",
-            String::from_utf8_lossy(&applied.stderr)
+            error.error.suggested_fix.contains("post chat 'tax' --send"),
+            "{label} must name the channel verb and the shell-quoted channel: {}",
+            error.error.suggested_fix
         );
-        let landed = sandbox.run_in(&["chat", "tax", "--history", "5"], None, &alpha);
-        assert!(
-            String::from_utf8_lossy(&landed.stdout).contains("x"),
-            "the body the caller supplied must survive into the fix and land in the channel"
-        );
+        for required in ["--body", "--subject", "--kind", "--from"] {
+            assert!(
+                error.error.suggested_fix.contains(required),
+                "{label} must explain {required} and what replaces it: {}",
+                error.error.suggested_fix
+            );
+        }
     }
 
-    // Flags the caller supplied must survive into the fix; a flag that cannot
-    // survive must be named rather than silently dropped.
-    let output = sandbox.run_in(
-        &[
-            "send",
-            "--to",
-            "tax",
-            "--from",
-            "claude-space",
-            "--kind",
-            "signal",
-            "--subject",
-            "Report",
-            "--body",
-            "x",
-        ],
-        None,
-        &alpha,
-    );
-    let error: ErrorEnvelope = from_stderr(&output);
-    let fix = error.error.details.exact_fix.clone().expect("exact_fix");
+    // No refusal sent anything: the channel's history is only the fixture.
+    let history = chat_history_text(&sandbox, "tax", &alpha);
+    for absent in [
+        "inline",
+        "stdin body",
+        "dash stdin body",
+        "explicit note",
+        "signal",
+        "sigil",
+    ] {
+        assert!(
+            !history.contains(absent),
+            "a refused send must not land in the channel: {history}"
+        );
+    }
+    // ...and nothing moved: the backlog is still unread and the store is
+    // byte-for-byte what it was before the refusals.
+    assert_eq!(snapshot_tree(&channels), before);
+    let still_unread = stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &alpha));
     assert!(
-        fix.contains("--subject 'Report'"),
-        "--subject maps onto channels and must survive: {fix}"
-    );
-    assert!(
-        error.error.suggested_fix.contains("--kind signal"),
-        "a flag with no channel equivalent must be named, not dropped: {}",
-        error.error.suggested_fix
+        still_unread.contains(unread),
+        "the refusals must leave the backlog unread: {still_unread}"
     );
 
     // A genuine typo must still take the did-you-mean path, not the channel one.
@@ -1679,6 +1721,187 @@ fn doctor_reports_inbox_read_duplicates_by_content() {
         .expect("differing duplicate detected");
     assert_eq!(mismatch.severity, DoctorSeverity::Error);
     assert!(mismatch.path.contains(&differing_name));
+}
+
+#[test]
+fn doctor_reports_a_participants_unusable_cursor_state() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let participant = sandbox.test_participant("alpha");
+    let cursors = sandbox
+        .mail_root
+        .join("participants")
+        .join(&participant)
+        .join("cursors.json");
+
+    // Healthy (no file yet): the check must not fire.
+    let healthy = sandbox.run(&["doctor"]);
+    let report: DoctorOutput = from_stdout(&healthy);
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.id == format!("participant.{participant}.cursors_unusable")),
+        "absent cursor state is not a finding"
+    );
+
+    fs::write(&cursors, b"{not json").expect("plant malformed cursor state");
+    let diagnosed = sandbox.run(&["doctor"]);
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    let found = report
+        .checks
+        .iter()
+        .find(|check| check.id == format!("participant.{participant}.cursors_unusable"))
+        .unwrap_or_else(|| {
+            panic!(
+                "unusable participant cursor state must be reported: {:?}",
+                report
+                    .checks
+                    .iter()
+                    .map(|check| check.id.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(found.severity, DoctorSeverity::Warning);
+    assert_eq!(found.path, cursors.display().to_string());
+    // The finding names the parse failure, not just "invalid".
+    assert!(
+        found.message.contains("line"),
+        "the parse error must reach the operator: {}",
+        found.message
+    );
+
+    // Doctor never rewrites cursor state, including under --fix: the degrade is
+    // fail-open by design, and discarding the evidence would hide the cause.
+    let _ = sandbox.run(&["doctor", "--fix"]);
+    assert_eq!(
+        fs::read(&cursors).expect("read planted state"),
+        b"{not json",
+        "doctor --fix must not repair or discard malformed cursor state"
+    );
+
+    // A degraded read says which file and which error, so a doorbell reporting
+    // a wall of "new" mail can be traced to its cause without reading source.
+    let read = sandbox.run_as_participant(&["inbox", "--json"], &participant, &alpha);
+    let warning = stderr(&read);
+    assert!(
+        warning.contains(&cursors.display().to_string()),
+        "the degrade warning must name the file: {warning}"
+    );
+    assert!(
+        warning.contains("line"),
+        "the degrade warning must carry the parse error: {warning}"
+    );
+
+    // The degrade must reach the ring surface too, on every surface a doorbell
+    // uses: provenance that only exists in a stderr warning is exactly how a
+    // re-report of history was mistaken for a burst of new mail.
+    let beta = sandbox.path.join("beta");
+    let mail = sandbox.run_in(
+        &[
+            "send", "--to", "alpha", "--from", "beta", "--body", "ring", "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&mail);
+    // Deliberately not assert_success: the degrade warning is stderr, and the
+    // warning is not what this asserts.
+    let text = sandbox.run_as_participant(&["watch", "--snapshot", "--text"], &participant, &alpha);
+    assert!(text.status.success(), "stderr: {}", stderr(&text));
+    assert!(
+        stdout(&text)
+            .lines()
+            .any(|line| line.starts_with("[cursor unusable: re-reporting history] ")),
+        "a degraded --text ring must say it is re-reporting history: {}",
+        stdout(&text)
+    );
+    let digest = sandbox.run_as_participant(
+        &["watch", "--snapshot", "--digest", "--text"],
+        &participant,
+        &alpha,
+    );
+    assert!(digest.status.success(), "stderr: {}", stderr(&digest));
+    assert!(
+        stdout(&digest).contains("re-reported cursor unusable")
+            && !stdout(&digest).contains(" new"),
+        "a degraded digest must not report re-reported history as new: {}",
+        stdout(&digest)
+    );
+    let ndjson =
+        sandbox.run_as_participant(&["watch", "--snapshot", "--json"], &participant, &alpha);
+    assert!(ndjson.status.success(), "stderr: {}", stderr(&ndjson));
+    assert!(
+        stdout(&ndjson).contains("\"cursor_unusable\":true"),
+        "the NDJSON ring must carry the marker: {}",
+        stdout(&ndjson)
+    );
+}
+
+#[test]
+fn cursor_degrade_diagnostics_escape_hostile_state_and_paths() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    let participant = sandbox.test_participant("alpha");
+    let cursors = sandbox
+        .mail_root
+        .join("participants")
+        .join(&participant)
+        .join("cursors.json");
+
+    // A stored id is interpolated into the parse failure, so a newline inside
+    // one is a direct route into stderr: the degrade warning must describe it,
+    // never render it.
+    fs::write(
+        &cursors,
+        "{\"version\":2,\"mail\":{},\"channels\":{\"ops\":{\"seen\":[\"20260922-163423-000001-abcdef\\nFORGED cursor line\"]}}}\n",
+    )
+    .expect("plant cursor state with a control payload");
+    let read = sandbox.run_as_participant(&["inbox", "--json"], &participant, &alpha);
+    let err = stderr(&read);
+    assert!(
+        err.contains("FORGED cursor line"),
+        "the parse failure must still be described: {err}"
+    );
+    assert!(
+        err.contains("\\nFORGED cursor line"),
+        "the payload must be escaped, not dropped: {err}"
+    );
+    assert!(
+        err.lines().all(|line| !line.starts_with("FORGED")),
+        "control text from cursor state must not forge a line: {err}"
+    );
+
+    // The path is attacker-influenced too -- POST_MAIL_ROOT is the caller's --
+    // and the same warning renders it.
+    let hostile_root = sandbox.path.join("root\nFORGED root claim");
+    fs::rename(&sandbox.mail_root, &hostile_root).expect("move the store under a hostile root");
+    let read = sandbox.run_in_env(
+        &["inbox", "--json"],
+        None,
+        &alpha,
+        &[
+            (
+                "POST_MAIL_ROOT",
+                hostile_root.to_str().expect("hostile root is utf8"),
+            ),
+            ("POST_PARTICIPANT", participant.as_str()),
+        ],
+    );
+    let err = stderr(&read);
+    assert!(
+        err.contains("FORGED root claim"),
+        "the path must still be reported: {err}"
+    );
+    assert!(
+        err.contains("\\nFORGED root claim"),
+        "the path must be escaped, not dropped: {err}"
+    );
+    assert!(
+        err.lines()
+            .all(|line| !line.starts_with("FORGED root claim")),
+        "a hostile root path must not forge a line: {err}"
+    );
 }
 
 #[test]
@@ -2635,6 +2858,365 @@ fn channel_two_room_flow_lists_participants_and_advances_each_seen_set() {
 }
 
 #[test]
+fn chat_refuses_a_leading_hash_rather_than_renaming_the_channel() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+
+    // '#stray' names nothing in this store: the identifier is not rewritten for
+    // the caller, and the correction carries the exact bare-name command.
+    // (`--join` is one of the two forms the bare name reproduces whole, so this
+    // is the caller's own invocation minus the sigil -- see
+    // chat_hash_refusal_publishes_no_lossy_correction for the forms that get
+    // prose instead.)
+    let refused = sandbox.run_in(&["chat", "#stray", "--join", "--json"], None, &alpha);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("post chat 'stray' --join"),
+        "the refusal must carry the runnable bare-name command: {}",
+        stderr(&refused)
+    );
+    let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
+    let names: Vec<&str> = listed
+        .channels
+        .iter()
+        .map(|channel| channel.name.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"stray"),
+        "a refused join must not join the stripped name either: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.starts_with('#')),
+        "a refused join must not create a '#…' channel: {names:?}"
+    );
+
+    // A channel LITERALLY named '#legacy' is a store an older post created, and
+    // it has to keep working: '#legacy' IS its name, not a rendering of one.
+    let legacy_id = "20260922-163423-000001-abcdef";
+    write_bad_channel(
+        &sandbox,
+        "#legacy",
+        Some(r#"{"alpha":"2026-09-22 16:34:23 +0000"}"#),
+        true,
+        r##"{"name":"#legacy","created":"2026-09-22 16:34:23 +0000","created_by":"alpha"}"##,
+    );
+    write_channel_message(&sandbox, "#legacy", legacy_id, "beta", "", "legacy history");
+    let read = sandbox.run_in(&["chat", "#legacy", "--json"], None, &alpha);
+    assert_success(&read);
+    let body = stdout(&read);
+    assert!(
+        body.contains(legacy_id),
+        "an existing literal '#name' channel must stay readable: {body}"
+    );
+    // ...and the stripped spelling is a different identifier, not an alias: the
+    // literal store is not reachable under 'legacy'.
+    let stripped = sandbox.run_in(&["chat", "legacy", "--json"], None, &alpha);
+    assert!(
+        !stripped.status.success(),
+        "the stripped name must not resolve the literal channel: {}",
+        stdout(&stripped)
+    );
+}
+
+/// `--subject` belongs to a send. A subject-only READ used to be refused with an
+/// `exact_fix` of `post chat <chan> --send --subject <S> --body '<text>'`: the
+/// body was a placeholder for one this invocation never supplied, so a debug
+/// build aborted on the exact_fix guard and a release caller who pasted the
+/// "fix" sent the literal text into the channel. Nothing here says what the body
+/// would be, so no command is published -- and a refused read must move no
+/// cursor and send nothing.
+#[test]
+fn chat_subject_only_read_is_refused_without_a_command_or_a_store_change() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "ops", &alpha);
+    join_channel(&sandbox, "ops", &beta);
+    let unread = "20260922-163423-000003-abcdef";
+    write_channel_message(&sandbox, "ops", unread, "beta", "", "unread backlog");
+    let channels = sandbox.mail_root.join("channels");
+    let before = snapshot_tree(&channels);
+
+    for args in [
+        vec!["chat", "ops", "--peek", "--subject", "Report"],
+        vec!["chat", "ops", "--subject", "Report"],
+        vec!["chat", "ops", "--subject", "Report", "--json"],
+    ] {
+        let refused = sandbox.run_in(&args, None, &alpha);
+        // The placeholder exact_fix aborted a debug build right here (101).
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{args:?} stderr: {}",
+            stderr(&refused)
+        );
+        let error: ErrorEnvelope = from_stderr(&refused);
+        assert_eq!(error.error.code, "invalid_argument", "{args:?}");
+        assert_eq!(
+            error.error.details.input.as_deref(),
+            Some("--subject"),
+            "{args:?}"
+        );
+        assert_eq!(
+            error.error.details.exact_fix, None,
+            "{args:?} names no body, so it must publish no command: {:?}",
+            error.error.details.exact_fix
+        );
+        // The human surface is what an operator pastes from, so the text form
+        // must not advertise a command either.
+        assert!(
+            !stderr(&refused).contains("post chat"),
+            "{args:?} must not advertise a command: {}",
+            stderr(&refused)
+        );
+        assert!(
+            !error.error.suggested_fix.contains("--body '"),
+            "{args:?} must not invent a body: {}",
+            error.error.suggested_fix
+        );
+    }
+
+    // A refused read changes nothing: no cursor moved and nothing was sent.
+    assert_eq!(
+        snapshot_tree(&channels),
+        before,
+        "a refused read must leave the channel store byte-identical"
+    );
+
+    // The read the refusal was about still behaves as asked: the backlog is
+    // still unread, the glance shows it, and the consuming read is what
+    // consumes it.
+    let peeked = sandbox.run_in(&["chat", "ops", "--peek", "--json"], None, &alpha);
+    assert!(
+        stdout(&peeked).contains(unread),
+        "the refused reads must not have consumed the backlog: {}",
+        stdout(&peeked)
+    );
+    let consumed = sandbox.run_in(&["chat", "ops", "--json"], None, &alpha);
+    assert!(
+        stdout(&consumed).contains(unread),
+        "the backlog must still be unread after the refusals: {}",
+        stdout(&consumed)
+    );
+    let empty = sandbox.run_in(&["chat", "ops", "--json"], None, &alpha);
+    assert!(
+        !stdout(&empty).contains(unread),
+        "the consuming read is what consumes: {}",
+        stdout(&empty)
+    );
+}
+
+/// The sigil refusal is fail-closed, and its correction must be too. A command
+/// that runs but does something else than the caller asked is the one outcome
+/// worse than no command: the first revision advertised `post chat 'name'` for
+/// EVERY form, so a refused `--peek` pasted as a consuming read of the backlog
+/// it had just asked to leave alone, and a refused send came back with no body
+/// and no options.
+#[test]
+fn chat_hash_refusal_publishes_no_lossy_correction() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "stray", &alpha);
+    join_channel(&sandbox, "stray", &beta);
+    let unread = "20260922-163423-000001-abcdef";
+    write_channel_message(&sandbox, "stray", unread, "beta", "", "unread backlog");
+
+    // `--peek` is the difference between a glance and reading the backlog, so
+    // the bare-name spelling cannot stand in for this invocation at all.
+    let glanced = sandbox.run_in(&["chat", "#stray", "--peek", "--json"], None, &alpha);
+    assert_eq!(
+        glanced.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&glanced)
+    );
+    let error: ErrorEnvelope = from_stderr(&glanced);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert_eq!(
+        error.error.details.exact_fix, None,
+        "a correction that dropped --peek would consume the backlog: {:?}",
+        error.error.details.exact_fix
+    );
+    assert!(
+        error.error.suggested_fix.contains("'stray'"),
+        "the prose must still name the bare channel: {}",
+        error.error.suggested_fix
+    );
+    // The human surface is what an operator pastes from, so it must not
+    // advertise a command either.
+    let plain = sandbox.run_in(&["chat", "#stray", "--peek"], None, &alpha);
+    assert_eq!(plain.status.code(), Some(2));
+    assert!(
+        !stderr(&plain).contains("post chat"),
+        "no runnable command may be advertised for a form it cannot reproduce: {}",
+        stderr(&plain)
+    );
+
+    // Cursor safety is the claim, so prove the state rather than the string:
+    // the refusal left the message unread, a glance behind it still sees it, the
+    // consuming read then consumes it, and the read after that does not. That
+    // last step is what makes the earlier ones mean something.
+    let after_glance = sandbox.run_in(&["chat", "stray", "--peek", "--json"], None, &alpha);
+    assert!(
+        stdout(&after_glance).contains(unread),
+        "a refused --peek must not consume the backlog: {}",
+        stdout(&after_glance)
+    );
+    let consumed = sandbox.run_in(&["chat", "stray", "--json"], None, &alpha);
+    assert!(
+        stdout(&consumed).contains(unread),
+        "the backlog must still be unread after the refusal: {}",
+        stdout(&consumed)
+    );
+    let empty = sandbox.run_in(&["chat", "stray", "--json"], None, &alpha);
+    assert!(
+        !stdout(&empty).contains(unread),
+        "the consuming read is what consumes: {}",
+        stdout(&empty)
+    );
+
+    // A send correction must not lose the body or the options, and must not
+    // echo the body into diagnostics.
+    let secret = "SEND-BODY-MUST-NOT-BE-ECHOED";
+    let sent = sandbox.run_in(
+        &[
+            "chat",
+            "#stray",
+            "--send",
+            "--subject",
+            "Status",
+            "--body",
+            secret,
+            "--json",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(sent.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&sent);
+    assert_eq!(
+        error.error.details.exact_fix, None,
+        "a send correction without its body is not the caller's command: {:?}",
+        error.error.details.exact_fix
+    );
+    assert!(
+        !stderr(&sent).contains(secret),
+        "diagnostics must never echo a send body: {}",
+        stderr(&sent)
+    );
+    assert!(
+        !stdout(&sandbox.run_in(&["chat", "stray", "--history", "10"], None, &alpha))
+            .contains(secret),
+        "the refused send must not have landed"
+    );
+
+    // Every other form loses something the bare-name spelling cannot carry.
+    for args in [
+        vec!["chat", "#stray", "--history", "3"],
+        vec!["chat", "#stray", "--since", unread],
+        vec!["chat", "#stray", "--message", unread, "--max-bytes", "64"],
+        vec!["chat", "#stray", "--discard"],
+        vec!["chat", "#stray", "--discard-through", unread],
+        vec!["chat", "#stray", "--ack", unread],
+        vec!["chat", "#stray", "--seen-by", unread],
+        vec!["chat", "#stray", "--framing", "full"],
+        vec!["chat", "#stray", "--limit", "1"],
+        vec!["chat", "#stray", "--join", "--description", "norms"],
+    ] {
+        let refused = sandbox.run_in(&args, None, &alpha);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            stderr(&refused)
+        );
+        let error: ErrorEnvelope = from_stderr(&refused);
+        assert_eq!(
+            error.error.details.exact_fix, None,
+            "{args:?} must get prose, not a corrected command: {:?}",
+            error.error.details.exact_fix
+        );
+    }
+
+    // The two forms the bare name DOES reproduce exactly keep their fix --
+    // including the globals the caller passed -- and it runs as written.
+    let fresh = sandbox.run_in(&["chat", "#fresh", "--join", "--json"], None, &alpha);
+    assert_eq!(fresh.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&fresh);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post chat 'fresh' --join --json"),
+        "the corrected command is the caller's invocation minus the sigil"
+    );
+    let ran = sandbox.run_fix(
+        error.error.details.exact_fix.as_deref().expect("exact_fix"),
+        &alpha,
+    );
+    assert_success(&ran);
+    let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
+    let joined = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "fresh")
+        .expect("running the correction must create and join the bare-name channel");
+    assert!(joined
+        .participants
+        .contains(&sandbox.test_participant("alpha")));
+
+    // Reproduction includes the quoting: a name the shell would otherwise split
+    // has to come back as one argument.
+    let spaced = sandbox.run_in(&["chat", "#two words", "--join"], None, &alpha);
+    assert_eq!(spaced.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&spaced);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post chat 'two words' --join"),
+        "the bare-name correction must stay one shell argument"
+    );
+
+    // `--pretty` spreads the refusal over several lines, so this one is read
+    // off the text rather than the envelope helper.
+    let pretty = sandbox.run_in(&["chat", "#pretty", "--join", "--pretty"], None, &alpha);
+    assert_eq!(pretty.status.code(), Some(2));
+    assert!(
+        stderr(&pretty).contains("post chat 'pretty' --join --pretty"),
+        "an output global is part of the invocation, not decoration to drop: {}",
+        stderr(&pretty)
+    );
+
+    // `--leave` is the other form with no companions, and its fix must leave.
+    let leaving = sandbox.run_in(&["chat", "#stray", "--leave", "--json"], None, &alpha);
+    assert_eq!(leaving.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&leaving);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post chat 'stray' --leave --json")
+    );
+    let ran = sandbox.run_fix(
+        error.error.details.exact_fix.as_deref().expect("exact_fix"),
+        &alpha,
+    );
+    assert_success(&ran);
+    let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
+    let left = listed
+        .channels
+        .iter()
+        .find(|channel| channel.name == "stray")
+        .expect("the channel survives its member's departure");
+    assert!(
+        !left
+            .participants
+            .contains(&sandbox.test_participant("alpha")),
+        "running the correction must leave the channel: {:?}",
+        left.participants
+    );
+}
+
+#[test]
 fn channel_watch_reports_backlog_live_events_omits_bodies_and_preserves_cursors() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
@@ -2911,6 +3493,41 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
         None,
         &alpha,
     ));
+    // A second channel whose only message beta CONSUMES before it is corrupted:
+    // from that moment the file is ordinary history, which the fast wake scan
+    // never opens again. It lives in its own channel because a message that no
+    // longer parses makes the complete projection refuse that whole channel --
+    // the pre-existing posture for a corrupt store, which is exactly why the
+    // healthy ring has to be a different channel.
+    join_channel(&sandbox, "consumed-store", &alpha);
+    join_channel(&sandbox, "consumed-store", &beta);
+    let consumed: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "consumed-store",
+            "--send",
+            "--anyway",
+            "--body",
+            "consumed body must not print",
+            "--json",
+        ],
+        None,
+        &alpha,
+    ));
+    let discarded = sandbox.run_in(
+        &["chat", "consumed-store", "--discard", "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&discarded);
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels/consumed-store/messages")
+            .join(format!("{}.msg", consumed.message.id)),
+        "malformed consumed channel message",
+    )
+    .expect("corrupt the consumed channel message");
     write_bad_channel(
         &sandbox,
         "bad-info",
@@ -2947,7 +3564,18 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
     )
     .expect("write malformed channel message");
 
-    let output = sandbox.run(&["watch", "--room", "beta", "--once", "--interval-ms", "100"]);
+    // Complete validation re-reads every stored message on pass, so a channel
+    // store it cannot enumerate must degrade per channel and leave the healthy
+    // ring alone. A failed target scan emits nothing, and `--once` waits for a
+    // non-empty batch: the failure mode this guards is "never exits", so the
+    // test enforces its own deadline instead of trusting the suite's.
+    let output = run_under_deadline(
+        &sandbox,
+        &["watch", "--room", "beta", "--once", "--interval-ms", "100"],
+        &sandbox.path,
+        &sandbox.test_participant("beta"),
+        std::time::Duration::from_secs(30),
+    );
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let events = watch_events(&output.stdout);
     assert!(events.iter().any(|event| matches!(
@@ -2963,6 +3591,20 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
             ..
         } if id == "99990102-010101-000001-abcdef"
     )));
+    // The consumed message is corruption too, and this pass owes complete
+    // validation: the fast wake scan would never open it, and a wake-only
+    // implementation reports nothing here at all.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            WatchEvent::Unreadable {
+                id,
+                reason: WatchReason::Channel,
+                ..
+            } if id == &consumed.message.id
+        )),
+        "corruption in a consumed channel message must be reported: {events:?}"
+    );
     let err = stderr(&output);
     assert!(err.contains("bad-info"), "{err}");
     assert!(err.contains("bad-members"), "{err}");
@@ -2979,6 +3621,11 @@ fn channel_watch_isolates_corrupt_channel_stores_and_still_rings_healthy_channel
     assert!(
         raw.contains("\"preview\":\"healthy body must not print\""),
         "{raw}"
+    );
+    // Reporting corruption must not re-deliver or re-mark what it validated.
+    assert!(
+        !raw.contains("consumed body must not print"),
+        "a consumed message must not be re-delivered by validation: {raw}"
     );
 }
 
@@ -5913,6 +6560,7 @@ fn chat_body_markers_stay_behind_the_gutter() {
                     .split_whitespace()
                     .next()
                     .unwrap()
+                    .trim_end_matches('\u{2026}')
             ))
             .count(),
         1,
@@ -5928,6 +6576,7 @@ fn chat_body_markers_stay_behind_the_gutter() {
                     .split_whitespace()
                     .next()
                     .unwrap()
+                    .trim_end_matches('\u{2026}')
             ))
             .count(),
         1,
@@ -6540,6 +7189,114 @@ fn snapshot_does_not_leave_a_live_heartbeat() {
     );
     let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
     assert!(!hb.exists(), "snapshot must not create watch.heartbeat");
+}
+
+#[test]
+fn who_room_scope_omits_participants_bound_to_other_rooms() {
+    let sandbox = Sandbox::new();
+    let _rooms = register_alpha_beta(&sandbox);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    // A participant with no workspace: no room can claim it, so only the
+    // unscoped report may list it.
+    let session_only = sandbox.seed_session_only_participant();
+
+    let scoped: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    let scoped_ids: Vec<&str> = scoped
+        .participants
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert!(
+        scoped_ids.contains(&alpha_participant.as_str()),
+        "the selected room's participant must be listed: {scoped_ids:?}"
+    );
+    assert!(
+        !scoped_ids.contains(&beta_participant.as_str()),
+        "a scoped `who` must not answer with another room's participants: {scoped_ids:?}"
+    );
+    assert!(
+        !scoped_ids.contains(&session_only.as_str()),
+        "a scoped `who` reports one room, and a session-only participant is in none: {scoped_ids:?}"
+    );
+    assert_eq!(scoped.count, scoped.participants.len());
+
+    // `--text` is the surface the preflight reads, so it must be scoped too.
+    let text = stdout(&sandbox.run(&["who", "--room", "alpha", "--text"]));
+    assert!(text.contains(&alpha_participant), "scoped text: {text}");
+    assert!(
+        !text.contains(&beta_participant),
+        "scoped --text still listed another room's participant: {text}"
+    );
+    assert!(
+        !text.contains(&session_only),
+        "scoped --text still listed the session-only participant: {text}"
+    );
+
+    // Omitted --room keeps every registered room's participants AND the
+    // participants that belong to no room at all: the unscoped report claims
+    // the whole host, and a session-only participant's only address is its id.
+    let all: WhoOutput = from_stdout(&sandbox.run(&["who"]));
+    let all_ids: Vec<&str> = all
+        .participants
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert!(
+        all_ids.contains(&beta_participant.as_str()),
+        "an unscoped `who` must still list everyone: {all_ids:?}"
+    );
+    assert!(
+        all_ids.contains(&session_only.as_str()),
+        "an unscoped `who` must include session-only participants: {all_ids:?}"
+    );
+    assert_eq!(all.count, all.participants.len());
+    let unscoped_text = stdout(&sandbox.run(&["who", "--text"]));
+    assert!(
+        unscoped_text.contains(&session_only),
+        "unscoped --text dropped the session-only participant: {unscoped_text}"
+    );
+}
+
+#[test]
+fn positional_prose_is_reported_as_prose_not_as_a_file_read_failure() {
+    let sandbox = Sandbox::new();
+    let _rooms = register_alpha_beta(&sandbox);
+
+    // Short prose lands in the body-FILE slot: a usage error (exit 2) whose
+    // remedy is the runnable --body form, not an I/O retry.
+    let short = sandbox.run(&["send", "--to", "alpha", "hello"]);
+    assert_eq!(short.status.code(), Some(2), "stderr: {}", stderr(&short));
+    assert!(
+        stderr(&short).contains("not inline message text"),
+        "stderr: {}",
+        stderr(&short)
+    );
+
+    // Prose longer than a file name can be (NAME_MAX is 255 bytes) is still a
+    // usage error, but the payload must not be echoed back and the advice must
+    // not be a --body-file fix that can never run.
+    let prose = "x".repeat(6000);
+    let long = sandbox.run(&["send", "--to", "alpha", &prose]);
+    assert_eq!(long.status.code(), Some(2), "stderr: {}", stderr(&long));
+    let error = stderr(&long);
+    assert!(
+        !error.contains(&prose),
+        "the rejected payload was echoed back: {} bytes of it",
+        error.len()
+    );
+    assert!(
+        !error.contains("--body-file"),
+        "an over-long positional cannot be a body file: {error}"
+    );
+    assert!(
+        error.contains("--body"),
+        "the remedy must name --body: {error}"
+    );
+    assert!(
+        !error.contains("retry the same command"),
+        "an unreadable 'path' must not invite the same retry: {error}"
+    );
 }
 
 #[test]

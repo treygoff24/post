@@ -579,7 +579,9 @@ pub(crate) struct ChannelsArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct WhoArgs {
-    /// Restrict to these rooms; omit for every registered room.
+    /// Restrict the whole report to these rooms: participant rows are the
+    /// participants bound to a selected room, plus that room's heartbeat row.
+    /// Omit for every registered room.
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Vec<String>,
 
@@ -631,6 +633,9 @@ pub(crate) struct RoomsAddArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Migration: the old `post profile --name <NAME>` spelling is now `post profile set --name <NAME>` (add `--pfp <EMOJI>` to set the sigil in the same command)."
+)]
 pub(crate) struct ProfileArgs {
     #[command(subcommand)]
     pub command: Option<ProfileCommand>,

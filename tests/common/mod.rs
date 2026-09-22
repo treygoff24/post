@@ -10,9 +10,55 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Run the binary under test and require it to exit before `deadline`.
+///
+/// A process test whose failure mode is "never exits" cannot be written with a
+/// blocking runner: the regression then hangs the whole suite instead of
+/// reporting, which is exactly how a one-shot `post watch` outage once cost a
+/// validation run 40 minutes. This polls the exact child it spawned and, on
+/// overrun, kills ONLY that child -- never a pattern kill, never a process-tree
+/// sweep -- and fails with the output it had produced.
+pub fn run_under_deadline(
+    sandbox: &Sandbox,
+    args: &[&str],
+    cwd: &Path,
+    participant: &str,
+    deadline: Duration,
+) -> Output {
+    let mut command = post_command();
+    let mut child = command
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", participant)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn post binary");
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait().expect("poll post binary").is_some() {
+            return child.wait_with_output().expect("collect post output");
+        }
+        if started.elapsed() >= deadline {
+            child.kill().expect("stop the overrunning child only");
+            let output = child.wait_with_output().expect("collect post output");
+            panic!(
+                "`post {}` did not exit within {deadline:?}\nstdout: {}\nstderr: {}",
+                args.join(" "),
+                stdout(&output),
+                stderr(&output)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 pub fn assert_child_running(child: &mut Child, context: &str) {
     let Some(status) = child.try_wait().expect("poll child process") else {
@@ -396,6 +442,14 @@ impl Sandbox {
 
     pub fn test_participant(&self, workspace: &str) -> String {
         self.seed_test_participant(Some(workspace), None)
+    }
+
+    /// A session-only participant: no workspace binding, so its only address is
+    /// its own id. It is a supported participant class (nothing registers it in
+    /// a room), which is why the reports that promise "the whole host" have to
+    /// keep it.
+    pub fn seed_session_only_participant(&self) -> String {
+        self.seed_test_participant(None, Some("test-solo"))
     }
 
     fn test_participant_for_cwd(&self, cwd: &Path) -> String {

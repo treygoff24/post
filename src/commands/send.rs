@@ -6,7 +6,7 @@ use crate::mailbox::{
     closest_room, declared_env_pin, declared_sender_address, encode_mail, exclusive_atomic_write,
     local_timestamp, new_mail_id, shell_quote, validate_envelope, Context,
 };
-use crate::model::{Envelope, MailKind, RoomMap, SenderProvenance};
+use crate::model::{Envelope, RoomMap, SenderProvenance};
 use crate::output::{self, SendOutput};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
@@ -175,50 +175,29 @@ where
             .map(|paths| paths.exists())
             .unwrap_or(false);
         if is_channel {
-            // Carry the caller's work into the fix. This repo's rule is that a
-            // flag must survive into the command it hands back -- see
-            // send_fix_prefix, where --kind "always survives" because a fix that
-            // dropped it would silently retry as a note. Channels are a narrower
-            // surface than rooms, so --subject, --oversize and the body source
-            // map across and --kind does not exist at all; the one flag that
-            // cannot survive is named in the prose instead of being dropped in
-            // silence. That asymmetry is also the reason this errors rather than
-            // routing: a router would have to drop --kind or invent a meaning
-            // for it, and both are lies.
-            let mut fix = format!("post chat {} --send", shell_quote(channel_candidate));
-            if !args.subject.is_empty() {
-                fix.push_str(&format!(" --subject {}", shell_quote(&args.subject)));
-            }
-            if args.oversize {
-                fix.push_str(" --oversize");
-            }
-            match (&args.body_file, &args.file, &args.body) {
-                (Some(path), _, _) | (_, Some(path), _) => {
-                    fix.push_str(&format!(
-                        " --body-file {}",
-                        shell_quote(&path.display().to_string())
-                    ));
-                }
-                (_, _, Some(text)) => fix.push_str(&format!(" --body {}", shell_quote(text))),
-                _ => {}
-            }
-            let dropped = if args.kind == MailKind::Note {
-                String::new()
-            } else {
-                format!(
-                    " Channels carry no message kind, so --kind {} has no equivalent and is not in the command below.",
-                    args.kind.as_str()
-                )
-            };
+            // PROSE ONLY, for every invocation. A channel is a different
+            // protocol from a room, and the cross-protocol correction cannot be
+            // built without lying: channels carry no message kind, `post chat`
+            // has no --from (it sends as the current bound participant), and a body
+            // from stdin cannot be reconstructed into an argument. A `post chat ... --send` command assembled from
+            // what survives would run as written while silently dropping the
+            // caller's register, sender assertion, or body bytes -- so the
+            // refusal names the channel verb and the re-supply instead of
+            // handing back a command that is not the caller's invocation. This
+            // supersedes the exact_fix this branch used to publish for
+            // invocations whose flags all mapped across.
+            let guidance = format!(
+                "Channels take a different verb: run `post chat {} --send`, re-supplying the body with --body '<text>' or --body-file <path> (the original stdin stream is not preserved in a correction) and the subject with --subject '<text>'. `post send`'s --kind and --from have no channel equivalent: a channel carries no message kind, and `post chat` sends as the current bound participant. No corrected command is offered because none can carry this invocation's kind, sender, and body source.",
+                shell_quote(channel_candidate)
+            );
             return Err(AppError::new(
                 ErrorCode::UnknownRoom,
                 format!(
                     "'{}' is a channel, not a room; `post send --to` delivers direct mail to rooms only",
                     args.to
                 ),
-                format!("Channels take a different verb.{dropped} Run `{fix}`."),
+                guidance,
             )
-            .exact_fix(fix)
             .input(args.to.clone())
             .reason("recipient names a channel, not a room"));
         }
@@ -629,6 +608,25 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
             .path(display)
             .reason("body file path does not exist"))
         }
+        // Inline prose longer than any file name can be is not a path at all:
+        // NAME_MAX is 255 bytes on every Unix post supports, so a 6000-
+        // character paste lands here. It is the same usage mistake as a
+        // nonexistent path, but the payload must NOT be echoed back -- the
+        // generic io_error echoed it in the message and again inside a
+        // --body-file fix that could never work, which is how a pasted
+        // paragraph becomes a screenful of itself. No runnable fix can carry
+        // that payload, so this names the remedy instead, like the oversize
+        // body error does.
+        Err(error) if error.kind() == io::ErrorKind::InvalidFilename => Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "the message body argument is {} bytes long, too long to be a file name; that argument is a path to a body FILE, not inline message text",
+                display.len()
+            ),
+            "Send the text with `--body '<text>'`, or pipe it on stdin, instead of a positional path.",
+        )
+        .reason(error.to_string())
+        .operation("read UTF-8 message body file")),
         Err(error) => Err(
             AppError::io("read UTF-8 message body file", path, error).exact_fix(format!(
                 "{fix_prefix} --body-file {}",

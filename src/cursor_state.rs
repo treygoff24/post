@@ -37,10 +37,27 @@ impl ParticipantCursors {
         match read_participant_cursor(&participant_cursor_path(participant)) {
             ParticipantCursorRead::Missing => Self::default(),
             ParticipantCursorRead::Valid(state) => state,
-            ParticipantCursorRead::Invalid => {
+            ParticipantCursorRead::Invalid { reason, .. } => {
+                // Fail open: a read degrades to an empty snapshot, so every
+                // eligible message is reported as unread. That is a large,
+                // misleading change in what a monitor sees, so the warning
+                // names the participant, the file, and the reason, and points
+                // at the machine-readable signal: `post watch` marks the events
+                // and digests it projects from this state, and `post doctor`
+                // reports the finding after the fact.
+                //
+                // Every one of those three values is debug-quoted, not
+                // interpolated: this is the hostile-state reader, so the path
+                // (the mailbox root is attacker-influenced) and the reason
+                // (which quotes the file's own bytes) can carry newlines and
+                // control text that would otherwise forge extra diagnostic
+                // lines in the output a harness is reading. Same discipline as
+                // the unreadable-message warnings (`{:?}` on the same values).
                 eprintln!(
-                    "post: warning: participant '{}' has invalid cursors.json; treating every eligible message as unread",
-                    participant.id
+                    "post: warning: participant {:?} cursor state at {:?} is unusable ({:?}): every eligible message in every joined channel and address is reported unread until it is repaired; `post watch` marks what it re-reports and `post doctor` reports the finding",
+                    participant.id,
+                    participant_cursor_path(participant),
+                    reason
                 );
                 Self::default()
             }
@@ -155,10 +172,43 @@ fn participant_cursor_path(participant: &Participant) -> PathBuf {
     participant.dir.join(CURSORS_FILE)
 }
 
+/// Why this participant's cursor state cannot be used, when it exists and is
+/// unusable. `None` covers both the healthy case and the missing file (a
+/// participant that has consumed nothing yet). Runtime reads degrade to an
+/// empty snapshot and warn; this is what `post doctor` reports so the degrade
+/// is discoverable after the fact rather than only in a live process's stderr.
+pub(crate) fn participant_cursor_defect(participant: &Participant) -> Option<String> {
+    match read_participant_cursor(&participant_cursor_path(participant)) {
+        ParticipantCursorRead::Invalid { reason, .. } => Some(reason),
+        ParticipantCursorRead::Missing | ParticipantCursorRead::Valid(_) => None,
+    }
+}
+
+/// Why a participant's cursor state could not be read. `transient` marks a
+/// failure that a second attempt can plausibly fix (a metadata lookup or read
+/// error); content failures -- symlink, not a solitary regular file, wrong
+/// version, malformed JSON, invalid ids -- are deterministic and are never
+/// retried into a success.
 enum ParticipantCursorRead {
     Missing,
     Valid(ParticipantCursors),
-    Invalid,
+    Invalid { reason: String, transient: bool },
+}
+
+impl ParticipantCursorRead {
+    fn invalid(reason: impl Into<String>) -> Self {
+        Self::Invalid {
+            reason: reason.into(),
+            transient: false,
+        }
+    }
+
+    fn transient(reason: impl Into<String>) -> Self {
+        Self::Invalid {
+            reason: reason.into(),
+            transient: true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,24 +219,44 @@ struct ParticipantCursorDocument {
     channels: BTreeMap<String, CursorSet>,
 }
 
+/// One retry covers a state file that a concurrent writer is halfway through
+/// replacing; it does NOT cover a malformed one, which must stay visible
+/// instead of being retried until something else answers.
 fn read_participant_cursor(path: &Path) -> ParticipantCursorRead {
+    let first = read_participant_cursor_once(path);
+    match first {
+        ParticipantCursorRead::Invalid {
+            transient: true, ..
+        } => read_participant_cursor_once(path),
+        other => other,
+    }
+}
+
+fn read_participant_cursor_once(path: &Path) -> ParticipantCursorRead {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return ParticipantCursorRead::Missing;
         }
-        Err(_) => return ParticipantCursorRead::Invalid,
+        Err(error) => {
+            return ParticipantCursorRead::transient(format!("cannot inspect file: {error}"));
+        }
     };
     if !metadata.file_type().is_file() || metadata.nlink() != 1 {
-        return ParticipantCursorRead::Invalid;
+        return ParticipantCursorRead::invalid(
+            "not a solitary regular file (a symlink, directory, or multiply-linked file is refused)"
+                .to_owned(),
+        );
     }
     let raw = match fs::read(path) {
         Ok(raw) => raw,
-        Err(_) => return ParticipantCursorRead::Invalid,
+        Err(error) => {
+            return ParticipantCursorRead::transient(format!("cannot read file: {error}"));
+        }
     };
     parse_participant_cursor(&raw)
         .map(ParticipantCursorRead::Valid)
-        .unwrap_or(ParticipantCursorRead::Invalid)
+        .unwrap_or_else(ParticipantCursorRead::invalid)
 }
 
 fn parse_participant_cursor(raw: &[u8]) -> Result<ParticipantCursors, String> {
@@ -272,10 +342,10 @@ fn update_participant<T>(
     let mut state = match read_participant_cursor(&path) {
         ParticipantCursorRead::Missing => ParticipantCursors::default(),
         ParticipantCursorRead::Valid(state) => state,
-        ParticipantCursorRead::Invalid => {
+        ParticipantCursorRead::Invalid { reason, .. } => {
             return Err(AppError::config(
                 &path,
-                "participant cursors.json is malformed or unsafe; refusing to discard its read state",
+                format!("participant cursors.json is malformed or unsafe ({reason}); refusing to discard its read state"),
             ));
         }
     };
@@ -1059,6 +1129,7 @@ fn trusted_lock_metadata(metadata: &fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel_state::ParticipantChannels;
     use crate::model::ChannelMessage;
     use crate::test_support::{test_root, trash_test_root};
     use std::sync::{Arc, Barrier};
@@ -1213,6 +1284,44 @@ mod tests {
         let snapshot = Snapshot::load(&context, "alpha");
         assert!(snapshot.channel_has_seen("tax", ID1));
         assert!(snapshot.channel_has_seen("tax", ID2));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn unread_channel_skipping_consumed_matches_the_complete_projection() {
+        let (root, context) = context("fast-unread");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        ParticipantChannels::join(&context, &participant, "tax").expect("join channel");
+        seed_message(&root, "tax", ID1, "beta");
+        seed_message(&root, "tax", ID2, "beta");
+        fs::write(
+            root.join(CHANNELS_DIR).join("tax").join("channel.json"),
+            r#"{"name":"tax","created":"2026-08-31 17:12:34 +0000","created_by":"alpha"}"#,
+        )
+        .expect("channel info");
+        ParticipantCursors::consume_channel(&context, &participant, "tax", &[ID1.to_owned()])
+            .expect("consume ID1");
+
+        let full = super::eligibility::unread_channel(&context, &participant, "tax").expect("full");
+        let fast =
+            super::eligibility::unread_channel_skipping_consumed(&context, &participant, "tax")
+                .expect("fast");
+        // Equivalence is the whole license for the fast path: same ids, same
+        // order, same bodies. Its one difference -- a consumed body is never
+        // opened -- is not observed here on purpose: only the watch passes may
+        // use this projection, and they run the complete validation that
+        // reports a consumed file's corruption (`commands::watch` tests own
+        // that assertion).
+        assert_eq!(
+            full.iter()
+                .map(|item| (item.message.id.clone(), item.body.clone()))
+                .collect::<Vec<_>>(),
+            fast.iter()
+                .map(|item| (item.message.id.clone(), item.body.clone()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(fast.len(), 1, "exactly the unseen message is unread");
+        assert_eq!(fast[0].message.id, ID2);
         trash_test_root(&root);
     }
 

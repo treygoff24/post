@@ -119,6 +119,18 @@ fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(Option<String>
                 .to_owned(),
         ));
     }
+    if subcommand == Some("profile")
+        && (message.contains("unexpected argument '--name'")
+            || message.contains("unexpected argument '--pfp'"))
+    {
+        return Some((
+            // The value is the caller's, so the correction is prose: a
+            // `--name <NAME>` template would not run as written.
+            None,
+            "`post profile` sets nothing at the top level: the spelling is `post profile set --name <NAME>` (add `--pfp <EMOJI>` in the same command to set the sigil)."
+                .to_owned(),
+        ));
+    }
     if message.contains("unexpected argument '--room'") {
         return Some(match subcommand {
             Some("chat") => (

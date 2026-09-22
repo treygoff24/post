@@ -71,6 +71,108 @@ fn default_channel_reads_are_quiet_and_actionable() {
 }
 
 #[test]
+fn a_shortened_reference_is_marked_and_the_marked_token_resolves() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    for cwd in [&alpha, &beta] {
+        assert_success(&sandbox.run_in(&["chat", "mark", "--join"], None, cwd));
+    }
+    let first: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &["chat", "mark", "--send", "--body", "first body", "--json"],
+        None,
+        &alpha,
+    ));
+    let second: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &["chat", "mark", "--send", "--body", "second body", "--json"],
+        None,
+        &alpha,
+    ));
+
+    let peek = sandbox.run_in(&["chat", "mark", "--peek"], None, &beta);
+    assert_success(&peek);
+    let text = common::stdout(&peek);
+    let tokens: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(" · id=") && !line.contains("[join]"))
+        .filter_map(|line| line.split("id=").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect();
+    assert_eq!(tokens.len(), 2, "two headers expected: {text}");
+    for token in &tokens {
+        // Ids from two sends inside one second share a long prefix, so both are
+        // shortened -- and a shortened reference must say so, or a reader cannot
+        // tell a prefix from the whole id.
+        assert!(
+            token.ends_with('\u{2026}'),
+            "a shortened reference must be marked as a prefix: {token:?} in {text}"
+        );
+        let shorter = token.trim_end_matches('\u{2026}');
+        assert!(
+            first.message.id.starts_with(shorter) || second.message.id.starts_with(shorter),
+            "the mark must wrap a real prefix: {token:?}"
+        );
+        assert!(shorter.len() < first.message.id.len());
+    }
+
+    // The token post printed is a token post accepts: pasted back with its mark
+    // it must resolve rather than report not_found.
+    let marked_first = tokens
+        .iter()
+        .find(|token| {
+            first
+                .message
+                .id
+                .starts_with(token.trim_end_matches('\u{2026}'))
+        })
+        .expect("first message header");
+    let slice = sandbox.run_in(
+        &[
+            "chat",
+            "mark",
+            "--message",
+            marked_first,
+            "--max-bytes",
+            "4096",
+            "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&slice);
+    assert!(common::stdout(&slice).contains(&first.message.id));
+
+    let seen = sandbox.run_in(
+        &["chat", "mark", "--seen-by", marked_first, "--json"],
+        None,
+        &beta,
+    );
+    assert_success(&seen);
+
+    // The mark is presentation only: a reply stamped with the pasted token must
+    // store the real id, never the marked one.
+    let reply: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "mark",
+            "--send",
+            "--anyway",
+            "--re",
+            marked_first,
+            "--body",
+            "reply",
+            "--json",
+        ],
+        None,
+        &beta,
+    ));
+    assert_eq!(
+        reply.message.re.as_deref(),
+        Some(first.message.id.as_str()),
+        "the truncation mark must not leak into message metadata"
+    );
+}
+
+#[test]
 fn bind_activation_notice_is_once_per_participant_not_process_or_channel() {
     let sandbox = Sandbox::new();
     for (key, expected) in [

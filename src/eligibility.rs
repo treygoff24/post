@@ -242,6 +242,68 @@ pub(crate) fn unread_channel(
         .collect())
 }
 
+/// The unread projection without re-reading messages this participant already
+/// consumed.
+///
+/// The filename IS the message id (`parse_channel_message` refuses a file whose
+/// stem disagrees with the id it contains), and a consumed id can never be
+/// unread, so a file whose id is already in the seen-set cannot contribute to
+/// the result: reading and parsing it was pure cost. On a channel whose backlog
+/// runs to hundreds of messages, that is the difference between per-scan work
+/// that tracks new mail and per-scan work that tracks everything ever posted --
+/// the difference a `post watch` doorbell pays on every wake.
+///
+/// The equivalence holds only where this is called: `post watch` uses it for
+/// event-wake scans. Every pass that owes complete validation -- startup,
+/// `--once`, `--snapshot`, the periodic reconciliation pass, and full-history
+/// readers (read, chat, catchup, channels, search) -- uses `unread_channel`
+/// (or `visible_channel`) instead. Its one behavioral difference is not
+/// observable as a lost report: a corrupt message which is ALREADY consumed
+/// does not fail this projection (the consumed id is excluded before its
+/// content is used, so it could not be delivered either way), and the complete
+/// validation those passes run -- `commands::watch::report_consumed_channel_corruption`
+/// -- reports it from cursor-aware validation instead, on the first pass that
+/// owes it. A wake scan therefore never decides whether corruption is
+/// reported; it only declines to pay for opening bodies it cannot deliver.
+pub(crate) fn unread_channel_skipping_consumed(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+) -> AppResult<Vec<EligibleChannelMessage>> {
+    let membership = ParticipantChannels::load(participant)?;
+    if !membership.effective(context, participant, channel_name)? {
+        return Ok(Vec::new());
+    }
+    let cursors = ParticipantCursors::load(context, participant);
+    let paths = ChannelPaths::new(context, channel_name)?;
+    if !paths.exists() {
+        return Ok(Vec::new());
+    }
+    let mut unread = Vec::new();
+    for path in channel::message_files(&paths.messages)? {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if cursors.channel_has_seen(channel_name, id) {
+            continue;
+        }
+        let parsed = channel::parse_channel_message(&path)?;
+        let own = parsed.message.from_participant.as_deref() == Some(participant.id.as_str());
+        if own {
+            continue;
+        }
+        unread.push(EligibleChannelMessage {
+            path,
+            message: parsed.message,
+            body: parsed.body,
+            own,
+            already_read: false,
+        });
+    }
+    unread.sort_by(|left, right| left.message.id.cmp(&right.message.id));
+    Ok(unread)
+}
+
 /// Complete channel history for an effective member. Read state and sender
 /// status are annotations, not visibility filters.
 pub(crate) fn visible_channel(

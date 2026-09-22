@@ -845,6 +845,9 @@ fn message_author_is(paths: &ChannelPaths, id: &str, room: &str) -> bool {
 /// Only accepts paths that parse as channel messages whose envelope id matches
 /// the filename stem — never trust a bare `.msg` name alone.
 pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResult<String> {
+    // A reference printed by `post chat` carries a truncation mark when it is a
+    // prefix; strip it so the token post printed resolves when pasted back.
+    let prefix = crate::output::unmark_reference(prefix);
     let mut matches = Vec::new();
     for path in message_files(&paths.messages)? {
         let Ok(parsed) = parse_channel_message(&path) else {

@@ -2329,11 +2329,16 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
     let set: Value = from_stdout(&set);
     assert_eq!(set["participant"], fire.as_str());
     assert_eq!(set["key"], format!("participant:{fire}"));
-    assert_eq!(set["retired_legacy_entry"], "alpha", "set from the workspace retires the legacy entry");
+    assert_eq!(
+        set["retired_legacy_entry"], "alpha",
+        "set from the workspace retires the legacy entry"
+    );
 
     let send = |participant: &str, body: &str| -> Value {
         let out = sandbox.run_as_participant(
-            &["chat", "faces", "--send", "--anyway", "--body", body, "--json"],
+            &[
+                "chat", "faces", "--send", "--anyway", "--body", body, "--json",
+            ],
             participant,
             &alpha,
         );
@@ -2342,7 +2347,14 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
     };
     let mail = |participant: &str, body: &str| -> Value {
         let out = sandbox.run_as_participant(
-            &["send", "--to", &format!("participant:{reader}"), "--body", body, "--json"],
+            &[
+                "send",
+                "--to",
+                &format!("participant:{reader}"),
+                "--body",
+                body,
+                "--json",
+            ],
             participant,
             &alpha,
         );
@@ -2354,10 +2366,16 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
     assert_eq!(fire_chat["message"]["display_name"], "Fire Fable");
     assert_eq!(fire_chat["message"]["pfp"], "🔥");
     let vale_chat = send(&vale, "vale speaks");
-    assert!(vale_chat["message"]["display_name"].is_null(), "peer profile leaked into channel stamp: {vale_chat}");
+    assert!(
+        vale_chat["message"]["display_name"].is_null(),
+        "peer profile leaked into channel stamp: {vale_chat}"
+    );
     assert!(vale_chat["message"]["pfp"].is_null());
     let vale_mail = mail(&vale, "vale mails");
-    assert!(vale_mail["envelope"]["display_name"].is_null(), "peer profile leaked into mail stamp: {vale_mail}");
+    assert!(
+        vale_mail["envelope"]["display_name"].is_null(),
+        "peer profile leaked into mail stamp: {vale_mail}"
+    );
     assert!(vale_mail["envelope"]["pfp"].is_null());
     let fire_mail = mail(&fire, "fire mails");
     assert_eq!(fire_mail["envelope"]["display_name"], "Fire Fable");
@@ -2369,16 +2387,31 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
         &alpha,
     ));
     assert_eq!(send(&vale, "vale again")["message"]["display_name"], "Vale");
-    assert_eq!(send(&fire, "fire again")["message"]["display_name"], "Fire Fable");
+    assert_eq!(
+        send(&fire, "fire again")["message"]["display_name"],
+        "Fire Fable"
+    );
     assert_success(&sandbox.run_as_participant(&["profile", "clear"], &vale, &alpha));
     assert!(send(&vale, "vale cleared")["message"]["display_name"].is_null());
-    assert_eq!(send(&fire, "fire after peer clear")["message"]["display_name"], "Fire Fable");
+    assert_eq!(
+        send(&fire, "fire after peer clear")["message"]["display_name"],
+        "Fire Fable"
+    );
     // History is as-sent: the first Vale message still has no stamp, Fire's first keeps its name.
     let first_id = fire_chat["message"]["id"].as_str().expect("id").to_owned();
-    let history = sandbox.run_as_participant(&["chat", "faces", "--history", "50", "--json"], &reader, &alpha);
+    let history = sandbox.run_as_participant(
+        &["chat", "faces", "--history", "50", "--json"],
+        &reader,
+        &alpha,
+    );
     assert_success(&history);
     let history: Value = from_stdout(&history);
-    let first = history["messages"].as_array().expect("messages").iter().find(|m| m["id"] == first_id.as_str()).expect("first");
+    let first = history["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["id"] == first_id.as_str())
+        .expect("first");
     assert_eq!(first["display_name"], "Fire Fable");
 
     // A participant with NO workspace (bound from an unregistered cwd) can set
@@ -2386,16 +2419,31 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
     let nowhere = sandbox.mail_root.join("nowhere");
     std::fs::create_dir_all(&nowhere).expect("unregistered cwd");
     let solo = sandbox.bind_codex("profile-solo", &nowhere, None);
-    assert!(solo["participant"]["workspace"].is_null(), "solo must be session-only: {solo}");
+    assert!(
+        solo["participant"]["workspace"].is_null(),
+        "solo must be session-only: {solo}"
+    );
     let solo = participant_id(&solo).to_owned();
-    assert_success(&sandbox.run_as_participant(&["chat", "faces", "--join", "--json"], &solo, &nowhere));
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "faces", "--join", "--json"],
+        &solo,
+        &nowhere,
+    ));
     assert_success(&sandbox.run_as_participant(
         &["profile", "set", "--name", "Solo", "--pfp", "🧭"],
         &solo,
         &nowhere,
     ));
     let solo_out = sandbox.run_as_participant(
-        &["chat", "faces", "--send", "--anyway", "--body", "solo speaks", "--json"],
+        &[
+            "chat",
+            "faces",
+            "--send",
+            "--anyway",
+            "--body",
+            "solo speaks",
+            "--json",
+        ],
         &solo,
         &nowhere,
     );
@@ -2403,7 +2451,11 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
     let solo_chat: Value = from_stdout(&solo_out);
     assert_eq!(solo_chat["message"]["display_name"], "Solo");
     assert_eq!(solo_chat["message"]["pfp"], "🧭");
-    assert_eq!(solo_chat["message"]["from"], solo.as_str(), "session-only reply address is the participant id");
+    assert_eq!(
+        solo_chat["message"]["from"],
+        solo.as_str(),
+        "session-only reply address is the participant id"
+    );
     // profile show <participant-id> and show participant:<id> resolve the same entry.
     let shown = sandbox.run_as_participant(&["profile", "show", &solo], &reader, &alpha);
     assert_success(&shown);

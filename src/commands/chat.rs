@@ -11,10 +11,63 @@ use serde::Serialize;
 
 pub(super) fn run(
     context: &Context,
-    args: ChatArgs,
+    mut args: ChatArgs,
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    // Channel names are stored exactly as given, and `post chat '#room'` used to
+    // create a channel LITERALLY named '#room', which renders as '##room'
+    // everywhere, forever. The rendered form is what agents type, so the
+    // mistake is real. Rewriting the identifier is still not the answer: a
+    // store that already holds a literal '#room' channel is supported, and
+    // normalizing its name made its history unreachable through chat.
+    //
+    // Fail closed instead. A leading '#' that names an existing literal channel
+    // IS that channel (compatibility, unchanged behavior for those stores). One
+    // that names nothing is a usage error, raised before anything is created --
+    // so the ambiguity never has to be guessed away at read time.
+    if let Some(bare) = args.name.strip_prefix('#').filter(|rest| !rest.is_empty()) {
+        if !literal_channel_exists(context, &args.name) {
+            let shown = output::sanitize_text_header(&args.name);
+            let command = bare_name_fix(&args, bare, json_output, pretty);
+            let mut error = AppError::new(
+                ErrorCode::InvalidArgument,
+                format!("channel '{shown}' does not exist; channel names never carry a leading '#'"),
+                match command.as_deref() {
+                    Some(command) => format!(
+                        "Rendered channel names look like '#name', but the name is stored without the '#'. Run `{command}`, or keep using a channel that is literally named '{shown}' if that is the store you meant."
+                    ),
+                    // Prose, never a command: this invocation carries something
+                    // the bare-name spelling cannot reproduce (`--peek` and the
+                    // other modes, a body, options), and a command that runs but
+                    // does something else is worse than none. Nothing here
+                    // echoes the arguments, so a send body stays private.
+                    None => format!(
+                        "Rendered channel names look like '#name', but the name is stored without the '#'. Re-state the same invocation against the channel named '{}', or keep using a channel that is literally named '{shown}' if that is the store you meant.",
+                        output::sanitize_text_header(bare)
+                    ),
+                },
+            )
+            .input(shown)
+            .reason("stripping '#' would silently rename the target channel");
+            if let Some(command) = command {
+                error = error.exact_fix(command);
+            }
+            return Err(error);
+        }
+    }
+    // A reference post printed carries a truncation mark when it is a prefix
+    // (`20260922-163423-17…`). It is still a reference post accepts: strip the
+    // mark here, at the one door every reference argument comes through, so the
+    // printed token can be pasted straight back.
+    for reference in [&mut args.re, &mut args.seen_by] {
+        if let Some(value) = reference.as_mut() {
+            let unmarked = output::unmark_reference(value);
+            if unmarked.len() != value.len() {
+                *value = unmarked.to_owned();
+            }
+        }
+    }
     if args.join {
         return join(
             context,
@@ -64,17 +117,18 @@ pub(super) fn run(
         ));
     }
     if !sending && !args.subject.is_empty() {
-        let fix = format!(
-            "post chat {} --send --subject {} --body '<text>'",
-            crate::mailbox::shell_quote(&args.name),
-            crate::mailbox::shell_quote(&args.subject)
-        );
+        // Prose, never a command. The earlier revision published
+        // `post chat <chan> --send --subject <S> --body '<text>'` here as an
+        // exact_fix, and `<text>` is a placeholder for a body this invocation
+        // never supplied: a debug build tripped the exact_fix guard and
+        // aborted, and a release caller who pasted the "fix" sent the literal
+        // text. No command can carry a body nobody gave, so the remedy is the
+        // two things the caller can actually do.
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
             "--subject only applies to a send, and this invocation is a read",
-            format!("Run `{fix}`, or drop --subject to read the channel."),
+            "Drop --subject to read the channel. To send with a subject, use --send and supply the body yourself on --body, in --body-file, or on stdin; a read never carries a subject.",
         )
-        .exact_fix(fix)
         .input("--subject")
         .reason("subject passed without a send"));
     }
@@ -82,6 +136,52 @@ pub(super) fn run(
         return send(context, args, json_output, pretty);
     }
     read(context, args, json_output, pretty)
+}
+
+/// The bare-name correction for a `#name` argument, when -- and only when --
+/// this builder can reproduce the caller's ENTIRE invocation.
+///
+/// `exact_fix` promises a "complete command that runs verbatim". Reconstructing
+/// the verb and dropping everything else still RUNS, which is worse than
+/// promising nothing: the earlier revision of this refusal turned a refused
+/// `#name --peek` into `post chat 'name'`, a consuming read of the very backlog
+/// the caller had just asked to glance at without advancing, and turned a
+/// refused send into a send with no body, no options and no subject.
+///
+/// Only two chat forms are the bare name plus one verb. `--join` qualifies when
+/// no `--description` was given (the description's value would have to survive
+/// the round trip, and it is exactly the kind of argument that gets dropped).
+/// `--leave` qualifies because it conflicts with every other chat flag. Both
+/// reproduce the global flags too, so the corrected command is the caller's
+/// invocation minus the sigil. Every other form gets prose guidance instead.
+fn bare_name_fix(args: &ChatArgs, bare: &str, json_output: bool, pretty: bool) -> Option<String> {
+    let verb = if args.leave {
+        "--leave"
+    } else if args.join && args.description.is_none() {
+        "--join"
+    } else {
+        return None;
+    };
+    let mut command = format!("post chat {} {verb}", crate::mailbox::shell_quote(bare));
+    if json_output {
+        command.push_str(" --json");
+    }
+    if pretty {
+        command.push_str(" --pretty");
+    }
+    Some(command)
+}
+
+/// Whether the store holds a channel directory literally named `name`.
+///
+/// Only the leading-'#' compatibility rule asks this: a literal `#name` channel
+/// is a store an older post created and must keep working, so the name is
+/// looked up before a '#name' argument is refused. A name that fails validation
+/// cannot name a channel, so it is simply not there.
+fn literal_channel_exists(context: &Context, name: &str) -> bool {
+    channel::ChannelPaths::new(context, name)
+        .map(|paths| paths.exists())
+        .unwrap_or(false)
 }
 
 fn acknowledge_exact(
@@ -1510,6 +1610,9 @@ fn resolve_message_stem(
     channel_name: &str,
     prefix: &str,
 ) -> AppResult<String> {
+    // A rendered reference may carry the truncation mark; the match is by
+    // prefix either way.
+    let prefix = output::unmark_reference(prefix);
     let mut matches: Vec<String> = channel::message_files(&paths.messages)?
         .iter()
         .filter_map(|path| path.file_stem().and_then(|value| value.to_str()))
@@ -1819,18 +1922,18 @@ fn render_chat_text_item(
         message.from_participant.as_deref(),
         message.sender_provenance.as_deref(),
     );
-    let id = output::unique_reference(&message.id, message_ids.iter().map(String::as_str));
+    let id = labelled_reference(&message.id, message_ids);
     let re = message
         .re
         .as_deref()
-        .map(|re| output::unique_reference(re, message_ids.iter().map(String::as_str)));
+        .map(|re| labelled_reference(re, message_ids));
     let mut out = String::from("\n");
     out.push_str(&output::message_header(
         &output::sender_label(output::SenderAttribution::from(message)),
         &message.sent,
-        id,
+        &id,
         output::reply_address(reply.participant.as_deref(), &reply.shared),
-        re,
+        re.as_deref(),
         &message.subject,
         message.event.as_deref(),
     ));
@@ -1861,6 +1964,20 @@ fn render_chat_text_item(
     }
     output::render_gutter_body(&mut out, body);
     out
+}
+
+/// A message reference as rendered: shortened against the channel's id set, and
+/// marked as a prefix when it was shortened.
+///
+/// `--re`, `--message`, `--seen-by` and `--discard-through` resolve a unique
+/// prefix, so a shortened id is usable — but only by a reader who knows that is
+/// what they are holding. The unmarked form reads as the whole id, which is the
+/// failure this renders around: a typed reference reported not_found twice in
+/// one night because the renderer had silently truncated the token. The mark is
+/// 3 bytes, and every reference input strips it (`output::unmark_reference`),
+/// so the printed token is still a token post accepts back.
+fn labelled_reference(id: &str, message_ids: &std::collections::HashSet<String>) -> String {
+    output::marked_reference(id, message_ids.iter().map(String::as_str))
 }
 
 fn chat_text_prefix_sizes(

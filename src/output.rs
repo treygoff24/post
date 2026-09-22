@@ -82,6 +82,28 @@ fn display_time(sent: &str) -> String {
     sanitize_text_header(sent)
 }
 
+/// A shortened reference as rendered: the unique prefix plus U+2026, because an
+/// unmarked truncation reads as the whole id. The mark is presentation only --
+/// the channel-reference inputs that can receive this token (`--re`, `--message`,
+/// `--seen-by`, `--discard-through`, and `channel::resolve_message_id`) strip it
+/// through `unmark_reference`, so the token post prints is still a token post
+/// accepts back.
+pub(crate) fn marked_reference<'a>(id: &'a str, ids: impl IntoIterator<Item = &'a str>) -> String {
+    let short = unique_reference(id, ids);
+    if short.len() == id.len() {
+        id.to_owned()
+    } else {
+        format!("{short}\u{2026}")
+    }
+}
+
+/// Strip the truncation mark from a reference a caller supplied. Post prints
+/// `20260922-163423-17…` for a shortened id; an operator (or a model) that
+/// pastes that token back must not get not_found for the tool's own output.
+pub(crate) fn unmark_reference(value: &str) -> &str {
+    value.strip_suffix('\u{2026}').unwrap_or(value)
+}
+
 pub(crate) fn unique_reference<'a>(id: &'a str, ids: impl IntoIterator<Item = &'a str>) -> &'a str {
     let mut length = 1;
     let mut found = false;
@@ -1002,6 +1024,23 @@ pub enum WatchReason {
     Mail,
     Channel,
     Mention,
+}
+
+/// A watch event plus the one scan-level marker the event itself cannot carry.
+///
+/// `WatchEvent` is the adapter-facing NDJSON contract, so the marker is added by
+/// flattening the event and appending a field rather than by growing all three
+/// variants: the healthy case serializes byte-identically to the bare event, and
+/// the degraded case is purely additive for a parser that ignores unknown keys.
+/// `cursor_unusable` is true when the watching participant's cursor state exists
+/// but cannot be read, so the projection that produced this event reports
+/// consumed history as unread -- the event may have been delivered before.
+#[derive(Debug, Serialize)]
+pub(crate) struct MarkedWatchEvent<'a> {
+    #[serde(flatten)]
+    pub(crate) event: &'a WatchEvent,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) cursor_unusable: bool,
 }
 
 impl WatchReason {

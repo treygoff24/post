@@ -14,7 +14,7 @@
 //! participant bound to that workspace retires the entry.
 
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{atomic_replace, Context};
+use crate::mailbox::{atomic_replace, shell_quote, Context};
 use crate::model::RoomMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -182,13 +182,48 @@ pub(crate) fn validate_pfp(
             None => rooms.contains_key(key),
         };
         if key != own_room && counts && profile.pfp.as_deref() == Some(pfp) {
-            return Err(invalid(
-                &format!("pfp is already the sigil of '{key}'"),
-                pfp,
-            ));
+            return Err(pfp_taken(pfp, key));
         }
     }
     Ok(())
+}
+
+/// A sigil is unique among the profiles that render now, so the refusal has to
+/// name who holds it and what frees it. "Pick another emoji" is useless advice
+/// at the case this rule actually meets: a continued lineage is a new
+/// participant id, and while the previous participant's lease is unexpired the
+/// continuation cannot take the lineage's sigil back. What frees a sigil is the
+/// HOLDER's own action or its lease lapsing -- `post participant end` and
+/// `post profile clear` act on the acting participant only, so this refusal
+/// never tells the caller to run them against someone else, and never points at
+/// editing profiles.json by hand.
+fn pfp_taken(pfp: &str, holder_key: &str) -> AppError {
+    // Quoted because this is embedded in a command the caller may run: a pfp is
+    // one non-ASCII grapheme, so it is not ASCII shell syntax -- but quoting is
+    // what makes that independence, rather than a property of today's
+    // validator, the reason the suggestion is safe to paste.
+    let sigil = shell_quote(pfp);
+    let (holder, next) = match participant_of_key(holder_key) {
+        Some(id) => (
+            format!("participant:{id}"),
+            format!(
+                "Another participant holds this sigil while it is active, and a continued lineage does not inherit it (the same lineage continued is a new participant id). Pick a different emoji, or set the sigil once it is free with `post profile set --pfp {sigil}`: the holder releases it by running `post participant end` or `post profile clear` itself, and a lease that lapses stops it counting. Nothing you can run ends or clears another participant."
+            ),
+        ),
+        None => (
+            format!("registered room '{holder_key}'"),
+            format!(
+                "A legacy workspace-keyed entry for '{holder_key}' holds this sigil. It never stamps and retires itself. Pick a different emoji, or have the participant that replies as '{holder_key}' set the sigil for its own entry with `post profile set --pfp {sigil}` (its own key wins over the legacy one)."
+            ),
+        ),
+    };
+    AppError::new(
+        ErrorCode::InvalidArgument,
+        format!("profile value is invalid: pfp is already the sigil of {holder}"),
+        next,
+    )
+    .input(pfp.escape_debug().to_string())
+    .reason(format!("pfp is already the sigil of {holder}"))
 }
 
 /// Resolve the profile to stamp for the acting `participant_id` (replying as
@@ -344,8 +379,10 @@ mod tests {
             },
         );
         let active: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        validate_pfp("⚖️", "pact", &profiles, &room_map, &active).expect("VS16 emoji is one grapheme");
-        validate_pfp("👩‍🚀", "pact", &profiles, &room_map, &active).expect("ZWJ emoji is one grapheme");
+        validate_pfp("⚖️", "pact", &profiles, &room_map, &active)
+            .expect("VS16 emoji is one grapheme");
+        validate_pfp("👩‍🚀", "pact", &profiles, &room_map, &active)
+            .expect("ZWJ emoji is one grapheme");
         validate_pfp("👻", "pact", &profiles, &room_map, &active)
             .expect("unregistered entry does not reserve a sigil");
         assert!(
@@ -360,11 +397,56 @@ mod tests {
             validate_pfp("", "pact", &profiles, &room_map, &active).is_err(),
             "empty"
         );
+        let taken =
+            validate_pfp("🐋", "pact", &profiles, &room_map, &active).expect_err("taken sigil");
+        // The refusal names the holder and the action that takes the sigil --
+        // and it must stop there: neither ending a participant nor editing
+        // profiles.json is something the caller can do to someone else.
         assert!(
-            validate_pfp("🐋", "pact", &profiles, &room_map, &active).is_err(),
-            "taken sigil"
+            taken.message.contains("atlasos"),
+            "the refusal must name the holder: {}",
+            taken.message
         );
-        validate_pfp("🐋", "atlasos", &profiles, &room_map, &active).expect("re-setting own sigil ok");
+        assert!(
+            taken.suggested_fix.contains("post profile set --pfp '🐋'"),
+            "the refusal must name the action that takes the sigil: {}",
+            taken.suggested_fix
+        );
+        assert!(
+            !taken.suggested_fix.contains("participant end atlasos")
+                && !taken.suggested_fix.contains("profiles.json"),
+            "the refusal must not hand the caller a command that acts on another participant or a hand edit: {}",
+            taken.suggested_fix
+        );
+        // The same rule for a live participant holder: `post participant end`
+        // and `post profile clear` are the holder's own verbs (neither takes an
+        // id), so naming the holder and its own action is the whole remedy.
+        let holder = "fire";
+        let mut live = ProfileMap::new();
+        live.insert(
+            format!("participant:{holder}"),
+            Profile {
+                name: None,
+                pfp: Some("🔥".to_owned()),
+            },
+        );
+        let active: std::collections::BTreeSet<String> = [holder.to_owned()].into_iter().collect();
+        let held =
+            validate_pfp("🔥", "pact", &live, &room_map, &active).expect_err("held by a live peer");
+        assert!(
+            held.message.contains("participant:fire"),
+            "the refusal must name the live holder: {}",
+            held.message
+        );
+        assert!(
+            held.suggested_fix.contains("post profile set --pfp '🔥'")
+                && !held.suggested_fix.contains("participant end fire")
+                && !held.suggested_fix.contains("profiles.json"),
+            "the refusal must not tell the caller to end another participant: {}",
+            held.suggested_fix
+        );
+        validate_pfp("🐋", "atlasos", &profiles, &room_map, &active)
+            .expect("re-setting own sigil ok");
         assert!(
             validate_pfp("\u{202E}", "pact", &profiles, &room_map, &active).is_err(),
             "bidi pfp"
@@ -448,7 +530,11 @@ mod tests {
         // still has a legacy entry, gets NOTHING: the workspace persona is not
         // inherited (the 2026-09-22 identity collision).
         let fresh = stamp_for(&context, "test-fresh", "alpha", &rooms);
-        assert_eq!(fresh, Profile::default(), "legacy workspace entry never stamps");
+        assert_eq!(
+            fresh,
+            Profile::default(),
+            "legacy workspace entry never stamps"
+        );
         // Session-only participant (reply address == its id, unregistered)
         // stamps its own entry: registration of the room is not required.
         let solo = stamp_for(&context, "test-good", "test-good", &rooms);

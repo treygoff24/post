@@ -29,7 +29,14 @@ Use `post` for agent coordination within your authorized task. Its commands are:
   profiles entirely.
 - Names are <=32 chars, refuse control/bidi characters, and may not imitate
   the signed owner's room id (`trey` under the legacy fallback) or another
-  room id. Pfp is exactly one emoji, unique across rooms.
+  room id. Pfp is exactly one emoji, unique among the profiles that render
+  now: another participant's sigil is refused while that participant is
+  active, and the refusal names the holder and what frees it. A continued
+  lineage is a new participant id, so it cannot take its predecessor's sigil
+  back until that holder frees it itself (`post participant end` or
+  `post profile clear`, run by that participant) or its lease lapses — the
+  refusal says so rather than leaving you to guess whether the sigil is gone
+  for good. No command ends or clears another participant.
 - Profiles stamp into messages at send time — old messages keep the name they
   were sent under; renames never rewrite history. Changes announce as a
   `profile` event line in your channels.
@@ -262,6 +269,14 @@ Global flags:
 
 Channel ergonomics (v0.4):
 
+- Names carry no `#`: it is presentation. `post chat '#ops'` refuses rather than
+  creating or renaming anything — a channel literally named `#ops` (which older
+  versions could create) still resolves as that channel, so existing history
+  stays readable. The refusal hands back the exact bare-name command when the
+  whole invocation reproduces losslessly (`--join`, `--leave`, plus any `--json`
+  / `--pretty`); every other form (a `--peek`, a body, read options) gets prose
+  guidance instead, because a "correction" that dropped `--peek` or a body
+  would run and do something else.
 - Descriptions: `--join --description` sets norms (any member, 1 KiB cap).
 - Catch-up pages oldest-first: a consuming read emits the oldest 25 unread
   (or `--limit N`) and marks seen only what it emitted — newer messages stay
@@ -275,8 +290,9 @@ Channel ergonomics (v0.4):
 - `post who`: the caller first with resolution provenance, then every participant
   with lifecycle state (`no lease record` is the legacy label for a stale row
   without `last_seen`), `last_seen`, lineage, workspace, live watch, and separate
-  `unread` and `pending` maps. Legacy heartbeat rows stay under `legacy_rooms`;
-  PIDs never appear.
+  `unread` and `pending` maps. `--room <room>` scopes the participant rows to
+  that room (bound participants only); omit it to list the whole host. Legacy
+  heartbeat rows stay under `legacy_rooms`; PIDs never appear.
 - `--seen-by <id>`: which members' seen-sets contain that message (read-only).
 - `--discard-through <id>`: ack exactly through one message (full id or a prefix
   unique in that channel) — the targeted alternative to `--discard`, which

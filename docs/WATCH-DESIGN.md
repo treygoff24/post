@@ -103,6 +103,33 @@ a delivery. It only selects targets for the existing full scan.
 - **Overflow means rescan everything.** A `need_rescan` event or backend error
   marks every watched directory as affected. If the backend dies, watch warns
   once and falls back to polling at `--interval-ms` rather than going silent.
+- **Event wakes are batched by the backend, never rate-limited.** The `notify`
+  backend folds everything already queued behind the first event into one wake,
+  so a burst of simultaneous writes is one scan. The loop adds no minimum
+  interval of its own: any such floor delays a quiet store's first ring, which
+  is the ring the doorbell exists for. What is bounded instead is the work each
+  scan does (below).
+- **Consumed channel messages are not re-read by a wake scan.** The message id
+  IS the file name and a consumed id can never be unread, so the event-wake
+  scan excludes them by id before opening a body; only full-history readers
+  (read, search, catchup, chat) always pay for the whole backlog. On a channel
+  with hundreds of stored messages, a wake costs a directory enumeration and a
+  seen-set lookup per message rather than one open and parse per message.
+- **Complete validation belongs to the reconciliation passes.** Startup,
+  `--once`, `--snapshot`, and the slow periodic pass re-read every stored
+  message, including consumed ones, because a corrupt file is corruption
+  whether or not it was consumed. A corrupt consumed message is reported as an
+  `unreadable` channel event, and the report tracks the file: repairing it
+  clears the report, so corrupting it again is news again. Nothing is
+  re-delivered and no cursor is advanced or reset by validation.
+- **Unusable cursor state is marked, not hidden.** A participant whose
+  `cursors.json` exists but cannot be read degrades to "nothing seen", so the
+  projection reports consumed history as unread. Every event produced from that
+  state carries `"cursor_unusable": true`, its `--text` line is prefixed
+  `[cursor unusable: re-reporting history]`, and `--digest --text` renders
+  `<count> re-reported cursor unusable` instead of `<count> new`. The state is
+  re-read each scan, so a repair clears the marker; nothing is reset or
+  silently filtered.
 - **Reconciliation is wall-clock based.** The slow pass re-derives channel
   directories, re-registers directories replaced at the same path, retries a
   failed re-watch, and scans every target. Its deadline is checked after every

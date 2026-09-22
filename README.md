@@ -767,7 +767,13 @@ Default output is NDJSON with variants:
 
 Every event carries `address: {kind, name}`. `room` is present only for a
 workspace address; lineage and participant events omit it. Pending mail carries
-`pending: true`. Individual mail and channel-message events expose `origin`,
+`pending: true`. An event projected from a participant whose cursor state is
+unusable carries `"cursor_unusable": true` (absent otherwise, so a healthy event
+is byte-identical to the pre-marker form). Its `--text` event line is prefixed
+`[cursor unusable: re-reporting history]`, and its degraded `--digest --text`
+line reads `<count> re-reported cursor unusable` instead of `<count> new`, so a
+re-report of history is never mistaken for a burst of new mail. Individual mail
+and channel-message events expose `origin`,
 `reply_to_shared`, and a `reply_to_participant` only for a sender participant
 known on this host. Digest aggregates have no single-sender reply target.
 
@@ -802,9 +808,11 @@ durable watcher-notification store.
 
 `post who` reports the caller first with binding provenance, then all participant
 records with lifecycle state, `last_seen`, lineage, workspace, and watch
-presence. JSON keeps each participant's `unread` and `pending` maps separate.
-Legacy room heartbeat rows remain under `legacy_rooms`. It never emits PIDs or
-anything usable to target a process.
+presence. `--room <room>` scopes the report to that room: participant rows are
+the participants bound to it, alongside its heartbeat row — an unscoped `who`
+lists the whole host. JSON keeps each participant's `unread` and `pending` maps
+separate. Legacy room heartbeat rows remain under `legacy_rooms`. It never emits
+PIDs or anything usable to target a process.
 
 ## Session hook adapters (Claude Code, Codex, Cursor, Grok)
 

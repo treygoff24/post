@@ -40,6 +40,31 @@ struct WatchDelivery {
     room: String,
     source: String,
     event: WatchEvent,
+    /// True when the delivery came from a participant whose cursor state is
+    /// unusable, so an "unread" projection is a re-report of consumed history:
+    /// the event and any digest built from it say so, instead of leaving the
+    /// caller to infer a degrade from a stderr warning.
+    cursor_unusable: bool,
+}
+
+/// What a scan pass owes the caller, and therefore which channel projection it
+/// may use.
+///
+/// This is the whole license for the cheap projection: only a wake may skip
+/// opening consumed channel bodies, and only because a pass that owes complete
+/// validation -- the one that reports corruption in a consumed file -- runs on
+/// startup, on `--once`/`--snapshot`, and on every wall-clock reconciliation
+/// window. Passing the mode explicitly (rather than a bare bool) keeps that
+/// pairing visible at each call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanMode {
+    /// An event wake: deliver what it can, cheaply. A consumed channel body
+    /// cannot be delivered, so it is excluded by id before it is opened.
+    Wake,
+    /// A pass that owes complete validation: every stored message is read, and
+    /// corruption in a consumed one is reported by
+    /// `report_consumed_channel_corruption`.
+    Complete,
 }
 
 impl WatchDelivery {
@@ -48,6 +73,7 @@ impl WatchDelivery {
             room: room.to_owned(),
             source: "mail".to_owned(),
             event,
+            cursor_unusable: false,
         }
     }
 
@@ -56,6 +82,7 @@ impl WatchDelivery {
             room: room.to_owned(),
             source: format!("channel:{channel}"),
             event,
+            cursor_unusable: false,
         }
     }
 
@@ -137,6 +164,11 @@ struct WatchDigest {
     /// suffix in text so the true fencepost group stays rightmost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
+    /// True when the group was projected from unusable cursor state, so
+    /// `count` is a re-report of history rather than a count of new messages.
+    /// Absent in the healthy case, additive where present.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    cursor_unusable: bool,
     #[serde(skip)]
     sender_counts: Vec<(String, usize)>,
     #[serde(skip)]
@@ -164,10 +196,19 @@ impl WatchDigest {
             .preview
             .as_ref()
             .map_or_else(String::new, |p| format!("  {p}"));
+        // Unusable cursor state makes every eligible message read as unread, so
+        // `count` is history being re-reported, not mail that just arrived. Say
+        // which one it is: an unmarked "12 new" is how a re-report was mistaken
+        // for a burst.
+        let (count_word, degrade_note) = if self.cursor_unusable {
+            ("re-reported", " cursor unusable")
+        } else {
+            ("new", "")
+        };
         if self.sender_counts.is_empty() {
             let pending = if self.pending { " pending" } else { "" };
             return format!(
-                "{label}: {} new{pending}{preview}{bounds}{action}\n",
+                "{label}: {} {count_word}{degrade_note}{pending}{preview}{bounds}{action}\n",
                 self.count
             );
         }
@@ -189,10 +230,10 @@ impl WatchDigest {
         if omitted > 0 {
             senders.push(format!("+{omitted} more"));
         }
+        let pending = if self.pending { " pending" } else { "" };
         format!(
-            "{label}: {} new{} ({}){preview}{bounds}{action}\n",
+            "{label}: {} {count_word}{degrade_note}{pending} ({}){preview}{bounds}{action}\n",
             self.count,
-            if self.pending { " pending" } else { "" },
             senders.join(", ")
         )
     }
@@ -243,6 +284,7 @@ fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
                     reason: delivery.reason().as_str().to_owned(),
                     pending: delivery.pending(),
                     preview: None,
+                    cursor_unusable: false,
                     sender_counts: Vec::new(),
                     sender_label_counts: Vec::new(),
                 });
@@ -252,6 +294,11 @@ fn digest_batch(batch: &[WatchDelivery]) -> Vec<WatchDigest> {
         let digest = &mut digests[index];
         digest.count += 1;
         digest.last_id = delivery.id().to_owned();
+        // Any member projected from unusable cursor state makes the group's
+        // count a re-report, so the marker is the union over the group.
+        if delivery.cursor_unusable {
+            digest.cursor_unusable = true;
+        }
         if let Some(preview) = delivery.event.preview() {
             digest.preview = Some(preview.to_owned());
         }
@@ -477,6 +524,9 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             &owned_rooms,
             &mut emitted_channel_ids,
             false,
+            // Priming only suppresses what is already there; the reconciliation
+            // pass is what owes full validation.
+            ScanMode::Wake,
             |_| true,
         );
     }
@@ -496,6 +546,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 &owned_rooms,
                 &mut emitted_channel_ids,
                 false,
+                ScanMode::Complete,
             )?);
         }
         dedupe_unreadable_channels(&mut batch);
@@ -610,6 +661,10 @@ fn run_watch_loop(
         owned_rooms,
         emitted_channel_ids,
         allow_writes,
+        // The first pass is the arrival-gap scan: it re-reads every stored
+        // message, so a corrupt file is reported even if it was consumed
+        // before this watch started.
+        ScanMode::Complete,
         |_| true,
     );
     drop(initial_admission);
@@ -670,13 +725,17 @@ fn run_watch_loop(
                     last_beat = Instant::now();
                 }
                 // Rescan every affected target through the full existing scan
-                // path — never an incremental one (r2).
+                // path — never an incremental one (r2). The wake scan reads
+                // only what it could deliver (consumed channel bodies are not
+                // re-opened); the wall-clock reconciliation pass below is what
+                // re-reads the whole channel and re-reports corruption.
                 scan_targets(
                     context,
                     targets,
                     owned_rooms,
                     emitted_channel_ids,
                     allow_writes,
+                    ScanMode::Wake,
                     |target| target.dirs.iter().any(|dir| dirs.contains(dir)),
                 )
             }
@@ -699,6 +758,11 @@ fn run_watch_loop(
                 owned_rooms,
                 emitted_channel_ids,
                 allow_writes,
+                // Reconciliation is the pass that owes complete validation:
+                // every stored message is read again, so corruption in an
+                // already-consumed channel file is still reported and its
+                // repair is still confirmed.
+                ScanMode::Complete,
                 |_| true,
             ));
         }
@@ -822,12 +886,19 @@ fn touch_warning_for(
 /// One full scan pass over the selected targets, preserving the old loop's
 /// degrade-and-keep-polling posture: a transient scan failure warns once and
 /// never kills the doorbell; only stdout failure is fatal.
+///
+/// `mode` selects the channel projection: an event wake (`ScanMode::Wake`)
+/// reads only what it could deliver (consumed ids are excluded before their
+/// bodies are opened), while a startup, `--once`, `--snapshot`, or periodic
+/// reconciliation pass (`ScanMode::Complete`) re-reads the whole channel so a
+/// corrupt message is found whether or not it was already consumed.
 fn scan_targets(
     context: &Context,
     targets: &mut [WatchTarget],
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
     allow_writes: bool,
+    mode: ScanMode,
     selected: impl Fn(&WatchTarget) -> bool,
 ) -> Vec<WatchDelivery> {
     let mut batch = Vec::new();
@@ -838,6 +909,7 @@ fn scan_targets(
             owned_rooms,
             emitted_channel_ids,
             allow_writes,
+            mode,
         ) {
             Ok(events) => {
                 if target.scan_failing {
@@ -1155,6 +1227,7 @@ fn scan_watch_target(
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
     allow_writes: bool,
+    mode: ScanMode,
 ) -> AppResult<Vec<WatchDelivery>> {
     let (Some(participant), Some(address)) = (target.participant.as_ref(), target.address.as_ref())
     else {
@@ -1191,6 +1264,11 @@ fn scan_watch_target(
     } else {
         super::inbox::address_label(&channel_address)
     };
+    // A participant whose cursors.json exists but cannot be read reports every
+    // eligible message, consumed history included. That is the real state of
+    // this scan (not an inference from a warning log), so every delivery it
+    // produces carries it and the caller can tell a re-report from fresh mail.
+    let cursor_unusable = crate::cursor_state::participant_cursor_defect(participant).is_some();
 
     let mail = participant_mail_snapshot(context, participant, address, allow_routing)?;
     for item in mail {
@@ -1247,11 +1325,39 @@ fn scan_watch_target(
     }
 
     for channel in crate::channel_state::effective_channels(context, participant)? {
-        let eligible = match crate::cursor_state::eligibility::unread_channel(
-            context,
-            participant,
-            &channel,
-        ) {
+        // A complete-validation pass reads consumed messages too -- not to
+        // deliver them again (a consumed id can never be unread) but because a
+        // corrupt file is corruption whether or not it was consumed, and the
+        // fast event-wake scan deliberately never opens a consumed body.
+        if mode == ScanMode::Complete {
+            report_consumed_channel_corruption(
+                context,
+                participant,
+                &channel_watch_address,
+                &channel_context,
+                &channel,
+                &mut target.reported_unreadable,
+                &mut batch,
+            );
+        }
+        // The doorbell re-scans on every wake, so an event wake reads only what
+        // it could deliver: consumed messages are excluded by id before their
+        // bodies are opened. A scan that owes the caller full validation
+        // (startup, --once, --snapshot, and the periodic reconciliation pass)
+        // uses the complete projection instead, so a corrupt message is
+        // reported whether or not it was already consumed. Full-history readers
+        // (read, chat, catchup, channels, search) always keep the complete
+        // projection.
+        let projected = if mode == ScanMode::Complete {
+            crate::cursor_state::eligibility::unread_channel(context, participant, &channel)
+        } else {
+            crate::cursor_state::eligibility::unread_channel_skipping_consumed(
+                context,
+                participant,
+                &channel,
+            )
+        };
+        let eligible = match projected {
             Ok(eligible) => eligible,
             Err(error) if error.code == ErrorCode::ConfigInvalid => {
                 scan_unreadable_participant_channel(
@@ -1297,7 +1403,95 @@ fn scan_watch_target(
             ));
         }
     }
+    if cursor_unusable {
+        for delivery in &mut batch {
+            delivery.cursor_unusable = true;
+        }
+    }
     Ok(batch)
+}
+
+/// Read every consumed message in a channel and keep the corruption report in
+/// sync with the files.
+///
+/// The fast event-wake scan never opens a consumed body (the id is the file
+/// name and a consumed id can never be unread), so without this a message that
+/// was corrupted after it was consumed would go unreported forever. A pass that
+/// owes complete validation reads it anyway: a corrupt file is corruption
+/// whether or not it was consumed. Nothing is delivered or re-marked -- only a
+/// parse failure is reported, and a repaired file clears its own report so a
+/// later corruption is news again.
+///
+/// This returns no error BY CONSTRUCTION, and must not start: it runs inside
+/// `scan_watch_target`, whose failure is swallowed by `scan_targets` into an
+/// empty batch. `post watch --once` waits for a non-empty batch, so a scan
+/// error here turned a routine channel-store condition (an unreadable or
+/// unstored channel directory) into a doorbell that never rings and never
+/// exits. Every step below therefore degrades per channel and warns, exactly
+/// like the projection this scan runs with.
+fn report_consumed_channel_corruption(
+    context: &Context,
+    participant: &Participant,
+    channel_watch_address: &WatchAddress,
+    channel_context: &str,
+    channel: &str,
+    reported_unreadable: &mut HashSet<PathBuf>,
+    batch: &mut Vec<WatchDelivery>,
+) {
+    let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    let paths = match ChannelPaths::new(context, channel) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!(
+                "post: warning: skipped channel {:?} during consumed-message validation: {:?}",
+                channel, error.message
+            );
+            return;
+        }
+    };
+    if !paths.exists() {
+        return;
+    }
+    let files = match message_files(&paths.messages) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!(
+                "post: warning: skipped channel {:?} during consumed-message validation: {:?}",
+                channel, error.message
+            );
+            return;
+        }
+    };
+    for path in files {
+        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !cursors.channel_has_seen(channel, id) {
+            continue;
+        }
+        match parse_channel_message(&path) {
+            Ok(_) => {
+                reported_unreadable.remove(&path);
+            }
+            Err(_) if reported_unreadable.insert(path.clone()) => {
+                eprintln!(
+                    "post: warning: unreadable consumed channel message {:?}",
+                    path
+                );
+                batch.push(WatchDelivery::channel(
+                    channel_context,
+                    channel,
+                    WatchEvent::unreadable_channel_at(
+                        channel_watch_address.clone(),
+                        channel_context,
+                        channel,
+                        id.to_owned(),
+                    ),
+                ));
+            }
+            Err(_) => {}
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1318,6 +1512,10 @@ fn scan_unreadable_participant_channel(
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
+        // Consumed files are skipped: a consumed id can never be delivered
+        // again, and the complete-validation pass reads them separately
+        // (`report_consumed_channel_corruption`) rather than from this
+        // delivery scan.
         if cursors.channel_has_seen(channel, id) || seen_paths.contains(&path) {
             continue;
         }
@@ -1708,9 +1906,27 @@ fn emit(batch: &[WatchDelivery], text: bool, digest: bool) -> AppResult<()> {
     } else {
         for delivery in batch {
             let line = if text {
-                delivery.event.text_line()
+                // Text is a ring surface a human or a harness reads without
+                // parsing JSON, so the degrade has to be on the line itself:
+                // without it a re-report of consumed history is indistinguishable
+                // from a real burst. The marker goes in FRONT of the event line
+                // (a `--text` line starts with the id, and a caller matching on
+                // it would otherwise see the note as an id; a prefix is what a
+                // summary notice prints).
+                let line = delivery.event.text_line();
+                if delivery.cursor_unusable {
+                    format!("[cursor unusable: re-reporting history] {line}")
+                } else {
+                    line
+                }
             } else {
-                crate::output::json(&delivery.event, false)?
+                crate::output::json(
+                    &crate::output::MarkedWatchEvent {
+                        event: &delivery.event,
+                        cursor_unusable: delivery.cursor_unusable,
+                    },
+                    false,
+                )?
             };
             write_line(line)?;
         }
@@ -1721,11 +1937,243 @@ fn emit(batch: &[WatchDelivery], text: bool, digest: bool) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::encode_message;
+    use crate::channel::{encode_message, CHANNELS_DIR};
+    use crate::channel_state::ParticipantChannels;
+    use crate::cursor_state::{ParticipantCursors, CURSORS_FILE};
     use crate::model::{ChannelMessage, MailKind};
     use crate::output::InboxItem;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
+
+    const SEED_ID: &str = "20260831-171234-000001-a1b2c3";
+
+    fn channel_message(id: &str, channel: &str, from: &str) -> ChannelMessage {
+        ChannelMessage {
+            id: id.to_owned(),
+            from: from.to_owned(),
+            channel: channel.to_owned(),
+            subject: String::new(),
+            sent: "2026-08-31 17:12:34 +0000".to_owned(),
+            from_participant: None,
+            from_lineage: None,
+            address_kind: None,
+            event: None,
+            display_name: None,
+            pfp: None,
+            re: None,
+            mentions: Vec::new(),
+            signature_ref: None,
+            sender_address: None,
+            sender_provenance: None,
+        }
+    }
+
+    /// A channel with one stored message and the channel.json that makes it a
+    /// real channel for `effective_channels`.
+    fn seed_channel_message(root: &std::path::Path, channel: &str, id: &str, from: &str) {
+        let channel_dir = root.join(CHANNELS_DIR).join(channel);
+        fs::create_dir_all(channel_dir.join("messages")).expect("create message directory");
+        fs::write(
+            channel_dir.join("channel.json"),
+            format!(
+                r#"{{"name":"{channel}","created":"2026-09-16 00:00:00 -0500","created_by":"alpha"}}"#
+            ),
+        )
+        .expect("write channel info");
+        fs::write(
+            channel_dir.join("messages").join(format!("{id}.msg")),
+            encode_message(&channel_message(id, channel, from), "body").expect("encode message"),
+        )
+        .expect("write channel message");
+    }
+
+    fn message_path(root: &std::path::Path, channel: &str, id: &str) -> std::path::PathBuf {
+        root.join(CHANNELS_DIR)
+            .join(channel)
+            .join("messages")
+            .join(format!("{id}.msg"))
+    }
+
+    fn watch_target_for(context: &Context, participant: &Participant, room: &str) -> WatchTarget {
+        WatchTarget {
+            room: room.to_owned(),
+            inbox: context.root.join(room).join("inbox"),
+            participant: Some(participant.clone()),
+            address: Some(Address {
+                kind: AddressKind::Workspace,
+                name: room.to_owned(),
+            }),
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }
+    }
+
+    fn scan_target_once(
+        context: &Context,
+        target: &mut WatchTarget,
+        mode: ScanMode,
+    ) -> Vec<WatchDelivery> {
+        scan_watch_target(
+            context,
+            target,
+            &BTreeSet::new(),
+            &mut HashSet::new(),
+            false,
+            mode,
+        )
+        .expect("scan target")
+    }
+
+    fn unreadable_channel_id(delivery: &WatchDelivery) -> Option<&str> {
+        match &delivery.event {
+            WatchEvent::Unreadable {
+                id,
+                channel: Some(_),
+                ..
+            } => Some(id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn reconciliation_reports_corruption_in_a_consumed_channel_message() {
+        // The fast scan never opens a consumed body -- that is the whole point
+        // of the projection it uses -- so a message corrupted AFTER it was
+        // consumed used to go unreported forever. The periodic reconciliation
+        // pass reads it anyway, and its report tracks the file.
+        let root = test_root("watch-consumed-corruption");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        ParticipantChannels::join(&context, &participant, "tax").expect("join channel");
+        seed_channel_message(&root, "tax", SEED_ID, "beta");
+        ParticipantCursors::consume_channel(&context, &participant, "tax", &[SEED_ID.to_owned()])
+            .expect("consume the message");
+        let consumed_file = message_path(&root, "tax", SEED_ID);
+        fs::write(&consumed_file, b"{\"truncated\":").expect("corrupt the consumed file");
+
+        let mut fast = watch_target_for(&context, &participant, "alpha");
+        assert!(
+            scan_target_once(&context, &mut fast, ScanMode::Wake).is_empty(),
+            "an event-wake scan must not open a consumed body"
+        );
+
+        let mut reconciled = watch_target_for(&context, &participant, "alpha");
+        let reported = scan_target_once(&context, &mut reconciled, ScanMode::Complete);
+        assert_eq!(
+            reported.len(),
+            1,
+            "reconciliation must report corruption in a consumed file"
+        );
+        assert_eq!(unreadable_channel_id(&reported[0]), Some(SEED_ID));
+
+        // Repair is detected by the same long-running watch: the next complete
+        // pass re-reads the file, finds it valid, and clears the report.
+        fs::write(
+            &consumed_file,
+            encode_message(&channel_message(SEED_ID, "tax", "beta"), "body").expect("encode"),
+        )
+        .expect("repair the file");
+        assert!(
+            scan_target_once(&context, &mut reconciled, ScanMode::Complete).is_empty(),
+            "a repaired consumed file stops being reported"
+        );
+        // ...and corruption after a repair is news again, not a path this watch
+        // already reported and is suppressing.
+        fs::write(&consumed_file, b"{not json").expect("corrupt it again");
+        let re_reported = scan_target_once(&context, &mut reconciled, ScanMode::Complete);
+        assert_eq!(unreadable_channel_id(&re_reported[0]), Some(SEED_ID));
+
+        // No cursor reset and no re-delivery: the consumed id is still consumed.
+        assert!(
+            ParticipantCursors::load(&context, &participant).channel_has_seen("tax", SEED_ID),
+            "validation must not advance or reset the read cursor"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn unusable_cursor_state_marks_the_events_and_the_digest_it_re_reports() {
+        // Unusable cursor state degrades to "nothing seen", so a doorbell rings
+        // as if the whole backlog were new. The marker says so on the event and
+        // on the digest, and the digest wording stops calling re-reported
+        // history "new".
+        let root = test_root("watch-cursor-unusable");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        ParticipantChannels::join(&context, &participant, "tax").expect("join channel");
+        seed_channel_message(&root, "tax", SEED_ID, "beta");
+
+        let mut healthy = watch_target_for(&context, &participant, "alpha");
+        let delivered = scan_target_once(&context, &mut healthy, ScanMode::Wake);
+        assert_eq!(delivered.len(), 1);
+        assert!(!delivered[0].cursor_unusable);
+        let healthy_json = crate::output::json(
+            &crate::output::MarkedWatchEvent {
+                event: &delivered[0].event,
+                cursor_unusable: delivered[0].cursor_unusable,
+            },
+            false,
+        )
+        .expect("serialize");
+        assert!(
+            !healthy_json.contains("cursor_unusable"),
+            "a healthy scan must not grow the event shape: {healthy_json}"
+        );
+        assert!(
+            digest_batch(&delivered)[0].text_line().contains("1 new"),
+            "healthy wording is unchanged"
+        );
+
+        let cursors = participant.dir.join(CURSORS_FILE);
+        fs::write(&cursors, b"{ malformed").expect("corrupt cursor state");
+        let mut degraded = watch_target_for(&context, &participant, "alpha");
+        let re_reported = scan_target_once(&context, &mut degraded, ScanMode::Wake);
+        assert_eq!(re_reported.len(), 1);
+        assert!(
+            re_reported[0].cursor_unusable,
+            "a delivery projected from unusable cursor state must carry the marker"
+        );
+        let degraded_json = crate::output::json(
+            &crate::output::MarkedWatchEvent {
+                event: &re_reported[0].event,
+                cursor_unusable: true,
+            },
+            false,
+        )
+        .expect("serialize");
+        assert!(
+            degraded_json.contains("\"cursor_unusable\":true")
+                && degraded_json.contains("\"event\":\"channel_message\""),
+            "the marker is additive on the existing event: {degraded_json}"
+        );
+
+        let digests = digest_batch(&re_reported);
+        assert!(digests[0].cursor_unusable);
+        let line = digests[0].text_line();
+        assert!(
+            line.contains("1 re-reported")
+                && line.contains("cursor unusable")
+                && !line.contains(" new"),
+            "a re-report must not read as new mail: {line}"
+        );
+        assert!(
+            crate::output::json(&digests[0], false)
+                .expect("serialize")
+                .contains("\"cursor_unusable\":true"),
+            "the digest carries the marker in JSON too"
+        );
+        trash_test_root(&root);
+    }
 
     #[test]
     fn participant_watch_heartbeat_refresh_renews_activity_lease() {
