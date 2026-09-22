@@ -95,7 +95,7 @@ Delegate's own mail stays as it is. It is a status pipe between coordinator and 
 
 ## Sources
 
-Park et al., "Scaling Discovery through Test-Time Communication," arXiv 2609.21032 (Sep 17, 2026); local copy at `~/Downloads/2609.21032v1.pdf`. The communication prompt is Appendix A.2, the Terminal-Bench negative result is Section 3.4 and Table 3, and the budget ablation is Figure 4.
+Park et al., "Scaling Discovery through Test-Time Communication," arXiv 2609.21032 (Sep 17, 2026), https://arxiv.org/abs/2609.21032; local copy at `~/Downloads/2609.21032v1.pdf`. The communication prompt is Appendix A.2, the Terminal-Bench negative result is Section 3.4 and Table 3, and the budget ablation is Figure 4.
 
 Anthropic, "Patterns and Problems in Emerging Multiagent Systems," https://www.anthropic.com/research/multiagent-systems (Aug 13, 2026). The hidden-profile finding is under "Epistemic failures"; the branch-name conformity example (18 of 30 agents chose `mvp-game-loop`) is under "Failures from conformity."
 
