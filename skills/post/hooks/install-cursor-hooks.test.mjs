@@ -58,9 +58,10 @@ function freshTarget(content) {
   return file;
 }
 
-function run(target, { bin = GOOD_POST } = {}) {
+function run(target, { bin = GOOD_POST, extra = [] } = {}) {
   const args = [INSTALLER];
   if (target !== undefined) args.push(target);
+  args.push(...extra);
   return spawnSync(process.execPath, args, {
     encoding: "utf8",
     env: {
@@ -75,6 +76,19 @@ test("refuses to run without an explicit target", () => {
   const result = run(undefined);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /usage/);
+});
+
+test("-h and --help print usage on stdout and exit 0 before any validation", () => {
+  const target = freshTarget();
+  // A binary that cannot run: if help reached the preflight, this would fail.
+  const missing = path.join(ROOT, "help-no-such-binary");
+  for (const [first, ...extra] of [["--help"], ["-h"], [target, "--help"]]) {
+    const result = run(first, { bin: missing, extra });
+    assert.equal(result.status, 0, `${[first, ...extra].join(" ")}: ${result.stderr}`);
+    assert.match(result.stdout, /usage: node install-cursor-hooks\.mjs <path-to-hooks\.json>/);
+    assert.equal(result.stderr, "");
+  }
+  assert.ok(!fs.existsSync(target), "help must not write the hooks file");
 });
 
 test("preflight refuses a stale binary that mints unroomed mailboxes, touching nothing", () => {

@@ -115,6 +115,39 @@ def component(value):
                                                      or 127 <= ord(c) <= 159 for c in value))
 
 
+ADDRESS_KINDS = {"workspace", "participant", "lineage"}
+
+
+def mail_namespace(event):
+    """The watched identity of a mail event: a room, or a typed address label.
+
+    `post watch` omits `room` when the identity it is watching is a typed
+    address -- a participant or a lineage -- and carries it in `address`
+    instead. Requiring `room` therefore drops every participant and lineage
+    message, which is the whole of an agent's direct mail.
+
+    The namespace keeps the address kind, so participant `x` and workspace `x`
+    are two deliveries and never collapse into one dedupe key. A workspace
+    address is the room under a new name, so it must agree with `room`.
+    """
+    address = event.get("address")
+    if address is None:
+        return event.get("room")
+    if not isinstance(address, dict):
+        raise ValueError("invalid event address")
+    address_kind, name = address.get("kind"), address.get("name")
+    if address_kind not in ADDRESS_KINDS or not component(name):
+        raise ValueError("invalid event address")
+    room = event.get("room")
+    if address_kind == "workspace":
+        if room is not None and room != name:
+            raise ValueError("address does not agree with room")
+        return name
+    if room is not None:
+        raise ValueError("a typed address must not come with a room")
+    return f"{address_kind}:{name}"
+
+
 def event_metadata(event):
     """Opaque identity only; never return sender, subject, body, or preview."""
     if not isinstance(event, dict):
@@ -126,15 +159,14 @@ def event_metadata(event):
         raise ValueError("invalid event metadata")
     if ((kind == "mail" and reason != "mail")
             or (kind == "unreadable" and reason == "mention")
-            or (kind == "channel_message" and reason == "mail")
-            or (kind != "channel_message" and not component(event.get("room")))):
+            or (kind == "channel_message" and reason == "mail")):
         raise ValueError("invalid event reason or room")
     if kind == "channel_message" or (kind == "unreadable" and reason == "channel"
                                      and "channel" in event):
         namespace = event.get("channel")
         source = "channel:" + namespace if isinstance(namespace, str) else None
     else:
-        namespace = event.get("room")
+        namespace = mail_namespace(event)
         source = "mail" if reason == "mail" else "unreadable-channel"
     if not component(namespace):
         raise ValueError("invalid event namespace")

@@ -35,9 +35,19 @@ const COMMAND = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
 const EVENTS = ["UserPromptSubmit"];
 const INTEGRATION_NAMES = new Set(["grok-mail.mjs", "post-grok-mail.mjs"]);
 
-const requestedTarget = process.argv[2];
+const USAGE = "usage: node install-grok-hooks.mjs <path-to-hooks.json>";
+
+const argv = process.argv.slice(2);
+// `-h`/`--help` anywhere prints usage on stdout and exits 0, before the target
+// is even looked at or the post preflight runs.
+if (argv.includes("-h") || argv.includes("--help")) {
+  process.stdout.write(`${USAGE}\n`);
+  process.exit(0);
+}
+
+const requestedTarget = argv[0];
 if (!requestedTarget || requestedTarget.startsWith("-")) {
-  console.error("usage: node install-grok-hooks.mjs <path-to-hooks.json>");
+  console.error(USAGE);
   process.exit(2);
 }
 

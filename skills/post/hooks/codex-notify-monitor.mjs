@@ -91,6 +91,12 @@ function fail(message) {
   process.exitCode = 1;
 }
 
+// A service-log line that is not itself a failure: the launchd job keeps
+// running, but an operator reading the log learns what happened.
+function log(message) {
+  process.stderr.write(`post-notify: ${message}\n`);
+}
+
 function safeName(value) {
   return typeof value === "string" && value.length <= NAME_MAX && ROOM_NAME.test(value);
 }
@@ -201,6 +207,46 @@ function validUnreadable(event, allowedRooms) {
 
 const LEGACY_CHANNEL_EPISODE = "legacy-channel-episode";
 const LEGACY_WARNING = "Post compatibility warning: unreadable channel data from an older Post lacks channel identity. Per-message delivery is unknown; upgrade Post.";
+const SNAPSHOT_TIMEOUT_MS = 4000;
+// Post's own stderr is another program's output headed for a log line: bound it
+// and strip control characters so it cannot forge a line, and never mix in
+// stdout, which is where event bodies (subjects, previews) actually live.
+const STDERR_EXCERPT_CAP = 300;
+
+function stderrExcerpt(raw) {
+  const oneLine = String(raw ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  let bytes = 0;
+  let excerpt = "";
+  for (const character of oneLine) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > STDERR_EXCERPT_CAP) break;
+    bytes += size;
+    excerpt += character;
+  }
+  return excerpt;
+}
+
+// Why the snapshot produced nothing usable: a timeout, a nonzero exit with its
+// code, a signal, or a spawn failure, plus a bounded sanitized stderr excerpt.
+// "notification state is unknown" keeps its meaning; the reason stops being
+// discarded, because a monitor that says only "failed" cannot be diagnosed.
+function snapshotFailureMessage(snapshot) {
+  const parts = [];
+  if (snapshot.error) {
+    parts.push(
+      snapshot.error.code === "ETIMEDOUT"
+        ? `timed out after ${SNAPSHOT_TIMEOUT_MS}ms`
+        : `could not run: ${String(snapshot.error.code ?? snapshot.error.message)}`
+    );
+  } else if (typeof snapshot.status === "number") {
+    parts.push(`exited ${snapshot.status}`);
+  } else {
+    parts.push(`killed by signal ${String(snapshot.signal)}`);
+  }
+  const excerpt = stderrExcerpt(snapshot.stderr);
+  if (excerpt) parts.push(`stderr: ${excerpt}`);
+  return `snapshot failed; notification state is unknown (post watch --snapshot ${parts.join("; ")})`;
+}
 
 function eventKey(event) {
   if (event.event === "unreadable") {
@@ -305,12 +351,12 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
   args.push("--snapshot");
   const snapshot = spawnSync(post, args, {
     encoding: "utf8",
-    timeout: 4000,
-    stdio: ["ignore", "pipe", "ignore"],
+    timeout: SNAPSHOT_TIMEOUT_MS,
+    stdio: ["ignore", "pipe", "pipe"],
   });
 
   if (snapshot.error || snapshot.status !== 0) {
-    fail("snapshot failed; notification state is unknown");
+    fail(snapshotFailureMessage(snapshot));
   } else {
     const allowedRooms = new Set(rooms);
     const eligible = [];
@@ -370,7 +416,12 @@ if (herdrAgent && !AGENT_NAME.test(herdrAgent)) {
           }
           if (info.error || (info.status !== 0 && lookupError !== "agent_not_found")) {
             fail("Herdr agent lookup failed; mail remains eligible");
-          } else if (info.status === 0) {
+          } else if (info.status !== 0) {
+            // The pane is gone: not a retryable failure, but not silence either.
+            // A monitor whose target does not exist looks exactly like a monitor
+            // with no mail, and that is the failure nobody ever notices.
+            log(`pane not found: ${herdrAgent}`);
+          } else {
             let agent;
             try {
               agent = JSON.parse(info.stdout)?.result?.agent;

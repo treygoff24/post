@@ -36,10 +36,20 @@ const COMMAND = `${JSON.stringify(NODE_BIN)} ${JSON.stringify(ADAPTER)}`;
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse"];
 const INTEGRATION_NAMES = new Set(["codex-mail.mjs", "post-codex-mail.mjs"]);
 
-const requestedTarget = process.argv[2];
+const USAGE = "usage: node install-codex-hooks.mjs <path-to-hooks.json>";
+
+const argv = process.argv.slice(2);
+// `-h`/`--help` anywhere prints usage on stdout and exits 0, before the target
+// is even looked at or the post preflight runs.
+if (argv.includes("-h") || argv.includes("--help")) {
+  process.stdout.write(`${USAGE}\n`);
+  process.exit(0);
+}
+
+const requestedTarget = argv[0];
 // Flag-looking argv = usage error, not a target path (see Claude twin).
 if (!requestedTarget || requestedTarget.startsWith("-")) {
-  console.error("usage: node install-codex-hooks.mjs <path-to-hooks.json>");
+  console.error(USAGE);
   process.exit(2);
 }
 

@@ -78,6 +78,110 @@ class ADoorbellThatCannotRingIsRefused(unittest.TestCase):
             doorbell.parse_wake_on("nonsense")
 
 
+class TypedAddressMailIsNotDropped(unittest.TestCase):
+    """`post watch` omits `room` for a typed address.
+
+    When the watched identity is a participant or a lineage, watch carries it in
+    `address` instead: the `room` field appears only when watch is actually
+    watching a workspace. A doorbell that insists on `room` therefore drops
+    every participant and lineage message -- which is the whole of an agent's
+    direct mail. These events are real `post watch --snapshot` lines.
+    """
+
+    def test_participant_mail_is_accepted_with_a_participant_namespace(self):
+        key, source, reason = doorbell.event_metadata({
+            "event": "mail",
+            "address": {"kind": "participant", "name": "probe-6eb932de"},
+            "id": "20260923-023848-33ad64",
+            "reason": "mail",
+        })
+        self.assertEqual(source, "mail")
+        self.assertEqual(reason, "mail")
+        self.assertEqual(key, ("mail", "participant:probe-6eb932de", "20260923-023848-33ad64"))
+
+    def test_lineage_mail_is_accepted_with_a_lineage_namespace(self):
+        key, source, _ = doorbell.event_metadata({
+            "event": "mail",
+            "address": {"kind": "lineage", "name": "probe-lineage"},
+            "id": "20260923-023848-f8bd81",
+            "reason": "mail",
+        })
+        self.assertEqual(source, "mail")
+        self.assertEqual(key, ("mail", "lineage:probe-lineage", "20260923-023848-f8bd81"))
+
+    def test_workspace_mail_still_namespaces_by_room(self):
+        key, source, _ = doorbell.event_metadata({
+            "event": "mail",
+            "address": {"kind": "workspace", "name": "alpha"},
+            "room": "alpha",
+            "id": "20260923-023849-5eb84d",
+            "reason": "mail",
+        })
+        self.assertEqual(source, "mail")
+        self.assertEqual(key, ("mail", "alpha", "20260923-023849-5eb84d"))
+
+    def test_typed_unreadable_mail_takes_the_typed_namespace(self):
+        key, source, _ = doorbell.event_metadata({
+            "event": "unreadable",
+            "address": {"kind": "participant", "name": "probe-6eb932de"},
+            "id": "20260923-023848-33ad64",
+            "reason": "mail",
+        })
+        self.assertEqual(source, "mail")
+        self.assertEqual(key, ("mail", "participant:probe-6eb932de", "20260923-023848-33ad64"))
+
+    def test_typed_unreadable_channel_mail_becomes_the_legacy_episode(self):
+        # A channel message with no channel identity is the one compatibility
+        # warning, whatever address carried it; a typed address must not turn
+        # that event into a rejection that silently drops the warning.
+        key, source, _ = doorbell.event_metadata({
+            "event": "unreadable",
+            "address": {"kind": "lineage", "name": "probe-lineage"},
+            "id": "20260923-023848-f8bd81",
+            "reason": "channel",
+        })
+        self.assertEqual(source, "unreadable-channel")
+        self.assertEqual(key, doorbell.LEGACY_CHANNEL_EPISODE)
+
+    def test_a_workspace_address_that_contradicts_room_is_rejected(self):
+        for room in ("other", ""):
+            with self.assertRaises(ValueError):
+                doorbell.event_metadata({
+                    "event": "mail",
+                    "address": {"kind": "workspace", "name": "alpha"},
+                    "room": room,
+                    "id": "20260923-023849-5eb84d",
+                    "reason": "mail",
+                })
+
+    def test_an_unusable_address_is_rejected_not_read_as_a_room(self):
+        for address in (
+            {"kind": "elsewhere", "name": "alpha"},
+            {"kind": "participant"},
+            {"kind": "participant", "name": "../escape"},
+            None,
+            "alpha",
+        ):
+            with self.assertRaises(ValueError):
+                doorbell.event_metadata({
+                    "event": "mail",
+                    "address": address,
+                    "id": "20260923-023849-5eb84d",
+                    "reason": "mail",
+                })
+
+    def test_the_same_name_in_two_kinds_is_two_deliveries(self):
+        def key(kind, name, room=None):
+            event = {"event": "mail", "address": {"kind": kind, "name": name},
+                     "id": "same", "reason": "mail"}
+            if room is not None:
+                event["room"] = room
+            return doorbell.event_metadata(event)[0]
+
+        keys = {key("workspace", "x", room="x"), key("participant", "x"), key("lineage", "x")}
+        self.assertEqual(len(keys), 3)
+
+
 class OpaqueIdentity(unittest.TestCase):
     def test_same_second_ids_are_distinct_without_ordering(self):
         keys = {doorbell.event_metadata({"event": "mail", "room": "r", "reason": "mail", "id": ident})[0]

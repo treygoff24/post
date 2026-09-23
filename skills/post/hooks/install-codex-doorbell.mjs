@@ -62,14 +62,25 @@ function fail(message) {
   process.exit(1);
 }
 
-function usageError(message) {
-  console.error(
-    `install-codex-doorbell: ${message}\n` +
-      "usage: node install-codex-doorbell.mjs --room <room> --agent <unique-herdr-name> [--channel <name>]...\n" +
-      "       [--interval-seconds <positive-integer>]\n" +
-      "       node install-codex-doorbell.mjs --uninstall --agent <unique-herdr-name>"
+function usageText() {
+  return (
+    "usage: node install-codex-doorbell.mjs --room <room> --agent <unique-herdr-name> [--channel <name>]...\n" +
+    "       [--interval-seconds <positive-integer>]\n" +
+    "       node install-codex-doorbell.mjs --uninstall --agent <unique-herdr-name>"
   );
+}
+
+function usageError(message) {
+  console.error(`install-codex-doorbell: ${message}\n` + usageText());
   process.exit(2);
+}
+
+const argv = process.argv.slice(2);
+// `-h`/`--help` anywhere prints usage on stdout and exits 0, ahead of the
+// platform gate, argument validation, and every side effect.
+if (argv.includes("-h") || argv.includes("--help")) {
+  process.stdout.write(`${usageText()}\n`);
+  process.exit(0);
 }
 
 function homeDir() {
@@ -621,7 +632,7 @@ function uninstall(opts) {
 if (platform() !== "darwin") {
   fail("macOS only: launchd LaunchAgents are the supported scheduling surface");
 }
-const opts = parseArgs(process.argv.slice(2));
+const opts = parseArgs(argv);
 validate(opts);
 if (opts.uninstall) uninstall(opts);
 else install(opts);

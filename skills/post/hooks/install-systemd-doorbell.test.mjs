@@ -235,6 +235,33 @@ test("refuses non-Linux before resolution, preflight, or writes", () => {
   assertNoArtifacts(home);
 });
 
+test("-h and --help print usage on stdout and exit 0 before any validation", () => {
+  const home = homeFor("help");
+  const before = [POST_CALLS, HERDR_CALLS, SYSTEMCTL_CALLS].map((file) => calls(file).length);
+  for (const args of [["--help"], ["-h"], ["--room", "ops", "--agent", AGENT, "--help"]]) {
+    // Stubs that fail loudly if help reaches any resolution or preflight step.
+    const result = run(
+      args,
+      {
+        postExit: 1,
+        herdrGetExit: 1,
+        systemctlDaemonReloadExit: 1,
+        systemctlEnableExit: 1,
+      },
+      { POST_CODEX_DOORBELL_HOME: home }
+    );
+    assert.equal(result.status, 0, `${args.join(" ")} -> ${result.stderr}`);
+    assert.match(result.stdout, /usage: node install-systemd-doorbell\.mjs --room <room>/);
+    assert.equal(result.stderr, "");
+  }
+  assert.deepEqual(
+    [POST_CALLS, HERDR_CALLS, SYSTEMCTL_CALLS].map((file) => calls(file).length),
+    before,
+    "help must not run post, herdr, or systemctl"
+  );
+  assert.ok(!fs.existsSync(unitPath(home, "timer")), "help must not write a unit file");
+});
+
 test("usage validation mirrors the launchd CLI", () => {
   const cases = [
     { args: [], match: /requires --room/ },
