@@ -591,11 +591,13 @@ export class Supervisor {
     this.knownRootDirs = null;
     this.prefsCache = new Map();
     this.membership = new Map();
-    this.membershipState = { at: -Infinity, stale: true, running: false };
+    this.membershipState = { at: -Infinity, attemptAt: -Infinity, stale: true, running: false };
     this.logged = new Set();
     this.inflight = 0;
     this.rrCursor = null;
     this.watches = new Map();
+    this.watchFailures = new Map();
+    this.rearmAllPending = false;
     this.pendingHints = new Set();
     this.hintTimer = null;
     this.lastReconcileAt = -Infinity;
@@ -835,12 +837,23 @@ export class Supervisor {
       seen.add(key);
       let sub = this.subs.get(key);
       if (!sub && this.retiredKeys.has(key)) {
-        // A retired generation stays retired. A participant-level retirement
-        // lifts only once a participant list fetched after it shows the
-        // participant live again (a rebind clears ended_at).
         const entry = this.retiredKeys.get(key);
-        if (!entry.participantLevel || this.participantsListSeq <= entry.listSeq) continue;
-        this.retiredKeys.delete(key);
+        if (entry.participantLevel) {
+          // A participant-level retirement lifts only once a participant list
+          // fetched after it shows the participant live again (a rebind
+          // clears ended_at); the generation then starts empty.
+          if (this.participantsListSeq <= entry.listSeq) continue;
+          this.retiredKeys.delete(key);
+        } else {
+          // The identical generation is back: same pane, terminal, and
+          // session. Its retirement was a transient absence (a pane missing
+          // from one list, a session briefly unreported, a selection moved
+          // and moved back), so the same subscription resumes with its own
+          // state. Nothing crosses generations, and mail it already
+          // announced does not ring again.
+          this.retiredKeys.delete(key);
+          sub = this.revive(entry.sub);
+        }
       }
       if (!sub) {
         sub = this.createSub(participant.id, SINK_HERDR, generation, genHash);
@@ -943,7 +956,7 @@ export class Supervisor {
     sub.armed = false;
     this.subs.delete(sub.key);
     const participantLevel = reason === "participant ended" || reason === "participant gone";
-    this.retiredKeys.set(sub.key, { participantLevel, listSeq: this.participantsListSeq });
+    this.retiredKeys.set(sub.key, { participantLevel, listSeq: this.participantsListSeq, at: this.now(), sub: participantLevel ? null : sub });
     // The 60-second list cache must not keep an ended participant bound.
     if (participantLevel) this.participantsFetchedAt = -Infinity;
     this.emit({ type: "outcome", outcome: "retired", participant: sub.participant, sink: sub.sink, generation: sub.genHash, pane: sub.generation.pane, reason });
@@ -957,6 +970,27 @@ export class Supervisor {
     }
     this.retired.unshift({ participant: sub.participant, generation: sub.genHash, pane: sub.generation.pane, reason, at: new Date(this.now()).toISOString() });
     this.retired.length = Math.min(this.retired.length, 20);
+  }
+
+  // The same generation reappeared after a non-participant retirement. Its
+  // state file is unfrozen so the dedupe set is read again; if that write
+  // fails, the state reads as empty and unread mail rings once more.
+  revive(sub) {
+    sub.retired = false;
+    sub.armed = false;
+    sub.scannable = false;
+    this.subs.set(sub.key, sub);
+    const state = readJson(sub.stateFile);
+    if (state?.retired_at) {
+      const { retired_at: _at, retired_reason: _reason, ...rest } = state;
+      try {
+        writeFileAtomic(sub.stateFile, `${JSON.stringify(rest)}\n`);
+      } catch (error) {
+        this.emit({ type: "state", problem: "could not unfreeze revived state; unread mail may ring again", participant: sub.participant, error: String(error.code ?? error.message) });
+      }
+    }
+    this.emit({ type: "generation", participant: sub.participant, sink: sub.sink, generation: sub.genHash, pane: sub.generation.pane, revived: true });
+    return sub;
   }
 
   // ---------------------------------------------------------- dirty and hints
@@ -1014,10 +1048,15 @@ export class Supervisor {
     const state = this.membershipState;
     if (state.running || this.armedSubs().length === 0) return;
     const due = state.stale || this.now() - state.at >= this.config.membershipRefreshMs;
-    if (!due || this.now() - state.at < 10_000) return;
+    // Throttled on the last attempt, so a post outage costs one call per 10 s,
+    // not one per discovery tick.
+    if (!due || this.now() - state.attemptAt < 10_000) return;
     state.running = true;
+    state.attemptAt = this.now();
     try {
-      const result = await this.exec("post", ["channels", "--json"], {});
+      // --all: a subscribed channel that is archived still gets its targeted
+      // watch, since a new post resurrects it.
+      const result = await this.exec("post", ["channels", "--all", "--json"], {});
       if (!result.ok) return;
       let parsed;
       try {
@@ -1080,6 +1119,10 @@ export class Supervisor {
 
   rearmWatches(force = false) {
     if (this.halted) return;
+    if (this.rearmAllPending) {
+      force = true;
+      this.rearmAllPending = false;
+    }
     const desired = this.desiredWatches();
     for (const [key, entry] of this.watches) {
       if (force || !desired.has(key)) {
@@ -1087,13 +1130,24 @@ export class Supervisor {
         this.watches.delete(key);
       }
     }
+    const now = this.now();
+    // A failure streak ends after five quiet minutes (see onWatchError).
+    for (const [key, failure] of this.watchFailures) {
+      if (!desired.has(key) || now - failure.at >= 300_000) this.watchFailures.delete(key);
+    }
     for (const [key, spec] of desired) {
       const existing = this.watches.get(key);
       if (existing) {
         existing.spec = spec;
         if (existing.handle) continue;
       }
-      const entry = { spec, handle: null };
+      // A watch that failed waits out its backoff; the reconcile timer covers
+      // it meanwhile.
+      if (now < (this.watchFailures.get(key)?.retryAt ?? -Infinity)) {
+        if (!existing) this.watches.set(key, { key, spec, handle: null });
+        continue;
+      }
+      const entry = { key, spec, handle: null };
       entry.handle = this.watchImpl(
         spec.target,
         { recursive: spec.recursive },
@@ -1181,25 +1235,46 @@ export class Supervisor {
 
   // A watcher error, overflow, or a watched directory being replaced: the
   // hints are no longer trustworthy, so reconcile everything and re-arm.
+  //
+  // The re-arm never happens here. A watch can fail as it is created (EMFILE,
+  // EACCES), calling this synchronously from inside rearmWatches; re-arming
+  // here would recurse without bound. Instead the failed watch backs off (1 s
+  // doubling to 60 s; a streak ends after five quiet minutes), the first
+  // failure of a streak asks the next rearmWatches to re-arm everything, and
+  // the log gets one line per doubling of the streak.
   onWatchError(entry, error) {
     if (this.halted) return;
-    this.emit({ type: "watch", problem: "watcher error; full reconciliation", target: entry.spec.kind, error: String(error?.code ?? error?.message ?? error) });
     entry.handle?.close();
     entry.handle = null;
-    this.reconcile("watch-error", true);
+    const now = this.now();
+    const code = String(error?.code ?? error?.message ?? error);
+    const previous = this.watchFailures.get(entry.key);
+    const count = previous && now - previous.at < 300_000 ? previous.count + 1 : 1;
+    const retryMs = Math.min(1000 * 2 ** (count - 1), 60_000);
+    this.watchFailures.set(entry.key, { count, at: now, retryAt: now + retryMs, target: entry.spec.kind, path: entry.spec.target, error: code });
+    if (count === 1) this.rearmAllPending = true;
+    if ((count & (count - 1)) === 0) {
+      this.emit({ type: "watch", problem: "watcher error; full reconciliation", target: entry.spec.kind, error: code, failures: count, retry_in_ms: retryMs });
+    }
+    this.startReconcileRound("watch-error");
+    this.pump();
   }
 
   // Every armed subscription is scanned whether or not a hint fired.
   reconcile(reason = "timer", rearmAll = false) {
     if (this.halted) return;
+    this.startReconcileRound(reason);
+    this.rearmWatches(rearmAll);
+    this.pump();
+  }
+
+  startReconcileRound(reason) {
     if (this.reconcileRound?.gaps.length) {
       this.emit({ type: "reconcile", problem: "hint gaps found by reconciliation", round: this.reconcileRound.id, gaps: this.reconcileRound.gaps });
     }
     this.reconcileRound = { id: (this.reconcileRound?.id ?? 0) + 1, reason, gaps: [] };
     this.lastReconcileAt = this.now();
     for (const sub of this.armedSubs()) this.markDirty(sub, "reconcile");
-    this.rearmWatches(rearmAll);
-    this.pump();
   }
 
   // ---------------------------------------------------------- scheduling
@@ -1546,6 +1621,15 @@ export class Supervisor {
       // Cumulative since start: snapshots taken, split by what caused them.
       stats: { ...this.stats },
       bindings,
+      // Watches in backoff after an error; the reconcile timer covers them.
+      watch_failures: [...this.watchFailures.values()].map((f) => ({
+        target: f.target,
+        path: f.path,
+        error: f.error,
+        failures: f.count,
+        last_at: new Date(f.at).toISOString(),
+        retry_at: new Date(f.retryAt).toISOString(),
+      })),
       retired_recent: this.retired,
     };
   }
@@ -1570,6 +1654,9 @@ export class Supervisor {
   // Retired state is pruned after 7 days; so is state no live subscription owns.
   pruneState() {
     this.lastPruneAt = this.now();
+    for (const [key, entry] of this.retiredKeys) {
+      if (this.now() - entry.at > this.config.retiredPruneMs) this.retiredKeys.delete(key);
+    }
     let dirs;
     try {
       dirs = fs.readdirSync(this.paths.stateDir);
@@ -1737,11 +1824,13 @@ async function runSupervisor(paths) {
   let stopping = false;
   let exitCode = 0;
   let loopTimer;
+  let beatTimer;
   const finish = (code) => {
     if (stopping) return;
     stopping = true;
     exitCode = code;
     clearTimeout(loopTimer);
+    clearInterval(beatTimer);
     supervisor.halt(code === 0 ? "stopped" : "lock lost");
     try {
       lock.child.stdin.end();
@@ -1764,12 +1853,23 @@ async function runSupervisor(paths) {
   supervisor.loadConfig();
   supervisor.emit({ type: "start", pid: process.pid, lock_helper_pid: lock.helperPid, version: SUPERVISOR_VERSION });
   supervisor.writeHeartbeat({ lock_helper_pid: lock.helperPid });
+  // The heartbeat is liveness (process and event loop), on its own interval,
+  // so a tick waiting on a slow herdr or post (each call bounded by its own
+  // timeout) does not read as stale. Progress is last_discovery_at in health.
+  beatTimer = setInterval(() => {
+    if (stopping) return;
+    try {
+      supervisor.writeHeartbeat({ lock_helper_pid: lock.helperPid });
+    } catch (error) {
+      supervisor.logOnce("heartbeat-write", { type: "heartbeat", problem: "could not write the heartbeat", error: String(error?.code ?? error?.message ?? error) });
+    }
+  }, 2000);
+  beatTimer.unref?.();
   await supervisor.probeVersions();
   const loop = async () => {
     if (stopping) return;
     try {
       await supervisor.tick();
-      supervisor.writeHeartbeat({ lock_helper_pid: lock.helperPid });
       supervisor.writeHealth();
     } catch (error) {
       supervisor.emit({ type: "tick", problem: "tick failed", error: String(error?.stack ?? error).slice(0, 500) });

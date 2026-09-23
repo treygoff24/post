@@ -153,7 +153,11 @@ function makeWorld({ config = {} } = {}) {
         const participant = { ...row, ...(w.showPatch.get(row.id) ?? {}) };
         return ok(JSON.stringify({ ok: true, status: "bound", id: row.id, participant, provenance: "explicit-env" }));
       }
-      if (args[0] === "channels") return ok(JSON.stringify({ ok: true, channels: w.channelRows }));
+      if (args[0] === "channels") {
+        // Like post: the default listing hides archived channels; --all shows both.
+        const rows = args.includes("--all") ? w.channelRows : w.channelRows.filter((row) => !row.archived);
+        return ok(JSON.stringify({ ok: true, channels: rows }));
+      }
       if (args[0] === "version") return ok(JSON.stringify({ ok: true, version: "0.9.0", build_sha: "test" }));
       if (args[0] === "watch") {
         const script = w.snapshots.get(opts.participant);
@@ -466,6 +470,34 @@ describe("generations", () => {
     assert.deepEqual(w.outcomes("retired").map((r) => r.reason), ["pane gone"]);
   });
 
+  for (const [label, reason, vanish, restore] of [
+    ["a pane missing from one list", "pane gone", (w) => w.panes.splice(0, 1)[0], (w, pane) => w.panes.push(pane)],
+    ["a session briefly unreported", "session changed", (w) => { w.panes[0].session = null; }, (w) => { w.panes[0].session = "session-a"; }],
+  ]) {
+    test(`the identical generation revives with its state after ${label}`, async () => {
+      const w = standardWorld();
+      await w.run();
+      assert.equal(w.prompts.length, 1);
+      const file = w.sub("codex-aaaaaaaa").stateFile;
+      const held = vanish(w);
+      await w.run();
+      assert.deepEqual(w.outcomes("retired").map((r) => r.reason), [reason]);
+      assert.equal(w.sub("codex-aaaaaaaa"), undefined);
+      restore(w, held);
+      await w.run();
+      const sub = w.sub("codex-aaaaaaaa");
+      assert.ok(sub?.armed, "the same generation is armed again");
+      assert.equal(sub.stateFile, file, "same generation, same state file");
+      assert.equal(w.state("codex-aaaaaaaa").retired_at, undefined, "state unfrozen");
+      assert.equal(w.prompts.length, 1, "mail it already announced does not ring again");
+      assert.ok(w.logs.some((r) => r.type === "generation" && r.revived === true));
+      w.snapshots.set("codex-aaaaaaaa", [mailWith("20260923-000001-aaaaa1"), mailWith("20260923-000001-aaaaa2")]);
+      w.clock.t += 61_000;
+      await w.run();
+      assert.equal(w.prompts.length, 2, "new mail rings in the revived generation");
+    });
+  }
+
   test("one participant's state never suppresses another's", async () => {
     const w = standardWorld();
     w.addParticipant("codex-bbbbbbbb", "session-b");
@@ -759,6 +791,36 @@ describe("scheduling (E6)", () => {
     assert.equal(w.calls.filter((c) => c.kind === "post" && c.args[0] === "channels").length, 1, "not re-run every tick");
   });
 
+  test("an archived channel the participant joined keeps its targeted watch", async () => {
+    const w = standardWorld();
+    w.channelRows = [{ name: "planning", archived: true, participants: ["codex-aaaaaaaa"] }];
+    await w.run();
+    const planning = w.watches.find((h) => h.target === path.join(w.paths.root, "channels", "planning") && !h.closed);
+    assert.ok(planning, "a post would resurrect it, so it stays watched");
+  });
+
+  test("a failing channels call is retried once per 10 s, not every tick", async () => {
+    const w = standardWorld();
+    let calls = 0;
+    const exec = w.exec;
+    w.sup.exec = async (kind, args, opts) => {
+      if (kind === "post" && args[0] === "channels") {
+        calls += 1;
+        return { ok: false, code: 1, stdout: "", stderr: "post: store busy" };
+      }
+      return exec(kind, args, opts);
+    };
+    await w.run();
+    w.clock.t += 2_000;
+    await w.run();
+    w.clock.t += 2_000;
+    await w.run();
+    assert.equal(calls, 1, "throttled on the attempt");
+    w.clock.t += 10_000;
+    await w.run();
+    assert.equal(calls, 2);
+  });
+
   test("startup scans each armed subscription once; the timer reconcile follows a minute later", async () => {
     const w = standardWorld();
     const first = gate();
@@ -810,6 +872,38 @@ describe("scheduling (E6)", () => {
     await w.sup.idle();
     assert.equal(w.snapshotCalls().length, scans + 2);
     assert.ok(w.logs.some((r) => r.type === "watch" && r.problem.includes("full reconciliation")));
+  });
+
+  test("a watch that fails as it is created backs off instead of re-arming recursively", async () => {
+    const w = standardWorld();
+    const attempts = [];
+    w.sup.watchImpl = (target, opts, onEvent, onError) => {
+      if (target.includes("codex-aaaaaaaa")) {
+        attempts.push(target);
+        onError(Object.assign(new Error("too many open files"), { code: "EMFILE" }));
+        return null;
+      }
+      return w.watch(target, opts, onEvent, onError);
+    };
+    await w.run();
+    assert.equal(w.prompts.length, 1, "the mail still rings");
+    const first = attempts.length;
+    const failing = new Set(attempts).size;
+    assert.equal(first, failing, "one attempt per failing watch, no recursion");
+    await w.run();
+    assert.equal(attempts.length, first, "no retry inside the backoff");
+    w.clock.t += 1_000;
+    await w.run();
+    assert.equal(attempts.length, first + failing, "retried after the backoff");
+    for (let i = 0; i < 12; i += 1) {
+      w.clock.t += 60_000;
+      await w.run();
+    }
+    const lines = w.logs.filter((r) => r.type === "watch" && r.problem.includes("full reconciliation"));
+    assert.ok(lines.length <= failing * 5, `log bounded by doubling, got ${lines.length}`);
+    const health = w.sup.healthSnapshot();
+    assert.ok(health.watch_failures.length >= 1 && health.watch_failures.every((f) => f.error === "EMFILE"));
+    assert.equal(w.sup.watchFailures.get([...w.sup.watchFailures.keys()][0]).count > 5, true, "the streak keeps counting");
   });
 
   test("reconciliation scans every armed subscription with no hint, and reports gaps", async () => {
