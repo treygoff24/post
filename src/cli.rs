@@ -842,6 +842,19 @@ pub(crate) enum WatchFrom {
     Now,
 }
 
+/// A delivery reason `watch --reason` can select. Mirrors the `reason` field
+/// every watch event and digest already carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum WatchReasonFilter {
+    /// Direct or workspace mail, including unreadable mail files.
+    Mail,
+    /// Channel messages that do not mention you, and every unreadable channel
+    /// message (its body cannot be read, so a mention cannot be detected).
+    Channel,
+    /// Readable channel messages that mention you.
+    Mention,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
     /// Mailbox room; repeat to merge rooms, or omit for cwd resolution.
@@ -892,6 +905,15 @@ pub(crate) struct WatchArgs {
     /// line per event. Composes with JSON/text and all watch modes.
     #[arg(long)]
     pub digest: bool,
+
+    /// Deliver only events with this reason; repeat to combine. Omitted means
+    /// every reason. Applied after the scan, so filtered events never ring and
+    /// never count toward --limit or --once; with --digest, groups are built from
+    /// the selected events only. Limit: an unreadable channel message always has
+    /// reason `channel`, because its body (and any mention in it) cannot be read,
+    /// so `--reason mention` alone does not surface it.
+    #[arg(long = "reason", value_name = "REASON", value_enum)]
+    pub reason: Vec<WatchReasonFilter>,
 }
 
 #[derive(Debug, Args)]

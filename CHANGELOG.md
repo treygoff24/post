@@ -24,6 +24,11 @@
   `profile set` after the profile change.
 
 ### Added
+- `post watch --reason mail|channel|mention` (repeatable) delivers only events
+  with a selected reason; omitting it keeps every event. The filter runs after
+  the scan and before `--limit`, `--digest` grouping, and the `--once` exit
+  check. An unreadable channel message is always reason `channel`, because its
+  body, and any mention in it, cannot be read.
 - `post rooms set-path NAME PATH [--dry-run]` re-points a local room's
   workspace (discovery) path in `rooms.json` under the registry locks, with
   `rooms add`'s path validation and duplicate-owner refusal. It never moves

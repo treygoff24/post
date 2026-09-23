@@ -1,6 +1,6 @@
 use crate::channel::{message_files, parse_channel_message, ChannelPaths, CHANNELS_DIR};
 use crate::channel_state::ChannelState;
-use crate::cli::{WatchArgs, WatchFrom};
+use crate::cli::{WatchArgs, WatchFrom, WatchReasonFilter};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{mail_files, parse_mail, Context};
@@ -355,6 +355,24 @@ fn typed_watch_room(room: &str) -> bool {
     room.starts_with("participant:") || room.starts_with("lineage:")
 }
 
+/// `--reason` at the delivery boundary: keep only events whose reason was
+/// selected. An empty selection is the unfiltered default. Runs after the scan
+/// and before --limit, --digest grouping, and the --once exit check, so a
+/// filtered event never rings, never counts, and never joins a digest group.
+fn retain_selected_reasons(batch: &mut Vec<WatchDelivery>, reasons: &[WatchReasonFilter]) {
+    if reasons.is_empty() {
+        return;
+    }
+    batch.retain(|delivery| {
+        let wanted = match delivery.reason() {
+            WatchReason::Mail => WatchReasonFilter::Mail,
+            WatchReason::Channel => WatchReasonFilter::Channel,
+            WatchReason::Mention => WatchReasonFilter::Mention,
+        };
+        reasons.contains(&wanted)
+    });
+}
+
 fn apply_snapshot_limit(batch: &mut Vec<WatchDelivery>, limit: Option<usize>) -> usize {
     let Some(limit) = limit.filter(|limit| *limit > 0) else {
         return 0;
@@ -377,6 +395,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         interval_ms,
         text,
         digest,
+        reason: reasons,
     } = args;
     let rooms = context.load_rooms()?;
     let resolved = crate::participant::resolve(context)?;
@@ -550,6 +569,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             )?);
         }
         dedupe_unreadable_channels(&mut batch);
+        retain_selected_reasons(&mut batch, &reasons);
         let omitted = apply_snapshot_limit(&mut batch, limit);
         if omitted > 0 {
             let noun = if omitted == 1 { "event" } else { "events" };
@@ -609,6 +629,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         once,
         text,
         digest,
+        &reasons,
         &mut wake,
         slow_period,
         admission_warnings,
@@ -646,6 +667,7 @@ fn run_watch_loop(
     once: bool,
     text: bool,
     digest: bool,
+    reasons: &[WatchReasonFilter],
     wake: &mut Box<dyn WakeSource>,
     slow_period: Duration,
     mut admission_warnings: AdmissionWarnings,
@@ -668,6 +690,7 @@ fn run_watch_loop(
         |_| true,
     );
     drop(initial_admission);
+    retain_selected_reasons(&mut batch, reasons);
     if !batch.is_empty() {
         emit(&batch, text, digest)?;
         if once {
@@ -767,6 +790,7 @@ fn run_watch_loop(
             ));
         }
         drop(admission);
+        retain_selected_reasons(&mut batch, reasons);
         if !batch.is_empty() {
             emit(&batch, text, digest)?;
             if once {
@@ -3313,6 +3337,7 @@ body
             true,
             false,
             false,
+            &[],
             &mut wake,
             Duration::from_secs(3600),
             AdmissionWarnings::default(),
@@ -3386,6 +3411,7 @@ body
             true,
             false,
             false,
+            &[],
             &mut wake,
             Duration::ZERO,
             AdmissionWarnings::default(),
@@ -3471,6 +3497,7 @@ body
             true,
             false,
             false,
+            &[],
             &mut wake,
             Duration::from_secs(0),
             AdmissionWarnings::default(),

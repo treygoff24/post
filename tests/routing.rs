@@ -2970,3 +2970,270 @@ fn routing_remote_channel_message_with_colliding_sender_id_is_unread_for_the_loc
     assert!(watched.iter().any(|id| id == remote), "{watched:?}");
     assert!(!watched.iter().any(|id| id == local_own), "{watched:?}");
 }
+
+/// B1 fixture: one bound member of `tax` with one direct mail, one plain
+/// channel message, one channel message that mentions its workspace, and one
+/// unreadable channel message. The mention id sorts FIRST among the channel
+/// messages so a limit applied before the filter would drop it.
+fn reason_filter_fixture() -> (Sandbox, PathBuf, String) {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "reason-filter", &alpha, "alpha");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--join", "--json"],
+        &local,
+        &alpha,
+    ));
+    let target = format!("participant:{local}");
+    let mail = sandbox.run_in(
+        &[
+            "send", "--to", &target, "--from", "beta", "--body", "mail", "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&mail);
+    let messages = sandbox.mail_root.join("channels/tax/messages");
+    let write = |id: &str, subject: &str, mentions: &[&str]| {
+        fs::write(
+            messages.join(format!("{id}.msg")),
+            format!(
+                "{}\n---\n{subject} body",
+                json!({
+                    "id": id,
+                    "from": "beta",
+                    "channel": "tax",
+                    "subject": subject,
+                    "sent": "2026-09-23 06:00:00 -0500",
+                    "mentions": mentions
+                })
+            ),
+        )
+        .expect("write channel message");
+    };
+    write(REASON_MENTION, "mention", &["alpha"]);
+    write(REASON_CHANNEL, "plain", &[]);
+    fs::write(
+        messages.join(format!("{REASON_UNREADABLE}.msg")),
+        "{not json",
+    )
+    .expect("write unreadable channel message");
+    (sandbox, alpha, local)
+}
+
+const REASON_MENTION: &str = "20990923-060000-000001-bbbb01";
+const REASON_CHANNEL: &str = "20990923-060000-000002-bbbb02";
+const REASON_UNREADABLE: &str = "20990923-060000-000003-bbbb03";
+
+/// (event, id, reason) per emitted line; `--reason` values are appended.
+fn watch_reasons(
+    sandbox: &Sandbox,
+    participant: &str,
+    cwd: &Path,
+    extra: &[&str],
+) -> Vec<(String, String, String)> {
+    let mut args = vec!["watch", "--snapshot", "--json"];
+    args.extend_from_slice(extra);
+    let watch = sandbox.run_as_participant(&args, participant, cwd);
+    assert!(
+        watch.status.success(),
+        "`post {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&watch.stderr)
+    );
+    String::from_utf8_lossy(&watch.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("watch event JSON"))
+        .map(|event| {
+            let field = |key: &str| event[key].as_str().unwrap_or_default().to_owned();
+            let id = if event["event"] == "digest" {
+                format!(
+                    "{}..{}#{}",
+                    field("first_id"),
+                    field("last_id"),
+                    event["count"]
+                )
+            } else {
+                field("id")
+            };
+            (field("event"), id, field("reason"))
+        })
+        .collect()
+}
+
+fn reason_set(events: &[(String, String, String)]) -> Vec<(String, String)> {
+    let mut set: Vec<(String, String)> = events
+        .iter()
+        .map(|(event, _, reason)| (event.clone(), reason.clone()))
+        .collect();
+    set.sort();
+    set
+}
+
+#[test]
+fn watch_reason_filter_selects_each_reason_alone() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let all = watch_reasons(&sandbox, &local, &alpha, &[]);
+    // The fixture really produces every reason, and the unreadable channel
+    // message is reason `channel` (its mention, if any, cannot be read).
+    assert_eq!(
+        reason_set(&all),
+        vec![
+            ("channel_message".to_owned(), "channel".to_owned()),
+            ("channel_message".to_owned(), "mention".to_owned()),
+            ("mail".to_owned(), "mail".to_owned()),
+            ("unreadable".to_owned(), "channel".to_owned()),
+        ],
+        "{all:?}"
+    );
+
+    let mail = watch_reasons(&sandbox, &local, &alpha, &["--reason", "mail"]);
+    assert_eq!(
+        reason_set(&mail),
+        vec![("mail".to_owned(), "mail".to_owned())],
+        "{mail:?}"
+    );
+    let channel = watch_reasons(&sandbox, &local, &alpha, &["--reason", "channel"]);
+    let ids: Vec<&str> = channel.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(ids, vec![REASON_CHANNEL, REASON_UNREADABLE], "{channel:?}");
+    let mention = watch_reasons(&sandbox, &local, &alpha, &["--reason", "mention"]);
+    let ids: Vec<&str> = mention.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![REASON_MENTION],
+        "the unreadable message never matches mention: {mention:?}"
+    );
+}
+
+#[test]
+fn watch_reason_filter_combines_and_leaves_the_default_unfiltered() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let default = watch_reasons(&sandbox, &local, &alpha, &[]);
+    let every = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &[
+            "--reason", "mail", "--reason", "channel", "--reason", "mention",
+        ],
+    );
+    assert_eq!(default, every, "selecting every reason equals the default");
+    assert_eq!(default.len(), 4, "{default:?}");
+
+    let combined = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--reason", "mention", "--reason", "mail"],
+    );
+    let expected: Vec<_> = default
+        .iter()
+        .filter(|(_, _, reason)| reason == "mail" || reason == "mention")
+        .cloned()
+        .collect();
+    assert_eq!(combined, expected, "combination keeps scan order");
+    assert_eq!(combined.len(), 2, "{combined:?}");
+
+    // The filter runs before --limit: the mention is not the last event in
+    // scan order, so limiting first would leave nothing to select.
+    let limited = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--reason", "mention", "--limit", "1"],
+    );
+    let ids: Vec<&str> = limited.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(ids, vec![REASON_MENTION], "{limited:?}");
+}
+
+#[test]
+fn watch_reason_filter_applies_before_digest_grouping() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let unfiltered = watch_reasons(&sandbox, &local, &alpha, &["--digest"]);
+    assert!(
+        unfiltered
+            .iter()
+            .any(|(event, _, reason)| event == "digest" && reason == "mixed"),
+        "the unfiltered channel digest mixes reasons: {unfiltered:?}"
+    );
+
+    let channel = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--digest", "--reason", "channel"],
+    );
+    assert_eq!(
+        channel,
+        vec![(
+            "digest".to_owned(),
+            format!("{REASON_CHANNEL}..{REASON_UNREADABLE}#2"),
+            "channel".to_owned()
+        )],
+        "only the selected members are digested"
+    );
+    let mention = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--digest", "--reason", "mention"],
+    );
+    assert_eq!(
+        mention,
+        vec![(
+            "digest".to_owned(),
+            format!("{REASON_MENTION}..{REASON_MENTION}#1"),
+            "mention".to_owned()
+        )]
+    );
+}
+
+/// The long-watch path filters before its --once exit check: a batch whose
+/// every event is filtered out is not a delivery, so the watch keeps waiting.
+#[test]
+fn watch_once_with_reason_emits_only_selected_events_and_ignores_filtered_batches() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let once = common::run_under_deadline(
+        &sandbox,
+        &["watch", "--once", "--json", "--reason", "mail"],
+        &alpha,
+        &local,
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(once.status.code(), Some(0), "{once:?}");
+    let events: Vec<Value> = String::from_utf8_lossy(&once.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("watch event JSON"))
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["reason"], "mail");
+
+    // Remove the mention: the first batch then holds mail and channel events
+    // only, so a mention-only watch has nothing selected and must keep waiting.
+    fs::remove_file(
+        sandbox
+            .mail_root
+            .join(format!("channels/tax/messages/{REASON_MENTION}.msg")),
+    )
+    .expect("remove the mention");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--once", "--json", "--reason", "mention"])
+        .current_dir(&alpha)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &local)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn watch");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let still_running = child.try_wait().expect("poll watch").is_none();
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("collect watch output");
+    assert!(
+        still_running,
+        "a batch with no selected event must not end --once: {output:?}"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
