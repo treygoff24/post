@@ -102,7 +102,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "rooms",
             "post rooms [add <name> <path> | set-path <name> <path> [--dry-run]]",
             "JSON",
-            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json; set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing",
+            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json, and when the refused name is a case-folded duplicate of a remote placeholder the refusal names the owning host in details.host and carries a `post rooms add <name>-<suffix> <path>` exact_fix where a suffix is derivable; set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing",
         ),
         command(
             "profile",

@@ -16,6 +16,9 @@ pub struct ErrorDetails {
     pub did_you_mean: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact_fix: Option<String>,
+    /// The bridge host a remote placeholder belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +224,11 @@ impl AppError {
 
     pub fn did_you_mean(mut self, value: impl Into<String>) -> Self {
         self.details.did_you_mean = Some(value.into());
+        self
+    }
+
+    pub fn host(mut self, value: impl Into<String>) -> Self {
+        self.details.host = Some(value.into());
         self
     }
 

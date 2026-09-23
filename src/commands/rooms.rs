@@ -1,9 +1,10 @@
 use crate::cli::{RoomsAddArgs, RoomsArgs, RoomsCommand, RoomsSetPathArgs};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{validate_new_room_name, Context};
+use crate::mailbox::{shell_quote, validate_new_room_name, Context};
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{RoomOutput, RoomsOutput, RoomsSetPathOutput};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -54,6 +55,46 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .keys()
         .find(|name| name.eq_ignore_ascii_case(&args.name))
     {
+        let placeholders = placeholder_hosts(context, &rooms);
+        if let Some(host) = placeholders.get(existing_name.as_str()) {
+            // The duplicate is a remote placeholder: `set-path` refuses
+            // placeholders, so the local-duplicate hint can never work here.
+            // The estate's naming rule gives the fix instead — this checkout
+            // takes a `<name>-<suffix>` of its own.
+            let candidate = suffixed_room_candidate(
+                &rooms,
+                &placeholders,
+                bridge_host_id(context).as_deref(),
+                &args.name,
+            );
+            let mut error = AppError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "room '{}' is already registered as '{existing_name}', a remote placeholder owned by host '{host}': a checkout on this machine needs its own name",
+                    args.name
+                ),
+                match &candidate {
+                    Some(candidate) => format!(
+                        "This checkout needs its own name; run `post rooms add {} {}`.",
+                        shell_quote(candidate),
+                        shell_quote(&args.path)
+                    ),
+                    None => "This checkout needs its own name (the estate convention is `<name>-<host-suffix>`), but no suffixed candidate is free or derivable here; pick one and retry `post rooms add`.".to_owned(),
+                },
+            )
+            .input(args.name.clone())
+            .room(existing_name.clone())
+            .host(host.clone())
+            .reason("room name is a remote placeholder owned by another host");
+            if let Some(candidate) = candidate {
+                error = error.exact_fix(format!(
+                    "post rooms add {} {}",
+                    shell_quote(&candidate),
+                    shell_quote(&args.path)
+                ));
+            }
+            return Err(error);
+        }
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
             format!(
@@ -308,4 +349,166 @@ fn render(rooms: &RoomMap, rules: &RulesConfig, pretty: bool) -> AppResult<Comma
         count,
     };
     CommandResult::json(&output, pretty)
+}
+
+/// Every remote placeholder in the registry, name to owning host — the
+/// rooms.json entries whose stored path lands under `<root>/remote/<host>/`.
+fn placeholder_hosts(context: &Context, rooms: &RoomMap) -> BTreeMap<String, String> {
+    rooms
+        .iter()
+        .filter_map(|(name, stored)| {
+            crate::output::stored_path_remote_host_of(context, stored)
+                .map(|host| (name.clone(), host))
+        })
+        .collect()
+}
+
+/// This host's bridge id from `bridge/config.json`, or None on an unbridged
+/// host or a config that cannot be trusted.
+fn bridge_host_id(context: &Context) -> Option<String> {
+    crate::bridge_topology::load_config(context)
+        .ok()
+        .flatten()
+        .map(|config| config.host)
+}
+
+/// The estate's `<name>-<host-suffix>` candidate for a refused name, or None
+/// when no suffix is derivable or the candidate is itself taken under ASCII
+/// case folding or not a valid room name.
+fn suffixed_room_candidate(
+    rooms: &RoomMap,
+    placeholders: &BTreeMap<String, String>,
+    bridge_host: Option<&str>,
+    name: &str,
+) -> Option<String> {
+    let suffix =
+        learned_host_suffix(rooms, placeholders).or_else(|| bridge_host.map(str::to_owned))?;
+    let candidate = format!("{name}-{suffix}");
+    (validate_new_room_name(&candidate).is_ok()
+        && !rooms
+            .keys()
+            .any(|taken| taken.eq_ignore_ascii_case(&candidate)))
+    .then_some(candidate)
+}
+
+/// The estate's `<base>-<host-suffix>` naming rule, learned from this host's
+/// own registrations: for every local (non-placeholder) room named
+/// `<base>-<s>` whose `<base>` is a remote placeholder, count `s`. The most
+/// frequent suffix wins; ties go to the lexicographically smallest. `None`
+/// when no local room carries the pattern — the caller then falls back to the
+/// bridge host id.
+fn learned_host_suffix(rooms: &RoomMap, placeholders: &BTreeMap<String, String>) -> Option<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for name in rooms.keys() {
+        if placeholders.contains_key(name) {
+            continue;
+        }
+        for (index, _) in name.match_indices('-') {
+            let (base, suffix) = (&name[..index], &name[index + 1..]);
+            if !suffix.is_empty() && placeholders.contains_key(base) {
+                *counts.entry(suffix.to_owned()).or_default() += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|(a_suffix, a_count), (b_suffix, b_count)| {
+            a_count.cmp(b_count).then(b_suffix.cmp(a_suffix))
+        })
+        .map(|(suffix, _)| suffix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn room_map(names: &[&str]) -> RoomMap {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), format!("/workspaces/{name}")))
+            .collect()
+    }
+
+    fn placeholder_map(names: &[&str]) -> BTreeMap<String, String> {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), "mac".to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn learned_suffix_is_the_majority_marker_on_remote_bases() {
+        // The devbox shape: each local checkout carries the remote base plus
+        // this host's suffix; one oddball must not outvote the convention.
+        let rooms = room_map(&["hq-devbox", "cos-devbox", "fable-devbox", "hq-mac", "plain"]);
+        let placeholders = placeholder_map(&["hq", "cos", "fable"]);
+        assert_eq!(
+            learned_host_suffix(&rooms, &placeholders).as_deref(),
+            Some("devbox")
+        );
+    }
+
+    #[test]
+    fn learned_suffix_breaks_ties_on_the_lexicographically_smallest() {
+        let rooms = room_map(&["hq-zed", "cos-aaa"]);
+        let placeholders = placeholder_map(&["hq", "cos"]);
+        assert_eq!(
+            learned_host_suffix(&rooms, &placeholders).as_deref(),
+            Some("aaa")
+        );
+    }
+
+    #[test]
+    fn learned_suffix_ignores_placeholder_names_and_placeholderless_bases() {
+        // `hq-mac` is itself a placeholder: it never votes. `other-mac` has a
+        // base that is not a placeholder, so it does not vote either.
+        let rooms = room_map(&["hq-mac", "other-mac"]);
+        let placeholders = placeholder_map(&["hq", "hq-mac"]);
+        assert_eq!(learned_host_suffix(&rooms, &placeholders), None);
+    }
+
+    #[test]
+    fn learned_suffix_reads_every_hyphen_split() {
+        let rooms = room_map(&["a-b-c"]);
+        let placeholders = placeholder_map(&["a", "a-b"]);
+        // Both readings hold: base `a` gives `b-c`, base `a-b` gives `c`.
+        // One vote each, and the tie goes to the smaller suffix.
+        assert_eq!(
+            learned_host_suffix(&rooms, &placeholders).as_deref(),
+            Some("b-c")
+        );
+    }
+
+    #[test]
+    fn suffixed_candidate_falls_back_to_the_bridge_host() {
+        let rooms = room_map(&["hq"]);
+        let placeholders = placeholder_map(&["hq"]);
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, Some("trey"), "hq").as_deref(),
+            Some("hq-trey")
+        );
+        // No learned suffix and no bridge config: nothing is derivable.
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, None, "hq"),
+            None
+        );
+    }
+
+    #[test]
+    fn suffixed_candidate_is_none_when_taken_or_invalid() {
+        // Learned "mac" collides with the registered `hq-mac`.
+        let rooms = room_map(&["hq", "hq-mac"]);
+        let placeholders = placeholder_map(&["hq"]);
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, None, "hq"),
+            None
+        );
+        // A candidate outside the room-name grammar is never suggested
+        // (a learned suffix cannot produce this; the check is defensive).
+        let rooms = room_map(&["hq", "hq-mac"]);
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, Some("a:b"), "hq"),
+            None
+        );
+    }
 }

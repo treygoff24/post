@@ -345,6 +345,20 @@ fn stored_path_remote_host(path: &Path, raw_root: &Path, canonical_root: &Path) 
         .or_else(|| under(&canonicalize_existing_prefix(path), canonical_root))
 }
 
+/// The `<host>` a registered stored path is a placeholder of — the path
+/// component under `<root>/remote/` — or None for a local room. Same
+/// detection as `room_home`, for a caller that already holds the loaded
+/// registry and only needs the host, not a trust verdict.
+pub(crate) fn stored_path_remote_host_of(
+    context: &crate::mailbox::Context,
+    stored: &str,
+) -> Option<String> {
+    let expanded = context.expand_room_path(stored).ok()?;
+    let canonical_root =
+        std::fs::canonicalize(&context.root).unwrap_or_else(|_| context.root.clone());
+    stored_path_remote_host(&expanded, &context.root, &canonical_root)
+}
+
 /// Where a room name is homed, for trust fact 2 (a bridged `from` must be a
 /// placeholder of the host that sent it).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1255,6 +1255,166 @@ fn rooms_add_rejects_case_folded_collisions_with_registered_names() {
     );
 }
 
+/// Register `name` as a remote placeholder for `host` the way the bridge does:
+/// a rooms.json entry pointing under `<root>/remote/<host>/<name>`.
+fn register_remote_placeholder(sandbox: &Sandbox, host: &str, name: &str) {
+    let placeholder = sandbox.mail_root.join("remote").join(host).join(name);
+    fs::create_dir_all(&placeholder).expect("create placeholder dir");
+    assert_success(&sandbox.run(&["rooms", "add", name, &placeholder.to_string_lossy()]));
+}
+
+#[test]
+fn rooms_add_remote_placeholder_refusal_names_host_and_offers_runnable_fix() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    // The devbox shape: host "mac" holds the bare names as placeholders, and
+    // this host's checkouts carry the `<base>-devbox` convention.
+    for name in ["hq", "cos", "fable"] {
+        register_remote_placeholder(&sandbox, "mac", name);
+    }
+    for name in ["cos-devbox", "fable-devbox"] {
+        let dir = sandbox.path.join(name);
+        fs::create_dir(&dir).expect("create workspace dir");
+        register_room(&sandbox, name, &dir);
+    }
+    let rooms_before = fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms snapshot");
+
+    let checkout = sandbox.path.join("hq-checkout");
+    fs::create_dir(&checkout).expect("create checkout dir");
+    let checkout = checkout.to_string_lossy().into_owned();
+
+    let output = sandbox.run(&["rooms", "add", "hq", &checkout]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("room name is a remote placeholder owned by another host")
+    );
+    assert_eq!(error.error.details.room.as_deref(), Some("hq"));
+    assert_eq!(error.error.details.host.as_deref(), Some("mac"));
+    assert!(
+        error.error.message.contains("owned by host 'mac'"),
+        "message should name the owning host: {}",
+        error.error.message
+    );
+    assert!(
+        error.error.message.contains("its own name"),
+        "message should explain the naming rule: {}",
+        error.error.message
+    );
+    // Learned suffix: cos-devbox + fable-devbox teach "devbox".
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .expect("a runnable fix for a placeholder duplicate");
+    assert_eq!(fix, format!("post rooms add 'hq-devbox' '{checkout}'"));
+
+    // The refusal wrote nothing: the placeholder registration stands.
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms after refusal"),
+        rooms_before
+    );
+
+    // And the fix actually runs, because this host may claim `hq-devbox`.
+    let applied = sandbox.run_fix(&fix, &sandbox.path);
+    assert_success(&applied);
+    let listing: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
+    assert!(listing.rooms.iter().any(|room| room.name == "hq-devbox"));
+}
+
+#[test]
+fn rooms_add_remote_placeholder_refusal_falls_back_to_bridge_host() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    register_remote_placeholder(&sandbox, "mac", "hq");
+    fs::create_dir_all(sandbox.mail_root.join("bridge")).expect("bridge dir");
+    fs::write(
+        sandbox.mail_root.join("bridge/config.json"),
+        r#"{"host":"trey","peers":{}}"#,
+    )
+    .expect("bridge config");
+
+    let checkout = sandbox.path.join("hq-checkout");
+    fs::create_dir(&checkout).expect("create checkout dir");
+    let checkout = checkout.to_string_lossy().into_owned();
+
+    let output = sandbox.run(&["rooms", "add", "hq", &checkout]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.details.host.as_deref(), Some("mac"));
+    // No local `<base>-<suffix>` rooms exist, so the bridge host id supplies
+    // the suffix.
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some(format!("post rooms add 'hq-trey' '{checkout}'").as_str())
+    );
+}
+
+#[test]
+fn rooms_add_remote_placeholder_refusal_omits_fix_when_suggestion_is_taken() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    register_remote_placeholder(&sandbox, "mac", "hq");
+    // This host already claimed `hq-mac`, which teaches the suffix "mac" —
+    // and the candidate it would produce is itself registered.
+    let taken = sandbox.path.join("hq-mac");
+    fs::create_dir(&taken).expect("create taken workspace");
+    register_room(&sandbox, "hq-mac", &taken);
+
+    let checkout = sandbox.path.join("hq-checkout");
+    fs::create_dir(&checkout).expect("create checkout dir");
+
+    let output = sandbox.run(&["rooms", "add", "hq", &checkout.to_string_lossy()]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("room name is a remote placeholder owned by another host")
+    );
+    assert_eq!(error.error.details.host.as_deref(), Some("mac"));
+    assert!(
+        error.error.details.exact_fix.is_none(),
+        "no runnable fix when the suffixed name is taken"
+    );
+    assert!(
+        error.error.suggested_fix.contains("pick one"),
+        "hint should say so: {}",
+        error.error.suggested_fix
+    );
+}
+
+#[test]
+fn rooms_add_local_duplicate_keeps_the_set_path_hint() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "rooms",
+        "add",
+        "CLAUDE-SPACE",
+        &sandbox.path.to_string_lossy(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("duplicate room name under ASCII case folding")
+    );
+    assert!(
+        error.error.details.host.is_none(),
+        "a local duplicate reports no remote host"
+    );
+    assert!(
+        error.error.suggested_fix.contains("set-path"),
+        "local duplicates keep the set-path hint: {}",
+        error.error.suggested_fix
+    );
+}
+
 #[test]
 fn rooms_add_rejects_a_blocked_recipient_without_changing_config() {
     let sandbox = Sandbox::new();
