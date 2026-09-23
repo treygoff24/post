@@ -86,10 +86,16 @@ pub(super) fn run(
     if let Some(msg_id) = args.seen_by.as_deref() {
         return seen_by(context, &args.name, msg_id, json_output, pretty);
     }
+    // --ack and --discard-through consume read state, like a read: a body
+    // piped to either would be dropped while the cursor still advanced. The
+    // same guard runs before them. --seen-by, join, leave, and archive above
+    // consume nothing and stay unguarded.
     if let Some(target) = args.ack.as_deref() {
+        refuse_unintended_stdin(&args, json_output, pretty)?;
         return acknowledge_exact(context, &args.name, target, json_output, pretty);
     }
     if let Some(target) = args.discard_through.as_deref() {
+        refuse_unintended_stdin(&args, json_output, pretty)?;
         return discard_through(context, &args.name, target, json_output, pretty);
     }
     if args.message.is_some() {
@@ -172,7 +178,7 @@ fn refuse_unintended_stdin(args: &ChatArgs, json_output: bool, pretty: bool) -> 
     let fix = format!(
         "{send} # or, to read on purpose, re-run the same command with stdin from /dev/null: < /dev/null"
     );
-    let corrections = "To send the input, add --send (the body comes from stdin, as with --body-file -). To read on purpose, re-run the same command with stdin redirected from /dev/null. Nothing was read, sent, or marked seen.";
+    let corrections = "To send the input, add --send (the body comes from stdin, as with --body-file -). To read on purpose, re-run the same command with stdin redirected from /dev/null; over ssh, use `ssh -n` or add `< /dev/null` inside the remote command, because ssh without -t hands the remote post an open, silent stdin. Nothing was read, sent, or marked seen.";
     let error = match verdict {
         StdinVerdict::Queued => AppError::new(
             ErrorCode::InvalidArgument,

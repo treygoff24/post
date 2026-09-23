@@ -22,7 +22,7 @@ Waking an idle agent takes five mechanisms today: the Claude Monitor, per-harnes
 
 It never writes any participant's mail state. It reads through `POST_PARTICIPANT=<id> post watch --snapshot --json` and `post participant list --json`. It renews no lease, claims no presence, routes nothing, and consumes nothing. Post's participant-scoped projection stays the only authority on what a participant can see. The supervisor shares orchestration, not inbox identity: one scan per armed subscription, never an aggregate watch.
 
-**Singleton.** A second instance (a second installer run, a manual start, a duplicate unit) must exit nonzero with `already running (pid N)`, so two supervisors can never double-ring. Node 26.9 has no `fs.flock` (Aster checked live), so the builder picks a proven mechanism and names it in the report. The recommendation is a kernel lock the operating system releases at process death: a small `python3` child that takes `fcntl.flock(LOCK_EX|LOCK_NB)` on `$POST_MAIL_ROOT/doorbell/supervisor.lock`, reports success, and holds the lock until its stdin closes. The supervisor exits if that child dies. python3 is already a bridge dependency on both hosts. No dependency is added and PID reuse cannot matter. Required tests: simultaneous start, an abrupt crash then restart, and a stale owner with a reused PID. No owner file or receipt is written before ownership is established.
+**Singleton.** A second instance (a second installer run, a manual start, a duplicate unit) must exit nonzero with `already running (pid N)`, so two supervisors can never double-ring. Node 26.9 has no `fs.flock` (Aster checked live), so the builder picks a proven mechanism and names it in the report. The recommendation is a kernel lock the operating system releases at process death: a small `python3` child that takes `fcntl.flock(LOCK_EX|LOCK_NB)` on `$POST_MAIL_ROOT/doorbell/supervisor.lock`, reports success, and holds the lock until its stdin closes. The supervisor does no work until the child sends an explicit lock-acquired handshake. If the child exits unexpectedly, the supervisor stops all delivery and exits immediately; otherwise a killed helper would release the lock while the old supervisor kept ringing, and a second one could start (Aster's acceptance condition). python3 is already a bridge dependency on both hosts. No dependency is added and PID reuse cannot matter. Required tests: simultaneous start; an abrupt parent crash, then restart; helper death with the parent alive, tested separately; and a stale owner with a reused PID. No owner file or receipt is written before ownership is established.
 
 ## Terms
 
@@ -76,12 +76,11 @@ Every other binding shows as `unarmed` in `status`. An agent arms its own with o
 - **Fair, bounded concurrency.** At most 2 snapshots run at once (a tunable setting), drawn from a round-robin queue of dirty subscriptions. Each snapshot has a 20-second timeout. One slow participant cannot stall the rest.
 - A subscription whose pane is `working` or `blocked`, or focused without `--focused`, is not scanned. Its hooks surface mail on the next turn. When the pane becomes scannable again, it is marked dirty.
 
-**The scan command.** `POST_PARTICIPANT=<id> post watch --snapshot --json --limit 0`, plus reason flags:
+**The scan command.** `POST_PARTICIPANT=<id> post watch --snapshot --json --limit 0`, with no `--reason` filter, then selection in JavaScript (below).
 
-- with no channel subscriptions: `--reason mail --reason mention`;
-- with any: `--reason mail --reason mention --reason channel`.
-
-`--limit 0` keeps every event, so the newest unread state is never dropped. Output over 32 MiB is killed and reported as `failed: snapshot_oversize`, never parsed partially. `--reason` is B1 (wave 1). **B1 check at merge:** if `--reason mention` drops `unreadable` channel events, the supervisor adds `--reason channel` for every armed participant and filters in JavaScript, so unreadable channels are never silently invisible.
+- `--limit 0` keeps every event, so the newest unread state is never dropped.
+- Output over 32 MiB is killed and reported as `failed: snapshot_oversize`, never parsed partially.
+- **B1 check, done at e7fbdd3:** B1 gives unreadable channel events reason `channel`, never `mention`. A mention-only filter would therefore hide an unreadable channel, so the supervisor never passes `--reason`. The cost is larger output for participants with big unsubscribed channel backlogs, which the 32 MiB cap bounds visibly.
 
 **Parsing is all or nothing (E4).** A scan counts only if post exits 0 within the timeout, every line parses as JSON, and every event has the fields the contract requires for its variant: `event`, `address.kind`, `address.name`, `id`, and `channel` for channel variants. Anything else is `failed`: a nonzero exit, a timeout, a malformed or truncated line, an unknown `event` value, or oversize output. It is never partially accepted and never `accepted`. Unknown optional fields are fine; D's contract fixtures cover these cases.
 

@@ -5825,17 +5825,40 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         ),
     )
     .expect("large channel message");
+    // stdin is pinned to /dev/null: an inherited open, silent stdin (a piped
+    // runner, an ssh session) makes the read refuse as input_ambiguous. stderr
+    // goes to a file so a failed read names its own cause.
+    let blocked_stderr = active.path.join("blocked-read.stderr");
     let mut blocked_read = post_command()
         .args(["chat", "tax"])
         .current_dir(active.home.join("dest"))
         .env("HOME", &active.home)
         .env("POST_MAIL_ROOT", &active.mail_root)
         .env("POST_ARX_GENERATION", "7")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(fs::File::create(&blocked_stderr).expect("blocked stderr file"))
         .spawn()
         .expect("spawn blocked stdout reader");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let blocked_failure = |what: &str| {
+        format!(
+            "{what}; blocked read stderr: {}",
+            fs::read_to_string(&blocked_stderr).unwrap_or_default()
+        )
+    };
+    // Wait for the first stdout byte instead of a fixed sleep. Admission is
+    // taken before rendering, and the 128 KiB body exceeds any default pipe
+    // capacity (64 KiB), so once a byte arrives the child is provably blocked
+    // mid-stdout with admission held, however slowly it started.
+    let mut blocked_stdout = blocked_read.stdout.take().expect("blocked stdout pipe");
+    let mut drained = vec![0_u8; 1];
+    if blocked_stdout.read_exact(&mut drained).is_err() {
+        let status = blocked_read.wait().expect("wait failed blocked read");
+        panic!(
+            "{}",
+            blocked_failure(&format!("blocked read wrote no stdout ({status})"))
+        );
+    }
     let cutover_probe = OpenOptions::new()
         .read(true)
         .write(true)
@@ -5851,12 +5874,15 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         "stdout stall released the writer admission"
     );
     assert_eq!(probe_error, Some(libc::EWOULDBLOCK));
-    let mut blocked_stdout = blocked_read.stdout.take().expect("blocked stdout pipe");
-    let mut drained = Vec::new();
     blocked_stdout
         .read_to_end(&mut drained)
         .expect("drain blocked stdout");
-    assert!(blocked_read.wait().expect("wait blocked stdout").success());
+    let blocked_status = blocked_read.wait().expect("wait blocked stdout");
+    assert!(
+        blocked_status.success(),
+        "{}",
+        blocked_failure(&format!("blocked read exited {blocked_status}"))
+    );
     assert!(fs::read_to_string(
         active
             .mail_root
@@ -5961,28 +5987,39 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     seed_fence_store(&watched, r#"{"state":"active","generation":7}"#);
     seed_channel_fixture(&watched);
     fs::create_dir_all(watched.mail_root.join("dest")).expect("existing enrolled room");
+    // stdout and stderr go to files so the test can wait on what the watch
+    // has emitted while it is still running.
+    let watch_stdout = watched.path.join("fenced-watch.stdout");
+    let watch_stderr = watched.path.join("fenced-watch.stderr");
     let mut child = post_command()
         .args(["watch", "--room", "dest", "--interval-ms", "100"])
         .current_dir(watched.home.join("dest"))
         .env("HOME", &watched.home)
         .env("POST_MAIL_ROOT", &watched.mail_root)
         .env("POST_ARX_GENERATION", "7")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&watch_stdout).expect("watch stdout file"))
+        .stderr(fs::File::create(&watch_stderr).expect("watch stderr file"))
         .spawn()
         .expect("spawn watch");
     let heartbeat = watched
         .mail_root
         .join("participants/test-default/watch.heartbeat");
-    for _ in 0..60 {
-        if heartbeat.exists() {
-            break;
+    // Every wait below is on state the test can observe, never a fixed sleep:
+    // a slow start under load only makes it wait longer. The bound is a hang
+    // guard, and a watch that exits fails at once.
+    let wait_for = |child: &mut std::process::Child, what: &str, ready: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready() {
+            assert_child_running(child, what);
+            assert!(std::time::Instant::now() < deadline, "{what} (waited 30s)");
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(
-        heartbeat.exists(),
-        "watch never admitted its first heartbeat"
+    };
+    wait_for(
+        &mut child,
+        "watch never admitted its first heartbeat",
+        &|| heartbeat.exists(),
     );
     let started = std::time::Instant::now();
     assert_success(&watched.run_in_env(
@@ -5991,8 +6028,12 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         &watched.path,
         &[("POST_ARX_GENERATION", "7")],
     ));
+    // The regression this guards is a watch that holds writer admission for
+    // its lifetime, which blocks this send until the watch exits, not for a
+    // few seconds. The bound is therefore a generous hang guard, so a loaded
+    // machine cannot fail it while a held admission still does.
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
+        started.elapsed() < std::time::Duration::from_secs(30),
         "heartbeat admission blocked an ordinary writer"
     );
     let fence_mtime = fence_under_external_lock(&watched, 7);
@@ -6017,7 +6058,15 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         "fenced read-only ring",
         "visible while fenced",
     );
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    wait_for(
+        &mut child,
+        "fenced watch did not keep its read-only scan",
+        &|| {
+            fs::read_to_string(&watch_stdout)
+                .unwrap_or_default()
+                .contains(fenced_channel_id)
+        },
+    );
     assert_child_running(
         &mut child,
         "watch exited while scanning read-only under the fence",
@@ -6030,37 +6079,31 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     )
     .expect("write active fence temp");
     fs::rename(&active_tmp, watched.mail_root.join(".post-arx.json")).expect("reactivate fence");
-    let mut resumed = false;
-    for _ in 0..100 {
-        let modified = fs::metadata(&heartbeat)
-            .expect("heartbeat remains")
-            .modified()
-            .expect("heartbeat mtime");
-        if modified > fence_mtime {
-            resumed = true;
-            break;
-        }
-        assert_child_running(&mut child, "watch exited while recovering from the fence");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    child.kill().expect("stop recovered watch");
-    let output = child.wait_with_output().expect("collect recovered watch");
-    assert!(
-        resumed,
-        "watch heartbeat did not recover after reactivation"
+    wait_for(
+        &mut child,
+        "watch heartbeat did not recover after reactivation",
+        &|| {
+            fs::metadata(&heartbeat)
+                .expect("heartbeat remains")
+                .modified()
+                .expect("heartbeat mtime")
+                > fence_mtime
+        },
     );
+    child.kill().expect("stop recovered watch");
+    child.wait().expect("collect recovered watch");
+    let watch_stdout = fs::read_to_string(&watch_stdout).unwrap_or_default();
+    let watch_stderr = fs::read_to_string(&watch_stderr).unwrap_or_default();
     assert!(
-        stdout(&output).contains(fenced_channel_id),
-        "fenced watch did not keep its read-only scan: {}",
-        stdout(&output)
+        watch_stdout.contains(fenced_channel_id),
+        "fenced watch did not keep its read-only scan: {watch_stdout}"
     );
     assert_eq!(
-        stderr(&output)
+        watch_stderr
             .matches("migration fence active; watch continues read-only")
             .count(),
         1,
-        "fence episode warning was not deduplicated: {}",
-        stderr(&output)
+        "fence episode warning was not deduplicated: {watch_stderr}"
     );
 }
 
