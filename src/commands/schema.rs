@@ -100,9 +100,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "rooms",
-            "post rooms [add <name> <path>]",
+            "post rooms [add <name> <path> | set-path <name> <path> [--dry-run]]",
             "JSON",
-            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json",
+            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json; set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing",
         ),
         command(
             "profile",
@@ -231,7 +231,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "byte_limit",
         ]),
         read_ack: fields(&["ok", "room", "id", "already_read", "acknowledged"]),
-        rooms: fields(&["ok", "rooms", "count"]),
+        rooms: fields(&[
+            "ok",
+            "rooms",
+            "count",
+            "set-path: ok, room, before, after, changed, dry_run",
+        ]),
         schema: fields(&[
             "ok",
             "name",

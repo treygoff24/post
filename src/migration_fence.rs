@@ -619,6 +619,13 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         | Command::Rooms(crate::cli::RoomsArgs {
             command: Some(crate::cli::RoomsCommand::Add(_)),
         })
+        | Command::Rooms(crate::cli::RoomsArgs {
+            command:
+                Some(crate::cli::RoomsCommand::SetPath(crate::cli::RoomsSetPathArgs {
+                    dry_run: false,
+                    ..
+                })),
+        })
         | Command::Owner(crate::cli::OwnerArgs {
             command: Some(crate::cli::OwnerCommand::Init(_)),
         })

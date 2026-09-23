@@ -234,7 +234,7 @@ pub(crate) fn authored_locally_by(
     from_participant == Some(participant) && !remote_origin(context, from, sender_provenance)
 }
 
-fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool {
+pub(crate) fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool {
     let Ok(rooms) = context.load_rooms() else {
         return false;
     };
@@ -1419,6 +1419,17 @@ pub struct RoomOutput {
     pub name: String,
     pub path: String,
     pub blocked: Vec<BlockingRuleOutput>,
+}
+
+/// `post rooms set-path` receipt: the stored path before and after.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RoomsSetPathOutput {
+    pub ok: bool,
+    pub room: String,
+    pub before: String,
+    pub after: String,
+    pub changed: bool,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

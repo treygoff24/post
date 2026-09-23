@@ -24,6 +24,11 @@
   `profile set` after the profile change.
 
 ### Added
+- `post rooms set-path NAME PATH [--dry-run]` re-points a local room's
+  workspace (discovery) path in `rooms.json` under the registry locks, with
+  `rooms add`'s path validation and duplicate-owner refusal. It never moves
+  mail or history, never rewrites participant records, and always refuses
+  remote placeholders. It reports the path before and after.
 - `post profile list` lists every profile with its holder, workspace, name,
   sigil, lease, and whether it holds its sigil now, using the same predicate
   `profile set` refuses on. Text by default, `{ok, profiles:[…]}` with

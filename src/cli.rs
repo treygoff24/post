@@ -638,6 +638,27 @@ pub(crate) struct RoomsArgs {
 pub(crate) enum RoomsCommand {
     /// Register an existing workspace directory as a room.
     Add(RoomsAddArgs),
+    /// Change a local room's workspace (discovery) path; mail and history stay put.
+    SetPath(RoomsSetPathArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RoomsSetPathArgs {
+    /// Registered local room to re-point.
+    #[arg(value_name = "NAME", value_parser = nonempty_without_controls)]
+    pub name: String,
+
+    /// Existing workspace directory; absolute or starting with ~/.
+    #[arg(
+        value_name = "PATH",
+        value_hint = clap::ValueHint::DirPath,
+        value_parser = nonempty_without_controls
+    )]
+    pub path: String,
+
+    /// Validate and report the change without writing rooms.json.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

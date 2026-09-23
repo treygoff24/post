@@ -808,6 +808,169 @@ fn rooms_add_registers_an_existing_directory_without_touching_rules() {
     );
 }
 
+fn tree_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(at: &Path, found: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("tree entry").path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else {
+                found.insert(path.clone(), fs::read(&path).expect("read tree file"));
+            }
+        }
+    }
+    let mut found = std::collections::BTreeMap::new();
+    walk(root, &mut found);
+    found
+}
+
+/// A4: set-path re-points only the discovery path in rooms.json. The room's
+/// mail (stored under its name) and every participant record are
+/// byte-identical afterwards; --dry-run reports the same change and writes
+/// nothing.
+#[test]
+fn rooms_set_path_moves_only_the_discovery_path() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let sent = sandbox.run_in(
+        &["send", "--to", "alpha", "--body", "kept", "--json"],
+        None,
+        &alpha,
+    );
+    assert_success(&sent);
+    let moved = sandbox.path.join("alpha-moved");
+    fs::create_dir(&moved).expect("create new workspace");
+    let moved_arg = moved.to_string_lossy().into_owned();
+    let alpha_arg = alpha.to_string_lossy().into_owned();
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mail_before = tree_bytes(&sandbox.mail_root.join("alpha"));
+    assert!(!mail_before.is_empty(), "the room has mail to keep");
+    let participants_before = tree_bytes(&sandbox.mail_root.join("participants"));
+    let rooms_before = fs::read(&rooms_path).expect("rooms");
+
+    let dry = sandbox.run(&["rooms", "set-path", "alpha", &moved_arg, "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0), "{}", stderr(&dry));
+    let dry: serde_json::Value = from_stdout(&dry);
+    assert_eq!(
+        dry,
+        serde_json::json!({"ok": true, "room": "alpha", "before": alpha_arg, "after": moved_arg, "changed": true, "dry_run": true})
+    );
+    assert_eq!(fs::read(&rooms_path).expect("rooms"), rooms_before);
+
+    let output = sandbox.run(&["rooms", "set-path", "alpha", &moved_arg]);
+    assert_success(&output);
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert_eq!(receipt["before"], alpha_arg);
+    assert_eq!(receipt["after"], moved_arg);
+    assert_eq!(receipt["changed"], true);
+    assert_eq!(receipt["dry_run"], false);
+    let registered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms")).expect("rooms JSON");
+    assert_eq!(registered["alpha"], moved_arg);
+    assert_eq!(
+        registered["beta"],
+        sandbox.path.join("beta").to_string_lossy().as_ref()
+    );
+    assert_eq!(tree_bytes(&sandbox.mail_root.join("alpha")), mail_before);
+    assert_eq!(
+        tree_bytes(&sandbox.mail_root.join("participants")),
+        participants_before
+    );
+    assert_eq!(
+        fs::metadata(&rooms_path)
+            .expect("rooms")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    // Re-pointing at its own current path is not a conflict with itself.
+    let again = sandbox.run(&["rooms", "set-path", "alpha", &moved_arg]);
+    assert_success(&again);
+    let again: serde_json::Value = from_stdout(&again);
+    assert_eq!(again["changed"], false);
+}
+
+/// A4 refusals: each leaves rooms.json byte-identical.
+#[test]
+fn rooms_set_path_refusals_leave_the_registry_untouched() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let remote = sandbox.mail_root.join("remote/peer-host/far-room");
+    fs::create_dir_all(&remote).expect("remote placeholder");
+    assert_success(&sandbox.run(&[
+        "rooms",
+        "add",
+        "far-room",
+        remote.to_string_lossy().as_ref(),
+    ]));
+    let fresh = sandbox.path.join("fresh");
+    fs::create_dir(&fresh).expect("fresh dir");
+    let remote_target = sandbox.mail_root.join("remote/peer-host/other");
+    fs::create_dir_all(&remote_target).expect("remote target");
+    let not_a_dir = sandbox.path.join("file");
+    fs::write(&not_a_dir, b"x").expect("file");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let rooms_before = fs::read(&rooms_path).expect("rooms");
+
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    for (args, exit, code) in [
+        (vec!["nosuch".to_owned(), path(&fresh)], 65, "unknown_room"),
+        (
+            vec!["alpha".to_owned(), path(&beta)],
+            65,
+            "duplicate_workspace",
+        ),
+        (
+            vec!["alpha".to_owned(), path(&sandbox.path.join("missing"))],
+            2,
+            "invalid_argument",
+        ),
+        (
+            vec!["alpha".to_owned(), path(&not_a_dir)],
+            2,
+            "invalid_argument",
+        ),
+        (
+            vec!["far-room".to_owned(), path(&fresh)],
+            2,
+            "invalid_argument",
+        ),
+        (
+            vec!["alpha".to_owned(), path(&remote_target)],
+            2,
+            "invalid_argument",
+        ),
+    ] {
+        let mut argv = vec!["rooms", "set-path"];
+        argv.extend(args.iter().map(String::as_str));
+        let output = sandbox.run(&argv);
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{argv:?}: {}",
+            stderr(&output)
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, code, "{argv:?}");
+        assert_eq!(
+            fs::read(&rooms_path).expect("rooms"),
+            rooms_before,
+            "{argv:?} changed rooms.json"
+        );
+    }
+    let far = sandbox.run(&["rooms", "set-path", "far-room", &path(&fresh)]);
+    assert!(
+        stderr(&far).contains("remote placeholder"),
+        "{}",
+        stderr(&far)
+    );
+}
+
 #[test]
 fn rooms_add_rejects_existing_workspace_aliases_including_symlinks() {
     let sandbox = Sandbox::new();
