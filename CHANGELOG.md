@@ -112,6 +112,17 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- A closed stderr no longer panics post. A caller that closed the pipe early
+  (`post ... 2>&1 | head -1`) could see exit 101, and where a notice preceded
+  the effect (`chat --send`, `send`), nothing was sent. Unwritable stderr lines
+  are now dropped; exit codes and effects are unchanged.
+- Remote placeholders are recognized however the mail root is spelled. On
+  macOS `/var` is `/private/var`, and a symlinked `POST_MAIL_ROOT` or `HOME`
+  splits the same way, so a placeholder stored under one spelling read as
+  local under the other: a colliding `from_participant` became own again and
+  `rooms set-path` could rewrite it. A `rooms.json` that exists but cannot be
+  loaded now fails closed (no message is own); the registry is loaded once
+  per state instead of once per own message.
 - The claude, codex, cursor, and grok mail hooks refuse a watch event whose
   `room` differs from its workspace address name, as watch-notice and the Codex
   notify monitor already did; before, such a line rendered as mail waiting for
