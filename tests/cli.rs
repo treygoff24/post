@@ -7474,6 +7474,17 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         .join("participants/test-default/cursors.json")
         .exists());
 
+    // A real rooms rename is a fenced writer: refused before it writes a
+    // journal or moves anything. --dry-run is not a writer.
+    let refused_rename = fenced.run(&["rooms", "rename", "dest", "dest2", "--json"]);
+    assert_migration_refused(&refused_rename);
+    assert!(!fenced.mail_root.join("rename-journal.json").exists());
+    assert!(!fenced.mail_root.join("dest2").exists());
+    let dry_rename = fenced.run(&["rooms", "rename", "dest", "dest2", "--dry-run", "--json"]);
+    assert_eq!(dry_rename.status.code(), Some(0), "{}", stderr(&dry_rename));
+    assert!(stderr(&dry_rename).contains("dry run: nothing was written"));
+    assert!(!fenced.mail_root.join("rename-journal.json").exists());
+
     let inbox = fenced.run(&["inbox", "--room", "dest"]);
     assert_success(&inbox);
     let channels = fenced.run(&["channels"]);

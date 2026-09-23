@@ -14,6 +14,11 @@
   --backlog` restores the old all-unread join. The join instant is stored in
   a new `participants/<id>/membership-starts.json`; `channels.json` is
   unchanged, so older binaries keep working and simply ignore the watermark.
+- A real `post rooms rename` is now a migration-fenced write. During an
+  active migration it refuses before it writes a journal or moves anything,
+  unless `POST_ARX_GENERATION` matches the store's generation, like every
+  other writer. `post rooms rename --dry-run` stays read-only and available
+  under the fence.
 - `install-post.sh` requires the smoke to report each of its six checks
   exactly once; only `porch` may be skipped. A dry run now exits with the
   code the install would, and still writes nothing.

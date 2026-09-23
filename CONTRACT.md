@@ -108,8 +108,10 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   `chat --history`, `chat --since`, `chat --seen-by`, `search`, `watch
   --snapshot`, `schema`, `version`, `doctor` (without `--fix`), `profile`
   (show), `owner` (show), `participant show`, `participant list`, `identity
-  list`, `identity show`, and the listings (`inbox`, `rooms`, `channels`,
-  `who`).
+  list`, `identity show`, the listings (`inbox`, `rooms`, `channels`,
+  `who`), and `rooms rename --dry-run`. A real `rooms rename` is a writer:
+  it is admitted through the fence and refused without a matching
+  generation.
 - The same read-only forms remain available without a participant binding and
   never mint or initialize participant state. When a generic unbound notice is
   emitted, it goes to stderr. `post participant show` carries its own unbound
