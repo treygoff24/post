@@ -239,7 +239,8 @@ pub(crate) fn authored_locally_by(
 /// `<root>/remote/<host>/<name>` (at least two normal components after
 /// `remote/`). The placeholder directory need not exist.
 ///
-/// An unreadable `rooms.json` answers true, failing closed: a message whose
+/// A missing `rooms.json` registers nothing, so nothing is remote. A
+/// `rooms.json` that exists but cannot be loaded answers true, failing closed: a message whose
 /// origin cannot be established is never a local participant's own (so a
 /// colliding `from_participant` cannot hide it), its sender never drops a
 /// local recipient, and `rooms set-path` refuses. The cost is that reply
@@ -337,6 +338,16 @@ mod remote_index {
     fn build(context: &crate::mailbox::Context, key: FileKey) -> Index {
         #[cfg(test)]
         BUILDS.with(|builds| builds.set(builds.get() + 1));
+        // No registry registers no placeholder: nothing is remote. A registry
+        // that exists but cannot be loaded fails closed (None).
+        if key.0.is_none() && !context.root.join("rooms.json").exists() {
+            return Index {
+                root: context.root.clone(),
+                home: context.home.clone(),
+                key,
+                remote: Some(BTreeSet::new()),
+            };
+        }
         let remote = context.load_rooms().ok().map(|rooms| {
             let canonical_root =
                 std::fs::canonicalize(&context.root).unwrap_or_else(|_| context.root.clone());
@@ -2160,6 +2171,16 @@ mod tests {
         let (root, context) = remote_fixture("remote-unreadable", "{ not json");
         assert!(remote_workspace(&context, "alpha"));
         assert!(!authored_locally_by(
+            &context,
+            "p1",
+            "alpha",
+            Some("p1"),
+            None
+        ));
+        // A missing registry registers no placeholder: the id match is own.
+        std::fs::remove_file(root.join("rooms.json")).expect("remove rooms.json");
+        assert!(!remote_workspace(&context, "alpha"));
+        assert!(authored_locally_by(
             &context,
             "p1",
             "alpha",
