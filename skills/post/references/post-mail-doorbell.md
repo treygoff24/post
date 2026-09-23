@@ -4,7 +4,9 @@ A Claude Code session that should be rung by mail while idle wraps
 `post watch` in the harness **Monitor** tool. Each line the watch prints
 becomes a notification that starts a turn, which hooks cannot do: hooks run
 only when the session is already active. Keep the hook adapter too; hooks
-report mail on active turns, the Monitor rings idle ones.
+report mail on active turns, the Monitor rings idle ones. In a Herdr pane the
+host's doorbell supervisor already rings the session (`post-doorbell status`
+shows it), so this recipe is for sessions outside Herdr.
 
 ```
 Monitor({
@@ -65,11 +67,10 @@ Cursor and Grok have their own idle wakes (Cursor: a background `--once`
 notice task; Grok: `monitor` on the notice script); use the one
 [`watch.md`](watch.md) names rather than adding a second. Codex has no idle
 wake: its hook adapter (SessionStart, UserPromptSubmit, PostToolUse) is its
-whole notice path, so an idle Codex session hears about mail only on its next
-turn, unless the Herdr doorbell below pages it.
+whole notice path, so outside Herdr an idle Codex session hears about mail
+only on its next turn.
 
-A seat that must be rung across idles longer than the Monitor cap can use the
-Herdr doorbell, which pages one named agent from outside the session. It
-installs a service under the operator's account, so agree it with them first
-and run only one wake mechanism per agent. Flags, the Herdr sink, and
-uninstall: [`watch.md`](watch.md).
+In a Herdr pane, the host's doorbell supervisor rings an idle Claude Code or
+Codex session from outside it, by default and with no cap to re-arm. Run only
+one wake mechanism per agent. Opting out, channel subscriptions, and the
+supervisor's install: [`watch.md`](watch.md).
