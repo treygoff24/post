@@ -2257,8 +2257,10 @@ fn send(
         },
     )?;
     // The message is committed; a failed seen-mark must not turn the send
-    // into an error, so it degrades to a warning.
-    if let Err(error) = mark_own_message_seen(context, &message) {
+    // into an error, so it degrades to a warning. It is also bounded: a
+    // cursor lock held elsewhere must not keep a finished send's receipt
+    // waiting, so after OWN_SEEN_LOCK_BUDGET it gives up with that warning.
+    if let Err(error) = mark_own_message_seen(context, &message, OWN_SEEN_LOCK_BUDGET) {
         eprintln!(
             "post: warning: sent ok, but could not record own message as seen for #{}: {}",
             message.channel, error.message
@@ -2319,28 +2321,43 @@ fn seen_by(
     Ok(CommandResult::success(rendered))
 }
 
+/// How long the post-commit own-message seen update waits for the cursor lock
+/// before giving up with a warning. The send is already durable by then.
+const OWN_SEEN_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A sender's own message must never sit unseen for the sender — it rang
 /// their own doorbell and would otherwise re-show in their own next read.
 /// Record the sender's own message id as seen UNCONDITIONALLY: `from == self`
 /// is excluded from unread anyway, and under the seen-set model the old
 /// caught-up gating is unnecessary — other members' unseen messages simply
 /// stay unseen, so nothing is swallowed by this mark.
-fn mark_own_message_seen(context: &Context, message: &ChannelMessage) -> AppResult<()> {
+///
+/// `lock_budget` bounds only the wait for the cursor lock. Production passes
+/// `OWN_SEEN_LOCK_BUDGET`; tests may pass a shorter one.
+fn mark_own_message_seen(
+    context: &Context,
+    message: &ChannelMessage,
+    lock_budget: std::time::Duration,
+) -> AppResult<()> {
     match context.sender() {
-        Ok(sender) => ParticipantCursors::consume_channel(
+        Ok(sender) => ParticipantCursors::consume_channel_within(
             context,
             &sender.participant,
             &message.channel,
             std::slice::from_ref(&message.id),
+            lock_budget,
         )
         .map(|_| ()),
-        Err(error) if error.code == ErrorCode::NoParticipant => cursor_state::consume_channel(
-            context,
-            &message.from,
-            &message.channel,
-            vec![message.id.clone()],
-        )
-        .map(|_| ()),
+        Err(error) if error.code == ErrorCode::NoParticipant => {
+            cursor_state::consume_channel_within(
+                context,
+                &message.from,
+                &message.channel,
+                vec![message.id.clone()],
+                lock_budget,
+            )
+            .map(|_| ())
+        }
         Err(error) => Err(error),
     }
 }
@@ -2515,7 +2532,7 @@ mod tests {
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
             .expect("parse own message")
             .message;
-        mark_own_message_seen(&context, &own).expect("record own id");
+        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
         let state = ChannelState::load(&context, "alpha").expect("reload");
         assert!(state.has_seen("tax", ID2), "own send is in the seen-set");
 
@@ -2538,7 +2555,7 @@ mod tests {
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
             .expect("parse own message")
             .message;
-        mark_own_message_seen(&context, &own).expect("record own id");
+        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
         let state = ChannelState::load(&context, "alpha").expect("reload");
         assert!(
             !state.has_seen("tax", ID1),
@@ -2575,7 +2592,7 @@ mod tests {
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID3}.msg")))
             .expect("parse own message")
             .message;
-        mark_own_message_seen(&context, &own).expect("record own id");
+        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
         // ...and THEN the bridge lands T2 below both.
         seed_message(&dir, ID2, "beta", "bridged late arrival");
 

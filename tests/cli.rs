@@ -3712,6 +3712,88 @@ fn body_help_steers_shell_sensitive_prose_to_file_or_stdin() {
     }
 }
 
+/// A1: the send is durable before its own seen-mark runs, so a cursor lock
+/// held by someone else must not hold the receipt hostage. Before the fix this
+/// blocked on `flock(LOCK_EX)` for as long as the holder kept the lock; the
+/// test holds it for the whole run and relies on `run_under_deadline` to turn
+/// that hang into a failure instead of a wedged suite.
+#[cfg(unix)]
+#[test]
+fn chat_send_returns_its_receipt_when_the_own_seen_lock_is_held() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "tax", &alpha);
+    let participant = sandbox.test_participant("alpha");
+    let messages = sandbox.mail_root.join("channels/tax/messages");
+    let count_messages = || {
+        fs::read_dir(&messages)
+            .expect("list channel messages")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .expect("channel entry")
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "msg")
+            })
+            .count()
+    };
+    let before = count_messages();
+
+    let lock_path = sandbox
+        .mail_root
+        .join("participants")
+        .join(&participant)
+        .join(".cursors.lock");
+    let holder = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .expect("open the sender's cursor lock");
+    assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let started = std::time::Instant::now();
+    let output = run_under_deadline(
+        &sandbox,
+        &[
+            "chat",
+            "tax",
+            "--send",
+            "--anyway",
+            "--body",
+            "held lock",
+            "--json",
+        ],
+        &alpha,
+        &participant,
+        std::time::Duration::from_secs(20),
+    );
+    let waited = started.elapsed();
+    drop(holder);
+
+    // Not assert_success: the warning on stderr is the expected outcome here.
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let sent: ChatSendOutput = from_stdout(&output);
+    assert!(sent.ok);
+    assert_eq!(count_messages(), before + 1, "exactly one durable message");
+    assert!(
+        messages.join(format!("{}.msg", sent.message.id)).is_file(),
+        "the receipt names the committed message"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("could not record own message as seen") && err.contains(".cursors.lock"),
+        "stderr must warn and name the lock: {err}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(10),
+        "the receipt came back after {waited:?}, not within the lock budget"
+    );
+}
+
 #[test]
 fn chat_send_with_inline_text_in_the_file_slot_suggests_a_fix_that_runs_verbatim() {
     let sandbox = Sandbox::new();

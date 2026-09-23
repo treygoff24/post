@@ -69,6 +69,10 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- A channel send no longer waits indefinitely to mark its own message seen.
+  The message is durable before that step, so the cursor lock is now polled
+  for at most 2s; on timeout the send still returns its unchanged receipt and
+  stderr warns, naming the lock. Other cursor transactions still block.
 - Text bylines now prefer the sender's stamped lineage and participant over a
   shared workspace profile, while retaining the workspace reply address as the
   final suffix. Lineage bylines deliberately omit the workspace pfp because it

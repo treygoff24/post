@@ -15,6 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub(crate) const CURSORS_FILE: &str = "cursors.json";
 pub(crate) const CURSORS_LOCK_FILE: &str = ".cursors.lock";
@@ -85,7 +86,7 @@ impl ParticipantCursors {
         for id in ids {
             validate_mail_id(id)?;
         }
-        update_participant(context, participant, |state| {
+        update_participant(context, participant, LockWait::Blocking, |state| {
             let seen = state.mail.entry(mail_key(address)).or_default();
             let before = seen.len();
             seen.extend(ids.iter().cloned());
@@ -99,11 +100,34 @@ impl ParticipantCursors {
         channel: &str,
         ids: &[String],
     ) -> AppResult<CursorAdvance> {
+        Self::consume_channel_waiting(context, participant, channel, ids, LockWait::Blocking)
+    }
+
+    /// `consume_channel` for a best-effort caller that must not wait on the
+    /// cursor lock past `budget`. A timeout is an ordinary error that names
+    /// the lock; nothing is written.
+    pub(crate) fn consume_channel_within(
+        context: &Context,
+        participant: &Participant,
+        channel: &str,
+        ids: &[String],
+        budget: Duration,
+    ) -> AppResult<CursorAdvance> {
+        Self::consume_channel_waiting(context, participant, channel, ids, LockWait::Within(budget))
+    }
+
+    fn consume_channel_waiting(
+        context: &Context,
+        participant: &Participant,
+        channel: &str,
+        ids: &[String],
+        wait: LockWait,
+    ) -> AppResult<CursorAdvance> {
         channel::validate_channel_name(channel)?;
         for id in ids {
             validate_channel_id(id)?;
         }
-        update_participant(context, participant, |state| {
+        update_participant(context, participant, wait, |state| {
             let seen = state.channels.entry(channel.to_owned()).or_default();
             let prior = seen.last().cloned();
             let before = seen.len();
@@ -127,7 +151,7 @@ impl ParticipantCursors {
     ) -> AppResult<CursorAdvance> {
         channel::validate_channel_name(channel)?;
         validate_channel_id(target)?;
-        update_participant(context, participant, |state| {
+        update_participant(context, participant, LockWait::Blocking, |state| {
             let seen = state.channels.entry(channel.to_owned()).or_default();
             let prior = seen.last().cloned();
             let candidates = unseen_candidates(context, channel, seen, Some(target))?;
@@ -327,6 +351,7 @@ fn serialize_participant_cursor(state: &ParticipantCursors) -> AppResult<Vec<u8>
 fn update_participant<T>(
     _context: &Context,
     participant: &Participant,
+    wait: LockWait,
     update: impl FnOnce(&mut ParticipantCursors) -> AppResult<T>,
 ) -> AppResult<T> {
     fs::create_dir_all(&participant.dir).map_err(|error| {
@@ -336,7 +361,7 @@ fn update_participant<T>(
             error,
         )
     })?;
-    let _lock = lock_cursor_dir(&participant.dir)?;
+    let _lock = lock_cursor_dir(&participant.dir, wait)?;
     let path = participant_cursor_path(participant);
     ensure_cursor_destination_safe(&path)?;
     let mut state = match read_participant_cursor(&path) {
@@ -359,7 +384,58 @@ fn update_participant<T>(
     Ok(result)
 }
 
-fn lock_cursor_dir(directory: &Path) -> AppResult<File> {
+/// How long a cursor-lock acquisition may wait for another holder. Every
+/// consuming transaction blocks, as it always has; only the best-effort
+/// post-commit seen update after a channel send takes a deadline, because the
+/// message is already durable and an unbounded wait there held a finished
+/// send's receipt hostage to whoever held the lock.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LockWait {
+    Blocking,
+    Within(Duration),
+}
+
+/// Take `flock(LOCK_EX)` on `file`, either blocking or by polling
+/// `LOCK_EX|LOCK_NB` with capped exponential backoff until `budget` elapses.
+fn acquire_exclusive(file: &File, path: &Path, wait: LockWait) -> AppResult<()> {
+    let budget = match wait {
+        LockWait::Blocking => {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
+                return Err(AppError::io(
+                    "lock cursor state",
+                    path,
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            return Ok(());
+        }
+        LockWait::Within(budget) => budget,
+    };
+    let deadline = Instant::now() + budget;
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EINTR => {}
+            _ => return Err(AppError::io("lock cursor state", path, error)),
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(AppError::io(
+                "lock cursor state",
+                path,
+                format!("another process held the lock for longer than the {budget:?} budget"),
+            ));
+        }
+        std::thread::sleep(backoff.min(deadline - now));
+        backoff = (backoff * 2).min(Duration::from_millis(50));
+    }
+}
+
+fn lock_cursor_dir(directory: &Path, wait: LockWait) -> AppResult<File> {
     let path = directory.join(CURSORS_LOCK_FILE);
     let file = OpenOptions::new()
         .create(true)
@@ -385,13 +461,7 @@ fn lock_cursor_dir(directory: &Path) -> AppResult<File> {
             "lock must be a solitary regular file",
         ));
     }
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
-        return Err(AppError::io(
-            "lock cursor state",
-            &path,
-            std::io::Error::last_os_error(),
-        ));
-    }
+    acquire_exclusive(&file, &path, wait)?;
     let after = file
         .metadata()
         .map_err(|error| AppError::io("reinspect cursor state lock", &path, error))?;
@@ -518,7 +588,7 @@ pub(crate) fn consume(context: &Context, room: &str, delta: Delta) -> AppResult<
     if delta.mail_moves.is_empty() && delta.channel_seen.iter().all(|(_, ids)| ids.is_empty()) {
         return Ok(());
     }
-    consume_inner(context, room, delta, None, None).map(|_| ())
+    consume_inner(context, room, delta, None, None, LockWait::Blocking).map(|_| ())
 }
 
 #[allow(dead_code)]
@@ -527,6 +597,28 @@ pub(crate) fn consume_channel(
     room: &str,
     channel: &str,
     ids: Vec<String>,
+) -> AppResult<CursorAdvance> {
+    consume_channel_waiting(context, room, channel, ids, LockWait::Blocking)
+}
+
+/// Legacy-room `consume_channel` bounded by `budget` on the cursor lock; see
+/// `ParticipantCursors::consume_channel_within`.
+pub(crate) fn consume_channel_within(
+    context: &Context,
+    room: &str,
+    channel: &str,
+    ids: Vec<String>,
+    budget: Duration,
+) -> AppResult<CursorAdvance> {
+    consume_channel_waiting(context, room, channel, ids, LockWait::Within(budget))
+}
+
+fn consume_channel_waiting(
+    context: &Context,
+    room: &str,
+    channel: &str,
+    ids: Vec<String>,
+    wait: LockWait,
 ) -> AppResult<CursorAdvance> {
     if ids.is_empty() {
         let prior = Snapshot::load(context, room)
@@ -548,6 +640,7 @@ pub(crate) fn consume_channel(
         },
         Some(channel),
         None,
+        wait,
     )
 }
 
@@ -564,6 +657,7 @@ pub(crate) fn consume_channel_through(
         Delta::default(),
         Some(channel),
         Some((channel, target)),
+        LockWait::Blocking,
     )
 }
 
@@ -573,6 +667,7 @@ fn consume_inner(
     delta: Delta,
     outcome_channel: Option<&str>,
     through: Option<(&str, &str)>,
+    wait: LockWait,
 ) -> AppResult<CursorAdvance> {
     validate_delta(&delta)?;
     let path = cursor_path(context, room)?;
@@ -581,7 +676,7 @@ fn consume_inner(
         .ok_or_else(|| AppError::invalid_argument("cursor path has no room directory"))?;
     fs::create_dir_all(parent)
         .map_err(|error| AppError::io("create cursor state directory", parent, error))?;
-    let _lock = lock_room_cursors(context, room)?;
+    let _lock = lock_room_cursors(context, room, wait)?;
     ensure_cursor_destination_safe(&path)?;
     let mut state = load_for_write(context, room, &path)?;
     let prior = outcome_channel.and_then(|channel| {
@@ -1114,12 +1209,12 @@ fn is_canonical_mail_id(id: &str) -> bool {
         && id[16..].iter().all(u8::is_ascii_hexdigit)
 }
 
-fn lock_room_cursors(context: &Context, room: &str) -> AppResult<File> {
+fn lock_room_cursors(context: &Context, room: &str, wait: LockWait) -> AppResult<File> {
     let directory = cursor_path(context, room)?
         .parent()
         .expect("room cursor path has a parent")
         .to_path_buf();
-    lock_cursor_dir(&directory)
+    lock_cursor_dir(&directory, wait)
 }
 
 fn trusted_lock_metadata(metadata: &fs::Metadata) -> bool {
@@ -1527,6 +1622,67 @@ mod tests {
             fs::read(root.join("target.json")).expect("target"),
             target_before
         );
+        trash_test_root(&root);
+    }
+
+    /// A1: the bounded variant gives up once its budget is spent while
+    /// another open file description holds the lock, names the lock in the
+    /// error, and writes nothing; after release it succeeds. A timer thread
+    /// releases the holder after 1s, so an unbounded regression returns Ok
+    /// late (and fails `expect_err`) instead of wedging the suite.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_participant_lock_times_out_names_the_lock_and_writes_nothing() {
+        let (root, context) = context("bounded-lock");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        fs::create_dir_all(&participant.dir).expect("participant dir");
+        let lock_path = participant.dir.join(CURSORS_LOCK_FILE);
+        let holder = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .expect("open lock as holder");
+        assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            drop(holder);
+        });
+
+        let started = Instant::now();
+        let error = ParticipantCursors::consume_channel_within(
+            &context,
+            &participant,
+            "tax",
+            &[ID1.to_owned()],
+            Duration::from_millis(150),
+        )
+        .expect_err("a held lock must time out, not block");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150) && waited < Duration::from_secs(5),
+            "waited {waited:?}"
+        );
+        assert_eq!(error.code, ErrorCode::IoError);
+        assert!(
+            error.message.contains(CURSORS_LOCK_FILE),
+            "error must name the lock: {}",
+            error.message
+        );
+        assert!(!participant.dir.join(CURSORS_FILE).exists());
+
+        releaser.join().expect("release holder");
+        ParticipantCursors::consume_channel_within(
+            &context,
+            &participant,
+            "tax",
+            &[ID1.to_owned()],
+            Duration::from_millis(150),
+        )
+        .expect("a free lock is taken within the budget");
+        assert!(ParticipantCursors::load(&context, &participant).channel_has_seen("tax", ID1));
         trash_test_root(&root);
     }
 
