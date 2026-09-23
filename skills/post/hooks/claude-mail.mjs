@@ -207,7 +207,8 @@ function validEventAddress(event) {
   if (event.address === undefined) return safeName(event.room);
   if (!validAddress(event.address)) return false;
   if (event.address.kind !== "workspace" && event.room !== undefined) return false;
-  return event.room === undefined || safeName(event.room);
+  // Post emits room only as the workspace address's alias; a different room is a misroute.
+  return event.room === undefined || event.room === event.address.name;
 }
 
 function targetDescription(event) {
