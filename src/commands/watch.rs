@@ -72,9 +72,29 @@ enum ScanMode {
 /// format is not a contract, and nothing about the scan changes when it is on
 /// except the extra, untimed directory counts the line reports.
 fn watch_profile_enabled() -> bool {
+    #[cfg(test)]
+    if profile_trace::FORCED.with(std::cell::Cell::get) {
+        return true;
+    }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var_os("POST_WATCH_PROFILE").is_some_and(|value| value == "1"))
+}
+
+/// Test-only record of the profile's order of operations, so a test can
+/// assert where the file walk runs relative to the timers without relying on
+/// wall-clock thresholds.
+#[cfg(test)]
+mod profile_trace {
+    use std::cell::{Cell, RefCell};
+    thread_local! {
+        pub(super) static FORCED: Cell<bool> = const { Cell::new(false) };
+        pub(super) static STEPS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+        pub(super) static LAST: RefCell<Option<[std::time::Duration; 4]>> = const { RefCell::new(None) };
+    }
+    pub(super) fn step(name: &'static str) {
+        STEPS.with(|steps| steps.borrow_mut().push(name));
+    }
 }
 
 /// One target scan's cost. `mail_snapshot` covers the mail projection plus the
@@ -129,8 +149,13 @@ impl<'a> ScanProfile<'a> {
     }
 }
 
-/// `.msg` files in one channel, for the profile line only (never timed).
+/// `.msg` files in one channel, for the profile line only. Called only after
+/// every timer has stopped: the walk stats each message directory, and inside
+/// a timed span it would both inflate that span and warm the cache for the
+/// scan that follows.
 fn profile_channel_files(context: &Context, channel: &str) -> usize {
+    #[cfg(test)]
+    profile_trace::step("file_walk");
     ChannelPaths::new(context, channel)
         .ok()
         .and_then(|paths| message_files(&paths.messages).ok())
@@ -1435,15 +1460,13 @@ fn scan_watch_target(
     let enum_started = Instant::now();
     let channels = crate::channel_state::effective_channels(context, participant)?;
     let channel_enum = enum_started.elapsed();
+    #[cfg(test)]
+    profile_trace::step("channel_enum_stop");
     let channel_count = channels.len();
-    let channel_files = if watch_profile_enabled() {
-        channels
-            .iter()
-            .map(|channel| profile_channel_files(context, channel))
-            .sum()
-    } else {
-        0
-    };
+    // Names kept for the profile's file count, which runs after the timers.
+    let profiled_channels = watch_profile_enabled().then(|| channels.clone());
+    #[cfg(test)]
+    profile_trace::step("channel_scan_start");
     let channel_started = Instant::now();
     for channel in channels {
         // A complete-validation pass reads consumed messages too -- not to
@@ -1525,12 +1548,22 @@ fn scan_watch_target(
         }
     }
     let channel_scan = channel_started.elapsed();
+    #[cfg(test)]
+    profile_trace::step("channel_scan_stop");
     if cursor_unusable {
         for delivery in &mut batch {
             delivery.cursor_unusable = true;
         }
     }
-    if watch_profile_enabled() {
+    if let Some(profiled_channels) = profiled_channels {
+        // Every timer stops before the file walk below.
+        let total = scan_started.elapsed();
+        #[cfg(test)]
+        profile_trace::step("total");
+        let channel_files = profiled_channels
+            .iter()
+            .map(|channel| profile_channel_files(context, channel))
+            .sum();
         let profile = ScanProfile {
             room: &target.room,
             mode: match mode {
@@ -1544,8 +1577,12 @@ fn scan_watch_target(
             channel_scan,
             channel_files,
             events: batch.len(),
-            total: scan_started.elapsed(),
+            total,
         };
+        #[cfg(test)]
+        profile_trace::LAST.with(|last| {
+            *last.borrow_mut() = Some([mail_snapshot, channel_enum, channel_scan, total]);
+        });
         eprintln!("{}", profile.line());
     }
     Ok(batch)
@@ -3787,6 +3824,98 @@ body
         ] {
             assert!(line.contains(key), "{key} missing from {line}");
         }
+        trash_test_root(&root);
+    }
+
+    /// B2: the participant scan's file count for the profile line walks every
+    /// channel's message directory. It must run after every timer stops, so it
+    /// neither inflates a phase nor warms the cache for the timed scan, and
+    /// total_ms covers the phases. Asserted by order of operations, not by
+    /// wall-clock thresholds.
+    #[test]
+    fn participant_scan_profile_walks_files_after_every_timer() {
+        let root = test_root("watch-profile-order");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(root.join("rooms.json"), b"{}\n").expect("write rooms.json");
+        fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let address = Address {
+            kind: AddressKind::Participant,
+            name: participant.id.clone(),
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+        fs::create_dir_all(&inbox).expect("create participant inbox");
+        for channel in ["tax", "ops"] {
+            ParticipantChannels::join(&context, &participant, channel).expect("join channel");
+            let channel_dir = root.join(CHANNELS_DIR).join(channel);
+            fs::create_dir_all(channel_dir.join("messages")).expect("create channel");
+            fs::write(
+                channel_dir.join("channel.json"),
+                format!(
+                    r#"{{"name":"{channel}","created":"2026-09-01 00:00:00 -0500","created_by":"beta"}}"#
+                ),
+            )
+            .expect("write channel info");
+            for index in 0..3 {
+                let id = format!("20260901-120000-{index:06}-a1b2c3");
+                fs::write(
+                    channel_dir.join("messages").join(format!("{id}.msg")),
+                    encode_message(&channel_message(&id, channel, "beta"), "body").expect("encode"),
+                )
+                .expect("write channel message");
+            }
+        }
+        let mut target = WatchTarget {
+            room: format!("participant:{}", participant.id),
+            inbox,
+            participant: Some(participant.clone()),
+            address: Some(address),
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            reported_unreadable: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        };
+        profile_trace::FORCED.with(|forced| forced.set(true));
+        profile_trace::STEPS.with(|steps| steps.borrow_mut().clear());
+        let _ = scan_target_once(&context, &mut target, ScanMode::Complete);
+        profile_trace::FORCED.with(|forced| forced.set(false));
+
+        let steps = profile_trace::STEPS.with(|steps| steps.borrow().clone());
+        let at = |name: &str| steps.iter().position(|step| *step == name);
+        let total = at("total").expect("total taken");
+        let walks: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| **step == "file_walk")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(walks.len(), 2, "one walk per channel: {steps:?}");
+        for walk in &walks {
+            assert!(
+                *walk > total,
+                "the walk runs after total_ms is taken: {steps:?}"
+            );
+            assert!(
+                *walk > at("channel_scan_stop").expect("scan stop"),
+                "{steps:?}"
+            );
+        }
+        assert!(
+            at("channel_enum_stop") < at("channel_scan_start"),
+            "{steps:?}"
+        );
+
+        let [mail, channel_enum, channel_scan, total] =
+            profile_trace::LAST.with(|last| last.borrow().expect("profile emitted"));
+        assert!(
+            total >= mail + channel_enum + channel_scan,
+            "total_ms covers the phases: {total:?} < {mail:?} + {channel_enum:?} + {channel_scan:?}"
+        );
         trash_test_root(&root);
     }
 
