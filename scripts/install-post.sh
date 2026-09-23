@@ -10,9 +10,12 @@
 #    `cargo build --release --locked` there (CARGO_TARGET_DIR is honored).
 # 3. Run scripts/install-smoke.sh from that commit against the built binary,
 #    before anything in the bin dir is touched: a failed smoke installs nothing.
-#    Every check must run and pass. A skipped check fails the smoke unless the
-#    operator allowed it (POST_SMOKE_ALLOW_SKIP=porch, passed through to the
-#    smoke); the receipt then says pass_with_skips, never pass.
+#    Every check must run and pass. The results must name each of the six
+#    checks (setup, version, samples, doorbell_parsers, doorbell_contract,
+#    porch) exactly once and no other; a smoke that exits 0 with one missing,
+#    repeated, or unknown installs nothing. Only porch may be skipped, and only
+#    when the operator allowed it (POST_SMOKE_ALLOW_SKIP=porch, passed through
+#    to the smoke); the receipt then says pass_with_skips, never pass.
 # 4. Back up the current <bin-dir>/post to <bin-dir>/post-<old-build-sha>.bak.
 #    The copy goes to a temporary name, its sha256 is checked against the live
 #    file, and only then is it renamed into place. An existing backup of that
@@ -35,7 +38,9 @@
 # in the receipt and the exit code says so, so it cannot pass unnoticed.
 #
 # --dry-run builds and smokes, verifies the manifest, and prints what it would
-# do; it never backs up, installs, or writes a receipt.
+# do; it never backs up, installs, or writes a receipt. It exits with the code
+# the real install would (0, 1, or 4 for the served-skill verdict; 3 for a
+# refusal before install), but a dry run writes nothing whatever its code.
 #
 # Exit codes:
 #   0  installed; served skill matches (manifest verdict match).
@@ -150,11 +155,22 @@ except (OSError, ValueError) as error:
     sys.exit(f"unreadable smoke results: {error}")
 if not checks:
     sys.exit("the smoke reported no checks")
+# The six checks install-smoke.sh runs. Each must report exactly once; an
+# unknown id is refused; only porch may be skipped (and only when allowed).
+expected = ["setup", "version", "samples", "doorbell_parsers", "doorbell_contract", "porch"]
+skippable = {"porch"}
+ids = [check.get("check") for check in checks]
+for check_id in ids:
+    if check_id not in expected:
+        sys.exit(f"the smoke reported an unknown check {check_id!r}")
+for check_id in expected:
+    if ids.count(check_id) != 1:
+        sys.exit(f"check {check_id!r} reported {ids.count(check_id)} times, expected exactly once")
 for check in checks:
     result = check.get("result")
     if result == "pass":
         continue
-    if result == "skipped" and check.get("allowed") is True:
+    if result == "skipped" and check.get("allowed") is True and check["check"] in skippable:
         continue
     sys.exit(f"check {check.get('check')!r} reported {result!r} but the smoke exited 0")
 print("pass_with_skips" if any(check["result"] == "skipped" for check in checks) else "pass")
@@ -233,7 +249,7 @@ if [ "$dry_run" -eq 1 ]; then
     note "dry run: no current post at $target; nothing to back up"
   fi
   note "dry run: smoke $smoke_verdict; served $served ($served_kind) manifest $manifest_verdict; would write $receipt; would exit $outcome_code"
-  exit 0
+  exit "$outcome_code"
 fi
 
 mkdir -p "$bin_dir" || die "could not create $bin_dir; nothing was installed"
