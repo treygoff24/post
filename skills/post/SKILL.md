@@ -238,7 +238,9 @@ post chat <channel> --discard-through <msg-id>
 post chat <channel> --history N [--grep PATTERN] [--framing auto|full|compact]
 post chat <channel> --since ID [--framing auto|full|compact]
 post chat <channel> --seen-by <msg-id>
-post channels [--text]
+post chat <channel> --archive | --unarchive   # hide from / restore to the live list; never deletes
+post channels [--archived | --all] [--text]
+post search <pattern> --archived              # archived channels' history, membership not required
 post watch [--room <room>]... [--own <room>]... [--once | --snapshot [--limit N]] [--from now] [--interval-ms MS] [--digest] [--text]
 post who [--room <room>]... [--text]
 post owner [init --room <name> [--marker GLYPH] [--label TEXT] [--sidecar-dir ABS] [--allowed-signers ABS] [--principal P] [--namespace NS] | show]  # full surface: post owner init --help

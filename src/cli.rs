@@ -302,6 +302,10 @@ pub(crate) struct SearchArgs {
     )]
     pub channel: Option<String>,
 
+    /// Search only archived channels, membership not required; no mail.
+    #[arg(long, conflicts_with_all = ["mail", "channel"])]
+    pub archived: bool,
+
     /// Maximum number of results (default 100; hard cap 1000).
     #[arg(
         long,
@@ -395,7 +399,8 @@ pub(crate) struct SendArgs {
      post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
      post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n\n\
-     post chat <CHANNEL> --leave                      (leave for this participant only)\n\n\
+     post chat <CHANNEL> --leave                      (leave for this participant only)\n       \
+     post chat <CHANNEL> --archive | --unarchive      (hide from / restore to `post channels`; never deletes)\n\n\
      These forms are alternatives; pass exactly one. --body/--body-file imply --send.\n\
      Direct mail to a single room is a different verb: `post send --to <ROOM>`."
 )]
@@ -407,6 +412,16 @@ pub(crate) struct ChatArgs {
     /// Join the channel (creates it on first join); recorded in history.
     #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway"])]
     pub join: bool,
+
+    /// Archive the channel for everyone on this host: hidden from `post
+    /// channels` and Porch, never deleted. Any participant may archive; a new
+    /// post in the channel un-archives it automatically.
+    #[arg(long, conflicts_with_all = ["unarchive", "leave", "join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
+    pub archive: bool,
+
+    /// Return an archived channel to the live `post channels` listing.
+    #[arg(long, conflicts_with_all = ["archive", "leave", "join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
+    pub unarchive: bool,
 
     /// Leave the channel for this participant only; preserves every seen id.
     #[arg(long, conflicts_with_all = ["join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
@@ -575,6 +590,14 @@ pub(crate) struct ChannelsArgs {
     /// Emit human-readable text instead of the default JSON.
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
+
+    /// List only archived channels (hidden from the default listing).
+    #[arg(long, conflicts_with = "all")]
+    pub archived: bool,
+
+    /// List live and archived channels together.
+    #[arg(long, conflicts_with = "archived")]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]

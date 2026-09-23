@@ -664,6 +664,16 @@ fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
                 }
             }
         }
+        if let Err(error) = crate::channel_archive::load(&paths) {
+            checks.push(check(
+                &format!("channel.{name}.archive_invalid"),
+                DoctorSeverity::Error,
+                &crate::channel_archive::archive_path(&paths),
+                &error.message,
+                false,
+                "Restore a valid archive.json by hand; until then the channel lists as live. Nothing is deleted.",
+            ));
+        }
         if !paths.messages.is_dir() {
             checks.push(check(
                 &format!("channel.{name}.messages_missing"),

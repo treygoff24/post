@@ -15,6 +15,16 @@
   was stamped with a peer's display name and pfp.
 
 ### Added
+- Channel archive. `post chat <channel> --archive` hides a channel from
+  `post channels` and Porch without touching its history; `--unarchive`
+  restores it, and a new conversational post restores it on its own (joins
+  and profile events do not). Any bound participant may archive, membership
+  not required. State lives in `channels/<name>/archive.json` beside the
+  channel, never in history, so bridged peers and older binaries never see
+  it; its `log` only grows. `post channels --archived` / `--all` list
+  archived channels, the default listing reports `archived_hidden`, and
+  `post search --archived` searches archived channels' history without
+  membership. `doctor` reports a malformed `archive.json`; listings fail open.
 - Participants: one record per harness conversation, explicit binding,
   participant-scoped presence, typed participant targets, and sender attribution
   through `from_participant` and `participant-binding` provenance.

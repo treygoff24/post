@@ -707,6 +707,15 @@ pub struct ChannelListItem {
     /// null when not a member or no acting room.
     #[serde(default)]
     pub unread: Option<usize>,
+    /// True when the channel is archived (hidden from the default listing).
+    #[serde(default)]
+    pub archived: bool,
+    /// When the archive mark in force was set; absent for live channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    /// Participant that archived the channel; absent for live channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -714,6 +723,9 @@ pub struct ChannelsOutput {
     pub ok: bool,
     pub channels: Vec<ChannelListItem>,
     pub count: usize,
+    /// Archived channels left out of this listing (0 with --archived/--all).
+    #[serde(default)]
+    pub archived_hidden: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

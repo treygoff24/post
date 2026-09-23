@@ -369,11 +369,14 @@ their existing success semantics.
   Compact and pretty JSON admission serializes each candidate message once;
   later prefix probes reuse exact array-layout sizes and precomputed omission
   suffix counts rather than re-reading earlier bodies.
-- `post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000]
+- `post search <pattern> [--mail | --channel <channel> | --archived] [--limit 1..=1000]
   [--framing auto|full|compact]` — a read-only, cursorless, literal
   case-insensitive Unicode substring search. Default scope is
   participant-visible direct mail plus channels where the acting participant
-  is an effective member. `--mail` and `--channel` conflict; there is no
+  is an effective member. `--archived` instead searches every archived
+  channel on the host with no membership check and no mail; archived history
+  is the one channel surface open to non-members, so agents can find a
+  channel to resurrect. `--mail`, `--channel`, and `--archived` conflict; there is no
   `--room`. A named channel requires effective membership, and visibility checks happen
   before message content is opened. The default limit is 100 and the hard cap
   is 1000. Results are deterministic newest-first by UTC id components, with
@@ -526,8 +529,22 @@ their existing success semantics.
   `verification_scope: stored_full_body`; the slice itself is not independently
   signed. `body_slice`, byte-range, progress, EOF, and minimum-scaffold rules
   match direct mail.
-- `post channels [--text]` — read-only listing of channels, members, creation metadata,
-  descriptions, and message counts: `{ok, channels, count}`. Each JSON channel
+- `post chat <channel> --archive | --unarchive` — any bound participant,
+  membership not required, idempotent (`changed: false` when already in that
+  state). Writes only `channels/<name>/archive.json`
+  (`{version: 1, archived: {through, at, by_participant, by_room} | null,
+  log: [...]}`, log append-only); never writes history, never deletes. A
+  channel is archived while `archived` is set and no conversational (non-event)
+  message id exceeds `through`; a new post therefore resurrects it without a
+  write, and join/profile events never do. Archive state is host-local: the
+  sidecar is not bridged. JSON: `{ok, channel, archived, changed,
+  archived_at?, archived_by?}`.
+- `post channels [--archived | --all] [--text]` — read-only listing of channels, members, creation metadata,
+  descriptions, and message counts: `{ok, channels, count, archived_hidden}`.
+  Archived channels are omitted by default and counted in `archived_hidden`;
+  `--archived` lists only them, `--all` lists both; each item carries
+  `archived` and, when archived, `archived_at` and `archived_by`. An unreadable
+  `archive.json` lists the channel as live and is a `doctor` finding. Each JSON channel
   item keeps `name`, `created`, `created_by`, `description?`, `members`, and
   `messages`, adds `participants` for host-local effective members, and reports
   the acting participant's workspace as `room` or `null`. `unread` is the exact

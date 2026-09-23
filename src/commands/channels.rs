@@ -13,7 +13,22 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
     let participant = resolved.participant();
     let acting_room = participant.and_then(|actor| actor.workspace.clone());
     let mut channels = Vec::new();
+    let mut archived_hidden = 0;
     for summary in summaries {
+        let archived = summary.archived.is_some();
+        let listed = if args.all {
+            true
+        } else if args.archived {
+            archived
+        } else {
+            !archived
+        };
+        if !listed {
+            if archived {
+                archived_hidden += 1;
+            }
+            continue;
+        }
         let effective_members =
             crate::channel_state::effective_participants(context, &summary.info.name)?;
         let is_member = participant
@@ -46,6 +61,12 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
             messages: summary.messages,
             room: acting_room.clone(),
             unread,
+            archived,
+            archived_at: summary.archived.as_ref().map(|mark| mark.at.clone()),
+            archived_by: summary
+                .archived
+                .as_ref()
+                .map(|mark| mark.by_participant.clone()),
         });
     }
 
@@ -76,11 +97,23 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
             participant.map_or("unbound", |actor| actor.id.as_str())
         ));
         if channels.is_empty() {
-            rendered.push_str("post: no channels\n");
+            rendered.push_str(if args.archived {
+                "post: no archived channels\n"
+            } else {
+                "post: no channels\n"
+            });
         } else {
             for channel in &channels {
+                let archived_note = match (&channel.archived_at, &channel.archived_by) {
+                    (Some(at), Some(by)) => format!(
+                        ", archived {} by {}",
+                        output::sanitize_text_header(at),
+                        output::sanitize_text_header(by)
+                    ),
+                    _ => String::new(),
+                };
                 rendered.push_str(&format!(
-                    "#{}  ({} members, {} messages, by {})\n",
+                    "#{}  ({} members, {} messages, by {}{archived_note})\n",
                     output::sanitize_text_header(&channel.name),
                     channel.members.len(),
                     channel.messages,
@@ -94,6 +127,11 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
                 }
             }
         }
+        if archived_hidden > 0 {
+            rendered.push_str(&format!(
+                "({archived_hidden} archived channel(s) hidden; `post channels --archived --text` lists them)\n"
+            ));
+        }
         return Ok(CommandResult::success(rendered));
     }
     let count = channels.len();
@@ -101,6 +139,7 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         ok: true,
         channels,
         count,
+        archived_hidden,
     })
     .map_err(|error| {
         crate::error::AppError::invalid_argument(format!("serialize channels: {error}"))

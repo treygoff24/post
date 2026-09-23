@@ -124,7 +124,7 @@ pub(crate) fn validate_channel_name(value: &str) -> AppResult<()> {
 /// rare and human-paced, so a global lock is simpler than per-channel
 /// locks and cannot deadlock. Message sends never take it — exclusive
 /// file creation is their arbiter.
-fn lock_channels(context: &Context) -> AppResult<File> {
+pub(crate) fn lock_channels(context: &Context) -> AppResult<File> {
     let dir = context.root.join(CHANNELS_DIR);
     fs::create_dir_all(&dir)
         .map_err(|error| AppError::io("create channels directory", &dir, error))?;
@@ -1285,6 +1285,8 @@ pub(crate) struct ChannelSummary {
     pub info: ChannelInfo,
     pub members: MemberMap,
     pub messages: usize,
+    /// Archive mark in force, or None for a live channel.
+    pub archived: Option<crate::channel_archive::ArchiveMark>,
 }
 
 pub(crate) fn list_channels(context: &Context) -> AppResult<Vec<ChannelSummary>> {
@@ -1320,6 +1322,10 @@ pub(crate) fn list_channels(context: &Context) -> AppResult<Vec<ChannelSummary>>
             info: paths.load_info()?,
             members: paths.load_members()?,
             messages,
+            // Fail open: an unreadable archive.json lists the channel as live
+            // (visible) instead of failing the listing and every watch that
+            // enumerates channels. `post doctor` reports the bad file.
+            archived: crate::channel_archive::effective_mark(&paths).unwrap_or(None),
         });
     }
     summaries.sort_by(|left, right| left.info.name.cmp(&right.info.name));

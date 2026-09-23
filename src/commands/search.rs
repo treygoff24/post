@@ -28,7 +28,7 @@ pub(super) fn run(
     let pattern = LiteralPattern::new(&args.pattern);
     let mut matches = MatchAccumulator::new(args.limit);
 
-    let search_mail = args.channel.is_none() || args.mail;
+    let search_mail = !args.archived && (args.channel.is_none() || args.mail);
     let search_channels = !args.mail;
 
     if let Some(participant) = resolved.participant() {
@@ -40,10 +40,33 @@ pub(super) fn run(
 
         if let Some(channel_name) = args.channel.as_deref() {
             require_channel(context, channel_name)?;
-            collect_channel(context, participant, channel_name, &pattern, &mut matches)?;
+            let items = crate::cursor_state::eligibility::visible_channel(
+                context,
+                participant,
+                channel_name,
+            )?;
+            collect_channel(context, channel_name, items, &pattern, &mut matches);
+        } else if args.archived {
+            for summary in crate::channel::list_channels(context)? {
+                if summary.archived.is_none() {
+                    continue;
+                }
+                let name = summary.info.name;
+                let items = crate::cursor_state::eligibility::archived_channel(
+                    context,
+                    participant,
+                    &name,
+                )?;
+                collect_channel(context, &name, items, &pattern, &mut matches);
+            }
         } else if search_channels {
             for channel_name in crate::channel_state::effective_channels(context, participant)? {
-                collect_channel(context, participant, &channel_name, &pattern, &mut matches)?;
+                let items = crate::cursor_state::eligibility::visible_channel(
+                    context,
+                    participant,
+                    &channel_name,
+                )?;
+                collect_channel(context, &channel_name, items, &pattern, &mut matches);
             }
         }
     }
@@ -283,14 +306,12 @@ fn collect_mail(
 
 fn collect_channel(
     context: &Context,
-    participant: &crate::participant::Participant,
     channel_name: &str,
+    items: Vec<crate::cursor_state::eligibility::EligibleChannelMessage>,
     pattern: &LiteralPattern,
     matches: &mut MatchAccumulator,
-) -> AppResult<()> {
-    for item in
-        crate::cursor_state::eligibility::visible_channel(context, participant, channel_name)?
-    {
+) {
+    for item in items {
         let own = item.own;
         let already_read = item.already_read;
         let message = item.message;
@@ -337,7 +358,6 @@ fn collect_channel(
             result,
         });
     }
-    Ok(())
 }
 
 fn require_channel(context: &Context, channel_name: &str) -> AppResult<()> {

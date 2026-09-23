@@ -315,6 +315,30 @@ pub(crate) fn visible_channel(
     if !membership.effective(context, participant, channel_name)? {
         return Ok(Vec::new());
     }
+    all_channel_messages(context, participant, channel_name)
+}
+
+/// Every message of an ARCHIVED channel, membership not required. Archived
+/// history is the one channel surface open to non-members (Trey ruling
+/// 2026-09-22): it is how a host's agents find a channel to resurrect.
+/// A live channel returns nothing here; join it to read it.
+pub(crate) fn archived_channel(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+) -> AppResult<Vec<EligibleChannelMessage>> {
+    let paths = ChannelPaths::new(context, channel_name)?;
+    if !paths.exists() || crate::channel_archive::effective_mark(&paths)?.is_none() {
+        return Ok(Vec::new());
+    }
+    all_channel_messages(context, participant, channel_name)
+}
+
+fn all_channel_messages(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+) -> AppResult<Vec<EligibleChannelMessage>> {
     let cursors = ParticipantCursors::load(context, participant);
     let paths = ChannelPaths::new(context, channel_name)?;
     if !paths.exists() {

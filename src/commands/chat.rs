@@ -80,6 +80,9 @@ pub(super) fn run(
     if args.leave {
         return leave(context, &args.name, json_output, pretty);
     }
+    if args.archive || args.unarchive {
+        return set_archived(context, &args.name, args.archive, json_output, pretty);
+    }
     if let Some(msg_id) = args.seen_by.as_deref() {
         return seen_by(context, &args.name, msg_id, json_output, pretty);
     }
@@ -2125,6 +2128,58 @@ fn leave(
         )
     };
     Ok(CommandResult::success(rendered))
+}
+
+fn set_archived(
+    context: &Context,
+    name: &str,
+    archive: bool,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let outcome = crate::channel_archive::set_archived(context, name, archive)?;
+    #[derive(Serialize)]
+    struct ArchiveOutput<'a> {
+        ok: bool,
+        channel: &'a str,
+        archived: bool,
+        changed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        archived_at: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        archived_by: Option<&'a str>,
+    }
+    let quoted = crate::mailbox::shell_quote(name);
+    let rendered = if json_output {
+        output::json(
+            &ArchiveOutput {
+                ok: true,
+                channel: name,
+                archived: outcome.archived,
+                changed: outcome.changed,
+                archived_at: outcome.mark.as_ref().map(|mark| mark.at.as_str()),
+                archived_by: outcome
+                    .mark
+                    .as_ref()
+                    .map(|mark| mark.by_participant.as_str()),
+            },
+            pretty,
+        )?
+    } else {
+        match (outcome.archived, outcome.changed) {
+            (true, true) => format!(
+                "post: archived #{name}; hidden from `post channels`, history untouched. A new post un-archives it; so does `post chat {quoted} --unarchive`.\n"
+            ),
+            (true, false) => format!("post: #{name} was already archived\n"),
+            (false, true) => format!("post: un-archived #{name}; it is back in `post channels`\n"),
+            (false, false) => format!("post: #{name} is not archived\n"),
+        }
+    };
+    Ok(if outcome.changed {
+        CommandResult::committed(rendered)
+    } else {
+        CommandResult::success(rendered)
+    })
 }
 
 fn send(

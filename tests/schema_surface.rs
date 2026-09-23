@@ -523,7 +523,14 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "channels",
         &schema.output_shapes.channels,
-        ["ok", "channels", "count", "participant", "pending"]
+        [
+            "ok",
+            "channels",
+            "count",
+            "archived_hidden",
+            "participant",
+            "pending"
+        ]
     );
     assert_shape!(
         "profile",
@@ -819,10 +826,17 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let channels_json = json_object(&channels_output);
     assert_eq!(
         keys(&channels_json),
-        ["ok", "channels", "count", "participant", "pending"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        [
+            "ok",
+            "channels",
+            "count",
+            "archived_hidden",
+            "participant",
+            "pending"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
     assert_keys_are_documented(&keys(&channels_json), &schema.output_shapes.channels);
     assert_keys_in_shape(&schema.output_shapes.channels, &["room", "unread"]);
