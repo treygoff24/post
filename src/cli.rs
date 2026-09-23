@@ -114,6 +114,15 @@ pub(crate) enum Command {
     Contract(ContractArgs),
     /// Bridge-only entry points. Humans and agents never need these.
     Bridge(BridgeArgs),
+    /// Show where a host-qualified letter you sent stands: queued, published, received, or rejected.
+    Delivery(DeliveryArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DeliveryArgs {
+    /// The mail id `post send` printed for a participant:<id>@<host> letter.
+    #[arg(value_name = "MAIL_ID", value_parser = NonEmptyStringValueParser::new())]
+    pub id: String,
 }
 
 #[derive(Debug, Args)]

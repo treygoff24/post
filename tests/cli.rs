@@ -88,7 +88,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 19);
+    assert_eq!(schema.commands.len(), 20);
     assert!(schema
         .error_codes
         .iter()
@@ -161,6 +161,7 @@ fn help_and_schema_keep_command_contract_visible() {
         "version",
         "contract",
         "bridge",
+        "delivery",
     ];
     let command_names: Vec<&str> = schema
         .commands

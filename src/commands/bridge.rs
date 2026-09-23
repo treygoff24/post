@@ -444,6 +444,12 @@ fn finish(
     admission: Option<crate::migration_fence::WriteAdmission>,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    if let Decision::Rejected(reason, _) = &decision {
+        debug_assert!(
+            crate::imports::REJECTED_REASONS.contains(reason),
+            "rejected reason {reason} is missing from imports::REJECTED_REASONS"
+        );
+    }
     let (outcome, reason, admitted_at, replay, detail) = match decision {
         Decision::Delivered {
             admitted_at,

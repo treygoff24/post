@@ -4,6 +4,7 @@ mod catchup;
 mod channels;
 mod chat;
 mod contract;
+mod delivery;
 mod doctor;
 mod identity;
 mod inbox;
@@ -137,6 +138,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
             unreachable!("contract dispatches before mailbox context resolution")
         }
         Command::Bridge(_) => unreachable!("bridge dispatches before participant resolution"),
+        Command::Delivery(args) => delivery::run(&context, args, json, pretty),
     }?;
     if report_unbound {
         eprintln!("participant: unbound (run: post participant bind)");
@@ -210,7 +212,7 @@ fn participant_required(command: &Command) -> bool {
                 | crate::cli::ParticipantCommand::End
                 | crate::cli::ParticipantCommand::Notice { .. },
         }) => true,
-        Command::Send(_) | Command::Catchup(_) => true,
+        Command::Send(_) | Command::Catchup(_) | Command::Delivery(_) => true,
         Command::Read(args) => {
             args.ack || (!args.peek && args.offset.is_none() && args.length.is_none())
         }

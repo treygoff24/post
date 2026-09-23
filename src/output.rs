@@ -1739,6 +1739,7 @@ pub struct OutputShapes {
     pub watch: Vec<String>,
     pub who: Vec<String>,
     pub contract: Vec<String>,
+    pub delivery: Vec<String>,
     pub bridge: Vec<String>,
 }
 

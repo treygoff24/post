@@ -634,7 +634,7 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
         })
         | Command::Catchup(_)
         | Command::Bridge(_) => true,
-        Command::Search(_) => false,
+        Command::Search(_) | Command::Delivery(_) => false,
         Command::Read(args) => {
             args.ack || (!args.peek && args.offset.is_none() && args.length.is_none())
         }

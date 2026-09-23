@@ -20,6 +20,18 @@ const RECORD_MAX_BYTES: u64 = 4096;
 /// exact number.
 pub(crate) const MAX_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Every terminal reason `post bridge deliver` can decide. A sender-side
+/// `acked` receipt with `status: rejected` must carry one of these.
+pub(crate) const REJECTED_REASONS: [&str; 7] = [
+    "malformed",
+    "to_mismatch",
+    "forged_from",
+    "unknown_participant",
+    "ended_participant",
+    "blocked_route",
+    "id_collision",
+];
+
 /// The admission record: admission point, idempotence ledger, and frozen
 /// origin in one immutable file. Exact keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

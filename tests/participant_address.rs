@@ -622,3 +622,282 @@ fn a_local_wildcard_rule_blocks_a_remote_send_with_nothing_written() {
         false,
     );
 }
+
+// ---------------------------------------------------------------------------
+// post delivery
+
+impl Rig {
+    /// Queue one remote letter; returns (mail id, archive sha256).
+    fn queue(&self) -> (String, String) {
+        let receipt = assert_queued(
+            self,
+            &format!("participant:{REMOTE_ID}@{PEER}"),
+            REMOTE_ID,
+            PEER,
+        );
+        let id = receipt["envelope"]["id"].as_str().expect("id").to_owned();
+        let sha = sha256_hex(&fs::read(self.archive_file(&id)).expect("archive"));
+        (id, sha)
+    }
+
+    fn delivery_as(&self, participant: &str, id: &str, json_output: bool) -> Output {
+        let mut args = vec!["delivery", id];
+        if json_output {
+            args.push("--json");
+        }
+        self.sandbox
+            .run_as_participant(&args, participant, &self.cwd())
+    }
+
+    /// `post delivery --json` for the sender; asserts success and the schema.
+    fn delivery(&self, id: &str) -> Value {
+        let output = self.delivery_as(&self.sender, id, true);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let value: Value = serde_json::from_str(&stdout(&output)).expect("delivery JSON");
+        assert_eq!(value["schema"], json!("post.delivery.v1"));
+        assert_eq!(value["id"], json!(id));
+        value
+    }
+
+    fn evidence(&self, dir: &str, id: &str) -> PathBuf {
+        self.bridge().join(dir).join(format!("{id}.json"))
+    }
+
+    fn write_evidence(&self, dir: &str, id: &str, contents: &str) {
+        let path = self.evidence(dir, id);
+        fs::create_dir_all(path.parent().expect("parent")).expect("evidence dir");
+        fs::write(path, contents).expect("evidence");
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn receipt(id: &str, sha: &str, status: &str, reason: Option<&str>) -> Value {
+    json!({
+        "v": 1,
+        "status": status,
+        "origin": OWN_HOST,
+        "host": PEER,
+        "participant": REMOTE_ID,
+        "id": id,
+        "sha256": sha,
+        "reason": reason,
+        "at": "2026-09-23T05:00:00Z"
+    })
+}
+
+fn marker(id: &str, sha: &str) -> Value {
+    json!({"v": 1, "id": id, "host": PEER, "sha256": sha, "commit": "abc123", "at": "2026-09-23T04:00:00+00:00"})
+}
+
+#[test]
+fn delivery_reports_each_state_from_its_evidence() {
+    let rig = Rig::new();
+    let (id, sha) = rig.queue();
+    let queued = rig.delivery(&id);
+    assert_eq!(queued["state"], json!("queued"));
+    assert_eq!(queued["participant"], json!(REMOTE_ID));
+    assert_eq!(queued["host"], json!(PEER));
+    assert_eq!(queued["sha256"], json!(sha));
+    assert_eq!(queued["conflict"], json!(false));
+    rig.write_evidence(
+        "pmail-status",
+        &id,
+        &json!({"v": 1, "id": id, "blocked_reason": "peer_not_effective", "last_error": "relay push failed", "at": "2026-09-23T04:00:00Z", "extra": 1}).to_string(),
+    );
+    let blocked = rig.delivery(&id);
+    assert_eq!(blocked["state"], json!("queued"));
+    assert_eq!(blocked["blocked_reason"], json!("peer_not_effective"));
+    assert_eq!(blocked["last_error"], json!("relay push failed"));
+    rig.write_evidence("pmail-published", &id, &marker(&id, &sha).to_string());
+    let published = rig.delivery(&id);
+    assert_eq!(published["state"], json!("published"));
+    assert_eq!(published["commit"], json!("abc123"));
+    assert!(published["age_s"].as_u64().is_some(), "{published}");
+    assert!(published.get("blocked_reason").is_none(), "{published}");
+    rig.write_evidence(
+        "pmail-acked",
+        &id,
+        &receipt(&id, &sha, "delivered", None).to_string(),
+    );
+    let received = rig.delivery(&id);
+    assert_eq!(received["state"], json!("received"));
+    assert_eq!(received["acked_at"], json!("2026-09-23T05:00:00Z"));
+    assert!(received.get("reason").is_none(), "{received}");
+    // A receipt that outran the marker still reaches its terminal state.
+    fs::remove_file(rig.evidence("pmail-published", &id)).expect("drop marker");
+    assert_eq!(rig.delivery(&id)["state"], json!("received"));
+    rig.write_evidence(
+        "pmail-acked",
+        &id,
+        &receipt(&id, &sha, "rejected", Some("blocked_route")).to_string(),
+    );
+    let rejected = rig.delivery(&id);
+    assert_eq!(rejected["state"], json!("rejected"));
+    assert_eq!(rejected["reason"], json!("blocked_route"));
+    // The text form names the state and the address.
+    let text = stdout(&rig.delivery_as(&rig.sender, &id, false));
+    assert!(
+        text.contains(&format!("{id}: rejected (participant:{REMOTE_ID}@{PEER})")),
+        "{text}"
+    );
+    assert!(text.contains("reason: blocked_route"), "{text}");
+}
+
+#[test]
+fn delivery_reports_corrupt_evidence_as_unknown_never_a_guess() {
+    let rig = Rig::new();
+    let (id, sha) = rig.queue();
+    let other_sha = "0".repeat(64);
+    let mut extra = receipt(&id, &sha, "delivered", None);
+    extra["note"] = json!("x");
+    let mut missing = receipt(&id, &sha, "delivered", None);
+    missing.as_object_mut().expect("object").remove("at");
+    let cases: Vec<(&str, String)> = vec![
+        ("pmail-acked", "{not json".to_owned()),
+        ("pmail-acked", extra.to_string()),
+        ("pmail-acked", missing.to_string()),
+        (
+            "pmail-acked",
+            receipt(&id, &other_sha, "delivered", None).to_string(),
+        ),
+        ("pmail-acked", {
+            let mut value = receipt(&id, &sha, "delivered", None);
+            value["origin"] = json!(OTHER);
+            value.to_string()
+        }),
+        ("pmail-acked", {
+            let mut value = receipt(&id, &sha, "delivered", None);
+            value["host"] = json!(OTHER);
+            value.to_string()
+        }),
+        ("pmail-acked", {
+            let mut value = receipt(&id, &sha, "delivered", None);
+            value["participant"] = json!("someone-else");
+            value.to_string()
+        }),
+        (
+            "pmail-acked",
+            receipt(&id, &sha, "rejected", Some("flaky_network")).to_string(),
+        ),
+        (
+            "pmail-acked",
+            receipt(&id, &sha, "rejected", None).to_string(),
+        ),
+        (
+            "pmail-acked",
+            receipt(&id, &sha, "delivered", Some("blocked_route")).to_string(),
+        ),
+        ("pmail-acked", receipt(&id, &sha, "maybe", None).to_string()),
+        ("pmail-published", "[]".to_owned()),
+        ("pmail-published", {
+            let mut value = marker(&id, &other_sha);
+            value["sha256"] = json!(other_sha);
+            value.to_string()
+        }),
+        ("pmail-published", {
+            let mut value = marker(&id, &sha);
+            value["commit"] = json!("");
+            value.to_string()
+        }),
+        ("pmail-published", {
+            let mut value = marker(&id, &sha);
+            value["host"] = json!(OTHER);
+            value.to_string()
+        }),
+        ("pmail-status", "{not json".to_owned()),
+        ("pmail-status", json!({"v": 2, "id": id}).to_string()),
+        (
+            "pmail-status",
+            json!({"v": 1, "id": id, "blocked_reason": 7}).to_string(),
+        ),
+    ];
+    for (dir, contents) in cases {
+        for clean in ["pmail-acked", "pmail-published", "pmail-status"] {
+            let _ = fs::remove_file(rig.evidence(clean, &id));
+        }
+        rig.write_evidence(dir, &id, &contents);
+        let value = rig.delivery(&id);
+        assert_eq!(
+            value["state"],
+            json!("unknown"),
+            "{dir} {contents}: {value}"
+        );
+        assert!(
+            value["evidence_file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with(&format!("{dir}/{id}.json"))),
+            "{dir}: {value}"
+        );
+        assert!(value["evidence_error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
+    }
+    // A receipt whose origin cannot be checked (no bridge config) is unknown.
+    for clean in ["pmail-acked", "pmail-published", "pmail-status"] {
+        let _ = fs::remove_file(rig.evidence(clean, &id));
+    }
+    rig.write_evidence(
+        "pmail-acked",
+        &id,
+        &receipt(&id, &sha, "delivered", None).to_string(),
+    );
+    fs::remove_file(rig.bridge().join("config.json")).expect("drop config");
+    assert_eq!(rig.delivery(&id)["state"], json!("unknown"));
+}
+
+#[test]
+fn delivery_of_an_unknown_or_invalid_id_is_refused() {
+    let rig = Rig::new();
+    let missing = rig.delivery_as(&rig.sender, "20260923-000000-abcdef", true);
+    assert_refused(&missing, "not_found", 66, false);
+    let invalid = rig.delivery_as(&rig.sender, "../etc", true);
+    assert_refused(&invalid, "invalid_argument", 2, false);
+}
+
+#[test]
+fn delivery_of_workspace_mail_is_unsupported() {
+    let rig = Rig::new();
+    let output = rig.send("pact");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let sent: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+    let id = sent["envelope"]["id"].as_str().expect("id");
+    let value = rig.delivery(id);
+    assert_eq!(value["state"], json!("unsupported"));
+    assert!(value.get("host").is_none(), "{value}");
+}
+
+#[test]
+fn delivery_is_visible_only_to_the_sender_and_writes_nothing() {
+    let rig = Rig::new();
+    let (id, _) = rig.queue();
+    let other = rig.sandbox.test_participant("pact");
+    assert_ne!(other, rig.sender);
+    let before = tree_snapshot(rig.root());
+    let refused = rig.delivery_as(&other, &id, true);
+    assert_refused(&refused, "not_found", 66, false);
+    assert_eq!(rig.delivery(&id)["state"], json!("queued"));
+    let mut after = tree_snapshot(rig.root());
+    after.retain(|path, _| !path.to_string_lossy().ends_with(".lock"));
+    let mut before = before;
+    before.retain(|path, _| !path.to_string_lossy().ends_with(".lock"));
+    assert_eq!(after, before, "post delivery is read-only");
+}
+
+#[test]
+fn delivery_reports_a_receipt_conflict() {
+    let rig = Rig::new();
+    let (id, sha) = rig.queue();
+    rig.write_evidence(
+        "pmail-acked",
+        &id,
+        &receipt(&id, &sha, "delivered", None).to_string(),
+    );
+    rig.write_evidence("pmail-conflicts", &id, "{}");
+    let value = rig.delivery(&id);
+    assert_eq!(value["state"], json!("received"));
+    assert_eq!(value["conflict"], json!(true));
+}

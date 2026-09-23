@@ -158,6 +158,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "JSON (post.bridge-deliver.v1), always",
             "bridge-only fenced writer; takes no participant and never touches activity. Exit 0 means a decision: exactly one object with outcome=delivered|rejected|retry. Every other exit (usage error 2, crash, missing binary) is a retry for the bridge. Order: structural checks every attempt (argument grammar, --file a regular file of at most 8 MiB, --source-host not this host's bridge host, sha256 of the file equals --sha256, envelope id/to/address_kind=participant/to_host/from_participant without '@'/from room grammar), then under the participants lock the admission record participants/<id>/imports/<mail-id>.json {v, participant, mail_id, source_host, sha256, from_participant, admitted_at}. A valid record with the same source_host and sha256 is a replay: admission checks are skipped and the inbox file is completed or verified. No record: an existing inbox file is id_collision; otherwise the admission checks run once (from must be a placeholder homed under remote/<source-host>/, the participant must exist and not be ended, the route must not be blocked), then the record is written (the admission point), then the inbox file. Terminal reasons: unknown_participant, ended_participant, blocked_route, to_mismatch, forged_from, id_collision, malformed. Retry reasons: participant_unreadable, inventory_degraded (route policy unreadable), import_record_unreadable, digest_mismatch, fenced, topology_unavailable, io_error",
         ),
+        command(
+            "delivery",
+            "post delivery <mail-id> [--json]",
+            "text; JSON (post.delivery.v1) with --json",
+            "read-only; requires a bound participant and shows only letters that participant sent (anything else, and an id absent from archive/, is not_found, exit 66). Workspace, lineage, and local participant mail is state=unsupported. A participant:<id>@<host> letter is validated against its archive bytes and the bridge's evidence on this host: bridge/pmail-acked/<id>.json (exact keys v, status, origin, host, participant, id, sha256, reason, at; origin = this host, host = to_host, participant and id match, sha256 = archive digest, status delivered with reason null or rejected with a deliver reason) gives received|rejected; else bridge/pmail-published/<id>.json ({v:1, id, host, sha256, commit, at}, written after the push) gives published with commit and age_s; else queued, with blocked_reason/last_error from bridge/pmail-status/<id>.json ({v:1, id, blocked_reason?, last_error?, at?}). A receipt outranks the marker. Any evidence file that exists but does not validate gives state=unknown with evidence_file and evidence_error, never a guess. bridge/pmail-conflicts/<id>.json present sets conflict=true (the first receipt stands)",
+        ),
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
@@ -375,6 +381,25 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
+        ]),
+        delivery: fields(&[
+            "ok",
+            "schema=post.delivery.v1",
+            "id",
+            "state=queued|published|received|rejected|unknown|unsupported",
+            "participant? (the letter's to)",
+            "host? (the letter's to_host)",
+            "sha256? (archive digest)",
+            "conflict",
+            "reason? (rejected: the deliver reason; unsupported: why)",
+            "blocked_reason? (queued)",
+            "last_error? (queued)",
+            "commit? (published)",
+            "published_at? (published)",
+            "age_s? (published: seconds since published_at)",
+            "acked_at? (received|rejected)",
+            "evidence_file? (unknown)",
+            "evidence_error? (unknown)",
         ]),
         bridge: fields(&[
             "deliver: ok=true, schema=post.bridge-deliver.v1, outcome=delivered|rejected|retry, reason (null for delivered), participant, mail_id, source_host, sha256 (computed by post), admitted_at (RFC3339 UTC; non-null exactly for delivered), replay, detail (null for delivered; at most 512 chars)",
