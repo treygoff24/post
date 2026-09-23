@@ -1586,32 +1586,64 @@ fn write_bound_participant(sandbox: &Sandbox, id: &str, workspace: &str) -> Path
     dir
 }
 
+/// F4: the rename moves a mailbox built by real sends — routed letters with
+/// real routing receipts, one consumed — and the recipient's `post inbox`
+/// reads it cleanly under the new name. Legacy formats no current command
+/// writes (room-level cursors.json, bare members.json and profiles.json keys,
+/// a pre-existing `workspace:<new>` cursor key) are planted, because a rename
+/// must still carry them.
 #[test]
 fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
     let sandbox = Sandbox::new();
     create_default_room_paths(&sandbox);
+    let sender_workspace = sandbox.path.join("beta-workspace");
+    fs::create_dir(&sender_workspace).expect("sender workspace dir");
+    register_room(&sandbox, "beta", &sender_workspace);
     let workspace = sandbox.path.join("hq-workspace");
     fs::create_dir(&workspace).expect("workspace dir");
     register_room(&sandbox, "hq", &workspace);
 
-    // The mailbox: inbox, read, legacy cursor + channel state, and routing
-    // receipts — all under <root>/hq/.
+    // The mailbox, built by real commands: two letters to workspace:hq,
+    // routed by the recipient's inbox (publishing routing receipts), the
+    // first one read.
+    let recipient = bind_workspace_participant(&sandbox, "hq-recipient", &workspace, "hq");
+    let sender = bind_workspace_participant(&sandbox, "beta-sender", &sender_workspace, "beta");
+    let first = send_mail_as(
+        &sandbox,
+        &sender,
+        &sender_workspace,
+        "workspace:hq",
+        "first",
+    );
+    let second = send_mail_as(
+        &sandbox,
+        &sender,
+        &sender_workspace,
+        "workspace:hq",
+        "second",
+    );
+    let (listing, _) = inbox_listing(&sandbox, &recipient, &workspace);
+    assert_eq!(listing["unread_count"], 2, "{listing}");
+    assert_success(&sandbox.run_as_participant(
+        &["read", &first, "--json"],
+        &recipient,
+        &workspace,
+    ));
     let home = sandbox.mail_root.join("hq");
-    fs::create_dir_all(home.join("inbox")).expect("inbox");
-    fs::write(home.join("inbox/m1.mail"), "mail one").expect("mail");
-    fs::create_dir_all(home.join("read")).expect("read dir");
-    fs::write(home.join("read/m0.mail"), "mail zero").expect("read mail");
-    fs::create_dir_all(home.join("routing")).expect("routing");
-    fs::write(home.join("routing/r1.json"), "{}").expect("receipt");
+    assert!(home.join(format!("routing/{first}.json")).is_file());
+    assert!(home.join(format!("routing/{second}.json")).is_file());
+    // A legacy room-level cursor file rides along with the directory.
     fs::write(
         home.join("cursors.json"),
         "{\"version\":1,\"mail\":[\"a\"],\"channels\":{}}",
     )
     .expect("legacy cursors");
-    // Immutable history outside the room dir.
-    fs::create_dir_all(sandbox.mail_root.join("archive")).expect("archive");
-    fs::write(sandbox.mail_root.join("archive/a1.mail"), "archived letter")
-        .expect("archive letter");
+    let home_before = tree_bytes(&home);
+    let archive_before = tree_bytes(&sandbox.mail_root.join("archive"));
+    assert!(
+        !archive_before.is_empty(),
+        "real sends archive their letters"
+    );
     let participant_dir = write_bound_participant(&sandbox, "test-p1", "hq");
     // A channel whose legacy members.json names the room.
     let channel_dir = sandbox.mail_root.join("channels/ops");
@@ -1643,10 +1675,12 @@ fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
     assert_eq!(receipt["new"], "hq-mac");
     assert_eq!(receipt["mailbox_moved"], true);
     assert_eq!(receipt["dry_run"], false);
-    // register_room seeds one bound participant; write_bound_participant adds
-    // a second. Only the latter carries a cursors.json.
-    assert_eq!(receipt["rewritten"]["participants"], 2);
-    assert_eq!(receipt["rewritten"]["participant_cursors"], 1);
+    // register_room seeds one participant bound to hq, the recipient is
+    // bound to hq, and write_bound_participant adds a third. The recipient's
+    // read and the planted record carry cursors.json.
+    assert_eq!(receipt["rewritten"]["participants"], 3, "{receipt}");
+    assert_eq!(receipt["rewritten"]["participant_cursors"], 2, "{receipt}");
+    assert_eq!(receipt["rewritten"]["routing_receipts"], 2, "{receipt}");
     assert_eq!(receipt["rewritten"]["channel_members"], 1);
     assert_eq!(receipt["rewritten"]["profiles"], 1);
     let warnings = receipt["warnings"].as_array().expect("warnings array");
@@ -1664,23 +1698,43 @@ fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
         "no bridge warning without a bridge config: {warnings:?}"
     );
 
-    // The mailbox moved byte-for-byte.
+    // The mailbox moved byte-for-byte, except each routing receipt, whose
+    // address now names the new room.
     let new_home = sandbox.mail_root.join("hq-mac");
     assert!(!home.exists(), "old mailbox dir is gone");
+    let home_after = tree_bytes(&new_home);
+    let relative = |tree: &std::collections::BTreeMap<PathBuf, Vec<u8>>, base: &Path| {
+        tree.iter()
+            .map(|(path, bytes)| {
+                (
+                    path.strip_prefix(base).unwrap().to_path_buf(),
+                    bytes.clone(),
+                )
+            })
+            .filter(|(path, _)| !path.starts_with("routing"))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
     assert_eq!(
-        fs::read(new_home.join("inbox/m1.mail")).unwrap(),
-        b"mail one"
+        relative(&home_after, &new_home),
+        relative(&home_before, &home)
     );
-    assert_eq!(
-        fs::read(new_home.join("read/m0.mail")).unwrap(),
-        b"mail zero"
-    );
-    assert_eq!(fs::read(new_home.join("routing/r1.json")).unwrap(), b"{}");
-    // Legacy room-state files ride along unchanged.
-    assert_eq!(
-        fs::read(new_home.join("cursors.json")).unwrap(),
-        b"{\"version\":1,\"mail\":[\"a\"],\"channels\":{}}"
-    );
+    for id in [&first, &second] {
+        let moved: serde_json::Value = serde_json::from_slice(
+            &fs::read(new_home.join(format!("routing/{id}.json"))).expect("moved receipt"),
+        )
+        .expect("receipt json");
+        assert_eq!(
+            moved["address"],
+            serde_json::json!({"kind": "workspace", "name": "hq-mac"})
+        );
+    }
+    // The recipient reads the moved mailbox under the new name: the read
+    // letter stays read, the unread one is unread, nothing is unreadable.
+    let (listing, warnings) = inbox_listing(&sandbox, &recipient, &workspace);
+    assert_eq!(listing["skipped_unreadable"], 0, "{listing}\n{warnings}");
+    assert_eq!(unread_ids(&listing), vec![second.clone()], "{listing}");
+    let reread = sandbox.run_as_participant(&["read", &first, "--json"], &recipient, &workspace);
+    assert_success(&reread);
 
     // Live references point at the new name.
     let participant: serde_json::Value =
@@ -1726,8 +1780,8 @@ fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
     // History is never rewritten: archive, channel messages, channel.json's
     // created_by, and the moved dir's own contents all keep the old name.
     assert_eq!(
-        fs::read(sandbox.mail_root.join("archive/a1.mail")).unwrap(),
-        b"archived letter"
+        tree_bytes(&sandbox.mail_root.join("archive")),
+        archive_before
     );
     assert_eq!(
         fs::read(channel_dir.join("messages/c1.msg")).unwrap(),
