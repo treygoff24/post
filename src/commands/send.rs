@@ -158,6 +158,32 @@ where
         (actor.from.clone(), provenance)
     };
     let sender_address = identity.address;
+    match crate::bridge_topology::resolve_host_qualified(context, &args.to)? {
+        Some(crate::bridge_topology::HostQualified::Remote { id, host }) => {
+            return send_remote(
+                context,
+                RemoteSend {
+                    args,
+                    rooms: &rooms,
+                    actor: &actor,
+                    sender,
+                    provenance,
+                    sender_address,
+                    fix_prefix,
+                    id,
+                    host,
+                },
+                json_output,
+                pretty,
+                read_body,
+                next_id,
+            );
+        }
+        Some(crate::bridge_topology::HostQualified::Local(address)) => {
+            args.to = format!("{}:{}", address.kind.as_str(), address.name);
+        }
+        None => {}
+    }
     let resolved_target = match crate::participant::resolve_target(context, &args.to) {
         Ok(target) => Some(target),
         Err(error) if error.code == ErrorCode::UnknownRoom => None,
@@ -270,6 +296,7 @@ where
             from_participant: Some(actor.participant.id.clone()),
             from_lineage: actor.lineage.clone(),
             address_kind: Some(target.kind.as_str().to_owned()),
+            to_host: None,
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
             sender_address: sender_address.clone(),
@@ -353,6 +380,7 @@ where
                 ok: true,
                 envelope,
                 archived: true,
+                delivery: None,
             },
             pretty,
         )?
@@ -371,7 +399,224 @@ where
     Ok(CommandResult::committed(rendered))
 }
 
-fn ensure_route_allowed(
+/// Everything a host-qualified send carries past sender resolution.
+struct RemoteSend<'a> {
+    args: SendArgs,
+    rooms: &'a RoomMap,
+    actor: &'a crate::participant::Sender,
+    sender: String,
+    provenance: SenderProvenance,
+    sender_address: Option<String>,
+    fix_prefix: String,
+    id: String,
+    host: String,
+}
+
+/// Queue a letter for `participant:<id>@<host>` (design "The sender side").
+/// Nothing is written until the sender, the bridge's capabilities, the
+/// subject, the body, and the local rules all pass; then the letter goes to
+/// `archive/<mail-id>.mail` only. It never enters a workspace inbox, a
+/// participant inbox, or `outbox/`, and it is not routed: the bridge carries
+/// it, and the receipt says `queued`, never delivered.
+fn send_remote<F, G>(
+    context: &Context,
+    send: RemoteSend<'_>,
+    json_output: bool,
+    pretty: bool,
+    read_body: F,
+    mut next_id: G,
+) -> AppResult<CommandResult>
+where
+    F: FnOnce(BodySource<'_>) -> AppResult<String>,
+    G: FnMut(&str, u64) -> AppResult<String>,
+{
+    let RemoteSend {
+        mut args,
+        rooms,
+        actor,
+        sender,
+        provenance,
+        sender_address,
+        fix_prefix,
+        id: recipient,
+        host,
+    } = send;
+    // 1. The sender prerequisite: a real local room to reply to.
+    match output::room_home(context, &sender) {
+        Ok(output::RoomHome::Local) => {}
+        Ok(_) => {
+            return Err(AppError::new(
+                ErrorCode::RemoteSenderUnroutable,
+                format!(
+                    "participant {} sends from '{sender}', which is not a local room; a remote recipient could not reply",
+                    actor.participant.id
+                ),
+                "Bind to a local room first: `post participant bind --workspace <room>`, naming a room from `post rooms` that is not under remote/.",
+            )
+            .input(sender.clone())
+            .reason("sender workspace is not a registered local room"));
+        }
+        Err(error) => {
+            return Err(AppError::new(
+                ErrorCode::ConfigInvalid,
+                format!("cannot establish whether '{sender}' is a local room: {error}"),
+                "Run `post doctor` and repair rooms.json before sending.",
+            ))
+        }
+    }
+    // 2. The capability guard, before anything is written.
+    match crate::bridge_topology::bridge_health(context, std::time::SystemTime::now()) {
+        crate::bridge_topology::BridgeHealth::Ready => {}
+        crate::bridge_topology::BridgeHealth::Unsupported(missing) => {
+            return Err(AppError::new(
+                ErrorCode::BridgeUnsupported,
+                format!(
+                    "this host's running bridge predates participant mail (missing: {})",
+                    missing.join(", ")
+                ),
+                "Upgrade the post bridge on this host, then retry; nothing was written.",
+            )
+            .reason(format!("bridge/health.json lacks {}", missing.join(", "))));
+        }
+        crate::bridge_topology::BridgeHealth::Unavailable(detail) => {
+            return Err(AppError::new(
+                ErrorCode::BridgeStatusUnavailable,
+                format!("cannot establish that this host's bridge carries participant mail: {detail}"),
+                "Check that the post bridge is running (it refreshes bridge/health.json every tick), then retry; nothing was written.",
+            )
+            .reason(detail));
+        }
+    }
+    validate_subject(&args.subject)?;
+    let inline = args.body.take();
+    let body = read_body(BodySource {
+        inline,
+        body_file: args.body_file.as_deref(),
+        file: args.file.as_deref(),
+        fix_prefix: fix_prefix.clone(),
+        oversize: args.oversize,
+    })?;
+    if body.trim().is_empty() {
+        return Err(AppError::new(
+            ErrorCode::EmptyBody,
+            "message body is empty after trimming whitespace",
+            format!(
+                "Retry with `{fix_prefix}` and a non-empty body on stdin (heredoc or pipe), or pass --body-file."
+            ),
+        )
+        .exact_fix(fix_prefix)
+        .input("message body")
+        .reason("empty or whitespace-only"));
+    }
+    let address = format!("participant:{recipient}@{host}");
+    ensure_remote_route_allowed(context, rooms, &sender, &address)?;
+    let profile = crate::profile::stamp_for(context, &actor.participant.id, &sender, rooms);
+    let (id_timestamp, sent) = local_timestamp()?;
+    let archive = context.root.join("archive");
+    fs::create_dir_all(&archive)
+        .map_err(|error| AppError::io("create archive directory", &archive, error))?;
+    let mut queued = None;
+    for attempt in 0..256 {
+        let id = next_id(&id_timestamp, attempt)?;
+        let envelope = Envelope {
+            id: id.clone(),
+            from: sender.clone(),
+            to: recipient.clone(),
+            kind: args.kind,
+            subject: args.subject.clone(),
+            sent: sent.clone(),
+            from_participant: Some(actor.participant.id.clone()),
+            from_lineage: actor.lineage.clone(),
+            address_kind: Some(
+                crate::participant::AddressKind::Participant
+                    .as_str()
+                    .to_owned(),
+            ),
+            to_host: Some(host.clone()),
+            display_name: profile.name.clone(),
+            pfp: profile.pfp.clone(),
+            sender_address: sender_address.clone(),
+            sender_provenance: Some(provenance.as_str().to_owned()),
+        };
+        validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
+        let payload = encode_mail(&envelope, &body)?;
+        let archive_path = archive.join(format!("{id}.mail"));
+        match exclusive_atomic_write(&archive_path, &payload) {
+            Ok(()) => {
+                queued = Some(envelope);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(AppError::io(
+                    "exclusively write archive mail",
+                    &archive_path,
+                    error,
+                ))
+            }
+        }
+    }
+    let envelope = queued.ok_or_else(|| {
+        AppError::new(
+            ErrorCode::IoError,
+            "could not allocate a unique message id after 256 attempts",
+            "Retry the same send command; if this repeats, run `post doctor`.",
+        )
+    })?;
+    let rendered = if json_output {
+        output::json(
+            &SendOutput {
+                ok: true,
+                envelope,
+                archived: true,
+                delivery: Some(output::SendDelivery {
+                    state: "queued".to_owned(),
+                    host,
+                }),
+            },
+            pretty,
+        )?
+    } else {
+        format!(
+            "post: sent {} {} {} -> {address}\npost: queued for {host}; not yet delivered.\npost: check it with: post delivery {}\n",
+            envelope.kind,
+            envelope.id,
+            envelope.from,
+            crate::mailbox::shell_quote(&envelope.id),
+        )
+    };
+    Ok(CommandResult::committed(rendered))
+}
+
+/// Local rules for a remote recipient, whose workspace this host cannot see:
+/// only a rule that blocks this sender (or every sender) to every
+/// destination (`to == "*"`) can apply, and it does. The destination host
+/// enforces its own rules at admission.
+fn ensure_remote_route_allowed(
+    context: &Context,
+    rooms: &RoomMap,
+    sender: &str,
+    address: &str,
+) -> AppResult<()> {
+    let rules = context.load_rules(rooms)?;
+    let Some(rule) = rules
+        .blocked
+        .iter()
+        .find(|rule| (rule.from == "*" || rule.from == sender) && rule.to == "*")
+    else {
+        return Ok(());
+    };
+    Err(AppError::new(
+        ErrorCode::BlockedRoute,
+        format!("route {sender} -> {address} is blocked: {}", rule.reason),
+        "Do not route around this block. Ask the human operator to review rules.json.",
+    )
+    .input(format!("{sender} -> {address}"))
+    .reason(rule.reason.clone())
+    .rule(rule.clone()))
+}
+
+pub(crate) fn ensure_route_allowed(
     context: &Context,
     rooms: &RoomMap,
     sender: &str,

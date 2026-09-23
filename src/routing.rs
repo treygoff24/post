@@ -357,13 +357,7 @@ pub(crate) fn store_addresses(context: &Context) -> Vec<Address> {
 fn canonical_sender_is(context: &Context, address: &Address, id: &str, participant: &str) -> bool {
     let path = inbox_path(context, address).join(format!("{id}.mail"));
     parse_mail(&path).is_ok_and(|mail| {
-        crate::output::authored_locally_by(
-            context,
-            participant,
-            &mail.envelope.from,
-            mail.envelope.from_participant.as_deref(),
-            mail.envelope.sender_provenance.as_deref(),
-        )
+        crate::output::mail_authored_locally_by(context, participant, &mail.envelope)
     })
 }
 
@@ -489,7 +483,7 @@ pub(crate) fn held_ids(context: &Context, address: &Address) -> AppResult<Vec<St
     Ok(pending_summary(context, address)?.held)
 }
 
-fn route_message_locked(
+pub(crate) fn route_message_locked(
     context: &Context,
     address: &Address,
     id: &str,
@@ -563,11 +557,7 @@ fn candidate_recipients(
     // local participant's, who must still receive the message.
     if matches!(address.kind, AddressKind::Workspace | AddressKind::Lineage) {
         if let Some(sender) = envelope.from_participant.as_ref() {
-            if !crate::output::remote_origin(
-                context,
-                &envelope.from,
-                envelope.sender_provenance.as_deref(),
-            ) {
+            if !crate::output::mail_remote_origin(context, envelope) {
                 recipients.retain(|recipient| recipient != sender);
             }
         }

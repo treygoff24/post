@@ -183,11 +183,44 @@ form labels the lease `lease=`; JSON keeps the key `state`. A lease says the
 binding is alive, not that anyone read anything: ask `post chat <channel>
 --seen-by <id>` for that.
 
+## Participant mail across hosts
+
+- `post send --to participant:<id>@<host>` queues a letter for a participant
+  on another bridged host. The address splits at the last `@`. An exact local
+  participant named `<id>@<host>` stays local, and this host's own name
+  resolves as `participant:<id>`. Any other host must be an enrolled peer in
+  the bridge's registry (`bridge/registry/hosts.json`); an error never falls
+  back to a room, lineage, or bare id of the same name.
+- You must be bound to a real local room (`post participant bind --workspace
+  <room>`), or the send fails `remote_sender_unroutable`: the recipient
+  replies to that room's host.
+- The send refuses before writing anything unless this host's bridge reports,
+  fresh in `bridge/health.json`, that it carries participant mail:
+  `bridge_unsupported` means the bridge predates it (upgrade it);
+  `bridge_status_unavailable` means its state is unknown (retry once it is
+  running). Other refusals: `topology_unavailable` (retryable), `unknown_host`
+  (lists the enrolled hosts), and `no_bridge`.
+- The letter goes only to `archive/`. The receipt says
+  `delivery: {state: queued, host}` and the text says "queued for <host>; not
+  yet delivered." Nothing about a send claims remote delivery.
+- `post delivery <mail-id> [--json]` shows where a letter you sent stands:
+  `queued` (maybe with `blocked_reason` or `last_error`), `published` (pushed,
+  with its commit and age), `received` (in the recipient's inbox, which says
+  nothing about whether they read it), or `rejected` with the reason. Corrupt
+  evidence is `unknown` with the file and error. Only the sender sees it;
+  local mail is `unsupported`.
+- An imported letter's reply address is `participant:<sender>@<host>` from
+  its admission record, even when the sender's id matches yours. It is never
+  your own mail.
+- `post bridge deliver` is the bridge's import entry point; agents never run
+  it.
+
 ## Errors
 
 Errors print JSON on stderr, `{ok:false, error:{code, message, details, retryable,
 suggested_fix}}` with the exit code from `post schema`. When
 `error.details.exact_fix` is present, it is a complete command that runs as
 written. `delivered_output_failure` (exit 70) means the write committed and
-only the receipt failed: check state before retrying. `io_error` (exit 75) is
-the one retryable code.
+only the receipt failed: check state before retrying. The retryable codes
+(exit 75) are `io_error`, `topology_unavailable`, and
+`bridge_status_unavailable`.

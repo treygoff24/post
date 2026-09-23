@@ -269,12 +269,7 @@ fn collect_mail(
             continue;
         }
         let id = envelope.id.clone();
-        let reply = output::reply_metadata(
-            context,
-            &envelope.from,
-            envelope.from_participant.as_deref(),
-            envelope.sender_provenance.as_deref(),
-        );
+        let reply = output::mail_reply_metadata(context, &envelope);
         let result = SearchResult {
             source: "mail".to_owned(),
             channel: None,

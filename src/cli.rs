@@ -112,6 +112,48 @@ pub(crate) enum Command {
     /// Emit the output contract compiled into this binary: normalized samples
     /// of the JSON consumers read.
     Contract(ContractArgs),
+    /// Bridge-only entry points. Humans and agents never need these.
+    Bridge(BridgeArgs),
+    /// Show where a host-qualified letter you sent stands: queued, published, received, or rejected.
+    Delivery(DeliveryArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DeliveryArgs {
+    /// The mail id `post send` printed for a participant:<id>@<host> letter.
+    #[arg(value_name = "MAIL_ID", value_parser = NonEmptyStringValueParser::new())]
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BridgeArgs {
+    #[command(subcommand)]
+    pub command: BridgeCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum BridgeCommand {
+    /// Admit one relayed participant letter into its recipient's inbox and print the decision (post.bridge-deliver.v1).
+    Deliver(BridgeDeliverArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BridgeDeliverArgs {
+    /// Recipient participant id on this host.
+    #[arg(long, value_name = "ID")]
+    pub participant: String,
+    /// The peer host whose relay branch carried the letter.
+    #[arg(long, value_name = "HOST")]
+    pub source_host: String,
+    /// The letter's mail id (its pmail file name without .mail).
+    #[arg(long, value_name = "MAIL_ID")]
+    pub mail_id: String,
+    /// Lowercase hex sha256 of the letter bytes, as the bridge computed it.
+    #[arg(long, value_name = "HEX")]
+    pub sha256: String,
+    /// A private regular file holding the letter's exact bytes.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -735,10 +777,11 @@ pub(crate) struct ProfileSetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileShowArgs {
-    /// `participant:<id>` or a participant id; any other name shows that
-    /// workspace's legacy entry (never stamped). Defaults to the acting participant.
-    #[arg(value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
-    pub room: Option<String>,
+    /// The participant whose profile to show: `participant:<id>` or a bare
+    /// participant id. Defaults to the acting participant. A name that is not
+    /// a participant shows that room's legacy entry (never stamped).
+    #[arg(value_name = "PARTICIPANT", value_parser = NonEmptyStringValueParser::new())]
+    pub participant: Option<String>,
 }
 
 #[derive(Debug, Args)]

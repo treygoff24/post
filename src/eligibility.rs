@@ -366,13 +366,7 @@ pub(crate) fn envelope_is_own(
     participant: &Participant,
     envelope: &Envelope,
 ) -> bool {
-    crate::output::authored_locally_by(
-        context,
-        &participant.id,
-        &envelope.from,
-        envelope.from_participant.as_deref(),
-        envelope.sender_provenance.as_deref(),
-    )
+    crate::output::mail_authored_locally_by(context, &participant.id, envelope)
 }
 
 /// Channel counterpart of `envelope_is_own`.

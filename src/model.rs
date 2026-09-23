@@ -42,6 +42,11 @@ pub struct Envelope {
     pub from_lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address_kind: Option<String>,
+    /// Destination host of a host-qualified participant letter
+    /// (`participant:<id>@<host>`). Absent on every local and workspace
+    /// letter; older readers ignore it (no `deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_host: Option<String>,
     /// Sender's display name as of send time (presentation only; identity
     /// is always `from`). Absent when the sender had no profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]

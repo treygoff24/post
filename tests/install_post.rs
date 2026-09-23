@@ -23,13 +23,22 @@ const SMOKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-smoke.
 const STUB_SMOKE: &str = r#"#!/usr/bin/env bash
 [ "$1" = --results ] || { echo "stub smoke: expected --results" >&2; exit 2; }
 results="$2"
+line() { printf '{"check": "%s", "result": "pass", "detail": ""}\n' "$1"; }
+# The six checks the real smoke reports, each once, in its order.
+six() {
+  for id in setup version samples doorbell_parsers doorbell_contract porch; do line "$id"; done
+}
 case "${FAKE_SMOKE:-pass}" in
-  pass)
-    printf '%s\n' '{"check": "setup", "result": "pass", "detail": ""}' \
-      '{"check": "porch", "result": "pass", "detail": ""}' > "$results" ;;
+  pass) six > "$results" ;;
   allowed-skip)
-    printf '%s\n' '{"check": "setup", "result": "pass", "detail": ""}' \
-      '{"check": "porch", "result": "skipped", "detail": "no porch3", "allowed": true}' > "$results" ;;
+    six | sed '$d' > "$results"
+    printf '%s\n' '{"check": "porch", "result": "skipped", "detail": "no porch3", "allowed": true}' >> "$results" ;;
+  drop-contract) six | grep -v doorbell_contract > "$results" ;;
+  unknown-id) { six; line bogus; } > "$results" ;;
+  duplicate) { six; line setup; } > "$results" ;;
+  skip-version)
+    six | grep -v '"version"' > "$results"
+    printf '%s\n' '{"check": "version", "result": "skipped", "detail": "x", "allowed": true}' >> "$results" ;;
   silent) : > "$results" ;;
   lying)
     printf '%s\n' '{"check": "porch", "result": "fail", "detail": "launch check failed"}' > "$results" ;;
@@ -391,8 +400,8 @@ fn an_allowed_smoke_skip_is_recorded_as_pass_with_skips() {
     assert_code(&output, 0);
     let receipt = rig.receipt();
     assert_eq!(receipt["smoke_verdict"], "pass_with_skips");
-    assert_eq!(receipt["smoke_checks"][1]["check"], "porch");
-    assert_eq!(receipt["smoke_checks"][1]["result"], "skipped");
+    assert_eq!(receipt["smoke_checks"][5]["check"], "porch");
+    assert_eq!(receipt["smoke_checks"][5]["result"], "skipped");
 }
 
 #[test]
@@ -402,7 +411,44 @@ fn a_full_smoke_pass_is_recorded_per_check() {
     assert_code(&rig.run(&[]), 0);
     let receipt = rig.receipt();
     assert_eq!(receipt["smoke_verdict"], "pass");
-    assert_eq!(receipt["smoke_checks"].as_array().expect("checks").len(), 2);
+    let checks: Vec<&str> = receipt["smoke_checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .map(|check| check["check"].as_str().expect("check id"))
+        .collect();
+    assert_eq!(
+        checks,
+        [
+            "setup",
+            "version",
+            "samples",
+            "doorbell_parsers",
+            "doorbell_contract",
+            "porch"
+        ]
+    );
+}
+
+/// The gate knows the six checks: a smoke that exits 0 while one is missing,
+/// repeated, unknown, or skipped (other than porch) installs nothing.
+#[test]
+fn a_smoke_missing_a_check_or_reporting_an_unknown_one_installs_nothing() {
+    for (mode, why) in [
+        ("drop-contract", "doorbell_contract"),
+        ("unknown-id", "bogus"),
+        ("duplicate", "setup"),
+        ("skip-version", "version"),
+    ] {
+        let rig = Rig::new();
+        let live = rig.live(mode);
+        let output = rig.run(&[("FAKE_SMOKE", mode)]);
+        assert_code(&output, 3);
+        assert!(stderr(&output).contains(why), "{mode}: {}", stderr(&output));
+        assert_eq!(fs::read(rig.target()).expect("post"), live, "{mode}");
+        assert_eq!(rig.bin_entries(), ["post"], "{mode}");
+        assert!(!rig.receipt.exists(), "{mode}");
+    }
 }
 
 #[test]
@@ -560,6 +606,27 @@ fn served_skill_verdicts_map_to_distinct_exit_codes() {
             "{verify}: installed"
         );
         assert_eq!(rig.receipt()["manifest_verdict"], verdict, "{verify}");
+    }
+}
+
+/// A dry run exits with the code the real install would, and still writes
+/// nothing whatever that code is.
+#[test]
+fn a_dry_run_exits_with_the_install_outcome_code_and_writes_nothing() {
+    for (verify, code) in [("match", 0), ("drift", 1), ("error", 4), ("unverified", 4)] {
+        let rig = Rig::new();
+        let live = rig.live(verify);
+        let before = rig.bin_entries();
+        let output = rig.run_with(None, &[("FAKE_VERIFY", verify)], &["--dry-run"]);
+        assert_code(&output, code);
+        assert!(
+            stderr(&output).contains(&format!("would exit {code}")),
+            "{verify}: {}",
+            stderr(&output)
+        );
+        assert_eq!(rig.bin_entries(), before, "{verify}");
+        assert_eq!(fs::read(rig.target()).expect("post"), live, "{verify}");
+        assert!(!rig.receipt.exists(), "{verify}");
     }
 }
 

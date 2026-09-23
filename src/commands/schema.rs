@@ -58,9 +58,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "send",
-            "post send --to <workspace:<room>|lineage:<name>|participant:<id>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | --body-file - | stdin)",
+            "post send --to <workspace:<room>|lineage:<name>|participant:<id>|participant:<id>@<host>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | --body-file - | stdin)",
             "text; JSON with --json",
-            "atomically writes the resolved address's canonical inbox plus archive/<id>.mail, then publishes an atomic routing receipt when recipients exist; workspace/lineage fan-out suppresses only the sending local participant (remote-origin mail never excludes a local id), while an explicit participant:<self> target is readable; subjects over 1 KiB fail, body forms are exclusive, and --from that disagrees with the bound reply address is refused",
+            "atomically writes the resolved address's canonical inbox plus archive/<id>.mail, then publishes an atomic routing receipt when recipients exist; workspace/lineage fan-out suppresses only the sending local participant (remote-origin mail never excludes a local id), while an explicit participant:<self> target is readable; subjects over 1 KiB fail, body forms are exclusive, and --from that disagrees with the bound reply address is refused; participant:<id>@<host> (split at the last @; an exact local participant record of that full name stays local; this host's bridge host resolves as participant:<id>) queues a letter for an enrolled peer host: the sender must be bound to a registered local room (remote_sender_unroutable otherwise), bridge/health.json must be fresh (ticked_at within 3x interval_s) and list typed-outbound-exclusion and participant-mail-v1 (bridge_unsupported when a fresh file lacks one; retryable bridge_status_unavailable when missing, malformed, or stale), and a local rule blocking this sender (or *) to * applies; the letter (to=<id>, address_kind=participant, to_host=<host>) is written only to archive/<id>.mail, never to a workspace or participant inbox or outbox/, is not routed, and the receipt says delivery.state=queued; the enrolled set is bridge/registry/hosts.json minus this host, intersected with bridge/config.json peers when non-empty, with no fallback to config peers (retryable topology_unavailable when the registry or config is missing or invalid; unknown_host lists the enrolled hosts in details.matches; no_bridge without bridge/config.json); a host-qualified error never falls back to a room, lineage, or bare id",
         ),
         command(
             "chat",
@@ -106,7 +106,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "profile",
-            "post profile [show [<room>]] | post profile set [--name <name>] [--pfp <emoji>] | post profile clear | post profile list [--json]",
+            "post profile [show [<participant>]] | post profile set [--name <name>] [--pfp <emoji>] | post profile clear | post profile list [--json]",
             "JSON (list: text, JSON with --json)",
             "presentation only — display name and pfp never affect identity, auth, routing, blocks, cursors, or signed-message verification, and every render path keeps the immutable [participant] and (room-id) suffixes visible; a profile belongs to ONE participant: set/clear act on the acting participant and atomically update profiles.json under the rooms lock, keyed participant:<id> (bare workspace keys are legacy, shared by everyone in the workspace, and never stamp; doctor reports them, doctor --fix migrates one to a workspace's sole participant, and a set from that workspace retires it); names are <=32 chars, refuse control/bidi/line-separator characters, and may not imitate the signed owner's room id (legacy fallback reserves 'trey'; feature-absent reserves nothing) or another room id (NFKC skeleton check); pfp is exactly one emoji grapheme, unique across participants and legacy rooms; profiles are stamped into envelopes at send time (renames never rewrite history) after re-validation, so hand-edited registry values never stamp (set also drops, with a warning, a preserved stored field that no longer validates); text bylines render the stamped profile, else the lineage, always with the participant id; a name, pfp, or clear change announces itself as a 'profile' event naming the participant in every channel the room belongs to, with the channel list resolved before the registry commit so a listing failure fails pre-commit; list is read-only and reports every registry entry with its holder, workspace, name, pfp, lease, and holds_sigil, computed with the same predicate set refuses on (a participant entry while its lease is active, a legacy entry while its room is registered), so occupancy is lease-dependent and can change before a set",
         ),
@@ -151,6 +151,18 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "post contract samples [--dir <path>] | post contract skill-manifest [--verify <path>]",
             "JSON",
             "store-free: reads no mailbox and needs no participant; samples prints the normalized output samples compiled into this binary (contract/samples/, produced by the real commands in the test suite: ids, timestamps, paths, digests, and build_sha replaced by same-format stand-ins, field presence, types, and enum values kept) as one object keyed by file name; --dir <path> creates the directory if missing and writes each sample as <path>/<name>, replacing a same-named file whole, so a consumer's contract tests run against the binary it will actually call; skill-manifest prints the sha256 of every served skill file (skills/post: SKILL.md, references/, hooks/, agents/; dot-files excluded) computed when this binary was built -- an install receipt, not a runtime check; --verify <path> checks a served skill directory against it and records the served root's kind: symlink (checked through the files it resolves to) or copy (checked as served; a file whose source carries skill-render fence markers and differs is listed as rendered_unverified and makes the verdict unverified, not match, because the rendering is not checked); exit 0 on match, 1 on drift (a changed, missing, or extra covered file) or unverified, and an error envelope when the path cannot be read",
+        ),
+        command(
+            "bridge",
+            "post bridge deliver --participant <id> --source-host <host> --mail-id <mail-id> --sha256 <hex> --file <path> [--json]",
+            "JSON (post.bridge-deliver.v1), always",
+            "bridge-only fenced writer; takes no participant and never touches activity. Exit 0 means a decision: exactly one object with outcome=delivered|rejected|retry. Every other exit (usage error 2, crash, missing binary) is a retry for the bridge. Order: structural checks every attempt (argument grammar, --file a regular file of at most 8 MiB, --source-host not this host's bridge host, sha256 of the file equals --sha256, envelope id/to/address_kind=participant/to_host/from_participant without '@'/from room grammar), then under the participants lock the admission record participants/<id>/imports/<mail-id>.json {v, participant, mail_id, source_host, sha256, from_participant, admitted_at}. A valid record with the same source_host and sha256 is a replay: admission checks are skipped and the inbox file is completed or verified. No record: an existing inbox file is id_collision; otherwise the admission checks run once (from must be a placeholder homed under remote/<source-host>/, the participant must exist and not be ended, the route must not be blocked), then the record is written (the admission point), then the inbox file. Terminal reasons: unknown_participant, ended_participant, blocked_route, to_mismatch, forged_from, id_collision, malformed. Retry reasons: participant_unreadable, inventory_degraded (route policy unreadable), import_record_unreadable, digest_mismatch, fenced, topology_unavailable, io_error",
+        ),
+        command(
+            "delivery",
+            "post delivery <mail-id> [--json]",
+            "text; JSON (post.delivery.v1) with --json",
+            "read-only; requires a bound participant and shows only letters that participant sent (anything else, and an id absent from archive/, is not_found, exit 66). Workspace, lineage, and local participant mail is state=unsupported. A participant:<id>@<host> letter is validated against its archive bytes and the bridge's evidence on this host: bridge/pmail-acked/<id>.json (exact keys v, status, origin, host, participant, id, sha256, reason, at; origin = this host, host = to_host, participant and id match, sha256 = archive digest, status delivered with reason null or rejected with a terminal reason: malformed, to_mismatch, forged_from, unknown_participant, ended_participant, blocked_route, id_collision, or, decided by the destination bridge before deliver runs, name_collision or unpublished_sender) gives received|rejected; else bridge/pmail-published/<id>.json ({v:1, id, host, sha256, commit, at}, written after the push) gives published with commit and age_s; else queued, with blocked_reason/last_error from bridge/pmail-status/<id>.json ({v:1, id, blocked_reason?, last_error?, at?}). A receipt outranks the marker. Any evidence file that exists but does not validate gives state=unknown with evidence_file and evidence_error, never a guess. bridge/pmail-conflicts/<id>.json present sets conflict=true (the first receipt stands)",
         ),
     ];
     let output_shapes = OutputShapes {
@@ -262,7 +274,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "environment",
             "owner (state: configured|legacy|none, wire_grammar, note?, owner?: {room, sidecar_dir, allowed_signers, principal, namespace, marker, label})",
         ]),
-        send_json: fields(&["ok", "envelope", "archived"]),
+        send_json: fields(&[
+            "ok",
+            "envelope",
+            "archived",
+            "delivery? ({state=queued, host}; participant:<id>@<host> sends only; never claims remote delivery)",
+        ]),
         chat_join: fields(&[
             "ok",
             "channel",
@@ -364,6 +381,28 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
+        ]),
+        delivery: fields(&[
+            "ok",
+            "schema=post.delivery.v1",
+            "id",
+            "state=queued|published|received|rejected|unknown|unsupported",
+            "participant? (the letter's to)",
+            "host? (the letter's to_host)",
+            "sha256? (archive digest)",
+            "conflict",
+            "reason? (rejected: the terminal reason; unsupported: why)",
+            "blocked_reason? (queued)",
+            "last_error? (queued)",
+            "commit? (published)",
+            "published_at? (published)",
+            "age_s? (published: seconds since published_at)",
+            "acked_at? (received|rejected)",
+            "evidence_file? (unknown)",
+            "evidence_error? (unknown)",
+        ]),
+        bridge: fields(&[
+            "deliver: ok=true, schema=post.bridge-deliver.v1, outcome=delivered|rejected|retry, reason (null for delivered), participant, mail_id, source_host, sha256 (computed by post), admitted_at (RFC3339 UTC; non-null exactly for delivered), replay, detail (null for delivered; at most 512 chars)",
         ]),
         contract: fields(&[
             "samples: ok, samples{<file name>: <sample text>}",

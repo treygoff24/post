@@ -589,6 +589,30 @@ pub(crate) fn parse_mail(path: &Path) -> AppResult<ParsedMail> {
     File::open(path)
         .and_then(|mut file| file.read_to_string(&mut raw))
         .map_err(|error| AppError::io("read mail file", path, error))?;
+    let parsed = parse_mail_text(path, &raw)?;
+    if path.file_stem().and_then(|value| value.to_str()) != Some(parsed.envelope.id.as_str()) {
+        return Err(AppError::config(
+            path,
+            format!(
+                "mail filename must be '{}.mail' to match envelope id '{}'",
+                parsed.envelope.id, parsed.envelope.id
+            ),
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Parse mail bytes that are not (yet) at their canonical path, such as a
+/// bridge's temporary file. `label` names the source in errors. Every check
+/// `parse_mail` makes applies except the filename/id match, which the caller
+/// replaces with its own id check.
+pub(crate) fn parse_mail_bytes(label: &Path, bytes: &[u8]) -> AppResult<ParsedMail> {
+    let raw = std::str::from_utf8(bytes)
+        .map_err(|error| AppError::config(label, format!("mail is not UTF-8: {error}")))?;
+    parse_mail_text(label, raw)
+}
+
+fn parse_mail_text(path: &Path, raw: &str) -> AppResult<ParsedMail> {
     let (head, body) = raw.split_once("\n---\n").ok_or_else(|| {
         AppError::config(
             path,
@@ -598,15 +622,6 @@ pub(crate) fn parse_mail(path: &Path) -> AppResult<ParsedMail> {
     let envelope: Envelope = serde_json::from_str(head)
         .map_err(|error| AppError::config(path, format!("malformed envelope JSON: {error}")))?;
     validate_envelope(path, &envelope)?;
-    if path.file_stem().and_then(|value| value.to_str()) != Some(envelope.id.as_str()) {
-        return Err(AppError::config(
-            path,
-            format!(
-                "mail filename must be '{}.mail' to match envelope id '{}'",
-                envelope.id, envelope.id
-            ),
-        ));
-    }
     Ok(ParsedMail {
         envelope,
         body: body.to_owned(),

@@ -36,12 +36,7 @@ struct InboxItemV2 {
 
 impl InboxItemV2 {
     fn new(context: &Context, envelope: Envelope) -> Self {
-        let reply = output::reply_metadata(
-            context,
-            &envelope.from,
-            envelope.from_participant.as_deref(),
-            envelope.sender_provenance.as_deref(),
-        );
+        let reply = output::mail_reply_metadata(context, &envelope);
         Self {
             id: envelope.id,
             from: envelope.from,

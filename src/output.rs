@@ -170,7 +170,13 @@ pub(crate) fn render_reply_metadata(
     participant: Option<&str>,
     shared: &str,
 ) {
-    let participant = if origin == "local" { participant } else { None };
+    // A remote origin may carry only a host-qualified participant address,
+    // which comes from an admission record (`mail_reply_metadata`).
+    let participant = match origin {
+        "local" => participant,
+        "remote" => participant.filter(|address| address.contains('@')),
+        _ => None,
+    };
     rendered.push_str(&format!(
         "reply={}\n",
         sanitize_text_header(reply_address(participant, shared))
@@ -203,6 +209,63 @@ pub(crate) fn reply_metadata(
         participant: local.then(|| format!("participant:{}", from_participant.unwrap())),
         shared: from.to_owned(),
     }
+}
+
+/// Reply metadata for one mail envelope. An imported participant letter's
+/// origin comes from its admission record (`imports::import_origin`): the
+/// private reply is `participant:<from_participant>@<source_host>`, and an
+/// unavailable origin omits it. Every other letter uses `reply_metadata`.
+pub(crate) fn mail_reply_metadata(
+    context: &crate::mailbox::Context,
+    envelope: &Envelope,
+) -> ReplyMetadata {
+    match crate::imports::import_origin(context, envelope) {
+        Some(crate::imports::ImportOrigin::Remote { host, participant }) => ReplyMetadata {
+            origin: "remote".to_owned(),
+            participant: Some(format!("participant:{participant}@{host}")),
+            shared: envelope.from.clone(),
+        },
+        Some(crate::imports::ImportOrigin::Unavailable) => ReplyMetadata {
+            origin: "unknown".to_owned(),
+            participant: None,
+            shared: envelope.from.clone(),
+        },
+        None => reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        ),
+    }
+}
+
+/// `remote_origin` for a mail envelope: import evidence (even unavailable
+/// evidence) is remote, never local.
+pub(crate) fn mail_remote_origin(context: &crate::mailbox::Context, envelope: &Envelope) -> bool {
+    crate::imports::import_origin(context, envelope).is_some()
+        || remote_origin(
+            context,
+            &envelope.from,
+            envelope.sender_provenance.as_deref(),
+        )
+}
+
+/// `authored_locally_by` for a mail envelope. An imported letter is never a
+/// local participant's own, even when a remote host minted the same id.
+pub(crate) fn mail_authored_locally_by(
+    context: &crate::mailbox::Context,
+    participant: &str,
+    envelope: &Envelope,
+) -> bool {
+    envelope.from_participant.as_deref() == Some(participant)
+        && crate::imports::import_origin(context, envelope).is_none()
+        && authored_locally_by(
+            context,
+            participant,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        )
 }
 
 /// Whether a message carries remote-origin evidence: a bridge provenance
@@ -260,19 +323,64 @@ pub(crate) fn remote_workspace(context: &crate::mailbox::Context, workspace: &st
 /// `POST_MAIL_ROOT` or `HOME` gives the same split, so a lexical comparison of
 /// one spelling against the other would read a placeholder as local.
 fn stored_path_is_remote(path: &Path, raw_root: &Path, canonical_root: &Path) -> bool {
-    fn under(path: &Path, root: &Path) -> bool {
-        let Ok(relative) = path.strip_prefix(root.join("remote")) else {
-            return false;
-        };
+    stored_path_remote_host(path, raw_root, canonical_root).is_some()
+}
+
+/// The `<host>` component of a stored path under `<root>/remote/<host>/...`,
+/// by the same three spellings `stored_path_is_remote` accepts.
+fn stored_path_remote_host(path: &Path, raw_root: &Path, canonical_root: &Path) -> Option<String> {
+    fn under(path: &Path, root: &Path) -> Option<String> {
+        let relative = path.strip_prefix(root.join("remote")).ok()?;
         let components = relative.components().collect::<Vec<_>>();
-        components.len() >= 2
-            && components
-                .iter()
-                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        let normal = components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+        if components.len() < 2 || !normal {
+            return None;
+        }
+        components[0].as_os_str().to_str().map(str::to_owned)
     }
     under(path, raw_root)
-        || under(path, canonical_root)
-        || under(&canonicalize_existing_prefix(path), canonical_root)
+        .or_else(|| under(path, canonical_root))
+        .or_else(|| under(&canonicalize_existing_prefix(path), canonical_root))
+}
+
+/// Where a room name is homed, for trust fact 2 (a bridged `from` must be a
+/// placeholder of the host that sent it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomHome {
+    /// Not in rooms.json.
+    Unregistered,
+    /// Registered at a path outside `<root>/remote/`.
+    Local,
+    /// Registered under `<root>/remote/<host>/...`.
+    Placeholder(String),
+}
+
+/// Look up where `room` is homed. Fails closed like `remote_workspace`: a
+/// rooms.json that is missing or cannot be loaded is an error, never
+/// "unregistered" (Aster ruling 20260923-052555).
+pub(crate) fn room_home(context: &crate::mailbox::Context, room: &str) -> Result<RoomHome, String> {
+    let path = context.root.join("rooms.json");
+    match std::fs::metadata(&path) {
+        Ok(_) => {}
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    }
+    let rooms = context.load_rooms().map_err(|error| error.message)?;
+    let Some(stored) = rooms.get(room) else {
+        return Ok(RoomHome::Unregistered);
+    };
+    let expanded = context
+        .expand_room_path(stored)
+        .map_err(|reason| format!("room '{room}' has an invalid path: {reason}"))?;
+    let canonical_root =
+        std::fs::canonicalize(&context.root).unwrap_or_else(|_| context.root.clone());
+    Ok(
+        match stored_path_remote_host(&expanded, &context.root, &canonical_root) {
+            Some(host) => RoomHome::Placeholder(host),
+            None => RoomHome::Local,
+        },
+    )
 }
 
 /// Canonicalize the longest existing ancestor of `path` and re-append the
@@ -402,6 +510,17 @@ pub struct SendOutput {
     pub ok: bool,
     pub envelope: Envelope,
     pub archived: bool,
+    /// Present only for a host-qualified send: the letter is queued for the
+    /// bridge, and this receipt never claims remote delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SendDelivery>,
+}
+
+/// Delivery state at send time for a host-qualified letter: always `queued`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendDelivery {
+    pub state: String,
+    pub host: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -590,12 +709,7 @@ impl MessageEnvelope {
         pending: bool,
         address: Option<&crate::participant::Address>,
     ) -> Self {
-        let reply = reply_metadata(
-            context,
-            &envelope.from,
-            envelope.from_participant.as_deref(),
-            envelope.sender_provenance.as_deref(),
-        );
+        let reply = mail_reply_metadata(context, &envelope);
         Self {
             envelope,
             origin: reply.origin,
@@ -1056,12 +1170,7 @@ impl InboxItem {
         envelope: Envelope,
         pending: bool,
     ) -> Self {
-        let reply = reply_metadata(
-            context,
-            &envelope.from,
-            envelope.from_participant.as_deref(),
-            envelope.sender_provenance.as_deref(),
-        );
+        let reply = mail_reply_metadata(context, &envelope);
         let mut item = Self::from(envelope);
         item.origin = reply.origin;
         item.reply_to_participant = reply.participant;
@@ -1630,6 +1739,8 @@ pub struct OutputShapes {
     pub watch: Vec<String>,
     pub who: Vec<String>,
     pub contract: Vec<String>,
+    pub delivery: Vec<String>,
+    pub bridge: Vec<String>,
 }
 
 /// The resolved signed owner as exposed by `post schema` (A0a Decision 6):

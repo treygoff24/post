@@ -75,7 +75,7 @@ pub(super) fn run(
         Some(ProfileCommand::Show(args)) => show(context, args, pretty),
         Some(ProfileCommand::Clear) => clear(context, pretty),
         Some(ProfileCommand::List) => list(context, json, pretty),
-        None => show(context, ProfileShowArgs { room: None }, pretty),
+        None => show(context, ProfileShowArgs { participant: None }, pretty),
     }
 }
 
@@ -196,7 +196,7 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
     // Target resolution: none = the acting participant; `participant:<id>`
     // or a bare participant id with an entry = that participant; any other
     // bare name = a legacy workspace-keyed entry (shown, never stamped).
-    let (room, key, participant, legacy) = match args.room {
+    let (room, key, participant, legacy) = match args.participant {
         None => {
             // Read-only and binding-free: an unbound shell still resolves its
             // cwd room and sees that room's legacy entry (never stamped).
