@@ -481,7 +481,9 @@ their existing success semantics.
   `rooms.json` last. The `rooms.json` write is inside the rollback: any
   failure up to and including it restores every rewritten file to its
   original bytes and moves the directory back. If a restore itself fails,
-  stderr names each file it could not restore and the journal below stays.
+  or the mailbox cannot move back because `<root>/<old>` exists again,
+  stderr says so, the journal below stays, and the error's fix is the
+  resume command (which then refuses on the recreated `<root>/<old>`).
   Before its first store change the rename atomically writes
   `<root>/rename-journal.json` (`{"v":1,"old":…,"new":…,"started_at":…}`),
   and it removes the journal after `rooms.json` commits or a clean rollback

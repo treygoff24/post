@@ -1193,10 +1193,12 @@ fn apply_rename(
     commit: impl FnOnce() -> AppResult<()>,
 ) -> Result<(), RenameFailure> {
     let mut applied = 0usize;
+    let mut moved = false;
     let outcome = (|| -> AppResult<()> {
         if plan.dir_move.is_some() {
             fs::rename(old_home, new_home)
                 .map_err(|error| AppError::io("move room mailbox", new_home, error))?;
+            moved = true;
         }
         for write in &plan.writes {
             crate::mailbox::atomic_replace(&write.path, &write.updated).map_err(|error| {
@@ -1219,8 +1221,18 @@ fn apply_rename(
             );
         }
     }
-    if plan.dir_move.is_some() && !old_home.exists() && new_home.exists() {
-        if let Err(restore) = fs::rename(new_home, old_home) {
+    if moved {
+        // Something recreated `<old>` after the move (an out-of-repo writer):
+        // moving back would merge or fail, so the rollback is incomplete and
+        // the journal must stay for the resume's recreated-old refusal.
+        if fs::symlink_metadata(old_home).is_ok() {
+            rolled_back = false;
+            eprintln!(
+                "post: warning: rollback could not move the mailbox back: {} exists again; the mail stays at {}",
+                old_home.display(),
+                new_home.display()
+            );
+        } else if let Err(restore) = fs::rename(new_home, old_home) {
             rolled_back = false;
             eprintln!(
                 "post: warning: rollback could not move the mailbox back to {}: {restore}",
@@ -1473,6 +1485,57 @@ fn learned_host_suffixes(rooms: &RoomMap, placeholders: &BTreeMap<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{test_root, trash_test_root};
+
+    /// H1: when `<old>` exists again at rollback time (an out-of-repo writer
+    /// recreated it after the move), the mailbox cannot move back. The
+    /// rollback must report itself incomplete, so the caller keeps the
+    /// journal, and must leave both directories untouched rather than merge.
+    #[test]
+    fn rollback_that_cannot_move_the_mailbox_back_is_not_clean() {
+        let root = test_root("rename-rollback");
+        let old_home = root.join("alpha");
+        let new_home = root.join("alpha2");
+        fs::create_dir_all(old_home.join("inbox")).expect("old inbox");
+        fs::write(old_home.join("inbox/m1.mail"), "moved mail").expect("mail");
+        let plan = RenamePlan {
+            dir_move: Some((old_home.clone(), new_home.clone())),
+            ..RenamePlan::default()
+        };
+        let failure = apply_rename(&plan, &old_home, &new_home, || {
+            fs::create_dir_all(old_home.join("inbox")).expect("recreate old");
+            fs::write(old_home.join("inbox/late.mail"), "late").expect("late mail");
+            Err(AppError::config(
+                &root.join("rooms.json"),
+                "forced commit failure",
+            ))
+        })
+        .expect_err("the commit failed");
+        assert!(
+            !failure.rolled_back,
+            "a skipped move-back is a failed rollback"
+        );
+        assert_eq!(
+            fs::read(new_home.join("inbox/m1.mail")).unwrap(),
+            b"moved mail"
+        );
+        assert_eq!(fs::read(old_home.join("inbox/late.mail")).unwrap(), b"late");
+        assert!(!old_home.join("inbox/m1.mail").exists(), "never merged");
+
+        // Control: with nothing recreated, the same failure rolls back clean.
+        fs::remove_dir_all(&old_home).expect("clear");
+        fs::rename(&new_home, &old_home).expect("reset");
+        let failure = apply_rename(&plan, &old_home, &new_home, || {
+            Err(AppError::config(
+                &root.join("rooms.json"),
+                "forced commit failure",
+            ))
+        })
+        .expect_err("the commit failed");
+        assert!(failure.rolled_back);
+        assert!(old_home.join("inbox/m1.mail").is_file() && !new_home.exists());
+        trash_test_root(&root);
+    }
 
     /// Rooms at `/workspaces/<name>`: a directory named for the whole room
     /// name, so no suffix vote comes from these.
