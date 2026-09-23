@@ -69,6 +69,12 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- Own-message and sender-exclusion checks are origin-aware. A message with
+  remote-origin evidence (a bridge `sender_provenance`, or a `from` workspace
+  registered under `remote/<host>/`) is never a local participant's own, and
+  its `from_participant` never drops a local recipient, so a bridged sender
+  whose id collides with a local participant's no longer hides the message
+  from that participant.
 - Participant cursor reads open `cursors.json` once (`O_NOFOLLOW`) and check
   and read that same descriptor, so a file replaced between the check and the
   read can no longer pair one file's verdict with another's content. Reads

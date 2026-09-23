@@ -303,7 +303,7 @@ pub(crate) fn received_addresses(
         if !named {
             for path in message_files(&inbox_path(context, &address))? {
                 if parse_mail(&path).is_ok_and(|mail| {
-                    mail.envelope.from_participant.as_deref() == Some(participant.id.as_str())
+                    super::eligibility::envelope_is_own(context, participant, &mail.envelope)
                 }) {
                     named = true;
                     break;
@@ -356,8 +356,15 @@ pub(crate) fn store_addresses(context: &Context) -> Vec<Address> {
 
 fn canonical_sender_is(context: &Context, address: &Address, id: &str, participant: &str) -> bool {
     let path = inbox_path(context, address).join(format!("{id}.mail"));
-    parse_mail(&path)
-        .is_ok_and(|mail| mail.envelope.from_participant.as_deref() == Some(participant))
+    parse_mail(&path).is_ok_and(|mail| {
+        crate::output::authored_locally_by(
+            context,
+            participant,
+            &mail.envelope.from,
+            mail.envelope.from_participant.as_deref(),
+            mail.envelope.sender_provenance.as_deref(),
+        )
+    })
 }
 
 fn collect_nested_addresses(root: &Path, kind: AddressKind, addresses: &mut Vec<Address>) {
@@ -424,7 +431,7 @@ fn provisional_pending(
             continue;
         }
         if address.kind != AddressKind::Participant
-            && parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str())
+            && super::eligibility::envelope_is_own(context, participant, &parsed.envelope)
         {
             continue;
         }
@@ -551,9 +558,18 @@ fn candidate_recipients(
     envelope: &crate::model::Envelope,
 ) -> AppResult<Vec<String>> {
     let mut recipients = resolved_recipients(context, address)?;
+    // The sender is not its own recipient, but only a LOCAL sender: a
+    // remote-origin sender's id is host-local to its origin and may equal a
+    // local participant's, who must still receive the message.
     if matches!(address.kind, AddressKind::Workspace | AddressKind::Lineage) {
         if let Some(sender) = envelope.from_participant.as_ref() {
-            recipients.retain(|recipient| recipient != sender);
+            if !crate::output::remote_origin(
+                context,
+                &envelope.from,
+                envelope.sender_provenance.as_deref(),
+            ) {
+                recipients.retain(|recipient| recipient != sender);
+            }
         }
     }
     Ok(recipients)

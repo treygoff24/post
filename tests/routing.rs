@@ -2804,3 +2804,169 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     walk(root, root, &mut out);
     out
 }
+
+fn register_remote_placeholder(sandbox: &Sandbox, name: &str) {
+    let remote = sandbox.mail_root.join("remote/peer-host").join(name);
+    fs::create_dir_all(&remote).expect("remote placeholder");
+    assert_success(&sandbox.run(&["rooms", "add", name, remote.to_string_lossy().as_ref()]));
+}
+
+fn snapshot_ids(sandbox: &Sandbox, participant: &str, cwd: &Path) -> Vec<String> {
+    let watch = sandbox.run_as_participant(&["watch", "--snapshot", "--json"], participant, cwd);
+    assert_success(&watch);
+    String::from_utf8_lossy(&watch.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("watch event JSON"))
+        .filter_map(|event| event["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// R7: participant ids are host-local. Mail whose remote-origin evidence says
+/// it was bridged in is never "own" for a local participant whose id happens
+/// to equal the remote `from_participant`, and that id never drops the local
+/// participant from the workspace recipients. The control message carries the
+/// same id with no remote evidence and stays own (not delivered to its
+/// sender), so the test tells locality apart rather than ignoring the id.
+#[test]
+fn routing_remote_mail_with_colliding_sender_id_reaches_the_local_participant() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "collision-local", &alpha, "alpha");
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+
+    register_remote_placeholder(&sandbox, "remote-room");
+    let by_placeholder = "20990923-040101-bb0001";
+    write_custom_mail(
+        &inbox,
+        by_placeholder,
+        &json!({"id":by_placeholder,"from":"remote-room","to":"alpha","kind":"note","subject":"remote placeholder","sent":"2026-09-23 04:01:01 -0500","from_participant":local,"address_kind":"workspace"}),
+        "remote placeholder body",
+    );
+    let by_provenance = "20990923-040102-bb0002";
+    write_custom_mail(
+        &inbox,
+        by_provenance,
+        &json!({"id":by_provenance,"from":"unregistered-peer","to":"alpha","kind":"note","subject":"bridge provenance","sent":"2026-09-23 04:01:02 -0500","from_participant":local,"address_kind":"workspace","sender_provenance":"bridge-import"}),
+        "bridge provenance body",
+    );
+    let local_own = "20990923-040103-bb0003";
+    write_custom_mail(
+        &inbox,
+        local_own,
+        &json!({"id":local_own,"from":"alpha","to":"alpha","kind":"note","subject":"local own","sent":"2026-09-23 04:01:03 -0500","from_participant":local,"address_kind":"workspace","sender_provenance":"participant-binding"}),
+        "local own body",
+    );
+
+    let unread_ids = || -> Vec<String> {
+        inbox_as(&sandbox, &local, &alpha)["unread"]
+            .as_array()
+            .expect("unread")
+            .iter()
+            .map(|message| message["id"].as_str().expect("id").to_owned())
+            .collect()
+    };
+
+    // A consuming read routes the workspace's pending mail (freezing each
+    // receipt) and then delivers the named message to this participant.
+    let read = sandbox.run_as_participant(&["read", by_provenance, "--json"], &local, &alpha);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    assert_eq!(read["envelope"]["id"], by_provenance);
+
+    let receipt = |id: &str| -> Option<Value> {
+        fs::read(sandbox.mail_root.join(format!("alpha/routing/{id}.json")))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).expect("receipt JSON"))
+    };
+    for id in [by_placeholder, by_provenance] {
+        let receipt = receipt(id).expect("remote mail was routed");
+        assert!(
+            receipt["recipients"]
+                .as_array()
+                .expect("recipients")
+                .iter()
+                .any(|recipient| recipient == local.as_str()),
+            "{id}: {receipt}"
+        );
+    }
+    // The local control is routed to alpha's other participant and still
+    // excludes its own local sender.
+    let own_receipt = receipt(local_own).expect("local mail routed to the other member");
+    assert!(
+        !own_receipt["recipients"]
+            .as_array()
+            .expect("recipients")
+            .iter()
+            .any(|recipient| recipient == local.as_str()),
+        "{own_receipt}"
+    );
+
+    let unread = unread_ids();
+    assert!(unread.iter().any(|id| id == by_placeholder), "{unread:?}");
+    assert!(!unread.iter().any(|id| id == by_provenance), "{unread:?}");
+    assert!(!unread.iter().any(|id| id == local_own), "{unread:?}");
+
+    let watched = snapshot_ids(&sandbox, &local, &alpha);
+    assert!(watched.iter().any(|id| id == by_placeholder), "{watched:?}");
+    assert!(!watched.iter().any(|id| id == local_own), "{watched:?}");
+}
+
+/// R7, channel side: a bridged channel message whose `from_participant`
+/// equals a local member's id is unread for, and rings, that member.
+#[test]
+fn routing_remote_channel_message_with_colliding_sender_id_is_unread_for_the_local_member() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "collision-member", &alpha, "alpha");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--join", "--json"],
+        &local,
+        &alpha,
+    ));
+    register_remote_placeholder(&sandbox, "remote-workspace");
+    let messages = sandbox.mail_root.join("channels/tax/messages");
+    let write = |id: &str, from: &str, provenance: &str, body: &str| {
+        fs::write(
+            messages.join(format!("{id}.msg")),
+            format!(
+                "{}\n---\n{body}",
+                json!({
+                    "id": id,
+                    "from": from,
+                    "channel": "tax",
+                    "subject": body,
+                    "sent": "2026-09-23 05:11:00 -0500",
+                    "from_participant": local,
+                    "address_kind": "channel",
+                    "sender_provenance": provenance
+                })
+            ),
+        )
+        .expect("write channel message");
+    };
+    let remote = "20990923-051100-000001-acde11";
+    write(
+        remote,
+        "remote-workspace",
+        "participant-binding",
+        "remote collision",
+    );
+    let local_own = "20990923-051100-000002-acde12";
+    write(local_own, "alpha", "participant-binding", "local own");
+
+    let read = sandbox.run_as_participant(&["chat", "tax", "--peek", "--json"], &local, &alpha);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    let ids: Vec<&str> = read["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|message| message["id"].as_str().expect("id"))
+        .collect();
+    assert!(ids.contains(&remote), "{ids:?}");
+    assert!(!ids.contains(&local_own), "{ids:?}");
+
+    let watched = snapshot_ids(&sandbox, &local, &alpha);
+    assert!(watched.iter().any(|id| id == remote), "{watched:?}");
+    assert!(!watched.iter().any(|id| id == local_own), "{watched:?}");
+}

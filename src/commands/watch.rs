@@ -1525,8 +1525,11 @@ fn scan_unreadable_participant_channel(
         }
         match parse_channel_message(&path) {
             Ok(parsed)
-                if parsed.message.from_participant.as_deref() == Some(participant.id.as_str())
-                    || parsed.message.event.is_some() =>
+                if crate::cursor_state::eligibility::message_is_own(
+                    context,
+                    participant,
+                    &parsed.message,
+                ) || parsed.message.event.is_some() =>
             {
                 seen_paths.insert(path);
             }
@@ -2701,6 +2704,75 @@ mod tests {
             }] if event_id == id
         ));
         assert!(seen.contains(&path));
+        crate::test_support::trash_test_root(&root);
+    }
+
+    /// R7: the per-file fallback scan (a channel with an unreadable message)
+    /// applies the same origin-aware own check as the projection. A bridged
+    /// message whose `from_participant` equals this participant's id is
+    /// delivered; the same id with local provenance stays suppressed as own.
+    #[test]
+    fn unreadable_channel_fallback_delivers_remote_message_with_colliding_sender_id() {
+        let root = crate::test_support::test_root("watch-channel-collision");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let channel = "collide";
+        let remote_id = "20260923-050000-000001-acde01";
+        let local_id = "20260923-050000-000002-acde02";
+        let malformed_id = "20260923-050000-000003-acde03";
+        let messages = root.join(CHANNELS_DIR).join(channel).join("messages");
+        fs::create_dir_all(&messages).expect("create messages");
+        for (id, from, provenance) in [
+            (remote_id, "beta", "bridge-import"),
+            (local_id, "alpha", "participant-binding"),
+        ] {
+            let message = ChannelMessage {
+                id: id.to_owned(),
+                from: from.to_owned(),
+                channel: channel.to_owned(),
+                subject: id.to_owned(),
+                sent: "2026-09-23 05:00:00 -0500".to_owned(),
+                from_participant: Some(participant.id.clone()),
+                from_lineage: None,
+                address_kind: Some("channel".to_owned()),
+                event: None,
+                display_name: None,
+                pfp: None,
+                re: None,
+                mentions: Vec::new(),
+                signature_ref: None,
+                sender_address: None,
+                sender_provenance: Some(provenance.to_owned()),
+            };
+            fs::write(
+                messages.join(format!("{id}.msg")),
+                encode_message(&message, "body").expect("encode message"),
+            )
+            .expect("write message");
+        }
+        fs::write(messages.join(format!("{malformed_id}.msg")), "malformed")
+            .expect("write malformed message");
+        let mut batch = Vec::new();
+        scan_unreadable_participant_channel(
+            &context,
+            &participant,
+            &WatchAddress {
+                kind: "workspace".to_owned(),
+                name: "alpha".to_owned(),
+            },
+            "alpha",
+            channel,
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+            &mut batch,
+        )
+        .expect("scan channel");
+        assert!(batch.iter().any(|delivery| delivery.id() == remote_id));
+        assert!(!batch.iter().any(|delivery| delivery.id() == local_id));
         crate::test_support::trash_test_root(&root);
     }
 

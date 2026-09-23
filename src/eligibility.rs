@@ -129,8 +129,7 @@ pub(crate) fn visible_mail_snapshot(
         if let Some(receipt) = receipt.as_ref() {
             match parse_routed_mail(&path, receipt) {
                 Ok(parsed) => {
-                    let own = parsed.envelope.from_participant.as_deref()
-                        == Some(participant.id.as_str());
+                    let own = envelope_is_own(context, participant, &parsed.envelope);
                     let recipient = receipt.recipients.contains(&participant.id);
                     if recipient || own {
                         visible.push(EligibleMail {
@@ -173,7 +172,7 @@ pub(crate) fn visible_mail_snapshot(
             }
             Err(error) => return Err(error),
         };
-        let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());
+        let own = envelope_is_own(context, participant, &parsed.envelope);
         if !own && !provisional.contains(id) {
             continue;
         }
@@ -205,7 +204,7 @@ pub(crate) fn strict_visible_routed_mail(
         return Ok(None);
     };
     let parsed = parse_routed_mail(path, &receipt)?;
-    let own = parsed.envelope.from_participant.as_deref() == Some(participant.id.as_str());
+    let own = envelope_is_own(context, participant, &parsed.envelope);
     let recipient = receipt.recipients.contains(&participant.id);
     if !recipient && !own {
         return Ok(None);
@@ -288,7 +287,7 @@ pub(crate) fn unread_channel_skipping_consumed(
             continue;
         }
         let parsed = channel::parse_channel_message(&path)?;
-        let own = parsed.message.from_participant.as_deref() == Some(participant.id.as_str());
+        let own = message_is_own(context, participant, &parsed.message);
         if own {
             continue;
         }
@@ -347,7 +346,7 @@ fn all_channel_messages(
     let mut visible = Vec::new();
     for path in channel::message_files(&paths.messages)? {
         let parsed = channel::parse_channel_message(&path)?;
-        let own = parsed.message.from_participant.as_deref() == Some(participant.id.as_str());
+        let own = message_is_own(context, participant, &parsed.message);
         let already_read = cursors.channel_has_seen(channel_name, &parsed.message.id);
         visible.push(EligibleChannelMessage {
             path,
@@ -359,6 +358,36 @@ fn all_channel_messages(
     }
     visible.sort_by(|left, right| left.message.id.cmp(&right.message.id));
     Ok(visible)
+}
+
+/// Own means authored by this local participant; remote-origin mail never is.
+pub(crate) fn envelope_is_own(
+    context: &Context,
+    participant: &Participant,
+    envelope: &Envelope,
+) -> bool {
+    crate::output::authored_locally_by(
+        context,
+        &participant.id,
+        &envelope.from,
+        envelope.from_participant.as_deref(),
+        envelope.sender_provenance.as_deref(),
+    )
+}
+
+/// Channel counterpart of `envelope_is_own`.
+pub(crate) fn message_is_own(
+    context: &Context,
+    participant: &Participant,
+    message: &ChannelMessage,
+) -> bool {
+    crate::output::authored_locally_by(
+        context,
+        &participant.id,
+        &message.from,
+        message.from_participant.as_deref(),
+        message.sender_provenance.as_deref(),
+    )
 }
 
 fn sha256(bytes: &[u8]) -> String {

@@ -182,9 +182,7 @@ pub(crate) fn reply_metadata(
     from_participant: Option<&str>,
     sender_provenance: Option<&str>,
 ) -> ReplyMetadata {
-    let remote = sender_provenance
-        .is_some_and(|value| matches!(value, "bridge" | "bridged" | "remote" | "bridge-import"))
-        || remote_workspace(context, from);
+    let remote = remote_origin(context, from, sender_provenance);
     let local = !remote
         && from_participant.is_some_and(|id| {
             crate::participant::load(context, id)
@@ -204,6 +202,36 @@ pub(crate) fn reply_metadata(
         participant: local.then(|| format!("participant:{}", from_participant.unwrap())),
         shared: from.to_owned(),
     }
+}
+
+/// Whether a message carries remote-origin evidence: a bridge provenance
+/// value, or a `from` workspace registered under `remote/<host>/...`. This is
+/// the one definition reply metadata, own-message checks, and recipient
+/// exclusion share.
+pub(crate) fn remote_origin(
+    context: &crate::mailbox::Context,
+    from: &str,
+    sender_provenance: Option<&str>,
+) -> bool {
+    sender_provenance
+        .is_some_and(|value| matches!(value, "bridge" | "bridged" | "remote" | "bridge-import"))
+        || remote_workspace(context, from)
+}
+
+/// Whether local participant `participant` authored a message. A message with
+/// remote-origin evidence is never local-own, even when its `from_participant`
+/// equals a local id: participant ids are host-local, so a bridged sender's id
+/// can collide with a local one, and that collision must not hide the message
+/// from, or drop it for, the local participant. Remote evidence is consulted
+/// only on an id match, so the common path loads nothing.
+pub(crate) fn authored_locally_by(
+    context: &crate::mailbox::Context,
+    participant: &str,
+    from: &str,
+    from_participant: Option<&str>,
+    sender_provenance: Option<&str>,
+) -> bool {
+    from_participant == Some(participant) && !remote_origin(context, from, sender_provenance)
 }
 
 fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool {
