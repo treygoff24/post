@@ -67,6 +67,76 @@ enum ScanMode {
     Complete,
 }
 
+/// B2 measurement: `POST_WATCH_PROFILE=1` prints one stderr line per target
+/// scan with its phase times and file counts. Diagnostic only -- the line's
+/// format is not a contract, and nothing about the scan changes when it is on
+/// except the extra, untimed directory counts the line reports.
+fn watch_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("POST_WATCH_PROFILE").is_some_and(|value| value == "1"))
+}
+
+/// One target scan's cost. `mail_snapshot` covers the mail projection plus the
+/// inbox walk for unreadable files; `channel_enum` is resolving which channels
+/// the target reads; `channel_scan` is projecting and reading them. `events`
+/// counts this target's deliveries before cross-target dedupe, so a channel
+/// reached through two watched addresses is scanned, and counted, twice.
+struct ScanProfile<'a> {
+    room: &'a str,
+    mode: &'static str,
+    mail_snapshot: Duration,
+    mail_files: usize,
+    channel_enum: Duration,
+    channels: usize,
+    channel_scan: Duration,
+    channel_files: usize,
+    events: usize,
+    total: Duration,
+}
+
+impl<'a> ScanProfile<'a> {
+    fn new(room: &'a str, mode: &'static str) -> Self {
+        Self {
+            room,
+            mode,
+            mail_snapshot: Duration::ZERO,
+            mail_files: 0,
+            channel_enum: Duration::ZERO,
+            channels: 0,
+            channel_scan: Duration::ZERO,
+            channel_files: 0,
+            events: 0,
+            total: Duration::ZERO,
+        }
+    }
+
+    fn line(&self) -> String {
+        let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        format!(
+            "post: watch profile: room={:?} mode={} mail_snapshot_ms={:.3} mail_files={} channel_enum_ms={:.3} channels={} channel_scan_ms={:.3} channel_files={} events={} total_ms={:.3}",
+            self.room,
+            self.mode,
+            ms(self.mail_snapshot),
+            self.mail_files,
+            ms(self.channel_enum),
+            self.channels,
+            ms(self.channel_scan),
+            self.channel_files,
+            self.events,
+            ms(self.total),
+        )
+    }
+}
+
+/// `.msg` files in one channel, for the profile line only (never timed).
+fn profile_channel_files(context: &Context, channel: &str) -> usize {
+    ChannelPaths::new(context, channel)
+        .ok()
+        .and_then(|paths| message_files(&paths.messages).ok())
+        .map_or(0, |files| files.len())
+}
+
 impl WatchDelivery {
     fn mail(room: &str, event: WatchEvent) -> Self {
         Self {
@@ -1253,9 +1323,11 @@ fn scan_watch_target(
     allow_writes: bool,
     mode: ScanMode,
 ) -> AppResult<Vec<WatchDelivery>> {
+    let scan_started = Instant::now();
     let (Some(participant), Some(address)) = (target.participant.as_ref(), target.address.as_ref())
     else {
-        return scan_batch(
+        let mut profile = ScanProfile::new(&target.room, "room");
+        let batch = scan_batch_measured(
             context,
             &target.room,
             owned_rooms,
@@ -1263,7 +1335,14 @@ fn scan_watch_target(
             &target.channel_seen,
             &mut target.seen,
             emitted_channel_ids,
-        );
+            &mut profile,
+        )?;
+        if watch_profile_enabled() {
+            profile.events = batch.len();
+            profile.total = scan_started.elapsed();
+            eprintln!("{}", profile.line());
+        }
+        return Ok(batch);
     };
     let allow_routing = allow_writes
         && target.route_pending
@@ -1294,6 +1373,8 @@ fn scan_watch_target(
     // produces carries it and the caller can tell a re-report from fresh mail.
     let cursor_unusable = crate::cursor_state::participant_cursor_defect(participant).is_some();
 
+    let mail_started = Instant::now();
+    let mut inbox_mail_files = 0;
     let mail = participant_mail_snapshot(context, participant, address, allow_routing)?;
     for item in mail {
         if !target.seen.insert(item.path) {
@@ -1313,9 +1394,11 @@ fn scan_watch_target(
     if let Ok(entries) = std::fs::read_dir(&target.inbox) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("mail")
-                || target.seen.contains(&path)
-            {
+            if path.extension().and_then(|value| value.to_str()) != Some("mail") {
+                continue;
+            }
+            inbox_mail_files += 1;
+            if target.seen.contains(&path) {
                 continue;
             }
             let Some(id) = path
@@ -1348,7 +1431,21 @@ fn scan_watch_target(
         }
     }
 
-    for channel in crate::channel_state::effective_channels(context, participant)? {
+    let mail_snapshot = mail_started.elapsed();
+    let enum_started = Instant::now();
+    let channels = crate::channel_state::effective_channels(context, participant)?;
+    let channel_enum = enum_started.elapsed();
+    let channel_count = channels.len();
+    let channel_files = if watch_profile_enabled() {
+        channels
+            .iter()
+            .map(|channel| profile_channel_files(context, channel))
+            .sum()
+    } else {
+        0
+    };
+    let channel_started = Instant::now();
+    for channel in channels {
         // A complete-validation pass reads consumed messages too -- not to
         // deliver them again (a consumed id can never be unread) but because a
         // corrupt file is corruption whether or not it was consumed, and the
@@ -1427,10 +1524,29 @@ fn scan_watch_target(
             ));
         }
     }
+    let channel_scan = channel_started.elapsed();
     if cursor_unusable {
         for delivery in &mut batch {
             delivery.cursor_unusable = true;
         }
+    }
+    if watch_profile_enabled() {
+        let profile = ScanProfile {
+            room: &target.room,
+            mode: match mode {
+                ScanMode::Wake => "wake",
+                ScanMode::Complete => "complete",
+            },
+            mail_snapshot,
+            mail_files: inbox_mail_files,
+            channel_enum,
+            channels: channel_count,
+            channel_scan,
+            channel_files,
+            events: batch.len(),
+            total: scan_started.elapsed(),
+        };
+        eprintln!("{}", profile.line());
     }
     Ok(batch)
 }
@@ -1600,6 +1716,7 @@ fn scan_unreadable_participant_channel(
     Ok(())
 }
 
+#[cfg(test)]
 fn scan_batch(
     context: &Context,
     room: &str,
@@ -1609,8 +1726,36 @@ fn scan_batch(
     seen: &mut HashSet<PathBuf>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
 ) -> AppResult<Vec<WatchDelivery>> {
+    scan_batch_measured(
+        context,
+        room,
+        owned_rooms,
+        inbox,
+        channel_seen,
+        seen,
+        emitted_channel_ids,
+        &mut ScanProfile::new(room, "room"),
+    )
+}
+
+/// The unbound room scan. `profile` receives its phase times and counts; only
+/// the caller decides whether to print them.
+#[allow(clippy::too_many_arguments)] // the room scan's state plus its profile sink
+fn scan_batch_measured(
+    context: &Context,
+    room: &str,
+    owned_rooms: &BTreeSet<String>,
+    inbox: &Path,
+    channel_seen: &HashMap<String, BTreeSet<String>>,
+    seen: &mut HashSet<PathBuf>,
+    emitted_channel_ids: &mut HashSet<(String, String)>,
+    profile: &mut ScanProfile<'_>,
+) -> AppResult<Vec<WatchDelivery>> {
     let mut batch = Vec::new();
-    for path in mail_files(inbox)? {
+    let mail_started = Instant::now();
+    let inbox_files = mail_files(inbox)?;
+    profile.mail_files = inbox_files.len();
+    for path in inbox_files {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -1647,9 +1792,23 @@ fn scan_batch(
             }
         }
     }
+    profile.mail_snapshot = mail_started.elapsed();
     // Channels the room belongs to. NEVER touches a cursor — a doorbell
     // notifies, it does not consume (contract 013246 watch invariant).
-    for (channel, path) in room_channel_message_paths(context, room) {
+    // For a room scan, enumeration includes listing each channel's files.
+    let enum_started = Instant::now();
+    let channel_paths = room_channel_message_paths(context, room);
+    profile.channel_enum = enum_started.elapsed();
+    // Counted from the listed files, so a member channel with no messages
+    // yet is not included in this count.
+    profile.channels = channel_paths
+        .iter()
+        .map(|(channel, _)| channel.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    profile.channel_files = channel_paths.len();
+    let channel_started = Instant::now();
+    for (channel, path) in channel_paths {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -1710,6 +1869,7 @@ fn scan_batch(
             }
         }
     }
+    profile.channel_scan = channel_started.elapsed();
     Ok(batch)
 }
 
@@ -3559,5 +3719,214 @@ body
             None => panic!("backend died instead of waking"),
         }
         trash_test_root(&base);
+    }
+
+    /// B2: the room scan fills its profile with the counts the stderr line
+    /// reports, and the line carries every key.
+    #[test]
+    fn room_scan_profile_counts_mail_channels_and_channel_files() {
+        let root = test_root("watch-room-profile");
+        let inbox = root.join("alpha").join("inbox");
+        fs::create_dir_all(&inbox).expect("create inbox");
+        fs::write(inbox.join("20260722-013000-000009-ccc333.mail"), "garbage")
+            .expect("write unreadable mail");
+        let dir = root.join("channels").join("tax");
+        fs::create_dir_all(dir.join("messages")).expect("create channel dirs");
+        fs::write(
+            dir.join("channel.json"),
+            r#"{"name":"tax","created":"2026-07-22 01:00:00 -0500","created_by":"alpha"}"#,
+        )
+        .expect("write channel.json");
+        fs::write(
+            dir.join("members.json"),
+            r#"{"alpha":"2026-07-22 01:00:00 -0500"}"#,
+        )
+        .expect("write members.json");
+        for id in [
+            "20260722-013000-000001-aaa111",
+            "20260722-013000-000002-bbb222",
+        ] {
+            fs::write(
+                dir.join("messages").join(format!("{id}.msg")),
+                encode_message(&channel_message(id, "tax", "beta"), "body").expect("encode"),
+            )
+            .expect("write message");
+        }
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut profile = ScanProfile::new("alpha", "room");
+        let batch = scan_batch_measured(
+            &context,
+            "alpha",
+            &BTreeSet::new(),
+            &inbox,
+            &HashMap::new(),
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+            &mut profile,
+        )
+        .expect("scan");
+        assert_eq!(batch.len(), 3);
+        assert_eq!(profile.mail_files, 1);
+        assert_eq!(profile.channels, 1);
+        assert_eq!(profile.channel_files, 2);
+        let line = profile.line();
+        for key in [
+            "room=\"alpha\"",
+            "mode=room",
+            "mail_snapshot_ms=",
+            "mail_files=1",
+            "channel_enum_ms=",
+            "channels=1",
+            "channel_scan_ms=",
+            "channel_files=2",
+            "events=0",
+            "total_ms=",
+        ] {
+            assert!(line.contains(key), "{key} missing from {line}");
+        }
+        trash_test_root(&root);
+    }
+
+    /// B2 bench, not a test: builds synthetic participant stores whose mail and
+    /// channel history grow by 10x while the unread tail stays at 10 each, and
+    /// prints the cost of each projection watch runs. Never touches a real
+    /// store (every root is a temporary test root).
+    ///
+    /// `cargo test --lib watch_projection_cost_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "bench: builds synthetic heavy stores; run with --ignored --nocapture"]
+    fn watch_projection_cost_bench() {
+        const UNREAD: usize = 10;
+        const RUNS: usize = 5;
+        fn median_ms(mut samples: Vec<Duration>) -> f64 {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1000.0
+        }
+        println!(
+            "history  unread_mail_ms  unread_channel_ms  skipping_consumed_ms  scan_complete_ms  scan_wake_ms"
+        );
+        for history in [100usize, 1_000, 10_000] {
+            let root = test_root(&format!("watch-bench-{history}"));
+            let context = Context {
+                root: root.clone(),
+                home: root.clone(),
+            };
+            fs::write(root.join("rooms.json"), b"{}\n").expect("write rooms.json");
+            fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
+            let participant = crate::participant::bind_test_actor(&context, "alpha");
+            let address = Address {
+                kind: AddressKind::Participant,
+                name: participant.id.clone(),
+            };
+            let inbox = crate::cursor_state::routing::inbox_path(&context, &address);
+            fs::create_dir_all(&inbox).expect("create participant inbox");
+            ParticipantChannels::join(&context, &participant, "tax").expect("join channel");
+            let channel_dir = root.join(CHANNELS_DIR).join("tax");
+            fs::create_dir_all(channel_dir.join("messages")).expect("create channel");
+            fs::write(
+                channel_dir.join("channel.json"),
+                r#"{"name":"tax","created":"2026-09-01 00:00:00 -0500","created_by":"beta"}"#,
+            )
+            .expect("write channel info");
+            let mut mail_ids = Vec::new();
+            let mut channel_ids = Vec::new();
+            for index in 0..history {
+                // Mail ids are date-time-hex6; channel ids add a counter.
+                let mail_id = format!("20260901-120000-{index:06x}");
+                let id = format!("20260901-120000-{index:06}-a1b2c3");
+                let envelope: crate::model::Envelope = serde_json::from_value(serde_json::json!({
+                    "id": mail_id,
+                    "from": "beta",
+                    "to": participant.id,
+                    "kind": "note",
+                    "subject": "bench",
+                    "sent": "2026-09-01 12:00:00 -0500",
+                    "address_kind": "participant"
+                }))
+                .expect("bench envelope");
+                fs::write(
+                    inbox.join(format!("{mail_id}.mail")),
+                    crate::mailbox::encode_mail(&envelope, "bench mail body").expect("encode"),
+                )
+                .expect("write mail");
+                fs::write(
+                    channel_dir.join("messages").join(format!("{id}.msg")),
+                    encode_message(&channel_message(&id, "tax", "beta"), "bench channel body")
+                        .expect("encode"),
+                )
+                .expect("write channel message");
+                if index < history - UNREAD {
+                    mail_ids.push(mail_id);
+                    channel_ids.push(id);
+                }
+            }
+            // Freeze routing receipts once, as a delivered send would have.
+            crate::cursor_state::routing::route_pending(&context, &address)
+                .expect("route bench mail");
+            ParticipantCursors::consume_mail(&context, &participant, &address, &mail_ids)
+                .expect("consume mail history");
+            ParticipantCursors::consume_channel(&context, &participant, "tax", &channel_ids)
+                .expect("consume channel history");
+
+            let mut samples: [Vec<Duration>; 5] = Default::default();
+            for _ in 0..RUNS {
+                let started = Instant::now();
+                let mail =
+                    crate::cursor_state::eligibility::unread_mail(&context, &participant, &address)
+                        .expect("unread mail");
+                samples[0].push(started.elapsed());
+                assert_eq!(mail.len(), UNREAD, "fixture: unread mail tail");
+
+                let started = Instant::now();
+                let complete =
+                    crate::cursor_state::eligibility::unread_channel(&context, &participant, "tax")
+                        .expect("unread channel");
+                samples[1].push(started.elapsed());
+                // The join event is unread history too.
+                assert!(complete.len() >= UNREAD, "fixture: unread channel tail");
+
+                let started = Instant::now();
+                let fast = crate::cursor_state::eligibility::unread_channel_skipping_consumed(
+                    &context,
+                    &participant,
+                    "tax",
+                )
+                .expect("unread channel skipping consumed");
+                samples[2].push(started.elapsed());
+                assert_eq!(fast.len(), complete.len(), "projections agree");
+
+                for (slot, mode) in [(3, ScanMode::Complete), (4, ScanMode::Wake)] {
+                    let mut target = WatchTarget {
+                        room: format!("participant:{}", participant.id),
+                        inbox: inbox.clone(),
+                        participant: Some(participant.clone()),
+                        address: Some(address.clone()),
+                        dirs: BTreeSet::new(),
+                        channel_seen: HashMap::new(),
+                        seen: HashSet::new(),
+                        reported_unreadable: HashSet::new(),
+                        scan_failing: false,
+                        route_pending: false,
+                    };
+                    let started = Instant::now();
+                    let batch = scan_target_once(&context, &mut target, mode);
+                    samples[slot].push(started.elapsed());
+                    assert_eq!(batch.len(), UNREAD + complete.len(), "fixture: scan events");
+                }
+            }
+            let [mail, complete, fast, scan_complete, scan_wake] = samples;
+            println!(
+                "{history:>7}  {:>14.3}  {:>17.3}  {:>20.3}  {:>16.3}  {:>12.3}",
+                median_ms(mail),
+                median_ms(complete),
+                median_ms(fast),
+                median_ms(scan_complete),
+                median_ms(scan_wake),
+            );
+            trash_test_root(&root);
+        }
     }
 }

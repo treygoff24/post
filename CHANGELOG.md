@@ -24,6 +24,11 @@
   `profile set` after the profile change.
 
 ### Added
+- `POST_WATCH_PROFILE=1` makes `post watch` print one diagnostic stderr line
+  per target scan: mail-snapshot time, channel-enumeration time, channel scan
+  time, and file counts. Nothing else changes. An ignored bench test,
+  `watch_projection_cost_bench`, reports each watch projection's cost against
+  synthetic history sizes.
 - `post watch --reason mail|channel|mention` (repeatable) delivers only events
   with a selected reason; omitting it keeps every event. The filter runs after
   the scan and before `--limit`, `--digest` grouping, and the `--once` exit

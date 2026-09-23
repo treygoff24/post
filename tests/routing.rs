@@ -3237,3 +3237,95 @@ fn watch_once_with_reason_emits_only_selected_events_and_ignores_filtered_batche
     );
     assert!(output.stdout.is_empty(), "{output:?}");
 }
+
+/// B2: `POST_WATCH_PROFILE=1` adds one stderr line per target scan with phase
+/// times and file counts, and changes nothing else -- stdout is byte-identical
+/// and the store is untouched.
+#[test]
+fn watch_profile_env_prints_one_stderr_line_per_target_scan_and_changes_nothing_else() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let args = ["watch", "--snapshot", "--json"];
+    let quiet = sandbox.run_in_env(&args, None, &alpha, &[("POST_PARTICIPANT", &local)]);
+    assert!(quiet.status.success(), "{quiet:?}");
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("watch profile"),
+        "no profile line without the env: {quiet:?}"
+    );
+    let before = common::tree_snapshot(&sandbox.mail_root);
+    let profiled = sandbox.run_in_env(
+        &args,
+        None,
+        &alpha,
+        &[("POST_PARTICIPANT", &local), ("POST_WATCH_PROFILE", "1")],
+    );
+    assert!(profiled.status.success(), "{profiled:?}");
+    assert_eq!(profiled.stdout, quiet.stdout, "stdout must not change");
+    assert_eq!(
+        common::tree_snapshot(&sandbox.mail_root),
+        before,
+        "profiling must not write"
+    );
+
+    let stderr = String::from_utf8_lossy(&profiled.stderr);
+    let lines: Vec<BTreeMap<String, String>> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("post: watch profile: "))
+        .map(|fields| {
+            fields
+                .split(' ')
+                .map(|pair| {
+                    let (key, value) = pair.split_once('=').expect("key=value");
+                    (key.to_owned(), value.to_owned())
+                })
+                .collect()
+        })
+        .collect();
+    assert!(!lines.is_empty(), "one line per target scan: {stderr}");
+    for line in &lines {
+        for key in [
+            "room",
+            "mode",
+            "mail_snapshot_ms",
+            "mail_files",
+            "channel_enum_ms",
+            "channels",
+            "channel_scan_ms",
+            "channel_files",
+            "events",
+            "total_ms",
+        ] {
+            assert!(line.contains_key(key), "missing {key}: {line:?}");
+        }
+        assert_eq!(line["mode"], "complete", "snapshot is a complete scan");
+        for key in [
+            "mail_snapshot_ms",
+            "channel_enum_ms",
+            "channel_scan_ms",
+            "total_ms",
+        ] {
+            line[key].parse::<f64>().expect("milliseconds");
+        }
+        // Every target resolves the participant's channels: one channel, whose
+        // directory holds the join event, the mention, the plain message, and
+        // the unreadable one.
+        assert_eq!(line["channels"], "1", "{line:?}");
+        assert_eq!(line["channel_files"], "4", "{line:?}");
+    }
+    // One line per watched address (the participant and its workspace), and
+    // each line counts that target's deliveries before cross-target dedupe:
+    // both targets resolve the same channel, so the unreadable message is
+    // produced twice and emitted once.
+    assert_eq!(lines.len(), 2, "{stderr}");
+    let emitted = String::from_utf8_lossy(&profiled.stdout).lines().count();
+    let events: Vec<usize> = lines
+        .iter()
+        .map(|line| line["events"].parse::<usize>().expect("events"))
+        .collect();
+    assert_eq!(events.iter().max(), Some(&emitted), "{stderr}");
+    assert!(events.iter().sum::<usize>() >= emitted, "{stderr}");
+    let mail_files: usize = lines
+        .iter()
+        .map(|line| line["mail_files"].parse::<usize>().expect("mail files"))
+        .sum();
+    assert_eq!(mail_files, 1, "the one participant mail file: {stderr}");
+}
