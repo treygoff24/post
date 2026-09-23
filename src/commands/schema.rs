@@ -100,9 +100,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "rooms",
-            "post rooms [add <name> <path> | set-path <name> <path> [--dry-run]]",
+            "post rooms [add <name> <path> | set-path <name> <path> [--dry-run] | rename <old> <new> [--dry-run]]",
             "JSON",
-            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json, and when the refused name is a case-folded duplicate of a remote placeholder the refusal names the owning host in details.host and carries a `post rooms add <name>-<suffix> <path>` exact_fix where a suffix is derivable; set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing",
+            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json, and when the refused name is a case-folded duplicate of a remote placeholder the refusal names the owning host in details.host and carries a `post rooms add <name>-<suffix> <path>` exact_fix where a suffix is derivable; set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing; rename moves <root>/<old> to <root>/<new>, rewrites every live reference to the name (participant workspace fields, participant cursor workspace keys, channel members.json keys, bare profiles.json keys), commits rooms.json last, rolls back on any failure, refuses placeholders/case-only renames/an existing <root>/<new>/owner.json or rules.json naming the old room, and on a bridged host requires a fresh bridge/health.json whose local_held counters are integer 0 (retryable bridge_guard_unavailable) — history keeps the old name; --dry-run runs every check and writes nothing",
         ),
         command(
             "profile",
@@ -254,6 +254,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "rooms",
             "count",
             "set-path: ok, room, before, after, changed, dry_run",
+            "rename: ok, old, new, path, mailbox_moved, rewritten, warnings, dry_run",
         ]),
         schema: fields(&[
             "ok",

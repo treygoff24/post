@@ -1415,6 +1415,706 @@ fn rooms_add_local_duplicate_keeps_the_set_path_hint() {
     );
 }
 
+// ---- post rooms rename (post-aqw.15) ----
+
+/// `YYYY-MM-DDTHH:MM:SS+00:00`, the bridge's stamp format.
+fn rfc3339(at: SystemTime) -> String {
+    let seconds = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("after epoch")
+        .as_secs() as i64;
+    let (days, rem) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    )
+}
+
+fn write_bridge_config(sandbox: &Sandbox, host: &str) {
+    let dir = sandbox.mail_root.join("bridge");
+    fs::create_dir_all(&dir).expect("bridge dir");
+    fs::write(
+        dir.join("config.json"),
+        serde_json::json!({"host": host, "peers": {}}).to_string(),
+    )
+    .expect("write bridge config");
+}
+
+/// A `bridge/health.json`. `age_secs` drives freshness against `interval_s`
+/// 30 (fresh window: 90 s); `local_held` is substituted verbatim so tests can
+/// plant non-integer counters.
+fn write_health(sandbox: &Sandbox, age_secs: u64, ok: bool, local_held: serde_json::Value) {
+    let dir = sandbox.mail_root.join("bridge");
+    fs::create_dir_all(&dir).expect("bridge dir");
+    let ticked = SystemTime::now() - std::time::Duration::from_secs(age_secs);
+    fs::write(
+        dir.join("health.json"),
+        serde_json::json!({
+            "ok": ok,
+            "reason": if ok { serde_json::Value::Null } else { "room_name_collision".into() },
+            "ticked_at": rfc3339(ticked),
+            "interval_s": 30,
+            "local_held": local_held,
+            "capabilities": ["participant-mail-v1", "typed-outbound-exclusion"],
+        })
+        .to_string(),
+    )
+    .expect("write bridge health");
+}
+
+fn healthy_guard(sandbox: &Sandbox) {
+    write_health(
+        sandbox,
+        0,
+        false,
+        serde_json::json!({"faults": 0, "candidates_unaccounted": 0}),
+    );
+}
+
+/// A participant record bound to `workspace`, plus a cursors.json carrying
+/// `workspace:<workspace>` seen-mail state.
+fn write_bound_participant(sandbox: &Sandbox, id: &str, workspace: &str) -> PathBuf {
+    let dir = sandbox.mail_root.join("participants").join(id);
+    fs::create_dir_all(&dir).expect("participant dir");
+    fs::write(
+        dir.join("participant.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "id": id,
+                "harness": "test",
+                "conversation_key_digest": "aa",
+                "created": "2026-09-16 00:00:00 +0000",
+                "workspace": workspace,
+                "workspace_path": format!("/workspaces/{workspace}"),
+            }))
+            .expect("participant record")
+        ),
+    )
+    .expect("write participant record");
+    fs::write(
+        dir.join("cursors.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 2,
+                "mail": {
+                    format!("workspace:{workspace}"): {"seen": ["m1", "m2"]},
+                    format!("workspace:{workspace}-mac"): {"seen": ["m2", "m3"]},
+                    "participant:other": {"seen": ["m9"]},
+                },
+                "channels": {"ops": {"seen": ["c1"]}},
+            }))
+            .expect("cursor record")
+        ),
+    )
+    .expect("write cursor record");
+    dir
+}
+
+#[test]
+fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+
+    // The mailbox: inbox, read, legacy cursor + channel state, and routing
+    // receipts — all under <root>/hq/.
+    let home = sandbox.mail_root.join("hq");
+    fs::create_dir_all(home.join("inbox")).expect("inbox");
+    fs::write(home.join("inbox/m1.mail"), "mail one").expect("mail");
+    fs::create_dir_all(home.join("read")).expect("read dir");
+    fs::write(home.join("read/m0.mail"), "mail zero").expect("read mail");
+    fs::create_dir_all(home.join("routing")).expect("routing");
+    fs::write(home.join("routing/r1.json"), "{}").expect("receipt");
+    fs::write(
+        home.join("cursors.json"),
+        "{\"version\":1,\"mail\":[\"a\"],\"channels\":{}}",
+    )
+    .expect("legacy cursors");
+    // Immutable history outside the room dir.
+    fs::create_dir_all(sandbox.mail_root.join("archive")).expect("archive");
+    fs::write(sandbox.mail_root.join("archive/a1.mail"), "archived letter")
+        .expect("archive letter");
+    let participant_dir = write_bound_participant(&sandbox, "test-p1", "hq");
+    // A channel whose legacy members.json names the room.
+    let channel_dir = sandbox.mail_root.join("channels/ops");
+    fs::create_dir_all(channel_dir.join("messages")).expect("channel messages");
+    fs::write(
+        channel_dir.join("channel.json"),
+        "{\"name\":\"ops\",\"created\":\"x\",\"created_by\":\"hq\"}",
+    )
+    .expect("channel info");
+    fs::write(
+        channel_dir.join("members.json"),
+        "{\"hq\":\"2026-09-20 00:00:00 +0000\",\"pact\":\"2026-09-21 00:00:00 +0000\"}",
+    )
+    .expect("members");
+    fs::write(channel_dir.join("messages/c1.msg"), "channel history").expect("history message");
+    // A legacy bare-keyed profile for the room, beside a typed one.
+    fs::write(
+        sandbox.mail_root.join("profiles.json"),
+        "{\"hq\":{\"name\":\"HQ\",\"pfp\":\"H\"},\"participant:x\":{\"name\":\"X\"}}",
+    )
+    .expect("profiles");
+
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert_eq!(receipt["ok"], true);
+    assert_eq!(receipt["old"], "hq");
+    assert_eq!(receipt["new"], "hq-mac");
+    assert_eq!(receipt["mailbox_moved"], true);
+    assert_eq!(receipt["dry_run"], false);
+    // register_room seeds one bound participant; write_bound_participant adds
+    // a second. Only the latter carries a cursors.json.
+    assert_eq!(receipt["rewritten"]["participants"], 2);
+    assert_eq!(receipt["rewritten"]["participant_cursors"], 1);
+    assert_eq!(receipt["rewritten"]["channel_members"], 1);
+    assert_eq!(receipt["rewritten"]["profiles"], 1);
+    let warnings = receipt["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("outside its store"))),
+        "the outside-the-store warning is always present: {warnings:?}"
+    );
+    // Unbridged host: no bridge warning.
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("bridge publishes"))),
+        "no bridge warning without a bridge config: {warnings:?}"
+    );
+
+    // The mailbox moved byte-for-byte.
+    let new_home = sandbox.mail_root.join("hq-mac");
+    assert!(!home.exists(), "old mailbox dir is gone");
+    assert_eq!(
+        fs::read(new_home.join("inbox/m1.mail")).unwrap(),
+        b"mail one"
+    );
+    assert_eq!(
+        fs::read(new_home.join("read/m0.mail")).unwrap(),
+        b"mail zero"
+    );
+    assert_eq!(fs::read(new_home.join("routing/r1.json")).unwrap(), b"{}");
+    // Legacy room-state files ride along unchanged.
+    assert_eq!(
+        fs::read(new_home.join("cursors.json")).unwrap(),
+        b"{\"version\":1,\"mail\":[\"a\"],\"channels\":{}}"
+    );
+
+    // Live references point at the new name.
+    let participant: serde_json::Value =
+        serde_json::from_slice(&fs::read(participant_dir.join("participant.json")).unwrap())
+            .unwrap();
+    assert_eq!(participant["workspace"], "hq-mac");
+    assert_eq!(participant["workspace_path"], "/workspaces/hq");
+    let cursors: serde_json::Value =
+        serde_json::from_slice(&fs::read(participant_dir.join("cursors.json")).unwrap()).unwrap();
+    // A pre-existing workspace:<new> key merges seen sets — read state is
+    // unioned, never lost.
+    assert_eq!(
+        cursors["mail"]["workspace:hq-mac"]["seen"],
+        serde_json::json!(["m1", "m2", "m3"])
+    );
+    assert!(cursors["mail"].get("workspace:hq").is_none());
+    assert_eq!(
+        cursors["mail"]["participant:other"]["seen"],
+        serde_json::json!(["m9"])
+    );
+    assert_eq!(
+        cursors["channels"]["ops"]["seen"],
+        serde_json::json!(["c1"])
+    );
+    let members: serde_json::Value =
+        serde_json::from_slice(&fs::read(channel_dir.join("members.json")).unwrap()).unwrap();
+    assert!(members.get("hq").is_none());
+    assert_eq!(members["hq-mac"], "2026-09-20 00:00:00 +0000");
+    assert_eq!(members["pact"], "2026-09-21 00:00:00 +0000");
+    let profiles: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("profiles.json")).unwrap())
+            .unwrap();
+    assert_eq!(profiles["hq-mac"]["name"], "HQ");
+    assert!(profiles.get("hq").is_none());
+    assert_eq!(profiles["participant:x"]["name"], "X");
+
+    // The registry commits last and keeps the same path.
+    let rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("rooms.json")).unwrap()).unwrap();
+    assert!(rooms.get("hq").is_none());
+    assert_eq!(rooms["hq-mac"], workspace.to_string_lossy().as_ref());
+
+    // History is never rewritten: archive, channel messages, channel.json's
+    // created_by, and the moved dir's own contents all keep the old name.
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("archive/a1.mail")).unwrap(),
+        b"archived letter"
+    );
+    assert_eq!(
+        fs::read(channel_dir.join("messages/c1.msg")).unwrap(),
+        b"channel history"
+    );
+    assert!(
+        fs::read_to_string(channel_dir.join("channel.json"))
+            .unwrap()
+            .contains("\"created_by\":\"hq\""),
+        "channel history fields keep the old name"
+    );
+}
+
+#[test]
+fn rooms_rename_receipt_carries_heartbeat_and_bridge_warnings() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    // A live heartbeat under the room dir (stamp now, max interval).
+    let home = sandbox.mail_root.join("hq");
+    fs::create_dir_all(&home).expect("room dir");
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(home.join("watch.heartbeat"), format!("{stamp} 60000\n")).expect("heartbeat");
+    write_bridge_config(&sandbox, "trey");
+    healthy_guard(&sandbox);
+
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    let warnings: Vec<String> = receipt["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        warnings.iter().any(|w| w.contains("re-arm")),
+        "live heartbeat warns the watcher must be re-armed: {warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("bridge publishes 'hq-mac'")),
+        "bridged host warns about the next publish tick: {warnings:?}"
+    );
+}
+
+#[test]
+fn rooms_rename_refuses_unknown_placeholder_and_bad_new_names() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+
+    // Unknown old room.
+    let output = sandbox.run(&["rooms", "rename", "ghost", "x", "--json"]);
+    assert_eq!(output.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "unknown_room");
+
+    // Remote placeholder old room: the bridge owns it.
+    register_remote_placeholder(&sandbox, "mac", "hq");
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-local", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("remote placeholders are refused")
+    );
+
+    // Invalid new name.
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "bad:name", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(error.error.message.contains("':'"));
+
+    // Case-only rename.
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "CLAUDE-SPACE", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("case-only renames are unsupported")
+    );
+
+    // New name collides with a local room: the set-path hint.
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "PACT", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("duplicate room name under ASCII case folding")
+    );
+    assert!(error.error.suggested_fix.contains("set-path"));
+
+    // New name collides with a placeholder: item 1's refusal, with a rename
+    // command as the fix.
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "hq", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.details.host.as_deref(), Some("mac"));
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("room name is a remote placeholder owned by another host")
+    );
+    // No learned suffix and no bridge config here: no runnable fix.
+    assert!(error.error.details.exact_fix.is_none());
+
+    // With a bridge host id the fix is a rename command to the suffixed name.
+    write_bridge_config(&sandbox, "trey");
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "hq", "--json"]);
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post rooms rename 'claude-space' 'hq-trey'")
+    );
+}
+
+#[test]
+fn rooms_rename_refuses_when_state_blocks_it() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+
+    // <root>/<new> already exists: never merge two mailboxes.
+    fs::create_dir_all(sandbox.mail_root.join("taken")).expect("existing dir");
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "taken", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("the new name's mailbox directory already exists")
+    );
+
+    // owner.json names the old room: post never rewrites signing config.
+    fs::write(
+        sandbox.mail_root.join("owner.json"),
+        "{\"room\":\"claude-space\"}",
+    )
+    .expect("owner.json");
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "space-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("owner.json names the old room")
+    );
+    assert!(error.error.suggested_fix.contains("owner.json"));
+    fs::remove_file(sandbox.mail_root.join("owner.json")).expect("clear owner");
+
+    // rules.json names the old room: the human's file comes first.
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        "{\"blocked\":[{\"from\":\"claude-space\",\"to\":\"pact\",\"reason\":\"no\"}]}",
+    )
+    .expect("rules.json");
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "space-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("a rules.json entry names the old room")
+    );
+    assert!(error.error.suggested_fix.contains("rules.json"));
+    fs::write(sandbox.mail_root.join("rules.json"), "{\"blocked\":[]}").expect("clear rules");
+
+    // A blocking rule targeting the NEW name (`to:"*"` needs no registered
+    // room; a registered target would hit the duplicate check first).
+    fs::write(
+        sandbox.mail_root.join("rules.json"),
+        "{\"blocked\":[{\"from\":\"*\",\"to\":\"*\",\"reason\":\"held\"}]}",
+    )
+    .expect("rules.json");
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "space-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(77));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "blocked_route");
+}
+
+#[test]
+fn rooms_rename_refuses_a_new_name_held_by_a_lineage() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let lineage_dir = sandbox.mail_root.join("lineages/alpha-line");
+    fs::create_dir_all(&lineage_dir).expect("lineage dir");
+    fs::write(
+        lineage_dir.join("lineage.json"),
+        "{\"name\":\"alpha-line\",\"founder\":\"x\",\"created\":\"2026-09-20\",\"host\":\"mac\"}",
+    )
+    .expect("lineage record");
+
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "alpha-line", "--json"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(
+        error.error.details.reason.as_deref(),
+        Some("room names cannot collide with existing lineages")
+    );
+}
+
+#[test]
+fn rooms_rename_bridge_interlock() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    write_bridge_config(&sandbox, "trey");
+
+    let assert_guard_refusal = |label: &str| {
+        let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+        assert_eq!(
+            output.status.code(),
+            Some(75),
+            "{label}: {}",
+            stderr(&output)
+        );
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "bridge_guard_unavailable", "{label}");
+        assert!(error.error.retryable, "{label}");
+    };
+
+    // Missing health.json on a bridged host.
+    assert_guard_refusal("missing health");
+    // Stale health.
+    write_health(
+        &sandbox,
+        3600,
+        true,
+        serde_json::json!({"faults": 0, "candidates_unaccounted": 0}),
+    );
+    assert_guard_refusal("stale health");
+    // A held fault.
+    write_health(
+        &sandbox,
+        0,
+        true,
+        serde_json::json!({"faults": 1, "candidates_unaccounted": 0}),
+    );
+    assert_guard_refusal("faults=1");
+    // Non-integer counters are not proof.
+    write_health(
+        &sandbox,
+        0,
+        true,
+        serde_json::json!({"faults": "0", "candidates_unaccounted": 0}),
+    );
+    assert_guard_refusal("non-integer faults");
+    write_health(&sandbox, 0, true, serde_json::json!({"faults": 0}));
+    assert_guard_refusal("missing candidates_unaccounted");
+
+    // Fresh health with zeroed counters — and ok:false, the collision state a
+    // rename exists to fix — lets the rename through.
+    healthy_guard(&sandbox);
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert_eq!(receipt["new"], "hq-mac");
+}
+
+#[test]
+fn rooms_rename_skips_the_interlock_without_a_bridge_config() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!sandbox.mail_root.join("bridge").exists());
+}
+
+#[test]
+fn rooms_rename_rolls_back_on_a_failed_rewrite() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    let home = sandbox.mail_root.join("hq");
+    fs::create_dir_all(home.join("inbox")).expect("inbox");
+    fs::write(home.join("inbox/m1.mail"), "mail one").expect("mail");
+    let participant_dir = write_bound_participant(&sandbox, "test-p1", "hq");
+    let participant_before =
+        fs::read(participant_dir.join("participant.json")).expect("record bytes");
+    let channel_dir = sandbox.mail_root.join("channels/ops");
+    fs::create_dir_all(&channel_dir).expect("channel dir");
+    fs::write(channel_dir.join("members.json"), "{\"hq\":\"t0\"}").expect("members");
+    let rooms_before = fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms snapshot");
+
+    // Inject the failure after the mailbox move: the channel directory is
+    // read-only, so the members.json rewrite cannot create its tempfile.
+    fs::set_permissions(&channel_dir, fs::Permissions::from_mode(0o555)).expect("read-only dir");
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+    fs::set_permissions(&channel_dir, fs::Permissions::from_mode(0o755)).expect("restore dir");
+
+    assert_ne!(output.status.code(), Some(0), "rename must fail");
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "io_error");
+    // The mailbox moved back, the participant record restored, rooms.json
+    // never committed.
+    assert!(home.is_dir(), "mailbox dir restored");
+    assert_eq!(fs::read(home.join("inbox/m1.mail")).unwrap(), b"mail one");
+    assert!(!sandbox.mail_root.join("hq-mac").exists());
+    assert_eq!(
+        fs::read(participant_dir.join("participant.json")).unwrap(),
+        participant_before
+    );
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("rooms.json")).unwrap(),
+        rooms_before
+    );
+}
+
+#[test]
+fn rooms_rename_dry_run_checks_everything_and_writes_nothing() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    let home = sandbox.mail_root.join("hq");
+    fs::create_dir_all(home.join("inbox")).expect("inbox");
+    fs::write(home.join("inbox/m1.mail"), "mail one").expect("mail");
+    write_bound_participant(&sandbox, "test-p1", "hq");
+    let channel_dir = sandbox.mail_root.join("channels/ops");
+    fs::create_dir_all(&channel_dir).expect("channel dir");
+    fs::write(channel_dir.join("members.json"), "{\"hq\":\"t0\"}").expect("members");
+    let before = tree_bytes(&sandbox.mail_root);
+
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--dry-run", "--json"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("dry run"));
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert_eq!(receipt["dry_run"], true);
+    assert_eq!(receipt["mailbox_moved"], true);
+    assert_eq!(receipt["rewritten"]["participants"], 2);
+    assert_eq!(receipt["rewritten"]["channel_members"], 1);
+    // Nothing written: every non-lockfile byte is identical and the new name
+    // appears nowhere.
+    let after = tree_bytes(&sandbox.mail_root);
+    let is_lock = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+    };
+    for (path, bytes) in &before {
+        assert_eq!(
+            after.get(path).map(Vec::as_slice),
+            Some(bytes.as_slice()),
+            "dry run changed {}",
+            path.display()
+        );
+    }
+    for path in after.keys() {
+        assert!(
+            before.contains_key(path) || is_lock(path),
+            "dry run created {}",
+            path.display()
+        );
+    }
+    assert!(!sandbox.mail_root.join("hq-mac").exists());
+
+    // A refusal still refuses under --dry-run (the checks all run).
+    let output = sandbox.run(&["rooms", "rename", "hq", "pact", "--dry-run"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn rooms_rename_allows_a_room_without_a_mailbox_and_refuses_a_symlink() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    // A registered room may have no mailbox directory yet: nothing moves.
+    let workspace = sandbox.path.join("bare-ws");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "bare", &workspace);
+    let output = sandbox.run(&["rooms", "rename", "bare", "bare-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert_eq!(receipt["mailbox_moved"], false);
+    let rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("rooms.json")).unwrap()).unwrap();
+    assert_eq!(rooms["bare-mac"], workspace.to_string_lossy().as_ref());
+
+    // A mailbox path that is a symlink (or otherwise not a real directory) is
+    // unsafe state: refuse rather than chase it.
+    let workspace2 = sandbox.path.join("linky-ws");
+    fs::create_dir(&workspace2).expect("workspace dir");
+    register_room(&sandbox, "linky", &workspace2);
+    let real_dir = sandbox.path.join("real-dir");
+    fs::create_dir(&real_dir).expect("real dir");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&real_dir, sandbox.mail_root.join("linky")).expect("symlink");
+        let output = sandbox.run(&["rooms", "rename", "linky", "linky-mac", "--json"]);
+        assert_eq!(output.status.code(), Some(78));
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "config_invalid");
+        assert!(error.error.message.contains("linky"));
+    }
+}
+
+#[test]
+fn rooms_rename_refuses_a_malformed_store_that_may_name_the_room() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    // A corrupt participant record whose bytes still name the room: post
+    // cannot prove it is free of the reference, so the rename refuses.
+    let dir = sandbox.mail_root.join("participants/broken");
+    fs::create_dir_all(&dir).expect("participant dir");
+    fs::write(dir.join("participant.json"), "{\"workspace\":\"hq\",").expect("corrupt record");
+    // participants/by-session is the session index, not participant state:
+    // it is never scanned, even when its bytes name the room.
+    let index_dir = sandbox.mail_root.join("participants/by-session");
+    fs::create_dir_all(&index_dir).expect("by-session dir");
+    fs::write(index_dir.join("participant.json"), "{\"workspace\":\"hq\",")
+        .expect("corrupt index fixture");
+
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+
+    assert_eq!(output.status.code(), Some(78));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "config_invalid");
+    assert!(error.error.message.contains("hq"));
+    // An unrelated corrupt record does not block the rename.
+    fs::write(dir.join("participant.json"), "{\"workspace\":\"other\",").expect("corrupt record");
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert!(
+        receipt["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("skipped malformed"))),
+        "the skipped malformed record is reported"
+    );
+}
+
 #[test]
 fn rooms_add_rejects_a_blocked_recipient_without_changing_config() {
     let sandbox = Sandbox::new();

@@ -707,6 +707,23 @@ pub(crate) enum RoomsCommand {
     Add(RoomsAddArgs),
     /// Change a local room's workspace (discovery) path; mail and history stay put.
     SetPath(RoomsSetPathArgs),
+    /// Rename a local room, moving its mailbox and rewriting live references; history keeps the old name.
+    Rename(RoomsRenameArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RoomsRenameArgs {
+    /// Registered local room to rename.
+    #[arg(value_name = "OLD", value_parser = nonempty_without_controls)]
+    pub old: String,
+
+    /// New room name; must pass the same checks `add` applies.
+    #[arg(value_name = "NEW", value_parser = nonempty_without_controls)]
+    pub new: String,
+
+    /// Validate and report the change without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

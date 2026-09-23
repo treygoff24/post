@@ -187,19 +187,9 @@ pub(crate) const MAX_CLOCK_SKEW: std::time::Duration = std::time::Duration::from
 
 pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> BridgeHealth {
     let path = bridge_dir(context).join("health.json");
-    let bytes = match read_regular(&path, HEALTH_MAX_BYTES) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return BridgeHealth::Unavailable(format!("{} does not exist", path.display())),
-        Err(error) => return BridgeHealth::Unavailable(error),
-    };
-    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+    let value = match read_health_json(&path) {
         Ok(value) => value,
-        Err(error) => {
-            return BridgeHealth::Unavailable(format!(
-                "{} is not valid JSON: {error}",
-                path.display()
-            ))
-        }
+        Err(reason) => return BridgeHealth::Unavailable(reason),
     };
     let Some(capabilities) = value
         .get("capabilities")
@@ -217,12 +207,82 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
         };
         advertised.push(capability);
     }
+    if let Err(reason) = health_is_fresh(&value, &path, now) {
+        return BridgeHealth::Unavailable(reason);
+    }
+    let missing: Vec<String> = REQUIRED_CAPABILITIES
+        .iter()
+        .filter(|required| !advertised.contains(required))
+        .map(|required| (*required).to_owned())
+        .collect();
+    if missing.is_empty() {
+        BridgeHealth::Ready
+    } else {
+        BridgeHealth::Unsupported(missing)
+    }
+}
+
+/// The room-rename interlock: what the bridge's export guard must prove
+/// before a name can move under it. `bridge/health.json` must be fresh by
+/// the participant-mail rule AND carry a `local_held` object whose `faults`
+/// and `candidates_unaccounted` are both the integer 0. `ok` is deliberately
+/// not consulted — `ok:false room_name_collision` is exactly the state a
+/// rename exists to resolve. Err carries the operator-facing reason.
+pub(crate) fn export_guard_health(
+    context: &Context,
+    now: std::time::SystemTime,
+) -> Result<(), String> {
+    let path = bridge_dir(context).join("health.json");
+    let value = read_health_json(&path)?;
+    health_is_fresh(&value, &path, now)?;
+    let Some(local_held) = value.get("local_held").and_then(|held| held.as_object()) else {
+        return Err(format!("{} has no local_held object", path.display()));
+    };
+    for field in ["faults", "candidates_unaccounted"] {
+        match local_held.get(field).and_then(serde_json::Value::as_u64) {
+            Some(0) => {}
+            Some(other) => {
+                return Err(format!(
+                    "{} reports local_held.{field} = {other}: the bridge is not cleanly holding this host's names",
+                    path.display()
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "{} local_held.{field} is missing or not an integer",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read and parse `bridge/health.json`. Err covers missing, unreadable,
+/// oversized, and non-JSON files; no freshness or content judgment here.
+fn read_health_json(path: &Path) -> Result<serde_json::Value, String> {
+    let bytes = match read_regular(path, HEALTH_MAX_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Err(format!("{} does not exist", path.display())),
+        Err(error) => return Err(error),
+    };
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
+}
+
+/// Freshness per the participant-mail rule: `ticked_at` is no older than
+/// three times `interval_s` and never further ahead than MAX_CLOCK_SKEW.
+fn health_is_fresh(
+    value: &serde_json::Value,
+    path: &Path,
+    now: std::time::SystemTime,
+) -> Result<(), String> {
     let Some(ticked_at) = value
         .get("ticked_at")
         .and_then(serde_json::Value::as_str)
         .and_then(crate::participant::parse_rfc3339)
     else {
-        return BridgeHealth::Unavailable(format!(
+        return Err(format!(
             "{} ticked_at is missing or not RFC 3339",
             path.display()
         ));
@@ -232,7 +292,7 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
         .and_then(serde_json::Value::as_f64)
         .filter(|interval| interval.is_finite() && *interval > 0.0 && *interval <= 86_400.0)
     else {
-        return BridgeHealth::Unavailable(format!(
+        return Err(format!(
             "{} interval_s must be a positive number of seconds (at most 86400)",
             path.display()
         ));
@@ -245,22 +305,13 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
         Err(ahead) => ahead.duration() <= MAX_CLOCK_SKEW,
     };
     if !fresh {
-        return BridgeHealth::Unavailable(format!(
+        return Err(format!(
             "{} is stale: ticked_at is older than three times interval_s or more than {} s ahead",
             path.display(),
             MAX_CLOCK_SKEW.as_secs()
         ));
     }
-    let missing: Vec<String> = REQUIRED_CAPABILITIES
-        .iter()
-        .filter(|required| !advertised.contains(required))
-        .map(|required| (*required).to_owned())
-        .collect();
-    if missing.is_empty() {
-        BridgeHealth::Ready
-    } else {
-        BridgeHealth::Unsupported(missing)
-    }
+    Ok(())
 }
 
 /// A `participant:<id>@<host>` address after resolution.

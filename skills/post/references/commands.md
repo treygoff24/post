@@ -170,6 +170,14 @@ supply `/dev/null`.
   discovery path, the directory whose cwd resolves to it. Mail, history, and
   participant records stay put. It refuses a path another room owns and
   always refuses remote placeholders. It prints `before` and `after`.
+- `post rooms rename <old> <new> [--dry-run]` renames a local room and keeps
+  its mail: `<root>/<old>` moves to `<root>/<new>`, live references
+  (participant workspaces, cursor keys, channel members, bare profile keys)
+  are rewritten, and `rooms.json` commits last with rollback on failure.
+  History keeps the old name. It refuses remote placeholders, case-only
+  renames, and an `owner.json` or `rules.json` naming the room; on a bridged
+  host it needs a fresh `bridge/health.json` whose `local_held` counters are
+  both zero (`bridge_guard_unavailable`, retryable).
 - There is no `rooms remove`.
 
 ## `who`

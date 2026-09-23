@@ -1,9 +1,9 @@
-use crate::cli::{RoomsAddArgs, RoomsArgs, RoomsCommand, RoomsSetPathArgs};
+use crate::cli::{RoomsAddArgs, RoomsArgs, RoomsCommand, RoomsRenameArgs, RoomsSetPathArgs};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::{shell_quote, validate_new_room_name, Context};
 use crate::model::{RoomMap, RulesConfig};
-use crate::output::{RoomOutput, RoomsOutput, RoomsSetPathOutput};
+use crate::output::{RoomOutput, RoomsOutput, RoomsRenameOutput, RoomsSetPathOutput};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +12,7 @@ pub(super) fn run(context: &Context, args: RoomsArgs, pretty: bool) -> AppResult
     match args.command {
         Some(RoomsCommand::Add(args)) => add(context, args, pretty),
         Some(RoomsCommand::SetPath(args)) => set_path(context, args, pretty),
+        Some(RoomsCommand::Rename(args)) => rename(context, args, pretty),
         None => list(context, pretty),
     }
 }
@@ -57,43 +58,22 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
     {
         let placeholders = placeholder_hosts(context, &rooms);
         if let Some(host) = placeholders.get(existing_name.as_str()) {
-            // The duplicate is a remote placeholder: `set-path` refuses
-            // placeholders, so the local-duplicate hint can never work here.
-            // The estate's naming rule gives the fix instead — this checkout
-            // takes a `<name>-<suffix>` of its own.
-            let candidate = suffixed_room_candidate(
-                &rooms,
-                &placeholders,
-                bridge_host_id(context).as_deref(),
-                &args.name,
-            );
-            let mut error = AppError::new(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "room '{}' is already registered as '{existing_name}', a remote placeholder owned by host '{host}': a checkout on this machine needs its own name",
-                    args.name
-                ),
-                match &candidate {
-                    Some(candidate) => format!(
-                        "This checkout needs its own name; run `post rooms add {} {}`.",
+            return Err(remote_duplicate_error(RemoteDuplicate {
+                context,
+                rooms: &rooms,
+                placeholders: &placeholders,
+                existing_name,
+                requested: &args.name,
+                host,
+                fix_for: &|candidate| {
+                    format!(
+                        "post rooms add {} {}",
                         shell_quote(candidate),
                         shell_quote(&args.path)
-                    ),
-                    None => "This checkout needs its own name (the estate convention is `<name>-<host-suffix>`), but no suffixed candidate is free or derivable here; pick one and retry `post rooms add`.".to_owned(),
+                    )
                 },
-            )
-            .input(args.name.clone())
-            .room(existing_name.clone())
-            .host(host.clone())
-            .reason("room name is a remote placeholder owned by another host");
-            if let Some(candidate) = candidate {
-                error = error.exact_fix(format!(
-                    "post rooms add {} {}",
-                    shell_quote(&candidate),
-                    shell_quote(&args.path)
-                ));
-            }
-            return Err(error);
+                retry: "`post rooms add`",
+            }));
         }
         return Err(AppError::new(
             ErrorCode::InvalidArgument,
@@ -207,6 +187,626 @@ fn set_path(context: &Context, args: RoomsSetPathArgs, pretty: bool) -> AppResul
     rooms.insert(args.name, args.path);
     context.write_rooms(&rooms)?;
     Ok(result.registration_committed())
+}
+
+/// Rename a local room: the mailbox directory moves, every live reference to
+/// the name is rewritten, and rooms.json commits last. History — archive
+/// letters, channel messages, routing receipts, the room's own cursor and
+/// channel state contents — keeps the old name; only the live registries
+/// that KEY on the name change. Same locks and lock order as `add`:
+/// participant lock, then rooms lock.
+fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<CommandResult> {
+    validate_new_room_name(&args.new).map_err(|reason| {
+        AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("room name '{}' is invalid: {reason}", args.new),
+            "Pass a single path-safe room name without '/' or '\\'.",
+        )
+        .input(args.new.clone())
+        .reason(reason)
+    })?;
+    let _participant_lock = crate::participant::lock(context)?;
+    let _lock = context.lock_rooms()?;
+    let mut rooms = context.load_rooms()?;
+    let Some(stored_path) = rooms.get(&args.old).cloned() else {
+        return Err(AppError::new(
+            ErrorCode::UnknownRoom,
+            format!("room '{}' is not registered", args.old),
+            "List rooms with `post rooms`; register a new one with `post rooms add <name> <path>`.",
+        )
+        .input(args.old)
+        .reason("rename only applies to an existing room"));
+    };
+    if crate::output::stored_path_remote_host_of(context, &stored_path).is_some() {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("room '{}' is a remote placeholder", args.old),
+            "rename never applies to a remote placeholder: the bridge owns it and republishes it. Rename the real room on its owning host.",
+        )
+        .input(args.old.clone())
+        .room(args.old.clone())
+        .reason("remote placeholders are refused"));
+    }
+    if args.new.eq_ignore_ascii_case(&args.old) {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "room name '{}' differs from '{}' only in ASCII case",
+                args.new, args.old
+            ),
+            "Case-only renames are unsupported: pick a name that differs by more than case.",
+        )
+        .input(args.new.clone())
+        .room(args.old.clone())
+        .reason("case-only renames are unsupported"));
+    }
+    let placeholders = placeholder_hosts(context, &rooms);
+    if let Some(existing_name) = rooms
+        .keys()
+        .find(|name| name.as_str() != args.old && name.eq_ignore_ascii_case(&args.new))
+    {
+        if let Some(host) = placeholders.get(existing_name.as_str()) {
+            return Err(remote_duplicate_error(RemoteDuplicate {
+                context,
+                rooms: &rooms,
+                placeholders: &placeholders,
+                existing_name,
+                requested: &args.new,
+                host,
+                fix_for: &|candidate| {
+                    format!(
+                        "post rooms rename {} {}",
+                        shell_quote(&args.old),
+                        shell_quote(candidate)
+                    )
+                },
+                retry: "`post rooms rename`",
+            }));
+        }
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "room '{}' is already registered as '{existing_name}' under ASCII case folding",
+                args.new
+            ),
+            format!("Choose a new room name; if the existing path is wrong, run `post rooms set-path {existing_name} <path>`."),
+        )
+        .input(args.new)
+        .room(existing_name)
+        .reason("duplicate room name under ASCII case folding"));
+    }
+    if crate::lineage::load(context, &args.new)?.is_some() {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "room name '{}' is already used by an existing lineage",
+                args.new
+            ),
+            "Choose a room name that does not collide with an existing lineage.",
+        )
+        .input(args.new)
+        .reason("room names cannot collide with existing lineages"));
+    }
+    let rules = context.load_rules(&rooms)?;
+    if let Some(rule) = rules.blocked.iter().find(|rule| rule.targets(&args.new)) {
+        return Err(AppError::new(
+            ErrorCode::BlockedRoute,
+            format!(
+                "room '{}' cannot take the name because a route to it is blocked: {}",
+                args.old, rule.reason
+            ),
+            "Do not route around this block. Ask the human operator to review rules.json.",
+        )
+        .input(args.new)
+        .reason(rule.reason.clone())
+        .rule(rule.clone()));
+    }
+    if let Some(rule) = rules
+        .blocked
+        .iter()
+        .find(|rule| rule.from == args.old || rule.to == args.old)
+    {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "rules.json has a rule naming '{}': {} -> {} ({})",
+                args.old, rule.from, rule.to, rule.reason
+            ),
+            "rules.json is the human's file: update or remove the rule naming this room, then retry the rename.",
+        )
+        .input(args.old)
+        .reason("a rules.json entry names the old room"));
+    }
+    let old_home = context.root.join(&args.old);
+    let new_home = context.root.join(&args.new);
+    match fs::symlink_metadata(&new_home) {
+        Ok(_) => {
+            return Err(AppError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "'{}' already exists in the mail root",
+                    new_home.display()
+                ),
+                "Rename never merges two mailboxes. Remove or move the existing directory yourself if it is not mail state, then retry.",
+            )
+            .input(args.new)
+            .reason("the new name's mailbox directory already exists"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io("inspect new room directory", &new_home, error)),
+    }
+    let owner_path = context.owner_json_path();
+    match fs::symlink_metadata(&owner_path) {
+        Ok(_) => {
+            let owner = crate::mailbox::read_owner_file(&owner_path)?;
+            if owner.room == args.old {
+                return Err(AppError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("owner.json names '{}' as the owner room", args.old),
+                    "Post never rewrites the owner's signing config. Update owner.json to the new name first, then retry the rename.",
+                )
+                .input(args.old)
+                .reason("owner.json names the old room"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io("inspect owner config", &owner_path, error)),
+    }
+    // The bridge interlock: on a bridged host, health.json must prove the
+    // export guard is cleanly holding this host's names. Without that proof a
+    // rename could let the bridge export this room's already-delivered
+    // letters to another host that also carries the old name. `ok:false` is
+    // not itself a refusal — a room_name_collision is what a rename fixes.
+    let bridged = crate::bridge_topology::load_config(context)
+        .map_err(|reason| {
+            AppError::config(
+                &crate::bridge_topology::bridge_dir(context).join("config.json"),
+                reason,
+            )
+        })?
+        .is_some();
+    if bridged {
+        crate::bridge_topology::export_guard_health(context, std::time::SystemTime::now())
+            .map_err(|reason| {
+                AppError::new(
+                    ErrorCode::BridgeGuardUnavailable,
+                    format!("cannot rename '{}': the bridge's export guard is not proven holding ({reason})", args.old),
+                    "Check that the post bridge is running and healthy (it refreshes bridge/health.json every tick), then retry; nothing was written.",
+                )
+                .input(args.old.clone())
+                .reason(reason)
+            })?;
+    }
+    let mut plan = RenamePlan {
+        dir_move: match fs::symlink_metadata(&old_home) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                Some((old_home.clone(), new_home.clone()))
+            }
+            Ok(_) => {
+                return Err(AppError::config(
+                    &old_home,
+                    "the room's mailbox directory is a symlink or not a directory; repair or remove it before renaming",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AppError::io("inspect room directory", &old_home, error)),
+        },
+        ..RenamePlan::default()
+    };
+    plan_live_rewrites(context, &args.old, &args.new, &mut plan)?;
+
+    let mut warnings = rename_warnings(context, &args.old, &args.new, bridged);
+    warnings.extend(plan.warnings.clone());
+    let mut rewritten: BTreeMap<String, usize> = BTreeMap::new();
+    for write in &plan.writes {
+        *rewritten.entry(write.store.to_owned()).or_default() += 1;
+    }
+    let output = RoomsRenameOutput {
+        ok: true,
+        old: args.old.clone(),
+        new: args.new.clone(),
+        path: stored_path.clone(),
+        mailbox_moved: plan.dir_move.is_some(),
+        rewritten,
+        warnings,
+        dry_run: args.dry_run,
+    };
+    let result = CommandResult::json(&output, pretty)?;
+    if args.dry_run {
+        eprintln!("post: dry run: nothing was written");
+        return Ok(result);
+    }
+    apply_rename(&plan, &old_home, &new_home)?;
+    rooms.remove(&args.old);
+    rooms.insert(args.new.clone(), stored_path);
+    context.write_rooms(&rooms)?;
+    Ok(result.registration_committed())
+}
+
+/// Everything `remote_duplicate_error` needs about one refused collision.
+/// `fix_for` renders the runnable command for a chosen candidate; `retry`
+/// names the command in prose when no candidate is derivable.
+struct RemoteDuplicate<'a> {
+    context: &'a Context,
+    rooms: &'a RoomMap,
+    placeholders: &'a BTreeMap<String, String>,
+    existing_name: &'a str,
+    requested: &'a str,
+    host: &'a str,
+    fix_for: &'a dyn Fn(&str) -> String,
+    retry: &'a str,
+}
+
+/// The refusal `add` and `rename` share when the case-folded duplicate is a
+/// remote placeholder: the owning host is machine-readable (`details.host`),
+/// and the fix is the estate's `<name>-<suffix>` convention — learned from
+/// this host's registrations, falling back to the bridge host id.
+fn remote_duplicate_error(dup: RemoteDuplicate) -> AppError {
+    // `set-path` refuses placeholders, so the local-duplicate hint can never
+    // work here. The estate's naming rule gives the fix instead — this
+    // checkout takes a `<name>-<suffix>` of its own.
+    let candidate = suffixed_room_candidate(
+        dup.rooms,
+        dup.placeholders,
+        bridge_host_id(dup.context).as_deref(),
+        dup.requested,
+    );
+    let mut error = AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "room '{}' is already registered as '{}', a remote placeholder owned by host '{}': a checkout on this machine needs its own name",
+            dup.requested, dup.existing_name, dup.host
+        ),
+        match &candidate {
+            Some(candidate) => {
+                format!("This checkout needs its own name; run `{}`.", (dup.fix_for)(candidate))
+            }
+            None => format!(
+                "This checkout needs its own name (the estate convention is `<name>-<host-suffix>`), but no suffixed candidate is free or derivable here; pick one and retry {}.",
+                dup.retry
+            ),
+        },
+    )
+    .input(dup.requested.to_owned())
+    .room(dup.existing_name.to_owned())
+    .host(dup.host.to_owned())
+    .reason("room name is a remote placeholder owned by another host");
+    if let Some(candidate) = candidate {
+        error = error.exact_fix((dup.fix_for)(&candidate));
+    }
+    error
+}
+
+/// One file the rename rewrites, with its original bytes for rollback.
+struct RenameWrite {
+    path: PathBuf,
+    original: Vec<u8>,
+    updated: Vec<u8>,
+    store: &'static str,
+}
+
+/// The full set of planned changes, computed before anything is written.
+#[derive(Default)]
+struct RenamePlan {
+    dir_move: Option<(PathBuf, PathBuf)>,
+    writes: Vec<RenameWrite>,
+    /// Non-fatal findings folded into the receipt (skipped malformed records).
+    warnings: Vec<String>,
+}
+
+/// True when `bytes` cannot be proven free of a reference to `old`: the name
+/// appears as a whole JSON string or inside a `workspace:` cursor key.
+fn json_bytes_may_name_room(bytes: &[u8], old: &str) -> bool {
+    let as_string = format!("\"{old}\"");
+    let as_cursor_key = format!("\"workspace:{old}\"");
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        // Non-UTF-8 cannot be JSON at all; it also cannot carry a JSON
+        // string naming the room, so it needs no reference.
+        return false;
+    };
+    text.contains(&as_string) || text.contains(&as_cursor_key)
+}
+
+/// Load a JSON state file for the rewrite plan. A malformed file that might
+/// still name the old room refuses the rename — live references must never
+/// be silently left behind; a malformed file that provably cannot name it is
+/// skipped with a warning, matching the readers' own tolerate-corruption
+/// posture.
+fn plan_json_write(
+    path: PathBuf,
+    old: &str,
+    store: &'static str,
+    plan: &mut RenamePlan,
+    mutate: impl FnOnce(&mut serde_json::Value) -> AppResult<()>,
+) -> AppResult<()> {
+    let original = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io("read state for rename", &path, error)),
+    };
+    let mut value: serde_json::Value = match serde_json::from_slice(&original) {
+        Ok(value) => value,
+        Err(error) => {
+            if json_bytes_may_name_room(&original, old) {
+                return Err(AppError::config(
+                    &path,
+                    format!("cannot prove a malformed {store} file is free of '{old}' references: {error}"),
+                ));
+            }
+            plan.warnings.push(format!(
+                "skipped malformed {} at {}: {error}",
+                store,
+                path.display()
+            ));
+            return Ok(());
+        }
+    };
+    // Compare documents, not bytes: a file that never named the room must not
+    // be rewritten (or counted) just because its serialization style differs.
+    let unchanged = value.clone();
+    mutate(&mut value)?;
+    if value == unchanged {
+        return Ok(());
+    }
+    let mut updated = serde_json::to_vec_pretty(&value)
+        .map_err(|error| AppError::io("serialize renamed state", &path, error))?;
+    updated.push(b'\n');
+    plan.writes.push(RenameWrite {
+        path,
+        original,
+        updated,
+        store,
+    });
+    Ok(())
+}
+
+/// Move a JSON object's `old` key to `new`. When `new` already exists the
+/// renamed room's record wins — a stray same-named entry predates the rename
+/// and does not describe this room. Returns whether a key moved.
+fn move_json_key(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    old: &str,
+    new: &str,
+) -> bool {
+    match map.remove(old) {
+        Some(value) => {
+            map.insert(new.to_owned(), value);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Union the `seen` id arrays of two cursor entries, sorted and deduplicated.
+fn union_seen_values(
+    into: &mut serde_json::Value,
+    from: serde_json::Value,
+    path: &Path,
+) -> AppResult<()> {
+    let seen_of = |value: &serde_json::Value| -> AppResult<Vec<String>> {
+        let Some(array) = value.get("seen").and_then(|seen| seen.as_array()) else {
+            return Err(AppError::config(
+                path,
+                "participant cursors.json holds a mail entry without a 'seen' array",
+            ));
+        };
+        array
+            .iter()
+            .map(|id| {
+                id.as_str().map(str::to_owned).ok_or_else(|| {
+                    AppError::config(
+                        path,
+                        "participant cursors.json 'seen' holds a non-string id",
+                    )
+                })
+            })
+            .collect()
+    };
+    let mut ids = seen_of(into)?;
+    ids.extend(seen_of(&from)?);
+    ids.sort();
+    ids.dedup();
+    into["seen"] =
+        serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect());
+    Ok(())
+}
+
+/// Collect every live-state file that names the room, in rewrite order.
+/// Each entry pairs the file's original bytes (the rollback journal) with
+/// the rewritten document.
+fn plan_live_rewrites(
+    context: &Context,
+    old: &str,
+    new: &str,
+    plan: &mut RenamePlan,
+) -> AppResult<()> {
+    // participants/<id>/participant.json: the `workspace` field. cursors.json:
+    // mail seen-keys `workspace:<old>` (a `workspace:<new>` key that already
+    // exists merges, never loses read state).
+    let participants_root = context.root.join(crate::participant::PARTICIPANTS_DIR);
+    match fs::read_dir(&participants_root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    AppError::io("read participant entry", &participants_root, error)
+                })?;
+                if !entry
+                    .file_type()
+                    .map_err(|error| {
+                        AppError::io("inspect participant entry", &entry.path(), error)
+                    })?
+                    .is_dir()
+                {
+                    continue;
+                }
+                // by-session holds the session index, not participant state.
+                if entry.file_name() == "by-session" {
+                    continue;
+                }
+                let dir = entry.path();
+                let old_for_record = old.to_owned();
+                let new_for_record = new.to_owned();
+                plan_json_write(
+                    dir.join("participant.json"),
+                    old,
+                    "participants",
+                    plan,
+                    move |value| {
+                        if value.get("workspace").and_then(|w| w.as_str())
+                            == Some(old_for_record.as_str())
+                        {
+                            value["workspace"] = serde_json::Value::String(new_for_record.clone());
+                        }
+                        Ok(())
+                    },
+                )?;
+                let cursor_path = dir.join(crate::cursor_state::CURSORS_FILE);
+                let old_key = format!("workspace:{old}");
+                let new_key = format!("workspace:{new}");
+                plan_json_write(
+                    cursor_path.clone(),
+                    old,
+                    "participant_cursors",
+                    plan,
+                    move |value| {
+                        let Some(mail) =
+                            value.get_mut("mail").and_then(|mail| mail.as_object_mut())
+                        else {
+                            return Ok(());
+                        };
+                        if let Some(moved) = mail.remove(&old_key) {
+                            match mail.get_mut(&new_key) {
+                                Some(existing) => {
+                                    union_seen_values(existing, moved, &cursor_path)?;
+                                }
+                                None => {
+                                    mail.insert(new_key, moved);
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io("list participants", &participants_root, error)),
+    }
+
+    // channels/<channel>/members.json: the legacy workspace-keyed member map.
+    let channels_root = context.root.join(crate::channel::CHANNELS_DIR);
+    match fs::read_dir(&channels_root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry
+                    .map_err(|error| AppError::io("read channel entry", &channels_root, error))?;
+                if !entry
+                    .file_type()
+                    .map_err(|error| AppError::io("inspect channel entry", &entry.path(), error))?
+                    .is_dir()
+                {
+                    continue;
+                }
+                plan_json_write(
+                    entry.path().join("members.json"),
+                    old,
+                    "channel_members",
+                    plan,
+                    |value| {
+                        if let Some(map) = value.as_object_mut() {
+                            move_json_key(map, old, new);
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io("list channels", &channels_root, error)),
+    }
+
+    // profiles.json: legacy bare (workspace-keyed) entries only; typed
+    // `participant:<id>` keys never name a room.
+    plan_json_write(
+        context.root.join(crate::profile::PROFILES_FILE),
+        old,
+        "profiles",
+        plan,
+        |value| {
+            if let Some(map) = value.as_object_mut() {
+                if !old.starts_with(crate::profile::PARTICIPANT_KEY_PREFIX) {
+                    move_json_key(map, old, new);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+/// The receipt warnings a rename always or conditionally carries.
+fn rename_warnings(context: &Context, old: &str, new: &str, bridged: bool) -> Vec<String> {
+    let mut warnings = Vec::new();
+    // The heartbeat moves with the directory, so a live watch on the old name
+    // still stamps the moved file — but it answers for nobody. Anything that
+    // armed on the old name (a watcher, a Monitor doorbell) must be re-armed.
+    if crate::presence::read_presence(context, old)
+        .map(|presence| presence.live_watch)
+        .unwrap_or(false)
+    {
+        warnings.push(format!(
+            "a watcher or doorbell armed on '{old}' was live recently; re-arm it on '{new}'"
+        ));
+    }
+    warnings.push(format!(
+        "post does not update names outside its store: doorbells, supervisor config, Porch config, and CLAUDE.md files still name '{old}'"
+    ));
+    if bridged {
+        warnings.push(format!(
+            "the bridge publishes '{new}' on its next tick; another host's '{old}', if any, becomes that host's alone"
+        ));
+    }
+    warnings
+}
+
+/// Apply a planned rename, rolling back on the first failure: rewritten
+/// files restore their original bytes and the mailbox directory moves back.
+/// rooms.json is written separately as the commit point after this returns.
+fn apply_rename(plan: &RenamePlan, old_home: &Path, new_home: &Path) -> AppResult<()> {
+    let mut applied = 0usize;
+    let outcome = (|| -> AppResult<()> {
+        if plan.dir_move.is_some() {
+            fs::rename(old_home, new_home)
+                .map_err(|error| AppError::io("move room mailbox", new_home, error))?;
+        }
+        for write in &plan.writes {
+            crate::mailbox::atomic_replace(&write.path, &write.updated).map_err(|error| {
+                AppError::io("rewrite live state for rename", &write.path, error)
+            })?;
+            applied += 1;
+        }
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        for write in plan.writes[..applied].iter().rev() {
+            if let Err(restore) = crate::mailbox::atomic_replace(&write.path, &write.original) {
+                eprintln!(
+                    "post: warning: rollback could not restore {}: {restore}",
+                    write.path.display()
+                );
+            }
+        }
+        if plan.dir_move.is_some() {
+            if let Err(restore) = fs::rename(new_home, old_home) {
+                eprintln!(
+                    "post: warning: rollback could not move the mailbox back to {}: {restore}",
+                    old_home.display()
+                );
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Expand and canonicalize a room path argument, requiring an existing

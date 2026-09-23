@@ -230,6 +230,8 @@ post catchup [<channel> | --mail | --all] [--max-bytes N] [--framing auto|full|c
 post search <pattern> [--mail | --channel <channel>] [--limit 1..=1000] [--framing auto|full|compact]
 post rooms
 post rooms add <name> <path>
+post rooms set-path <name> <path> [--dry-run]
+post rooms rename <old> <new> [--dry-run]
 post participant show
 post participant bind [--workspace <room>] [--new [--harness <slug>] | --harness <slug> --key <conversation-key>]
 post participant touch
@@ -427,6 +429,12 @@ mkdir -p ~/.codex/post-room
 post rooms add codex ~/.codex/post-room
 post rooms
 ```
+
+`post rooms rename <old> <new>` renames a local room and keeps its mail: the
+mailbox directory moves and every live reference to the name is rewritten,
+while archive letters and channel history keep the old name. On a bridged
+host it runs only while the bridge's export guard is provably holding this
+host's names, and it refuses remote placeholders — the bridge owns those.
 
 A bound participant is the channel actor. A session-only participant can join a
 channel explicitly without a registered workspace. Cwd is consulted when bind

@@ -103,10 +103,13 @@ pub enum ErrorCode {
     BridgeUnsupported,
     /// The running bridge's capabilities cannot be established. Retryable.
     BridgeStatusUnavailable,
+    /// A room rename cannot prove the bridge's export guard is holding this
+    /// host's copy of the name. Retryable.
+    BridgeGuardUnavailable,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -130,6 +133,7 @@ impl ErrorCode {
         Self::RemoteSenderUnroutable,
         Self::BridgeUnsupported,
         Self::BridgeStatusUnavailable,
+        Self::BridgeGuardUnavailable,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -157,6 +161,7 @@ impl ErrorCode {
             Self::RemoteSenderUnroutable => "remote_sender_unroutable",
             Self::BridgeUnsupported => "bridge_unsupported",
             Self::BridgeStatusUnavailable => "bridge_status_unavailable",
+            Self::BridgeGuardUnavailable => "bridge_guard_unavailable",
         }
     }
 
@@ -177,7 +182,10 @@ impl ErrorCode {
             Self::NotFound => 66,
             Self::BlockedRoute => 77,
             Self::ConfigInvalid | Self::NoBridge => 78,
-            Self::IoError | Self::TopologyUnavailable | Self::BridgeStatusUnavailable => 75,
+            Self::IoError
+            | Self::TopologyUnavailable
+            | Self::BridgeStatusUnavailable
+            | Self::BridgeGuardUnavailable => 75,
             Self::DeliveredOutputFailure | Self::DeliveredUnarchived => 70,
         }
     }
@@ -185,7 +193,10 @@ impl ErrorCode {
     pub const fn retryable(self) -> bool {
         matches!(
             self,
-            Self::IoError | Self::TopologyUnavailable | Self::BridgeStatusUnavailable
+            Self::IoError
+                | Self::TopologyUnavailable
+                | Self::BridgeStatusUnavailable
+                | Self::BridgeGuardUnavailable
         )
     }
 }

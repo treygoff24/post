@@ -422,7 +422,31 @@ their existing success semantics.
   (including `to: "*"`), quoting the rule's reason verbatim.
   Validation and replacement are one flock-protected transaction. It never
   creates the workspace, overwrites an existing registration, or modifies
-  rules.json beyond the one registration it performs.
+  rules.json beyond the one registration it performs. When the refused name
+  case-folds to a remote placeholder, the error names the owning host in
+  `details.host` and its `exact_fix` adds the room under the estate's
+  `<name>-<host-suffix>` convention (learned from this host's own suffixed
+  registrations, else the bridge host id); a local duplicate keeps the
+  `set-path` hint.
+- `post rooms set-path <name> <path> [--dry-run]` — re-points a local room's
+  workspace (discovery) path under the same locks and validation as `add`;
+  it never moves mail or history, never rewrites participant records, and
+  always refuses remote placeholders in either direction.
+- `post rooms rename <old> <new> [--dry-run]` — renames a local room under
+  the participant and rooms locks. It moves `<root>/<old>` to
+  `<root>/<new>` with a single rename, rewrites every live reference to the
+  name (participant `workspace` fields, participant cursor `workspace:<old>`
+  keys, `channels/*/members.json` keys, bare `profiles.json` keys), then
+  commits `rooms.json` last; a failure before the commit restores the moved
+  directory and every written file. Published history is never rewritten:
+  archive letters, channel messages, routing receipts, and the moved
+  directory's own contents keep the old name. It refuses an unknown or
+  remote-placeholder old room, any `add` check on the new name (including
+  placeholder duplicates), a case-only rename, an existing `<root>/<new>`,
+  an `owner.json` or `rules.json` naming the old room, and on a bridged host
+  any `bridge/health.json` that is not fresh or whose `local_held` counters
+  are not both integer 0 (retryable `bridge_guard_unavailable`; `ok:false`
+  alone does not refuse). `--dry-run` runs every check and writes nothing.
 - `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>]
   [--oversize] [--signature-ref <tag>] (--body <text> | --body-file <path> |
   stdin)`: sends to a shared channel as the bound participant. A session-only

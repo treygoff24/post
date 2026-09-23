@@ -387,7 +387,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "rooms",
         &schema.output_shapes.rooms,
-        ["ok", "rooms", "count", "set-path:"]
+        ["ok", "rooms", "count", "set-path:", "rename:"]
     );
     assert_shape!(
         "schema",
