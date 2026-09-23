@@ -1861,7 +1861,13 @@ async function runSupervisor(paths) {
     try {
       supervisor.writeHeartbeat({ lock_helper_pid: lock.helperPid });
     } catch (error) {
-      supervisor.logOnce("heartbeat-write", { type: "heartbeat", problem: "could not write the heartbeat", error: String(error?.code ?? error?.message ?? error) });
+      // The log itself can throw (a closed stdout); never let that escape
+      // the timer and take the process down.
+      try {
+        supervisor.logOnce("heartbeat-write", { type: "heartbeat", problem: "could not write the heartbeat", error: String(error?.code ?? error?.message ?? error) });
+      } catch {
+        // Nothing left to report to; the stale heartbeat is the signal.
+      }
     }
   }, 2000);
   beatTimer.unref?.();
