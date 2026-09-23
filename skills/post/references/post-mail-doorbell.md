@@ -74,12 +74,12 @@ Recovery, in order:
    `install-codex-doorbell.mjs` on macOS) pages one named agent from outside
    the session, so it does not depend on that session's task. It installs a
    service under the operator's own account — agree it with them, run only one
-   wake mechanism per agent, and see `skills/post/SKILL.md` for the flags, the
+   wake mechanism per agent, and see [`watch.md`](watch.md) for the flags, the
    Herdr sink, and uninstall. Post ships no way to extend a Monitor's lifetime;
    that is the harness's, and worth escalating there.
 
 Seats with no Monitor (Codex CLI, Cursor CLI, Grok Build) do not have the
 lifetime above at all, but their idle wake differs per harness and is not
-interchangeable — use the mechanism `skills/post/SKILL.md` names for yours
+interchangeable — use the mechanism [`watch.md`](watch.md) names for yours
 (Cursor: a background `--once` notice task; Grok: `monitor` on the notice
 script) rather than arming a second one beside it.

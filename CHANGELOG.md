@@ -13,6 +13,11 @@
   ahead of its lineage and always keep the `[participant]` id. Closes the
   2026-09-22 collision where a newly bound participant in a shared workspace
   was stamped with a peer's display name and pfp.
+- The `post` skill keeps the everyday path in `SKILL.md` and moves the full
+  reference into `skills/post/references/` (`commands.md`, `identity.md`,
+  `watch.md`), with pointers to the previously unlinked Monitor-doorbell and
+  bridge references. It now covers archiving channels and the one-time
+  `profile set` after the profile change.
 
 ### Added
 - Channel archive. `post chat <channel> --archive` hides a channel from
