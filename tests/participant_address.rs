@@ -588,6 +588,8 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     // A future stamp gets at most 5 s of clock skew, not a second window.
     rig.write_health(&both, now + Duration::from_secs(90), 30);
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
+    rig.write_health(&both, now + Duration::from_secs(8), 30);
+    assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     for broken in [
         "{not json".to_owned(),
         json!({"capabilities": both, "interval_s": 30}).to_string(),
@@ -604,8 +606,8 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     // Fresh within three intervals, with both capabilities: queued.
     rig.write_health(&both, now - Duration::from_secs(80), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
-    // A stamp 4 s ahead is inside the skew allowance.
-    rig.write_health(&both, now + Duration::from_secs(4), 30);
+    // A stamp 5 s ahead, the edge of the skew allowance, is inside it.
+    rig.write_health(&both, now + Duration::from_secs(5), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
 }
 
@@ -634,8 +636,17 @@ fn a_remote_letter_larger_than_the_bridge_carries_is_refused_before_writing() {
             &rig.cwd(),
         )
     };
+    // The snapshot records files only; check the archive directory itself.
+    let archive = rig.root().join("archive");
+    if archive.exists() {
+        fs::remove_dir(&archive).expect("the rig's archive directory is empty");
+    }
     let before = rig.snapshot();
     let value = assert_refused(&send(1024 * 1024), "invalid_argument", 2, false);
+    assert!(
+        !archive.exists(),
+        "an undeliverable letter created the archive directory"
+    );
     assert!(
         value["error"]["message"]
             .as_str()

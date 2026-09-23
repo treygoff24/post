@@ -513,8 +513,6 @@ where
     let profile = crate::profile::stamp_for(context, &actor.participant.id, &sender, rooms);
     let (id_timestamp, sent) = local_timestamp()?;
     let archive = context.root.join("archive");
-    fs::create_dir_all(&archive)
-        .map_err(|error| AppError::io("create archive directory", &archive, error))?;
     let mut queued = None;
     for attempt in 0..256 {
         let id = next_id(&id_timestamp, attempt)?;
@@ -553,6 +551,10 @@ where
             .input("message body")
             .reason(format!("letter exceeds the {cap}-byte bridge limit")));
         }
+        // Created only once the letter is known to fit: a refusal writes
+        // nothing, not even an empty archive directory.
+        fs::create_dir_all(&archive)
+            .map_err(|error| AppError::io("create archive directory", &archive, error))?;
         let archive_path = archive.join(format!("{id}.mail"));
         match exclusive_atomic_write(&archive_path, &payload) {
             Ok(()) => {
