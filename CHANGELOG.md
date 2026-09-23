@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Changed
+- `install-post.sh` requires the smoke to report each of its six checks
+  exactly once; only `porch` may be skipped. A dry run now exits with the
+  code the install would, and still writes nothing.
+- `post profile show`'s argument is named `PARTICIPANT` in help and schema.
 - `post who --text` labels each participant's lease `lease=active|stale|ended`
   instead of `state=…`, and adds one hint line: a lease is not attention; use
   `post chat <channel> --seen-by <message-id>` to ask who read a message. The
@@ -24,6 +28,27 @@
   `profile set` after the profile change.
 
 ### Added
+- Participant DM across hosts, post side (design rev 3.1). `post send --to
+  participant:<id>@<host>` queues a letter for a participant on an enrolled
+  peer host. The letter is written only to `archive/`, with `to_host`, and
+  the receipt says `delivery.state: queued`. The send refuses before writing
+  anything when the sender has no local room, when the host is unknown or
+  the topology unreadable, or when `bridge/health.json` does not show a fresh
+  bridge with `typed-outbound-exclusion` and `participant-mail-v1`. New error
+  codes: `topology_unavailable` and `bridge_status_unavailable` (both
+  retryable), plus `unknown_host`, `no_bridge`, `remote_sender_unroutable`, and
+  `bridge_unsupported`.
+- `post delivery <mail-id>` reports a sent letter's state (`queued`,
+  `published`, `received`, `rejected`, or `unknown` on corrupt evidence) from
+  the bridge's evidence files. It is visible only to the sender.
+- `post bridge deliver`, the bridge-only import command, has a frozen JSON
+  contract (`post.bridge-deliver.v1`, with samples in `contract/samples/`). It
+  writes the admission record before the inbox file, so a crash between
+  them converges on rerun, and a replay skips the mutable admission checks.
+- An imported letter's origin comes from its admission record at every call
+  site (inbox, read, search, catchup, watch, routing). Its reply address is
+  `participant:<sender>@<source-host>`. An imported sender whose id matches
+  a local participant's is never that participant's own mail.
 - `post contract samples [--dir <path>]` prints, or writes, the output
   samples built into the binary: watch snapshots (plain, digest, and with an
   unusable cursor), inbox, chat, who, profile show and list, channels,
