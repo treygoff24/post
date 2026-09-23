@@ -42,6 +42,9 @@ macro_rules! sample {
 /// Every checked-in sample. `tests/contract_samples.rs` fails when this list
 /// and `contract/samples/` disagree in either direction.
 pub(crate) const SAMPLES: &[(&str, &str)] = &[
+    sample!("bridge-deliver-delivered.json"),
+    sample!("bridge-deliver-rejected.json"),
+    sample!("bridge-deliver-retry.json"),
     sample!("channels.json"),
     sample!("chat.json"),
     sample!("doctor.json"),

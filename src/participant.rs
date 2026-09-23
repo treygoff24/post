@@ -1060,7 +1060,7 @@ fn activity_from_env() -> AppResult<ActivityRefresh> {
     })
 }
 
-fn format_rfc3339(now: SystemTime) -> AppResult<String> {
+pub(crate) fn format_rfc3339(now: SystemTime) -> AppResult<String> {
     let seconds = now.duration_since(UNIX_EPOCH).map_err(|error| {
         AppError::new(
             ErrorCode::IoError,
@@ -1094,7 +1094,7 @@ fn format_rfc3339(now: SystemTime) -> AppResult<String> {
     ))
 }
 
-fn parse_rfc3339(value: &str) -> Option<SystemTime> {
+pub(crate) fn parse_rfc3339(value: &str) -> Option<SystemTime> {
     let bytes = value.as_bytes();
     let (datetime_end, offset_seconds) = if bytes.last() == Some(&b'Z') {
         (bytes.len().checked_sub(1)?, 0_i64)
@@ -1215,7 +1215,7 @@ fn validate_harness(value: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn validate_participant_id(value: &str) -> AppResult<()> {
+pub(crate) fn validate_participant_id(value: &str) -> AppResult<()> {
     crate::mailbox::validate_component(value).map_err(|reason| {
         AppError::invalid_argument(format!("participant id '{value}' is invalid: {reason}"))
             .input(value)

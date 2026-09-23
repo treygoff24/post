@@ -152,6 +152,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "JSON",
             "store-free: reads no mailbox and needs no participant; samples prints the normalized output samples compiled into this binary (contract/samples/, produced by the real commands in the test suite: ids, timestamps, paths, digests, and build_sha replaced by same-format stand-ins, field presence, types, and enum values kept) as one object keyed by file name; --dir <path> creates the directory if missing and writes each sample as <path>/<name>, replacing a same-named file whole, so a consumer's contract tests run against the binary it will actually call; skill-manifest prints the sha256 of every served skill file (skills/post: SKILL.md, references/, hooks/, agents/; dot-files excluded) computed when this binary was built -- an install receipt, not a runtime check; --verify <path> checks a served skill directory against it and records the served root's kind: symlink (checked through the files it resolves to) or copy (checked as served; a file whose source carries skill-render fence markers and differs is listed as rendered_unverified and makes the verdict unverified, not match, because the rendering is not checked); exit 0 on match, 1 on drift (a changed, missing, or extra covered file) or unverified, and an error envelope when the path cannot be read",
         ),
+        command(
+            "bridge",
+            "post bridge deliver --participant <id> --source-host <host> --mail-id <mail-id> --sha256 <hex> --file <path> [--json]",
+            "JSON (post.bridge-deliver.v1), always",
+            "bridge-only fenced writer; takes no participant and never touches activity. Exit 0 means a decision: exactly one object with outcome=delivered|rejected|retry. Every other exit (usage error 2, crash, missing binary) is a retry for the bridge. Order: structural checks every attempt (argument grammar, --file a regular file of at most 8 MiB, --source-host not this host's bridge host, sha256 of the file equals --sha256, envelope id/to/address_kind=participant/to_host/from_participant without '@'/from room grammar), then under the participants lock the admission record participants/<id>/imports/<mail-id>.json {v, participant, mail_id, source_host, sha256, from_participant, admitted_at}. A valid record with the same source_host and sha256 is a replay: admission checks are skipped and the inbox file is completed or verified. No record: an existing inbox file is id_collision; otherwise the admission checks run once (from must be a placeholder homed under remote/<source-host>/, the participant must exist and not be ended, the route must not be blocked), then the record is written (the admission point), then the inbox file. Terminal reasons: unknown_participant, ended_participant, blocked_route, to_mismatch, forged_from, id_collision, malformed. Retry reasons: participant_unreadable, inventory_degraded (route policy unreadable), import_record_unreadable, digest_mismatch, fenced, topology_unavailable, io_error",
+        ),
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
@@ -364,6 +370,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
+        ]),
+        bridge: fields(&[
+            "deliver: ok=true, schema=post.bridge-deliver.v1, outcome=delivered|rejected|retry, reason (null for delivered), participant, mail_id, source_host, sha256 (computed by post), admitted_at (RFC3339 UTC; non-null exactly for delivered), replay, detail (null for delivered; at most 512 chars)",
         ]),
         contract: fields(&[
             "samples: ok, samples{<file name>: <sample text>}",

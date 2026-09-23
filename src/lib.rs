@@ -24,6 +24,7 @@ macro_rules! eprint {
 }
 
 mod app;
+mod bridge_topology;
 mod channel;
 mod channel_archive;
 mod channel_state;

@@ -1312,6 +1312,7 @@ mod tests {
             from_participant: None,
             from_lineage: None,
             address_kind: None,
+            to_host: None,
             display_name: display_name.map(str::to_owned),
             pfp: pfp.map(str::to_owned),
             sender_address: None,

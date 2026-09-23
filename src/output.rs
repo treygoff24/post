@@ -260,19 +260,64 @@ pub(crate) fn remote_workspace(context: &crate::mailbox::Context, workspace: &st
 /// `POST_MAIL_ROOT` or `HOME` gives the same split, so a lexical comparison of
 /// one spelling against the other would read a placeholder as local.
 fn stored_path_is_remote(path: &Path, raw_root: &Path, canonical_root: &Path) -> bool {
-    fn under(path: &Path, root: &Path) -> bool {
-        let Ok(relative) = path.strip_prefix(root.join("remote")) else {
-            return false;
-        };
+    stored_path_remote_host(path, raw_root, canonical_root).is_some()
+}
+
+/// The `<host>` component of a stored path under `<root>/remote/<host>/...`,
+/// by the same three spellings `stored_path_is_remote` accepts.
+fn stored_path_remote_host(path: &Path, raw_root: &Path, canonical_root: &Path) -> Option<String> {
+    fn under(path: &Path, root: &Path) -> Option<String> {
+        let relative = path.strip_prefix(root.join("remote")).ok()?;
         let components = relative.components().collect::<Vec<_>>();
-        components.len() >= 2
-            && components
-                .iter()
-                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        let normal = components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+        if components.len() < 2 || !normal {
+            return None;
+        }
+        components[0].as_os_str().to_str().map(str::to_owned)
     }
     under(path, raw_root)
-        || under(path, canonical_root)
-        || under(&canonicalize_existing_prefix(path), canonical_root)
+        .or_else(|| under(path, canonical_root))
+        .or_else(|| under(&canonicalize_existing_prefix(path), canonical_root))
+}
+
+/// Where a room name is homed, for trust fact 2 (a bridged `from` must be a
+/// placeholder of the host that sent it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomHome {
+    /// Not in rooms.json.
+    Unregistered,
+    /// Registered at a path outside `<root>/remote/`.
+    Local,
+    /// Registered under `<root>/remote/<host>/...`.
+    Placeholder(String),
+}
+
+/// Look up where `room` is homed. Fails closed like `remote_workspace`: a
+/// rooms.json that is missing or cannot be loaded is an error, never
+/// "unregistered" (Aster ruling 20260923-052555).
+pub(crate) fn room_home(context: &crate::mailbox::Context, room: &str) -> Result<RoomHome, String> {
+    let path = context.root.join("rooms.json");
+    match std::fs::metadata(&path) {
+        Ok(_) => {}
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    }
+    let rooms = context.load_rooms().map_err(|error| error.message)?;
+    let Some(stored) = rooms.get(room) else {
+        return Ok(RoomHome::Unregistered);
+    };
+    let expanded = context
+        .expand_room_path(stored)
+        .map_err(|reason| format!("room '{room}' has an invalid path: {reason}"))?;
+    let canonical_root =
+        std::fs::canonicalize(&context.root).unwrap_or_else(|_| context.root.clone());
+    Ok(
+        match stored_path_remote_host(&expanded, &context.root, &canonical_root) {
+            Some(host) => RoomHome::Placeholder(host),
+            None => RoomHome::Local,
+        },
+    )
 }
 
 /// Canonicalize the longest existing ancestor of `path` and re-append the
@@ -1630,6 +1675,7 @@ pub struct OutputShapes {
     pub watch: Vec<String>,
     pub who: Vec<String>,
     pub contract: Vec<String>,
+    pub bridge: Vec<String>,
 }
 
 /// The resolved signed owner as exposed by `post schema` (A0a Decision 6):

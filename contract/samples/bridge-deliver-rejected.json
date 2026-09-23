@@ -1,0 +1,13 @@
+{
+  "admitted_at": null,
+  "detail": "participant 'ghost-00000000' does not exist on this host",
+  "mail_id": "20260101-000001-a00001",
+  "ok": true,
+  "outcome": "rejected",
+  "participant": "ghost-00000000",
+  "reason": "unknown_participant",
+  "replay": false,
+  "schema": "post.bridge-deliver.v1",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_host": "peer-host"
+}

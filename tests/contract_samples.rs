@@ -416,7 +416,95 @@ fn produce() -> BTreeMap<&'static str, String> {
         "watch-snapshot-cursor-unusable.jsonl",
         normalizer.lines(&reread),
     );
+
+    // `post bridge deliver` (post.bridge-deliver.v1): one sample per
+    // outcome. The bridge codes against these, so each comes from a real
+    // decision: a delivery to the reader from the remote placeholder, a
+    // rejection for an absent participant, and a retry on a digest mismatch.
+    let bridge = sandbox.mail_root.join("bridge");
+    fs::create_dir_all(&bridge).expect("bridge dir");
+    fs::write(
+        bridge.join("config.json"),
+        r#"{"host":"test-host","relay_url":"ssh://relay.invalid/relay.git"}"#,
+    )
+    .expect("bridge config");
+    let relay = sandbox.path.join("relay");
+    let letter = |to: &str, id: &str| -> (PathBuf, String) {
+        let envelope = json!({
+            "id": id, "from": "remote-room", "to": to, "kind": "letter",
+            "subject": "dm", "sent": "2026-09-23 01:00:00 -0500",
+            "from_participant": "codex-peer0001", "address_kind": "participant",
+            "to_host": "test-host", "sender_provenance": "participant-binding"
+        });
+        write_custom_mail(&relay, id, &envelope, "hello across hosts\n");
+        let path = relay.join(format!("{id}.mail"));
+        let digest = sha256_hex(&fs::read(&path).expect("relay letter"));
+        (path, digest)
+    };
+    let deliver = |participant: &str, id: &str, sha: &str, file: &Path| {
+        let file = file.to_string_lossy().into_owned();
+        sandbox.run(&[
+            "bridge",
+            "deliver",
+            "--participant",
+            participant,
+            "--source-host",
+            "peer-host",
+            "--mail-id",
+            id,
+            "--sha256",
+            sha,
+            "--file",
+            &file,
+            "--json",
+        ])
+    };
+    let (delivered_file, delivered_sha) = letter(&reader, "20260101-000400-ccccc1");
+    let (ghost_file, ghost_sha) = letter("ghost-00000000", "20260101-000500-ccccc2");
+    let (retry_file, _) = letter(&reader, "20260101-000600-ccccc3");
+    let bridge_documents = [
+        (
+            "bridge-deliver-delivered.json",
+            deliver(
+                &reader,
+                "20260101-000400-ccccc1",
+                &delivered_sha,
+                &delivered_file,
+            ),
+        ),
+        (
+            "bridge-deliver-rejected.json",
+            deliver(
+                "ghost-00000000",
+                "20260101-000500-ccccc2",
+                &ghost_sha,
+                &ghost_file,
+            ),
+        ),
+        (
+            "bridge-deliver-retry.json",
+            deliver(
+                &reader,
+                "20260101-000600-ccccc3",
+                &"0".repeat(64),
+                &retry_file,
+            ),
+        ),
+    ];
+    for (name, output) in bridge_documents {
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        samples.insert(name, normalizer.document(&output));
+    }
     samples
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
 #[test]

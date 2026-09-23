@@ -489,7 +489,7 @@ pub(crate) fn held_ids(context: &Context, address: &Address) -> AppResult<Vec<St
     Ok(pending_summary(context, address)?.held)
 }
 
-fn route_message_locked(
+pub(crate) fn route_message_locked(
     context: &Context,
     address: &Address,
     id: &str,

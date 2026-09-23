@@ -270,6 +270,7 @@ where
             from_participant: Some(actor.participant.id.clone()),
             from_lineage: actor.lineage.clone(),
             address_kind: Some(target.kind.as_str().to_owned()),
+            to_host: None,
             display_name: profile.name.clone(),
             pfp: profile.pfp.clone(),
             sender_address: sender_address.clone(),
@@ -371,7 +372,7 @@ where
     Ok(CommandResult::committed(rendered))
 }
 
-fn ensure_route_allowed(
+pub(crate) fn ensure_route_allowed(
     context: &Context,
     rooms: &RoomMap,
     sender: &str,

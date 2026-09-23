@@ -1,3 +1,4 @@
+mod bridge;
 mod byte_budget;
 mod catchup;
 mod channels;
@@ -36,6 +37,12 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         return contract::run(args, pretty);
     }
     let context = Context::from_env()?;
+    // Bridge-only commands act for the bridge, never for a participant: no
+    // participant resolution, no activity touch, and no first-run defaults.
+    // They take their own fence admission so a refusal is a decided answer.
+    if let Command::Bridge(args) = cli.command {
+        return bridge::run(&context, args, pretty);
+    }
     let writes = migration_fence::classify_write(&cli.command);
     let long_watch = matches!(&cli.command, Command::Watch(args) if !args.snapshot);
     let explicit_bootstrap = explicit_participant_bootstrap(&cli.command);
@@ -129,6 +136,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Contract(_) => {
             unreachable!("contract dispatches before mailbox context resolution")
         }
+        Command::Bridge(_) => unreachable!("bridge dispatches before participant resolution"),
     }?;
     if report_unbound {
         eprintln!("participant: unbound (run: post participant bind)");
