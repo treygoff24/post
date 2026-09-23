@@ -181,7 +181,7 @@ fn help_and_schema_keep_command_contract_visible() {
         .expect("watch command in schema");
     assert_eq!(
         watch.usage,
-        "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--digest] [--text]"
+        "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--reason mail|channel|mention]... [--digest] [--text]"
     );
     assert!(watch.side_effects.contains("deduplicates channel messages"));
     assert!(watch.side_effects.contains("--snapshot"));
@@ -808,6 +808,32 @@ fn rooms_add_registers_an_existing_directory_without_touching_rules() {
     );
 }
 
+/// Participant records with `last_seen` removed: any writer command refreshes
+/// the ACTING participant's activity time, which changes its bytes whenever a
+/// second boundary passes. That refresh is not the command rewriting records.
+fn participant_records_without_activity(
+    root: &Path,
+) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    tree_bytes(root)
+        .into_iter()
+        .map(|(path, bytes)| {
+            if path
+                .file_name()
+                .is_some_and(|name| name == "participant.json")
+            {
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("participant record JSON");
+                if let Some(object) = record.as_object_mut() {
+                    object.remove("last_seen");
+                }
+                (path, serde_json::to_vec(&record).expect("record bytes"))
+            } else {
+                (path, bytes)
+            }
+        })
+        .collect()
+}
+
 fn tree_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     fn walk(at: &Path, found: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
         let Ok(entries) = fs::read_dir(at) else {
@@ -848,7 +874,8 @@ fn rooms_set_path_moves_only_the_discovery_path() {
     let rooms_path = sandbox.mail_root.join("rooms.json");
     let mail_before = tree_bytes(&sandbox.mail_root.join("alpha"));
     assert!(!mail_before.is_empty(), "the room has mail to keep");
-    let participants_before = tree_bytes(&sandbox.mail_root.join("participants"));
+    let participants_before =
+        participant_records_without_activity(&sandbox.mail_root.join("participants"));
     let rooms_before = fs::read(&rooms_path).expect("rooms");
 
     let dry = sandbox.run(&["rooms", "set-path", "alpha", &moved_arg, "--dry-run"]);
@@ -876,7 +903,7 @@ fn rooms_set_path_moves_only_the_discovery_path() {
     );
     assert_eq!(tree_bytes(&sandbox.mail_root.join("alpha")), mail_before);
     assert_eq!(
-        tree_bytes(&sandbox.mail_root.join("participants")),
+        participant_records_without_activity(&sandbox.mail_root.join("participants")),
         participants_before
     );
     assert_eq!(
