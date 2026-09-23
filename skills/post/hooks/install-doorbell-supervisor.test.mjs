@@ -117,7 +117,10 @@ if (path.basename(process.argv[1]) === "systemctl") {
   if (verb === "daemon-reload") {}
   else if (verb === "is-enabled") { process.stdout.write(state.enabled.includes(unit) ? "enabled\\n" : "disabled\\n"); process.exit(state.enabled.includes(unit) ? 0 : 1); }
   else if (verb === "enable") { add("enabled", unit); drop("disabled", unit); if (now) add("loaded", unit); }
-  else if (verb === "disable") { drop("enabled", unit); add("disabled", unit); if (now) { drop("loaded", unit); stop(unit); } }
+  else if (verb === "disable") {
+    if (!fs.existsSync(unitFile) && !state.enabled.includes(unit)) { process.stderr.write("Failed to disable unit: Unit file " + unit + " does not exist.\\n"); save(); process.exit(1); }
+    drop("enabled", unit); add("disabled", unit); if (now) { drop("loaded", unit); stop(unit); }
+  }
   else if (verb === "restart") {
     const text = fs.readFileSync(unitFile, "utf8");
     const exec = /^ExecStart=(.*)$/m.exec(text)[1].match(/"(?:[^"\\\\]|\\\\.)*"|\\S+/g).map(unq);
@@ -580,6 +583,15 @@ describe("uninstall and restore", () => {
     assert.equal(fs.readFileSync(path.join(host.dir, ".local", "bin", "post-doorbell"), "utf8"), "#!/usr/bin/env python3\n# old daemon\n");
     assert.equal(host.sm().running[supervisorUnit(host)], undefined);
   });
+
+  for (const platform of ["linux", "darwin"]) {
+    test(`uninstall with nothing installed is a clean no-op (${platform})`, () => {
+      const host = makeHost(platform);
+      const result = host.install(["--uninstall"]);
+      ok(result);
+      assert.match(result.stdout, /nothing to restore/);
+    });
+  }
 
   test("macOS: restore bootstraps the recorded plist", () => {
     const host = makeHost("darwin");

@@ -60,7 +60,7 @@ const UNIT = "post-doorbell-supervisor.service";
 const SHIM_MARKER = "# post-doorbell supervisor shim (install-doorbell-supervisor.mjs)";
 const AGENT_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const CHANNEL_NAME = /^[A-Za-z0-9._-]{1,255}$/;
-const NOT_LOADED = /no such process|could not find service|not loaded|not-found|not found/i;
+const NOT_LOADED = /no such process|could not find service|not loaded|not-found|not found|does not exist/i;
 
 class Fail extends Error {
   constructor(message, code = 1) {
@@ -265,8 +265,9 @@ function unescapeXml(value) {
     .replace(/&amp;/g, "&");
 }
 
+// systemd expands %-specifiers in ExecStart= and Environment=; %% is a literal %.
 function unitQuote(value) {
-  const text = String(value);
+  const text = String(value).replace(/%/g, "%%");
   if (!/[\s"'\\#;]/.test(text)) return text;
   return `"${text.replace(/([\\"])/g, "\\$1")}"`;
 }

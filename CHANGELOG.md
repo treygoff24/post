@@ -24,6 +24,30 @@
   `profile set` after the profile change.
 
 ### Added
+- One doorbell supervisor per host (`skills/post/hooks/doorbell-supervisor.mjs`,
+  run as `post-doorbell`) replaces the per-agent `codex-notify-monitor` timers.
+  It finds each post participant's herdr pane by exact session digest, scans
+  each enabled participant with `post watch --snapshot` when its mail or
+  channels change (with a periodic reconciliation pass as the backstop), and
+  rings the pane with a `[post-doorbell:v2]` notice. A snapshot is accepted
+  whole or not at all, and a failed scan never advances state. Per-generation
+  state means a moved or resumed session rings again. Failures back off
+  exponentially and are reported as broken after five in a row. A python3
+  `fcntl.flock` helper guarantees one supervisor per mail root, and
+  `health.json` plus the heartbeat give `post-doorbell status` a liveness
+  answer (running, stale, or dead) separate from scan health. Agents opt in
+  with `post-doorbell enable [--focused]`, `disable`,
+  `subscribe --channel <name>`, `unsubscribe --channel <name>`, and
+  `select --pane <id>`.
+- `skills/post/hooks/install-doorbell-supervisor.mjs` installs the supervisor
+  as a launchd LaunchAgent (macOS) or systemd user service (Linux), and waits
+  for the lock and a healthy first tick. It moves an old
+  `~/.local/bin/post-doorbell` aside with its hash and migrates old timers one
+  at a time: carry over the settings, wait for a healthy subscription, then
+  disable that timer. Every step is recorded in
+  `$POST_MAIL_ROOT/doorbell/install-receipt.json`, so an interrupted run
+  resumes where it stopped. `--uninstall` removes only the supervisor;
+  `--restore-legacy` re-enables the timers whose unit files are unchanged.
 - `post contract samples [--dir <path>]` prints, or writes, the output
   samples built into the binary: watch snapshots (plain, digest, and with an
   unusable cursor), inbox, chat, who, profile show and list, channels,
