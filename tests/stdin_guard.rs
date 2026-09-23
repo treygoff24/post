@@ -287,7 +287,11 @@ fn silent_open_pipe_past_the_bound_is_input_ambiguous() {
 }
 
 /// Every file under the store, with its bytes: a refused consuming flag must
-/// leave all of it, cursors included, byte-identical.
+/// leave all of it, cursors included, byte-identical. The one exception is a
+/// participant record's `last_seen`: every command that resolves the
+/// participant touches that liveness stamp (second resolution), refused or
+/// not, and it is not read state. It is removed before comparing, so a
+/// refusal that crosses a second boundary is not a false failure.
 fn store_bytes(fixture: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     fn walk(path: &std::path::Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(path).expect("read store dir") {
@@ -295,7 +299,20 @@ fn store_bytes(fixture: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>
             if path.is_dir() {
                 walk(&path, out);
             } else {
-                out.insert(path.clone(), fs::read(&path).expect("read store file"));
+                let mut bytes = fs::read(&path).expect("read store file");
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "participant.json")
+                {
+                    let mut record: Value =
+                        serde_json::from_slice(&bytes).expect("participant record");
+                    record
+                        .as_object_mut()
+                        .expect("participant object")
+                        .remove("last_seen");
+                    bytes = serde_json::to_vec(&record).expect("participant bytes");
+                }
+                out.insert(path.clone(), bytes);
             }
         }
     }
