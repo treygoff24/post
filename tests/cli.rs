@@ -4820,17 +4820,24 @@ fn channel_two_room_flow_lists_participants_and_advances_each_seen_set() {
             && message.message.subject == "greeting"
             && message.body == "hello beta"
     }));
+    // Peek shows every unseen message from others, history included: alpha's
+    // join event (before beta joined) and the greeting. Beta's own join event
+    // is never unseen-from-others.
+    assert_eq!(peek.count, 2, "peek: alpha's join event plus the greeting");
+    assert_eq!(peek.messages[0].message.from, "alpha");
+    assert!(
+        peek.messages[0].message.event.is_some(),
+        "the older one is alpha's join event"
+    );
+    assert_eq!(peek.messages[1].message.id, sent.message.id);
 
     let read: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
-    // Peek also shows beta's unseen pre-join history (alpha's join event), so
-    // counts differ by design; what peek must not do is consume the message.
-    assert!(
-        read.messages
-            .iter()
-            .any(|message| message.message.id == sent.message.id),
-        "peek must not advance the cursor"
-    );
+    // The consuming read starts at beta's join: the greeting alone, which the
+    // peek did not consume.
+    assert_eq!(read.count, 1, "peek must not advance the cursor");
+    assert_eq!(read.messages[0].message.id, sent.message.id);
+    assert!(!read.has_more);
     let empty: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
     assert_eq!(empty.count, 0, "read must advance the cursor");
