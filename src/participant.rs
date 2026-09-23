@@ -1330,7 +1330,9 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
             id: id.clone(),
             harness: "test".to_owned(),
             conversation_key_digest: digest,
-            created: "2026-09-16 00:00:00 -0500".to_owned(),
+            // Matches the integration seed in tests/common: fixtures seed
+            // fixed ids from 2026, which must read as unread, not history.
+            created: "2026-01-01 00:00:00 +0000".to_owned(),
             last_seen: None,
             lease_hours: DEFAULT_LEASE_HOURS,
             ended_at: None,
