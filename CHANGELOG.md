@@ -10,7 +10,9 @@
   `post channels`, plain reads, `post watch` events (mentions included),
   catchup, crossed-send, or discard receipts; `--peek`, `--history`, `--grep`,
   and `post search` still reach them. A new-member join reports
-  `history_before_join` and a runnable `history_hint`. `post chat <ch> --join
+  `history_before_join` and a runnable `history_hint`. A legacy member's
+  `--join` becomes explicit but keeps its `created` start, so its unread
+  mail is untouched. `post chat <ch> --join
   --backlog` restores the old all-unread join. The join instant is stored in
   a new `participants/<id>/membership-starts.json`; `channels.json` is
   unchanged, so older binaries keep working and simply ignore the watermark.

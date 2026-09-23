@@ -593,9 +593,14 @@ their existing success semantics.
   `--history`, `--grep`, `--since`, and `post search` ignore read state. A join
   that makes a new member reports `history_before_join` (messages older than
   the start) and a runnable `history_hint` (`post chat '<ch>' --history 20`);
-  an `already_member` join reports neither (null). `--join --backlog` (valid
-  only with `--join`) records a start before every message, restoring the
-  all-unread join. A bridge-imported channel message keeps its original id,
+  an `already_member` join (the channel is already in the explicit joined
+  set) reports neither (null). A legacy workspace member's `--join` still
+  records an explicit join and posts the join event, but its start is the one
+  it already had (its `created` watermark, or the backlog floor if `created`
+  is unparseable), never now, so no unread message becomes history;
+  `history_before_join` counts ids below that floor. `--join --backlog` (valid
+  only with `--join`, including from a legacy member) records a start before
+  every message, restoring the all-unread join. A bridge-imported channel message keeps its original id,
   so an import older than a member's start reads as history.
   `--seen-by <id>` is a read-only listing of member participants whose seen-set
   contains that message (`cursor` fields in JSON output are max-seen-id

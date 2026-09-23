@@ -237,6 +237,11 @@ pub(crate) fn join(
         });
     }
 
+    // A legacy workspace member already has a membership start (its
+    // `created`). Its explicit join keeps that floor rather than minting now,
+    // so no message it has not yet read turns into history.
+    let legacy_start = membership.membership_start(context, &actor.participant, channel)?;
+
     // Blocked routes bar shared membership, both directions, before any
     // state is written. Checked under the lock so a concurrent join of the
     // blocked counterpart cannot slip in between check and write.
@@ -295,10 +300,13 @@ pub(crate) fn join(
     // The membership start: join-from-now records this instant, so the whole
     // pre-join backlog is history rather than unread; `--backlog` records the
     // minimum watermark instead, keeping every message unread (the old
-    // behavior, as an opt-in). The count mirrors exactly what the new member
-    // will not see as unread: existing ids that sort below the start.
+    // behavior, as an opt-in). A legacy member keeps the start it already had.
+    // The count mirrors exactly what the member will not see as unread:
+    // existing ids that sort below the start.
     let start = if backlog {
         crate::channel_state::BACKLOG_MEMBERSHIP_START.to_owned()
+    } else if let Some(existing) = legacy_start {
+        existing
     } else {
         local_timestamp_micros()?.0
     };

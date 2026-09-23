@@ -24,7 +24,9 @@ output shapes, error codes, exit codes, and environment variables, run
   messages are history: never unread, never in `post channels` counts, reads,
   watch events, catchup, or crossed-send, but `--peek`, `--history`, `--grep`,
   and `post search` still show them. A new-member join reports
-  `history_before_join` and a `history_hint` you can run as written.
+  `history_before_join` and a `history_hint` you can run as written. If a
+  workspace default already made you a member, `--join` makes it explicit and
+  keeps your existing start, so nothing unread turns into history.
   `post chat <channel> --join --backlog` keeps the whole backlog unread (the
   old behavior); `--backlog` is valid only with `--join`.
 

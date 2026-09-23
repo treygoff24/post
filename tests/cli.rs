@@ -13685,3 +13685,55 @@ fn join_from_now_old_format_channel_file_loads_and_falls_back_to_created() {
     );
     assert_eq!(history.count, 61);
 }
+
+#[test]
+fn join_from_now_explicit_join_by_a_legacy_member_keeps_its_floor() {
+    let sandbox = Sandbox::new();
+    let (gamma, _beta) = jfn_legacy(&sandbox);
+    // Created 2026-01-01: a long-standing legacy member of `legacy`.
+    let old = sandbox.test_participant("gamma");
+    // One message older than `created` is history under the legacy floor.
+    jfn_write(
+        &sandbox,
+        "legacy",
+        "20251231-235959-000001-0000aa",
+        "beta",
+        &[],
+        "before created",
+    );
+    let page = jfn_read(
+        &sandbox,
+        &old,
+        &gamma,
+        &["chat", "legacy", "--limit", "5", "--json"],
+    );
+    assert_eq!(page.count, 5);
+    assert_eq!(jfn_unread(&sandbox, &old, &gamma, "legacy"), Some(25));
+
+    let joined = jfn_join(&sandbox, &old, &gamma, "legacy", false);
+    assert!(
+        !joined.already_member,
+        "a legacy member's join is recorded explicitly"
+    );
+    assert_eq!(
+        joined.history_before_join,
+        Some(1),
+        "counted below the created floor"
+    );
+    // Nothing it had not read turned into history.
+    assert_eq!(jfn_unread(&sandbox, &old, &gamma, "legacy"), Some(25));
+    let stored: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            sandbox
+                .mail_root
+                .join("participants")
+                .join(&old)
+                .join("channels.json"),
+        )
+        .expect("channels.json"),
+    )
+    .expect("channels.json parses");
+    assert_eq!(stored["joined"], serde_json::json!(["legacy"]));
+    // A second join is now already_member.
+    assert!(jfn_join(&sandbox, &old, &gamma, "legacy", false).already_member);
+}
