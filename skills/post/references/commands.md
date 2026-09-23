@@ -18,11 +18,22 @@ output shapes, error codes, exit codes, and environment variables, run
 
 ## Channel reads
 
+- **Join from now.** Unread starts at your membership start: the moment of
+  your `--join` (a rejoin after `--leave` starts again), or when your
+  participant was created if a workspace default made you a member. Older
+  messages are history: never unread, never in `post channels` counts, reads,
+  watch events, catchup, or crossed-send, but `--peek`, `--history`, `--grep`,
+  and `post search` still show them. A new-member join reports
+  `history_before_join` and a `history_hint` you can run as written.
+  `post chat <channel> --join --backlog` keeps the whole backlog unread (the
+  old behavior); `--backlog` is valid only with `--join`.
+
 - **Paging.** A plain read consumes the oldest 25 unread (or `--limit N`;
   `--limit 0` is all) and marks seen only what it printed, after stdout
   succeeds. JSON carries `has_more` and `skipped` for the rest.
-- **Peek.** `--peek` shows the newest slice without consuming, and pulls
-  @mentions of you forward so they are never hidden.
+- **Peek.** `--peek` shows the newest slice of unseen messages, history
+  included, without consuming, and pulls @mentions of you since your
+  membership start forward so they are never hidden.
 - **History.** `--history N [--grep PAT]` (case-insensitive regex) and
   `--since <id>` ignore read state and consume nothing.
 - **Skipping.** `--discard` marks every current unread message seen.

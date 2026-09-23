@@ -318,7 +318,10 @@ for (const adapter of MAIL_ADAPTERS) {
       const mail = cursorUnusable.filter((e) => e.event === "mail").map((e) => e.id);
       assert.doesNotMatch(context, UNKNOWN);
       assert.ok(context.includes(`Direct mail id(s): ${mail.join(", ")}.`), context);
-      assert.ok(context.includes("#tax: 4 new"), context);
+      // Count from the sample: join-from-now leaves pre-join events out of it.
+      const taxNew = cursorUnusable.filter((e) => e.event === "channel_message" && e.channel === "tax").length;
+      assert.ok(taxNew > 0);
+      assert.ok(context.includes(`#tax: ${taxNew} new`), context);
       assert.ok(!context.includes("Reader") && !context.includes("📮"), "display fields stay out");
     });
 
@@ -481,7 +484,9 @@ describe("watch-notice", { concurrency: true }, () => {
     const result = await runNotice(raw.cursorUnusable);
     assert.equal(result.status, 0, result.stderr);
     for (const e of cursorUnusable.filter((x) => x.event === "mail")) assert.ok(result.stdout.includes(e.id));
-    assert.ok(result.stdout.includes("#tax: 4 new"));
+    const taxNew = cursorUnusable.filter((e) => e.event === "channel_message" && e.channel === "tax").length;
+    assert.ok(taxNew > 0);
+    assert.ok(result.stdout.includes(`#tax: ${taxNew} new`), result.stdout);
     assert.doesNotMatch(result.stdout, UNKNOWN);
   });
 

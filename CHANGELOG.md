@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Changed
+- Channel joins start from now (post-0ku). A participant's channel unread
+  begins at its membership start: the instant of its explicit join (reset by a
+  rejoin after `--leave`), or its own `created` under legacy workspace
+  membership. Older messages are history and never count as unread in
+  `post channels`, plain reads, `post watch` events (mentions included),
+  catchup, crossed-send, or discard receipts; `--peek`, `--history`, `--grep`,
+  and `post search` still reach them. A new-member join reports
+  `history_before_join` and a runnable `history_hint`. `post chat <ch> --join
+  --backlog` restores the old all-unread join. The join instant is stored in
+  a new `participants/<id>/membership-starts.json`; `channels.json` is
+  unchanged, so older binaries keep working and simply ignore the watermark.
 - `install-post.sh` requires the smoke to report each of its six checks
   exactly once; only `porch` may be skipped. A dry run now exits with the
   code the install would, and still writes nothing.

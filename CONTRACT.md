@@ -188,6 +188,11 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   participant. Legacy `members.json` workspace membership supplies a default
   that one participant may leave without removing a sibling. Sending and
   reading require effective membership; non-members fail with `not_a_member`.
+  An explicit join's instant is stored in `participants/<id>/membership-starts.json`
+  (`{version: 1, starts: {<channel>: "YYYYMMDD-HHMMSS-ffffff"}}`), a sibling
+  file because `channels.json` parses with `deny_unknown_fields`; older
+  binaries never open it. A joined channel with no recorded start falls back to
+  the participant's `created`.
 - Cursor state is separate from message history: exact seen sets for every mail
   address and channel the participant consumed. Workspace and lineage fan-out
   exclude the sending participant. An explicit `participant:<self>` delivery
@@ -560,6 +565,23 @@ their existing success semantics.
   `--limit 0` means unlimited. With `--peek` the bound remains a newest-slice
   display-only glance and nothing is consumed; its `skipped` count is the
   omitted older remainder.
+  Unread starts at the participant's membership start (join from now): the
+  instant of its explicit join, reset by a rejoin after `--leave`, or its own
+  `created` under legacy workspace membership. The start is a UTC
+  `YYYYMMDD-HHMMSS-ffffff` watermark compared against message ids, which carry
+  the same UTC prefix; a message whose id sorts before it is history. History
+  is never unread: it is absent from `post channels` unread counts, plain
+  consuming reads and their `has_more`, `crossed_send`, `post watch` channel
+  and mention events (live and `--snapshot`), catchup, and `--discard`/
+  `--discard-through` counts. It stays readable: `--peek` glances at every
+  unseen message including history (its @mention rescue skips history), and
+  `--history`, `--grep`, `--since`, and `post search` ignore read state. A join
+  that makes a new member reports `history_before_join` (messages older than
+  the start) and a runnable `history_hint` (`post chat '<ch>' --history 20`);
+  an `already_member` join reports neither (null). `--join --backlog` (valid
+  only with `--join`) records a start before every message, restoring the
+  all-unread join. A bridge-imported channel message keeps its original id,
+  so an import older than a member's start reads as history.
   `--seen-by <id>` is a read-only listing of member participants whose seen-set
   contains that message (`cursor` fields in JSON output are max-seen-id
   summaries for compatibility, never the model). Consuming reads fail closed:

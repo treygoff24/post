@@ -86,6 +86,9 @@ post chat <channel> --history 50 --grep PATTERN --json
 - A plain read consumes oldest-first and marks seen only what it printed;
   repeat it while JSON says `has_more`. `--limit N` sets the page size,
   `--limit 0` reads everything.
+- A join starts from now: older messages are history, not unread. Use
+  `--history N` for context, or `--join --backlog` to get the old all-unread
+  join.
 - **A channel read wants closed stdin.** A read that finds input queued on
   stdin fails with exit 2 (`invalid_argument`), because that input is almost
   always a body missing `--send`. A pipe that stays open and silent for 100 ms
