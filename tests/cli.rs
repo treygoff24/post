@@ -159,6 +159,7 @@ fn help_and_schema_keep_command_contract_visible() {
         "watch",
         "who",
         "version",
+        "contract",
     ];
     let command_names: Vec<&str> = schema
         .commands

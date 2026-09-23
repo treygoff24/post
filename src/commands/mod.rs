@@ -2,6 +2,7 @@ mod byte_budget;
 mod catchup;
 mod channels;
 mod chat;
+mod contract;
 mod doctor;
 mod identity;
 mod inbox;
@@ -29,6 +30,10 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     let json = cli.json;
     if matches!(&cli.command, Command::Version) {
         return version::run(json, pretty);
+    }
+    // The contract is compiled in: no mailbox, participant, or fence.
+    if let Command::Contract(args) = &cli.command {
+        return contract::run(args, pretty);
     }
     let context = Context::from_env()?;
     let writes = migration_fence::classify_write(&cli.command);
@@ -121,6 +126,9 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Watch(args) => watch::run(&context, args),
         Command::Who(args) => who::run(&context, args, pretty),
         Command::Version => unreachable!("version dispatches before mailbox context resolution"),
+        Command::Contract(_) => {
+            unreachable!("contract dispatches before mailbox context resolution")
+        }
     }?;
     if report_unbound {
         eprintln!("participant: unbound (run: post participant bind)");

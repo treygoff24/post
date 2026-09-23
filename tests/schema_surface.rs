@@ -286,6 +286,11 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
         ]
     );
     assert_shape!(
+        "contract",
+        &schema.output_shapes.contract,
+        ["samples:", "samples_dir:"]
+    );
+    assert_shape!(
         "doctor",
         &schema.output_shapes.doctor,
         [

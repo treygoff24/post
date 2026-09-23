@@ -1487,6 +1487,7 @@ pub struct OutputShapes {
     pub profile: Vec<String>,
     pub watch: Vec<String>,
     pub who: Vec<String>,
+    pub contract: Vec<String>,
 }
 
 /// The resolved signed owner as exposed by `post schema` (A0a Decision 6):

@@ -109,6 +109,25 @@ pub(crate) enum Command {
     Who(WhoArgs),
     /// Print build, store, and capability information.
     Version,
+    /// Emit the output contract compiled into this binary: normalized samples
+    /// of the JSON consumers read.
+    Contract(ContractArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ContractArgs {
+    #[command(subcommand)]
+    pub command: ContractCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ContractCommand {
+    /// Print the embedded samples as one JSON object, or write them as files into --dir.
+    Samples {
+        /// Write each sample as a file here (created if missing) instead of printing them.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]

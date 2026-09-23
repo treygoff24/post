@@ -464,3 +464,65 @@ fn contract_samples_match_the_real_producers() {
         drift.join("\n")
     );
 }
+
+/// `post contract samples --dir` must hand consumers exactly the checked-in
+/// samples: the embedded list in src/commands/contract.rs and the directory
+/// agree in both directions, byte for byte.
+#[test]
+fn embedded_samples_are_the_checked_in_samples() {
+    let sandbox = Sandbox::new();
+    let out = sandbox.path.join("emitted");
+    let output = sandbox.run(&[
+        "contract",
+        "samples",
+        "--dir",
+        out.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&output);
+    let listed: Value = serde_json::from_slice(&output.stdout).expect("contract samples JSON");
+    let read = |dir: &Path| -> BTreeMap<String, Vec<u8>> {
+        fs::read_dir(dir)
+            .expect("samples dir")
+            .map(|entry| {
+                let path = entry.expect("sample").path();
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    fs::read(&path).expect("sample bytes"),
+                )
+            })
+            .collect()
+    };
+    let emitted = read(&out);
+    let checked_in = read(&samples_dir());
+    assert_eq!(
+        emitted.keys().collect::<Vec<_>>(),
+        checked_in.keys().collect::<Vec<_>>(),
+        "the embedded sample list and contract/samples/ disagree"
+    );
+    assert_eq!(
+        emitted, checked_in,
+        "an embedded sample differs from its file"
+    );
+    let names: Vec<&str> = listed["samples"]
+        .as_array()
+        .expect("samples list")
+        .iter()
+        .map(|name| name.as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        names,
+        checked_in.keys().map(String::as_str).collect::<Vec<_>>()
+    );
+
+    // The printing form carries the same text.
+    let printed = sandbox.run(&["contract", "samples"]);
+    assert_success(&printed);
+    let printed: Value = serde_json::from_slice(&printed.stdout).expect("printed samples");
+    for (name, bytes) in &checked_in {
+        assert_eq!(
+            printed["samples"][name].as_str().map(str::as_bytes),
+            Some(bytes.as_slice()),
+            "{name}"
+        );
+    }
+}

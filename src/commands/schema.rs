@@ -146,6 +146,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "one text line; JSON with --json",
             "read-only build/store/capability receipt",
         ),
+        command(
+            "contract",
+            "post contract samples [--dir <path>]",
+            "JSON",
+            "store-free: reads no mailbox and needs no participant; samples prints the normalized output samples compiled into this binary (contract/samples/, produced by the real commands in the test suite: ids, timestamps, paths, digests, and build_sha replaced by same-format stand-ins, field presence, types, and enum values kept) as one object keyed by file name; --dir <path> creates the directory if missing and writes each sample as <path>/<name>, replacing a same-named file whole, so a consumer's contract tests run against the binary it will actually call",
+        ),
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
@@ -358,6 +364,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
+        ]),
+        contract: fields(&[
+            "samples: ok, samples{<file name>: <sample text>}",
+            "samples_dir: (samples --dir) ok, dir, samples[<file name>]",
         ]),
         who: fields(&[
             "ok",
