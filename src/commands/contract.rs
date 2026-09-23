@@ -110,9 +110,10 @@ pub(super) fn run(args: &ContractArgs, pretty: bool) -> AppResult<CommandResult>
             verify: Some(served),
         } => {
             let output = verify_served(served)?;
-            let drift = !output.ok;
+            // Exit 1 for anything short of a match: drift or unverified.
+            let not_a_match = !output.ok;
             let mut result = CommandResult::json(&output, pretty)?;
-            if drift {
+            if not_a_match {
                 result.exit_code = 1;
             }
             Ok(result)
@@ -161,9 +162,11 @@ fn write_samples(dir: &Path) -> AppResult<()> {
 /// default: every served `post` path links into a checkout) is checked through
 /// the files it resolves to; a real directory is a rendered copy and is checked
 /// as served. In a rendered copy, a file whose source carries fence markers
-/// may legitimately differ, so it is reported as rendered_unverified, never as
-/// drift. Everything else must match byte for byte, with nothing missing and
-/// nothing extra in the covered subtrees.
+/// may legitimately differ, so it is listed as rendered_unverified and the
+/// verdict is `unverified`: not drift, and not a match either, because this
+/// binary cannot strip fences to prove the rendering faithful. Everything else
+/// must match byte for byte, with nothing missing and nothing extra in the
+/// covered subtrees.
 fn verify_served(served: &Path) -> AppResult<SkillVerifyOutput> {
     verify_against(served, SKILL_MANIFEST)
 }
@@ -223,10 +226,16 @@ fn verify_against(served: &Path, manifest: &[SkillFile]) -> AppResult<SkillVerif
         .filter(|path| !expected.contains(path.as_str()))
         .cloned()
         .collect();
-    let ok = mismatched.is_empty() && missing.is_empty() && extra.is_empty();
+    let verdict = if !(mismatched.is_empty() && missing.is_empty() && extra.is_empty()) {
+        "drift"
+    } else if !rendered_unverified.is_empty() {
+        "unverified"
+    } else {
+        "match"
+    };
     Ok(SkillVerifyOutput {
-        ok,
-        verdict: if ok { "match" } else { "drift" },
+        ok: verdict == "match",
+        verdict,
         served: served.display().to_string(),
         kind,
         resolved: resolved.display().to_string(),
@@ -284,8 +293,9 @@ mod tests {
     }
 
     /// A rendered copy of a fenced file differs from its source by design:
-    /// never drift. The same difference in an unfenced file, or anywhere
-    /// behind a symlink, is drift.
+    /// never drift, but never a match either, since nothing here proves the
+    /// rendering faithful. The same difference in an unfenced file, or
+    /// anywhere behind a symlink, is drift.
     #[test]
     fn a_rendered_copy_of_a_fenced_file_is_unverified_not_drift() {
         let source = "shared\n<!-- mac-only -->\nmac\n<!-- /mac-only -->\n";
@@ -308,8 +318,17 @@ mod tests {
         std::fs::write(copy.join("references/plain.md"), "plain\n").expect("plain file");
         let report = verify_against(&copy, &manifest).expect("verify copy");
         assert_eq!(report.kind, "copy");
-        assert_eq!(report.verdict, "match");
+        assert_eq!(report.verdict, "unverified");
+        assert!(!report.ok, "an unverified copy is not a match");
         assert_eq!(report.rendered_unverified, vec!["SKILL.md"]);
+
+        // A copy whose fenced file is byte-identical to its source is a match.
+        std::fs::write(copy.join("SKILL.md"), source).expect("unrendered file");
+        let report = verify_against(&copy, &manifest).expect("verify identical copy");
+        assert_eq!(report.verdict, "match");
+        assert!(report.ok);
+        assert!(report.rendered_unverified.is_empty());
+        std::fs::write(copy.join("SKILL.md"), "shared\n").expect("re-render file");
 
         std::fs::write(copy.join("references/plain.md"), "edited\n").expect("edit plain");
         let report = verify_against(&copy, &manifest).expect("verify edited copy");
