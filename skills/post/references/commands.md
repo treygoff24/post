@@ -93,7 +93,8 @@ supply `/dev/null`.
   before it writes: check the acting room there.
 - **Crossed sends.** A send is refused with `crossed_send` (exit 65) while an
   unseen message in the channel @mentions your workspace, replies to your
-  message, or comes from the signed owner, or while an unseen message is
+  message, or comes from the owner room (signed or not), or while an unseen
+  message is
   unreadable. The error previews the last 5 of those messages, first line only.
   Read them, then resend with `--anyway` if your message still stands. Any
   other unseen traffic prints a stderr warning and the send goes through.
@@ -172,7 +173,8 @@ supply `/dev/null`.
 ## `who`
 
 `post who` lists you first, with how your participant was resolved, then every
-participant with its lease (`active`, `stale`, or `ended`), `last_seen`,
+participant with its lease (`active`, `stale`, `ended`, or `no lease record`
+when it has never been seen), `last_seen`,
 lineage, workspace, `live_watch`, and separate `unread` and `pending` maps.
 `--room <room>` limits the rows to participants bound to that room. The text
 form labels the lease `lease=`; JSON keeps the key `state`. A lease says the

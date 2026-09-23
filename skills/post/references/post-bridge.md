@@ -23,12 +23,37 @@ guessing.
   `{"mode":"all","deny":[...]}` or `{"mode":"allow","allow":[...]}`. Without
   the key, a host neither publishes nor imports channels. The planned v2
   allowlist on the Mac and the trey cell is `loom-build` only; the Mac's
-  separate cell bridge syncs a few other channels over ssh.
+  separate cell bridge syncs a few other channels over ssh. Only v2 relays
+  channels; v1 has no channel support.
+- **Channel wake files (v2).** Each imported channel message also writes one
+  `bridge/events/<channel>/<id>.json` holding `host`, `channel`, `id`,
+  `from`, `event`, and `mentions`, never subject or body. It is a hook point
+  for waking an agent that is not running. Running sessions don't need it:
+  their `post watch` already rings on the import. The bridge never deletes
+  these files, so a consumer deletes what it has handled.
 - **Replies.** Remote mail carries `reply_to_shared` (the sender's workspace)
   and no `reply_to_participant`. A remote sender is never treated as a local
   participant, even when its participant id matches one, so the message still
   reaches and rings that local participant.
 - Anyone with relay access can read relayed mail. Keep secrets out of it.
+
+## A remote room that does not exist yet
+
+A placeholder can name a room that is not, or is no longer, a real room on its
+host: a v1 `peers` pin made before the room was created, or a room retired
+after publication. `post send` to it still returns `ok`, because the send is a
+local write to the outbox. **Do not resend.** The letter stays in the outbox,
+the destination re-checks it every tick, and when the room appears it delivers
+exactly once. A resend gets a new id and arrives as a second copy.
+
+The two versions differ in what the destination records meanwhile:
+
+- **v1** writes no receipt. It logs `undeliverable` with the letter's age each
+  tick, and its health turns false with reason `undeliverable` until the
+  letter delivers.
+- **v2** writes a `quarantined` receipt with reason `unknown_room` and stays
+  healthy. The receipt does not prune the letter from the sender's outbox, so
+  the retry continues.
 
 ## Name collisions: send from a unique workspace
 
@@ -82,8 +107,13 @@ ticks. `install.sh --help` and the README cover installation.
   2: the config or environment is wrong, and every tick fails the same way
   until it is fixed.
 
+v1 adds `undeliverable`: inbound mail addressed to a room that is not real
+here (see above). It clears once the room appears and the letter delivers.
+v2 has no `undeliverable`.
+
 A quarantined message does not make health false. Health counts it under
-`quarantined`; the log and `bridge/quarantine/` hold the details. Under v2, health also reports `rooms.collisions`,
+`quarantined`; the log and `bridge/quarantine/` hold the details. Under v2,
+health also reports `rooms.collisions`,
 `channels.diverged`, and `channels.rewritten`; `SPEC-v2.md` gives each one's
 remedy. `post` has no `rooms remove`: renaming a room means registering a
 new name, as above.

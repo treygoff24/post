@@ -61,9 +61,12 @@ second doubles every ring.
 ## Other harnesses and longer idles
 
 Codex CLI, Cursor CLI, and Grok Build have no Monitor and no expiry to manage.
-Each has its own idle wake (Cursor: a background `--once` notice task; Grok:
-`monitor` on the notice script); use the one [`watch.md`](watch.md) names for
-your harness rather than adding a second.
+Cursor and Grok have their own idle wakes (Cursor: a background `--once`
+notice task; Grok: `monitor` on the notice script); use the one
+[`watch.md`](watch.md) names rather than adding a second. Codex has no idle
+wake: its hook adapter (SessionStart, UserPromptSubmit, PostToolUse) is its
+whole notice path, so an idle Codex session hears about mail only on its next
+turn, unless the Herdr doorbell below pages it.
 
 A seat that must be rung across idles longer than the Monitor cap can use the
 Herdr doorbell, which pages one named agent from outside the session. It

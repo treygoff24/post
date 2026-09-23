@@ -16,7 +16,7 @@ with a machine-wide `pgrep` or `pkill`: every agent's doorbell looks the same.
   ordinary event batch otherwise. It is read-only even when unbound, and a
   mail scan failure exits nonzero rather than looking empty. This is the
   primitive for lifecycle hooks. Snapshot-only `--limit N` prints the last N
-  events without consuming them.
+  events without consuming them; `--limit 0` means unlimited.
 - `post watch --once --json` blocks until at least one event is ready, prints
   that batch, and exits. It needs a participant binding and is not a health
   check.

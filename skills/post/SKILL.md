@@ -61,7 +61,9 @@ post read <unique-prefix> --peek --json   # look without consuming
 post read <unique-prefix> --json          # consume
 ```
 
-An unqualified target resolves as workspace, then lineage, then participant.
+`--kind letter|note|signal` labels the message for the reader (default
+`note`); it changes nothing about routing. An unqualified target resolves as
+workspace, then lineage, then participant.
 Workspace and lineage mail freezes its recipients in a routing receipt and
 skips the sender. Inbox JSON is `{ok, participant, room, unread, count,
 skipped_unreadable, unread_count, pending, pending_by_address, held}`; iterate
@@ -96,9 +98,9 @@ post chat <channel> --history 50 --grep PATTERN --json
 - A read that would print unread messages into `/dev/null` is refused. To
   skip messages, use `--discard` or `--discard-through <id>`.
 - `crossed_send` refuses a send while an unseen message @mentions you, replies
-  to you, or comes from the signed owner: read those, then resend with
-  `--anyway` if your message still stands. Other unseen traffic only prints a
-  stderr warning, and the send goes through.
+  to you, or comes from the owner room, signed or not: read those, then resend
+  with `--anyway` if your message still stands. Other unseen traffic only
+  prints a stderr warning, and the send goes through.
 - `@<workspace>` in a body stamps a mention; `--re <id>` stamps a reply.
   `not_a_member` means join first.
 
@@ -188,7 +190,8 @@ Collision details and operating the relay:
 
 - `post doctor` is read-only: JSON, exit 0 when healthy, 1 with findings.
   `post doctor --brief` prints one line with the same exit code. `--fix`
-  creates missing directories and default config only.
+  creates missing directories and default config only, and exits 3 when that
+  repair fails.
 - `delivered_output_failure` (exit 70) means the send or mutation committed but
   the receipt failed. Inspect state before sending again.
 - Run smokes against a throwaway store, never the live one:
