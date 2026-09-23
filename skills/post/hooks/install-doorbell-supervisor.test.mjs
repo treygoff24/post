@@ -644,6 +644,49 @@ describe("migration: an unhealthy resume after the disable", () => {
   });
 });
 
+describe("migration: health from an earlier supervisor", () => {
+  test("a resume does not disable the timer on a restarted supervisor's stale health", async () => {
+    // GLM, fix round 3: after a crash and restart, health.json is the dead
+    // process's until the new one writes. Freeze the running supervisor so it
+    // cannot write, keep its heartbeat fresh, and plant health whose writer is
+    // another pid but whose scan would otherwise satisfy the migration.
+    const host = makeHost("linux");
+    host.agent("ada", "ada");
+    host.legacyTimer("ada", { channels: ["ops"] });
+    const first = host.install(["--migrate", "ada", "--health-timeout-seconds", "20"], { POST_DOORBELL_INSTALL_TEST_CRASH_AFTER: "subscription_created" });
+    assert.equal(first.status, 97, first.stdout + first.stderr);
+    assert.equal(host.timerOn("ada"), true);
+    const healthFile = path.join(host.doorbell, "health.json");
+    const scanned = () => {
+      try {
+        const health = JSON.parse(fs.readFileSync(healthFile, "utf8"));
+        return health.bindings.find((row) => row.participant === "ada" && row.last_success_scan_at && row.scan_prefs_version >= host.prefs("ada").version) ? health : null;
+      } catch {
+        return null;
+      }
+    };
+    let health = null;
+    for (let i = 0; i < 100 && !(health = scanned()); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.ok(health, "the supervisor scanned ada under the new subscription");
+    const pid = host.sm().running[supervisorUnit(host)];
+    process.kill(pid, "SIGSTOP");
+    const heartbeatFile = path.join(host.doorbell, "heartbeat.json");
+    try {
+      // Stamped ahead so the frozen supervisor reads as running for the whole
+      // rerun (liveness clamps a future heartbeat to age 0).
+      fs.writeFileSync(heartbeatFile, JSON.stringify({ pid, started_at: health.started_at, seq: 0, time: new Date(Date.now() + 20_000).toISOString() }) + "\n");
+      fs.writeFileSync(healthFile, JSON.stringify({ ...health, pid: pid + 100000 }));
+      const second = host.install(["--migrate", "ada", "--health-timeout-seconds", "3"]);
+      assert.equal(second.status, 3, second.stdout + second.stderr);
+      assert.match(second.stdout, /supervisor already running and current/);
+      assert.match(second.stdout, /no health from the running supervisor/);
+      assert.equal(host.timerOn("ada"), true, "the timer stays on until this supervisor proves the subscription");
+    } finally {
+      process.kill(pid, "SIGCONT");
+    }
+  });
+});
+
 describe("uninstall and restore", () => {
   function migratedHost() {
     const host = makeHost("linux");

@@ -836,7 +836,12 @@ function subscriptionHealth(ctx, entry) {
   const live = liveness(ctx.paths);
   if (live.state !== "running") return { ok: false, why: `supervisor ${live.state}` };
   const health = readJson(path.join(ctx.doorbell, "health.json"));
-  const binding = health?.bindings?.find((row) => row.participant === entry.participant);
+  // After a crash and restart, health.json is the dead process's until the
+  // new one writes its first: its scans prove nothing about this supervisor.
+  if (!health || live.pid === null || health.pid !== live.pid) {
+    return { ok: false, why: `no health from the running supervisor (pid ${live.pid ?? "unknown"}) yet` };
+  }
+  const binding = health.bindings?.find((row) => row.participant === entry.participant);
   if (!binding) return { ok: false, why: `the supervisor does not see ${entry.participant} on any pane` };
   if (!binding.armed) return { ok: false, why: `${entry.participant} is ${binding.state} and unarmed` };
   if (binding.generation?.pane !== entry.pane) return { ok: false, why: `${entry.participant} is bound to ${binding.generation?.pane}, not ${entry.pane}` };
