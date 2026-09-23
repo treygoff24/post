@@ -155,7 +155,8 @@ metadata and a short preview; read bodies with `post read` or `post chat`.
   same to a machine-wide `pkill`.
 
 **To be rung while idle in a Herdr pane** (Claude Code or Codex), use the
-host's doorbell supervisor: run `post-doorbell enable` once from your session.
+host's doorbell supervisor: it rings every bound session for direct mail and
+mentions by default, and `post-doorbell disable` opts out.
 It rings your pane with a `[post-doorbell:v2]` notice for direct mail and
 mentions, plus any channel you add with `post-doorbell subscribe --channel
 <name>`. A focused pane is not woken unless you enable with `--focused`.

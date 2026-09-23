@@ -121,7 +121,7 @@ kernel keeps it to one instance per host.
 Agent commands, run from the session being woken:
 
 ```bash
-post-doorbell enable [--focused]      # arm this participant; --focused also wakes a focused pane
+post-doorbell enable [--focused]      # re-arm after disable; --focused also wakes a focused pane
 post-doorbell disable
 post-doorbell subscribe --channel <name>     # ring for ordinary messages in that channel
 post-doorbell unsubscribe --channel <name>
@@ -129,8 +129,8 @@ post-doorbell select --pane <pane_id>        # resolve two panes carrying one co
 post-doorbell status [--json]
 ```
 
-Direct mail and mentions always ring once you are armed. Everything is unarmed
-until its agent runs `enable`, except timers carried over by migration.
+Every bound session is armed by default and rings for direct mail and
+mentions; `post-doorbell disable` is the opt-out and `enable` re-arms.
 `status` separates liveness from scan health:
 
 - `running`: the lock is held and the heartbeat is fresh.

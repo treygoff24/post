@@ -261,6 +261,7 @@ describe("end to end", () => {
     host.control.snapshots["codex-bbbbbbbb"] = [{ ...sampleMail(), id: "20260923-000001-e2e002" }];
     host.save();
     assert.equal(host.cli(["enable"], { POST_PARTICIPANT: "codex-aaaaaaaa" }).status, 0);
+    assert.equal(host.cli(["disable"], { POST_PARTICIPANT: "codex-bbbbbbbb" }).status, 0);
     const a = host.start();
     const prompts = await until(() => host.prompts().length >= 1 && host.prompts(), "a prompt");
     assert.equal(prompts[0].pane, "wC:p1");
@@ -273,7 +274,7 @@ describe("end to end", () => {
         return false;
       }
     }, "health accepted");
-    assert.equal(health.bindings.find((b) => b.participant === "codex-bbbbbbbb").armed, false, "unarmed participant never rings");
+    assert.equal(health.bindings.find((b) => b.participant === "codex-bbbbbbbb").armed, false, "a disabled participant never rings");
     const snapshotCalls = host.calls().filter((c) => c.bin === "post" && c.args[0] === "watch");
     assert.ok(snapshotCalls.every((c) => c.participant === "codex-aaaaaaaa"));
     assert.ok(snapshotCalls.every((c) => c.cwd === fs.realpathSync(host.doorbell)), "post runs from a neutral cwd");
@@ -300,10 +301,13 @@ describe("agent commands", () => {
     host.participant("codex-aaaaaaaa", "session-a");
     host.control.actor = "codex-aaaaaaaa";
     host.save();
-    let result = host.cli(["enable", "--focused"]);
+    let result = host.cli(["enable", "--focused", "--desktop"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /enabled for codex-aaaaaaaa \(also while focused\); prefs version 1\. Supervisor dead\./);
-    assert.deepEqual([prefs(host, "codex-aaaaaaaa").enabled, prefs(host, "codex-aaaaaaaa").focused], [true, true]);
+    assert.match(result.stdout, /enabled for codex-aaaaaaaa \(also while focused\) with desktop notifications; prefs version 1\. Supervisor dead\./);
+    assert.deepEqual(
+      [prefs(host, "codex-aaaaaaaa").enabled, prefs(host, "codex-aaaaaaaa").focused, prefs(host, "codex-aaaaaaaa").desktop],
+      [true, true, true]
+    );
     assert.equal(host.cli(["subscribe", "--channel", "tax", "--channel", "ops"]).status, 0);
     assert.deepEqual(prefs(host, "codex-aaaaaaaa").channels, ["ops", "tax"]);
     assert.equal(host.cli(["subscribe", "--unsubscribe", "--channel", "ops"]).status, 0);
@@ -312,6 +316,24 @@ describe("agent commands", () => {
     assert.equal(host.cli(["disable"]).status, 0);
     assert.equal(prefs(host, "codex-aaaaaaaa").enabled, false);
     assert.equal(prefs(host, "codex-aaaaaaaa").version, 5);
+  });
+
+  test("subscribe and select never persist enabled: false for a participant that never disabled", () => {
+    const host = makeHost();
+    host.participant("codex-aaaaaaaa", "session-a");
+    host.pane("wC:p1", "session-a");
+    host.control.actor = "codex-aaaaaaaa";
+    host.save();
+    assert.equal(host.cli(["subscribe", "--channel", "tax"]).status, 0);
+    assert.notEqual(prefs(host, "codex-aaaaaaaa").enabled, false, "subscribe does not write a disable");
+    assert.deepEqual(prefs(host, "codex-aaaaaaaa").channels, ["tax"]);
+    assert.equal(host.cli(["select", "--pane", "wC:p1"]).status, 0);
+    assert.notEqual(prefs(host, "codex-aaaaaaaa").enabled, false, "select does not write a disable");
+    // An explicit disable is the opt-out and survives both commands.
+    assert.equal(host.cli(["disable"]).status, 0);
+    assert.equal(prefs(host, "codex-aaaaaaaa").enabled, false);
+    assert.equal(host.cli(["subscribe", "--channel", "ops"]).status, 0);
+    assert.equal(prefs(host, "codex-aaaaaaaa").enabled, false, "subscribe does not re-enable");
   });
 
   test("an unbound or ended actor is refused", () => {

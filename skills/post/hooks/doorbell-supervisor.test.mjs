@@ -380,15 +380,23 @@ describe("discovery", () => {
     assert.ok(w.logs.some((r) => r.problem === "pane session matches no participant" && r.pane === "wC:p2"));
   });
 
-  test("discovery binds everything but arms only enabled participants (E7)", async () => {
+  test("discovery binds everything; only a stored `enabled: false` stays unarmed (E7)", async () => {
     const w = makeWorld();
     w.addParticipant("codex-aaaaaaaa", "session-a");
+    w.addParticipant("codex-bbbbbbbb", "session-b");
+    // What `post-doorbell disable` writes.
+    updatePrefs(w.paths, "codex-bbbbbbbb", (p) => {
+      p.enabled = false;
+    });
     w.addPane("wC:p1", "session-a");
+    w.addPane("wC:p2", "session-b");
     w.snapshots.set("codex-aaaaaaaa", [mailWith("20260923-000001-aaaaa1")]);
+    w.snapshots.set("codex-bbbbbbbb", [mailWith("20260923-000001-bbbbb1")]);
     await w.run();
-    assert.equal(w.sub("codex-aaaaaaaa").armed, false);
-    assert.equal(w.snapshotCalls().length, 0);
-    assert.equal(w.prompts.length, 0);
+    assert.equal(w.sub("codex-aaaaaaaa").armed, true, "no prefs file is enabled");
+    assert.equal(w.sub("codex-bbbbbbbb").armed, false);
+    assert.equal(w.snapshotCalls("codex-bbbbbbbb").length, 0);
+    assert.deepEqual(w.prompts.map((p) => p.pane), ["wC:p1"]);
   });
 
   test("two panes carrying one session are ambiguous and unarmed until select", async () => {
@@ -496,6 +504,88 @@ describe("discovery", () => {
     w.clock.t += 61_000;
     await w.run();
     assert.equal(failed().length, 3, "a new streak is a new first failure");
+  });
+});
+
+// ------------------------------------------------------------- default-on
+// Trey's ruling, 2026-09-23: "definitely turn it on by default". A participant
+// with no prefs file — or a file with no `enabled` field — is enabled. Only a
+// stored `enabled: false` (`post-doorbell disable`) opts out, and `subscribe`
+// and `select` never write one.
+
+describe("the doorbell is default-on", () => {
+  test("a participant with no prefs file, bound to a pane, is rung for direct mail", async () => {
+    const w = makeWorld();
+    w.addParticipant("codex-aaaaaaaa", "session-a");
+    w.addPane("wC:p1", "session-a");
+    w.snapshots.set("codex-aaaaaaaa", [mailWith("20260923-000001-aaaaa1")]);
+    assert.equal(fs.existsSync(prefsPath(w.paths, "codex-aaaaaaaa")), false, "no prefs file");
+    await w.run();
+    assert.equal(w.sub("codex-aaaaaaaa").armed, true);
+    assert.deepEqual(w.prompts.map((p) => p.pane), ["wC:p1"]);
+    assert.match(w.prompts[0].text, /Waiting: 1 direct\./);
+    assert.equal(fs.existsSync(prefsPath(w.paths, "codex-aaaaaaaa")), false, "ringing writes no prefs");
+  });
+
+  test("after disable it is not rung, and a later subscribe does not re-enable it", async () => {
+    const w = makeWorld();
+    w.addParticipant("codex-aaaaaaaa", "session-a");
+    w.addPane("wC:p1", "session-a");
+    w.snapshots.set("codex-aaaaaaaa", [mailWith("20260923-000001-aaaaa1")]);
+    // What `post-doorbell disable` writes.
+    updatePrefs(w.paths, "codex-aaaaaaaa", (p) => {
+      p.enabled = false;
+    });
+    await w.run();
+    assert.equal(w.sub("codex-aaaaaaaa").armed, false);
+    assert.equal(w.prompts.length, 0);
+    // What `post-doorbell subscribe --channel tax` writes.
+    updatePrefs(w.paths, "codex-aaaaaaaa", (p) => {
+      p.channels = [...new Set([...p.channels, "tax"])].sort();
+    });
+    w.snapshots.set("codex-aaaaaaaa", [mailWith("20260923-000001-aaaaa1"), channelWith("tax", "20260923-000000-000001-c00001")]);
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(loadPrefs(w.paths, "codex-aaaaaaaa").enabled, false);
+    assert.equal(w.sub("codex-aaaaaaaa").armed, false);
+    assert.equal(w.prompts.length, 0, "nothing rings while disabled");
+  });
+
+  test("subscribe on a fresh participant leaves it enabled and writes no enabled: false", async () => {
+    const w = makeWorld();
+    w.addParticipant("codex-aaaaaaaa", "session-a");
+    w.addPane("wC:p1", "session-a");
+    w.snapshots.set("codex-aaaaaaaa", [channelWith("tax", "20260923-000000-000001-c00001")]);
+    // What `post-doorbell subscribe --channel tax` writes.
+    updatePrefs(w.paths, "codex-aaaaaaaa", (p) => {
+      p.channels = [...new Set([...p.channels, "tax"])].sort();
+    });
+    const written = JSON.parse(fs.readFileSync(prefsPath(w.paths, "codex-aaaaaaaa"), "utf8"));
+    assert.notEqual(written.enabled, false);
+    assert.deepEqual(written.channels, ["tax"]);
+    await w.run();
+    assert.equal(w.sub("codex-aaaaaaaa").armed, true);
+    assert.equal(w.prompts.length, 1, "the subscribed channel rings");
+    assert.match(w.prompts[0].text, /1 in #tax/);
+  });
+
+  test("enable still sets focused and desktop from its flags", async () => {
+    const w = standardWorld();
+    w.panes[0].focused = true;
+    await w.run();
+    assert.equal(w.prompts.length, 0, "a focused pane is not woken by default");
+    assert.equal(w.desktop.length, 0);
+    // What `post-doorbell enable --focused --desktop` writes.
+    updatePrefs(w.paths, "codex-aaaaaaaa", (p) => {
+      p.enabled = true;
+      p.focused = true;
+      p.desktop = true;
+    });
+    const prefs = loadPrefs(w.paths, "codex-aaaaaaaa");
+    assert.deepEqual([prefs.enabled, prefs.focused, prefs.desktop], [true, true, true]);
+    await w.run();
+    assert.equal(w.prompts.length, 1, "--focused wakes a focused pane");
+    assert.equal(w.desktop.length, 1, "--desktop notifies");
   });
 });
 

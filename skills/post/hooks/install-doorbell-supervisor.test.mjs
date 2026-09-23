@@ -318,7 +318,7 @@ for (const platform of ["linux", "darwin"]) {
       host.agent("ada", "ada");
       const result = host.install();
       ok(result);
-      assert.match(result.stdout, /supervisor healthy \(pid \d+\); 1 binding\(s\) discovered, 0 armed/);
+      assert.match(result.stdout, /supervisor healthy \(pid \d+\); 1 binding\(s\) discovered, 1 armed/);
       const pid = host.sm().running[supervisorUnit(host)];
       assert.ok(pid && host.alive(pid), "the service manager is running the supervisor");
       const health = JSON.parse(fs.readFileSync(path.join(host.doorbell, "health.json"), "utf8"));

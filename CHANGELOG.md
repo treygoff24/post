@@ -26,6 +26,12 @@
   `watch.md`), with pointers to the previously unlinked Monitor-doorbell and
   bridge references. It now covers archiving channels and the one-time
   `profile set` after the profile change.
+- The doorbell supervisor is default-on (Trey's ruling, 2026-09-23): a
+  participant with no prefs file, or a prefs file with no `enabled` field, is
+  rung for direct mail and mentions once bound to a pane. `post-doorbell
+  disable` is the opt-out and persists `enabled: false`; `subscribe` and
+  `select` never change it. `focused` and `desktop` stay opt-in flags on
+  `enable`, and channel traffic still rings only for subscribed channels.
 
 ### Added
 - One doorbell supervisor per host (`skills/post/hooks/doorbell-supervisor.mjs`,
@@ -39,10 +45,11 @@
   exponentially and are reported as broken after five in a row. A python3
   `fcntl.flock` helper guarantees one supervisor per mail root, and
   `health.json` plus the heartbeat give `post-doorbell status` a liveness
-  answer (running, stale, or dead) separate from scan health. Agents opt in
-  with `post-doorbell enable [--focused]`, `disable`,
-  `subscribe --channel <name>`, `unsubscribe --channel <name>`, and
-  `select --pane <id>`.
+  answer (running, stale, or dead) separate from scan health. It rings every
+  bound session by default; `post-doorbell disable` opts out and `enable
+  [--focused] [--desktop]` re-arms, while `subscribe --channel <name>`,
+  `unsubscribe --channel <name>`, and `select --pane <id>` manage channel
+  rings and pane choice.
 - `skills/post/hooks/install-doorbell-supervisor.mjs` installs the supervisor
   as a launchd LaunchAgent (macOS) or systemd user service (Linux), and waits
   for the lock and a healthy first tick. It moves an old

@@ -16,7 +16,8 @@
 // `post participant list --json`. A matched pane is a binding; its target
 // generation is (pane id, terminal id, session digest). A subscription is
 // (participant, sink, generation) and owns all dedupe state (E1). Only armed
-// subscriptions (the participant ran `post-doorbell enable`) scan and ring (E7).
+// subscriptions scan and ring (E7): a bound participant is armed by default,
+// and `post-doorbell disable` is the opt-out until `enable` runs again.
 //
 // It never writes a participant's mail state. It reads through
 // `POST_PARTICIPANT=<id> post watch --snapshot --json --limit 0` (no reason filter),
@@ -494,8 +495,11 @@ export function prefsPath(paths, participant) {
   return path.join(paths.prefsDir, `${participant}.json`);
 }
 
+// The doorbell is default-on (Trey's ruling, 2026-09-23): no prefs file or a
+// file with no `enabled` field means enabled; only a stored `enabled: false`,
+// written by `disable`, opts out. `focused` and `desktop` stay opt-in.
 export function defaultPrefs(participant) {
-  return { version: 0, participant, enabled: false, focused: false, desktop: false, channels: [], selection: null };
+  return { version: 0, participant, enabled: true, focused: false, desktop: false, channels: [], selection: null };
 }
 
 export function loadPrefs(paths, participant) {
@@ -503,7 +507,9 @@ export function loadPrefs(paths, participant) {
   const prefs = defaultPrefs(participant);
   if (raw === undefined || raw === null || typeof raw !== "object") return prefs;
   if (Number.isSafeInteger(raw.version) && raw.version >= 0) prefs.version = raw.version;
-  prefs.enabled = raw.enabled === true;
+  // Anything but an explicit `false` is enabled: subscribe and select write
+  // the loaded value back unchanged, so a stored `false` is always a disable.
+  prefs.enabled = raw.enabled !== false;
   prefs.focused = raw.focused === true;
   prefs.desktop = raw.desktop === true;
   prefs.channels = Array.isArray(raw.channels) ? [...new Set(raw.channels.filter(validChannelName))].sort() : [];
@@ -1929,6 +1935,10 @@ function usageText() {
     "       post-doorbell unsubscribe --channel <name>",
     "       post-doorbell select --pane <pane_id>",
     "       post-doorbell status [--json]",
+    "",
+    "Every bound session is rung for direct mail and mentions by default;",
+    "disable opts out until enable runs again. subscribe and select never",
+    "change that; --focused and --desktop stay opt-in flags on enable.",
   ].join("\n");
 }
 
@@ -2041,7 +2051,7 @@ function printStatus(report) {
     lines.push(`herdr: ${health.herdr_ok === false ? "FAILING" : "ok"} ${health.herdr_version ?? ""}; post: ${health.post_ok === false ? "FAILING" : "ok"} ${health.post_version ?? ""}`);
     if (!health.bindings?.length) lines.push("bindings: none on this host");
     for (const binding of health.bindings ?? []) {
-      const armed = binding.armed ? "armed" : binding.state === "ambiguous" ? "unarmed (ambiguous: run post-doorbell select --pane <id>)" : binding.state === "ended" ? "unarmed (ended)" : "unarmed";
+      const armed = binding.armed ? "armed" : binding.state === "ambiguous" ? "unarmed (ambiguous: run post-doorbell select --pane <id>)" : binding.state === "ended" ? "unarmed (ended)" : binding.enabled === false ? "unarmed (disabled: run post-doorbell enable to re-arm)" : "unarmed";
       let line = `  ${binding.participant} ${binding.panes.join(",")} ${armed}`;
       if (binding.pane_status) line += ` pane ${binding.pane_status}`;
       if (binding.last_outcome) line += `; last ${binding.last_outcome} at ${binding.last_outcome_at}`;
@@ -2114,7 +2124,7 @@ function runCommandLine(opts, paths) {
   const summary = {
     enable: `enabled for ${id}${prefs.focused ? " (also while focused)" : ""}${prefs.desktop ? " with desktop notifications" : ""}`,
     disable: `disabled for ${id}`,
-    subscribe: `channels for ${id}: ${prefs.channels.length ? prefs.channels.map((c) => `#${c}`).join(" ") : "none"} (direct mail and mentions always ring)`,
+    subscribe: `channels for ${id}: ${prefs.channels.length ? prefs.channels.map((c) => `#${c}`).join(" ") : "none"} (direct mail and mentions ${prefs.enabled ? "always ring" : "stay quiet while disabled"})`,
     select: `selected pane ${opts.pane} for ${id}`,
   }[opts.command];
   process.stdout.write(`post-doorbell: ${summary}; prefs version ${prefs.version}. Supervisor ${live.state}.\n`);

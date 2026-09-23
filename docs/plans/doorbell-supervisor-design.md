@@ -42,7 +42,7 @@ It never writes any participant's mail state. It reads through `POST_PARTICIPANT
 
 Agent-facing commands resolve the acting participant with `post participant show --json`, the same resolution every post command uses:
 
-- `post-doorbell enable [--focused]`: arm this participant's herdr subscription. `--focused` opts into waking while the pane is focused; the default is off (the lead's ruling; Trey may reverse it).
+- `post-doorbell enable [--focused]`: re-arm this participant's herdr subscription after a `disable` (it is armed by default). `--focused` opts into waking while the pane is focused; the default is off (the lead's ruling; Trey may reverse it).
 - `post-doorbell disable`: disarm it.
 - `post-doorbell subscribe --channel <name>` and `--unsubscribe --channel <name>`: ring for ordinary channel messages in that channel. Direct mail and mentions always ring when armed.
 - `post-doorbell select --pane <pane_id>`: resolve ambiguity (above).
@@ -55,7 +55,7 @@ Preferences live at `$POST_MAIL_ROOT/doorbell/prefs/<participant-id>.json`, outs
 - the participants of the four live Codex timers it migrates (see Migration), with their old settings carried over; and
 - this project's overnight participants (`post-repo`: Nightjar and Aster).
 
-Every other binding shows as `unarmed` in `status`. An agent arms its own with one `post-doorbell enable`. There is no hidden global opt-in. Enrolling new sessions through their hooks is a later installation-policy decision, not tonight's work.
+**Default changed 2026-09-23 (Trey's ruling: "definitely turn it on by default").** The rollout list above was launch-night scoping; the opt-in is gone. A participant with no prefs file, or a prefs file with no `enabled` field, is enabled and rings for direct mail and mentions once bound. `post-doorbell disable` is the opt-out: it persists `enabled: false`, which `subscribe` and `select` never overwrite and only `enable` reverses. `focused` and `desktop` stay opt-in flags on `enable`.
 
 **Cursor and Grok are out of scope tonight (E2).** herdr gives them no conversation key, and a terminal id does not prove conversation lifetime: a shell can start a second harness conversation in the same terminal. They keep their existing in-session wrappers. The supervisor does not accept a terminal-only registration, and the design claims no generation protection for those targets.
 
