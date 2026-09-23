@@ -1700,7 +1700,8 @@ pub struct RoomsSetPathOutput {
 /// `post rooms rename` receipt: the registry path is unchanged by a rename
 /// (the room's mail lives under its name, not its workspace path).
 /// `rewritten` counts the live-state files changed per store; history —
-/// archive letters, channel messages, routing receipts — is never rewritten.
+/// archive letters, channel messages — is never rewritten. Routing receipts
+/// are live routing state: their `address.name` follows the room.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoomsRenameOutput {
     pub ok: bool,
@@ -1710,7 +1711,8 @@ pub struct RoomsRenameOutput {
     /// Whether `<root>/<old>` existed and moved to `<root>/<new>`.
     pub mailbox_moved: bool,
     /// Live-state files rewritten, keyed by store
-    /// (participants, participant_cursors, channel_members, profiles).
+    /// (participants, participant_cursors, channel_members, profiles,
+    /// routing_receipts).
     pub rewritten: std::collections::BTreeMap<String, usize>,
     pub warnings: Vec<String>,
     pub dry_run: bool,

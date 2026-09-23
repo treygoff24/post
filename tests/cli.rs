@@ -1679,6 +1679,100 @@ fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
     );
 }
 
+/// Bind a Claude participant to `workspace` from `cwd`; returns its id.
+fn bind_workspace_participant(sandbox: &Sandbox, key: &str, cwd: &Path, workspace: &str) -> String {
+    sandbox.bind_claude(key, cwd, Some(workspace))["id"]
+        .as_str()
+        .expect("participant id")
+        .to_owned()
+}
+
+/// A real `post send` from `participant` to `to`; returns the mail id.
+fn send_mail_as(sandbox: &Sandbox, participant: &str, cwd: &Path, to: &str, body: &str) -> String {
+    let output = sandbox.run_as_participant(
+        &["send", "--to", to, "--body", body, "--json"],
+        participant,
+        cwd,
+    );
+    assert_success(&output);
+    let sent: serde_json::Value = from_stdout(&output);
+    sent["envelope"]["id"]
+        .as_str()
+        .expect("sent mail id")
+        .to_owned()
+}
+
+/// `post inbox --json` as `participant`: the parsed listing and raw stderr.
+fn inbox_listing(sandbox: &Sandbox, participant: &str, cwd: &Path) -> (serde_json::Value, String) {
+    let output = sandbox.run_as_participant(&["inbox", "--json"], participant, cwd);
+    // Exit status only: stderr is returned so a test can assert on warnings.
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    (from_stdout(&output), stderr(&output))
+}
+
+fn unread_ids(listing: &serde_json::Value) -> Vec<String> {
+    listing["unread"]
+        .as_array()
+        .expect("unread array")
+        .iter()
+        .map(|item| item["id"].as_str().expect("unread id").to_owned())
+        .collect()
+}
+
+/// F1: routed workspace mail stays readable after a rename. Real sends
+/// produce real routing receipts binding `workspace:alpha`; the rename must
+/// re-bind them to the new name or every routed letter reads as a corrupt
+/// receipt.
+#[test]
+fn rooms_rename_keeps_routed_workspace_mail_readable() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let recipient = bind_workspace_participant(&sandbox, "rename-recipient", &alpha, "alpha");
+    let sender = bind_workspace_participant(&sandbox, "rename-sender", &beta, "beta");
+    let first = send_mail_as(&sandbox, &sender, &beta, "workspace:alpha", "first letter");
+    let second = send_mail_as(&sandbox, &sender, &beta, "workspace:alpha", "second letter");
+
+    // The recipient's inbox routes both (publishing the receipts), then one
+    // is read and consumed.
+    let (listing, _) = inbox_listing(&sandbox, &recipient, &alpha);
+    assert_eq!(listing["unread_count"], 2, "{listing}");
+    assert!(sandbox
+        .mail_root
+        .join(format!("alpha/routing/{first}.json"))
+        .is_file());
+    let read = sandbox.run_as_participant(&["read", &first, "--json"], &recipient, &alpha);
+    assert_success(&read);
+
+    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+
+    let (listing, warnings) = inbox_listing(&sandbox, &recipient, &alpha);
+    assert_eq!(listing["skipped_unreadable"], 0, "{listing}\n{warnings}");
+    assert!(
+        !warnings.contains("corrupt routing receipt"),
+        "no receipt may read as corrupt after a rename: {warnings}"
+    );
+    assert_eq!(unread_ids(&listing), vec![second.clone()], "{listing}");
+    assert_eq!(listing["unread_count"], 1);
+
+    // A rewritten receipt is exactly what routing writes for the new name.
+    let moved: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            sandbox
+                .mail_root
+                .join(format!("alpha2/routing/{second}.json")),
+        )
+        .expect("moved receipt"),
+    )
+    .expect("receipt json");
+    assert_eq!(
+        moved["address"],
+        serde_json::json!({"kind": "workspace", "name": "alpha2"})
+    );
+    assert_eq!(receipt["rewritten"]["routing_receipts"], 2, "{receipt}");
+}
+
 #[test]
 fn rooms_rename_receipt_carries_heartbeat_and_bridge_warnings() {
     let sandbox = Sandbox::new();
@@ -2102,6 +2196,25 @@ fn rooms_rename_refuses_a_malformed_store_that_may_name_the_room() {
     assert!(error.error.message.contains("hq"));
     // An unrelated corrupt record does not block the rename.
     fs::write(dir.join("participant.json"), "{\"workspace\":\"other\",").expect("corrupt record");
+    // A truncated routing receipt that names the room refuses the same way;
+    // one that cannot name it is skipped with a warning.
+    let routing = sandbox.mail_root.join("hq/routing");
+    fs::create_dir_all(&routing).expect("routing dir");
+    fs::write(
+        routing.join("20260923-000000-aaaaaa.json"),
+        "{\"address\":{\"kind\":\"workspace\",\"name\":\"hq\"",
+    )
+    .expect("truncated receipt");
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(
+        error.error.message.contains("routing receipt"),
+        "{}",
+        error.error.message
+    );
+    fs::write(routing.join("20260923-000000-aaaaaa.json"), "{\"version\":")
+        .expect("unrelated corrupt receipt");
     let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let receipt: serde_json::Value = from_stdout(&output);

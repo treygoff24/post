@@ -191,9 +191,10 @@ fn set_path(context: &Context, args: RoomsSetPathArgs, pretty: bool) -> AppResul
 
 /// Rename a local room: the mailbox directory moves, every live reference to
 /// the name is rewritten, and rooms.json commits last. History — archive
-/// letters, channel messages, routing receipts, the room's own cursor and
-/// channel state contents — keeps the old name; only the live registries
-/// that KEY on the name change. Same locks and lock order as `add`:
+/// letters, channel messages, the room's own cursor and channel state
+/// contents — keeps the old name; only the live state that KEYS or BINDS on
+/// the name changes (routing receipts bind `workspace:<name>`, so they
+/// follow the room). Same locks and lock order as `add`:
 /// participant lock, then rooms lock.
 fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<CommandResult> {
     validate_new_room_name(&args.new).map_err(|reason| {
@@ -393,7 +394,11 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         },
         ..RenamePlan::default()
     };
-    plan_live_rewrites(context, &args.old, &args.new, &mut plan)?;
+    // The receipts are read where the mailbox is now and written where it
+    // will be once the directory has moved.
+    plan_live_rewrites(
+        context, &args.old, &args.new, &old_home, &new_home, &mut plan,
+    )?;
 
     let mut warnings = rename_warnings(context, &args.old, &args.new, bridged);
     warnings.extend(plan.warnings.clone());
@@ -618,8 +623,16 @@ fn plan_live_rewrites(
     context: &Context,
     old: &str,
     new: &str,
+    home_now: &Path,
+    new_home: &Path,
     plan: &mut RenamePlan,
 ) -> AppResult<()> {
+    // <room>/routing/<id>.json: every receipt binds the address it routed
+    // for, and `routing::validate_receipt` refuses a receipt whose address
+    // is not the reader's. The receipt is live routing state, so it follows
+    // the room.
+    plan_routing_receipts(old, new, home_now, new_home, plan)?;
+
     // participants/<id>/participant.json: the `workspace` field. cursors.json:
     // mail seen-keys `workspace:<old>` (a `workspace:<new>` key that already
     // exists merges, never loses read state).
@@ -741,6 +754,88 @@ fn plan_live_rewrites(
             Ok(())
         },
     )?;
+    Ok(())
+}
+
+/// Plan the rewrite of every routing receipt in the room that binds
+/// `workspace:<old>`: only `address.name` changes. Receipts are read from
+/// `home_now/routing` and written to `new_home/routing` (the directory moves
+/// before any rewrite lands; on resume the two are the same). A receipt is
+/// re-encoded exactly as `routing::publish_receipt` writes one, so the result
+/// is byte-identical to the receipt routing would have written for `new`. A
+/// receipt for any other address is left alone; a malformed one follows the
+/// `plan_json_write` policy.
+fn plan_routing_receipts(
+    old: &str,
+    new: &str,
+    home_now: &Path,
+    new_home: &Path,
+    plan: &mut RenamePlan,
+) -> AppResult<()> {
+    let routing_now = home_now.join("routing");
+    let entries = match fs::read_dir(&routing_now) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io("list routing receipts", &routing_now, error)),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| AppError::io("read routing entry", &routing_now, error))?;
+        let name = entry.file_name();
+        let Some(text) = name.to_str() else { continue };
+        if !text.ends_with(".json") || text.starts_with('.') {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map_err(|error| AppError::io("inspect routing entry", &entry.path(), error))?
+            .is_file()
+        {
+            continue;
+        }
+        names.push(text.to_owned());
+    }
+    names.sort();
+    for name in names {
+        let source = routing_now.join(&name);
+        let original = fs::read(&source)
+            .map_err(|error| AppError::io("read routing receipt for rename", &source, error))?;
+        let mut receipt: crate::cursor_state::routing::Receipt = match serde_json::from_slice(
+            &original,
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if json_bytes_may_name_room(&original, old) {
+                    return Err(AppError::config(
+                        &source,
+                        format!("cannot prove a malformed routing receipt is free of '{old}' references: {error}"),
+                    ));
+                }
+                plan.warnings.push(format!(
+                    "skipped malformed routing_receipts at {}: {error}",
+                    source.display()
+                ));
+                continue;
+            }
+        };
+        if receipt.address.kind != crate::participant::AddressKind::Workspace
+            || receipt.address.name != old
+        {
+            continue;
+        }
+        receipt.address.name = new.to_owned();
+        let target = new_home.join("routing").join(&name);
+        let mut updated = serde_json::to_vec_pretty(&receipt)
+            .map_err(|error| AppError::io("serialize renamed routing receipt", &target, error))?;
+        updated.push(b'\n');
+        plan.writes.push(RenameWrite {
+            path: target,
+            original,
+            updated,
+            store: "routing_receipts",
+        });
+    }
     Ok(())
 }
 

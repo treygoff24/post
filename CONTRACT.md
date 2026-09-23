@@ -60,8 +60,9 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
    immutable copy to `~/.claude-mail/archive/`. Canonical address inbox files
    and channel messages never move on read. A successful consuming read records
    exact ids in the acting participant's cursor after stdout succeeds. A
-   routing receipt is published once and freezes delivery; it is never
-   rewritten. Participant cursor and channel state, leases, lifecycle records,
+   routing receipt is published once and freezes delivery; its recipients
+   and digest are never rewritten (`post rooms rename` re-binds only the
+   receipt's `address.name` to the room's new name). Participant cursor and channel state, leases, lifecycle records,
    heartbeats, and `rooms.json` are mutable delivery or configuration state.
 5. **Registers stay distinct.** Direct-mail `kind` ∈ {letter, note, signal}.
    Channel messages have no `kind`, so a signal structurally cannot occur in a
@@ -141,7 +142,9 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   characters with lowercase `\u` escapes.
 - Each canonical address store has `routing/<id>.json` receipts beside its
   inbox. A receipt freezes the recipient ids and message digest in a one-time
-  publication and is never rewritten. Missing receipt means pending. The
+  publication and is never otherwise rewritten; `post rooms rename` re-binds a
+  workspace receipt's `address.name` to the new name, because readers refuse a
+  receipt whose address is not theirs. Missing receipt means pending. The
   archive copy remains `archive/<id>.mail`.
   Canonical mail never moves on read; `<room>/read/` is read-only legacy state.
 - Mail writes are atomic. New mail files are published with an exclusive final
@@ -436,11 +439,13 @@ their existing success semantics.
   the participant and rooms locks. It moves `<root>/<old>` to
   `<root>/<new>` with a single rename, rewrites every live reference to the
   name (participant `workspace` fields, participant cursor `workspace:<old>`
-  keys, `channels/*/members.json` keys, bare `profiles.json` keys), then
-  commits `rooms.json` last; a failure before the commit restores the moved
-  directory and every written file. Published history is never rewritten:
-  archive letters, channel messages, routing receipts, and the moved
-  directory's own contents keep the old name. It refuses an unknown or
+  keys, `channels/*/members.json` keys, bare `profiles.json` keys, and the
+  `address.name` of every `routing/<id>.json` receipt bound to
+  `workspace:<old>`, written at its moved location exactly as routing would
+  write it for `<new>`), then commits `rooms.json` last; a failure before the
+  commit restores the moved directory and every written file. Published
+  history is never rewritten: archive letters, channel messages, and the
+  moved directory's other contents keep the old name. It refuses an unknown or
   remote-placeholder old room, any `add` check on the new name (including
   placeholder duplicates), a case-only rename, an existing `<root>/<new>`,
   an `owner.json` or `rules.json` naming the old room, and on a bridged host

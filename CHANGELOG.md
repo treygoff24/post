@@ -37,7 +37,7 @@
 - `post rooms rename <old> <new> [--dry-run]` renames a local room and keeps
   its mail: the mailbox directory moves, every live reference to the name is
   rewritten (participant workspace fields, cursor keys, channel members, bare
-  profile keys), and `rooms.json` commits last with rollback on failure.
+  profile keys, and the address each of the room's routing receipts binds), and `rooms.json` commits last with rollback on failure.
   History keeps the old name. On a bridged host it requires a fresh
   `bridge/health.json` with zeroed `local_held` counters; the refusal is the
   retryable `bridge_guard_unavailable`. Separately, `post rooms add` refusing

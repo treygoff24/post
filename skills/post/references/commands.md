@@ -172,8 +172,8 @@ supply `/dev/null`.
   always refuses remote placeholders. It prints `before` and `after`.
 - `post rooms rename <old> <new> [--dry-run]` renames a local room and keeps
   its mail: `<root>/<old>` moves to `<root>/<new>`, live references
-  (participant workspaces, cursor keys, channel members, bare profile keys)
-  are rewritten, and `rooms.json` commits last with rollback on failure.
+  (participant workspaces, cursor keys, channel members, bare profile keys,
+  and the address in each of the room's routing receipts) are rewritten, and `rooms.json` commits last with rollback on failure.
   History keeps the old name. It refuses remote placeholders, case-only
   renames, and an `owner.json` or `rules.json` naming the room; on a bridged
   host it needs a fresh `bridge/health.json` whose `local_held` counters are
