@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Post Papercut Triage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c10; --bg2:#0f1218; --card:#131720; --card2:#171c27; --line:#232a38; --line2:#2d3647;
+  --ink:#e8ecf3; --ink2:#aab3c3; --ink3:#6f7a8e;
+  --band:#34d399; --behav:#fbbf24; --refac:#a78bfa; --feat:#60a5fa; --fixed:#64748b; --hot:#fb7185;
+  --glow: 0 0 0 1px rgba(255,255,255,.03), 0 20px 60px -20px rgba(0,0,0,.6);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(1200px 600px at 80% -10%,rgba(96,165,250,.10),transparent 60%),radial-gradient(900px 500px at -10% 20%,rgba(167,139,250,.08),transparent 60%);}
+.wrap{max-width:1120px;margin:0 auto;padding:56px 24px 120px}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.86em}
+code{background:#1b2130;border:1px solid var(--line);padding:1px 6px;border-radius:6px;color:#cfd7e6}
+h1{font-size:clamp(34px,5vw,56px);line-height:1.05;letter-spacing:-.03em;margin:10px 0 14px;font-weight:800}
+h2{font-size:26px;letter-spacing:-.02em;margin:0 0 6px;font-weight:700}
+h3{font-size:18px;margin:0;font-weight:650;letter-spacing:-.01em}
+p{margin:0 0 12px;color:var(--ink2)}
+.kicker{font:600 12px/1 "JetBrains Mono",monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3)}
+.lede{font-size:18px;color:var(--ink2);max-width:760px}
+.lede b{color:var(--ink)}
+section{margin-top:72px}
+.sub{color:var(--ink3);margin-bottom:22px}
+
+/* funnel */
+.funnel{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:34px}
+.fstep{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 16px;position:relative;box-shadow:var(--glow)}
+.fstep .n{font:800 40px/1 Inter;letter-spacing:-.03em}
+.fstep .l{font-size:13px;color:var(--ink3);margin-top:8px;line-height:1.35}
+.fstep.g .n{color:var(--band)} .fstep.h .n{color:var(--hot)} .fstep.p .n{color:var(--refac)}
+.fstep:not(:last-child)::after{content:"→";position:absolute;right:-12px;top:50%;transform:translateY(-50%);color:var(--ink3);font-size:14px;z-index:2}
+
+/* headline cards */
+.heads{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.head{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:var(--glow)}
+.head .big{font:800 44px/1 Inter;letter-spacing:-.03em;margin:10px 0 10px}
+.head.r .big{color:var(--hot)} .head.y .big{color:var(--behav)} .head.b .big{color:var(--feat)}
+.head p{font-size:14px}
+
+/* legend */
+.legend{display:flex;flex-wrap:wrap;gap:16px;margin:0 0 20px;font-size:13px;color:var(--ink2)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+.d-band{background:var(--band)} .d-behav{background:var(--behav)} .d-refac{background:var(--refac)} .d-feat{background:var(--feat)} .d-fixed{background:var(--fixed)}
+
+/* root cause map */
+.map{display:grid;grid-template-columns:1fr;gap:10px}
+.row{display:grid;grid-template-columns:280px 1fr;gap:18px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 18px}
+.row .rc{display:flex;gap:12px;align-items:center}
+.row .num{font:700 13px/1 "JetBrains Mono";color:var(--ink3);width:26px}
+.row .rcn{font-weight:650}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.chip{font-size:12.5px;padding:5px 10px;border-radius:999px;border:1px solid;white-space:nowrap}
+.c-band{color:#a7f3d0;border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+.c-behav{color:#fde68a;border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.08)}
+.c-refac{color:#ddd6fe;border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.09)}
+.c-feat{color:#bfdbfe;border-color:rgba(96,165,250,.4);background:rgba(96,165,250,.09)}
+.c-fixed{color:#94a3b8;border-color:rgba(100,116,139,.4);background:rgba(100,116,139,.08);text-decoration:line-through;text-decoration-color:rgba(148,163,184,.5)}
+
+/* detail cards */
+.rcard{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:26px 28px;margin-bottom:16px;box-shadow:var(--glow)}
+.rtop{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}
+.rtop .left{display:flex;gap:14px;align-items:baseline}
+.rnum{font:800 30px/1 Inter;color:var(--line2);letter-spacing:-.03em}
+.badges{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.badge{font:600 11px/1 "JetBrains Mono";letter-spacing:.06em;text-transform:uppercase;padding:6px 9px;border-radius:7px}
+.b-band{background:rgba(52,211,153,.14);color:var(--band)} .b-behav{background:rgba(251,191,36,.14);color:var(--behav)}
+.b-refac{background:rgba(167,139,250,.16);color:var(--refac)} .b-feat{background:rgba(96,165,250,.16);color:var(--feat)}
+.b-pri{background:rgba(251,113,133,.14);color:var(--hot)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:8px}
+.cols h4{font:600 11.5px/1 "JetBrains Mono";letter-spacing:.12em;text-transform:uppercase;color:var(--ink3);margin:0 0 10px}
+.cols ul{margin:0;padding-left:18px;color:var(--ink2)} .cols li{margin-bottom:7px}
+.cols li b{color:var(--ink)}
+.now{border-left:2px solid var(--band);padding-left:14px}
+.real{border-left:2px solid var(--refac);padding-left:14px}
+.why{font-size:14.5px;color:var(--ink2);background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:6px 0 4px}
+.why b{color:var(--ink)}
+.refs{font-size:12px;color:var(--ink3);margin-top:12px}
+
+/* doorbell viz */
+.bells{display:grid;grid-template-columns:repeat(19,1fr);gap:6px;margin:14px 0 6px}
+.bell{aspect-ratio:1;border-radius:7px;display:grid;place-items:center;font-size:13px}
+.bell.live{background:rgba(52,211,153,.18);border:1px solid rgba(52,211,153,.5)}
+.bell.gone{background:rgba(251,113,133,.10);border:1px dashed rgba(251,113,133,.5)}
+.bellcap{font-size:12.5px;color:var(--ink3)}
+
+/* bridge diagram */
+.bridge{display:grid;grid-template-columns:1fr 150px 1fr;gap:0;align-items:stretch;margin:16px 0 8px}
+.host{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.host .hn{font:700 13px/1 "JetBrains Mono";color:var(--ink);margin-bottom:10px}
+.host .item{font-size:13px;color:var(--ink2);padding:5px 0;border-top:1px dashed var(--line)}
+.host .item:first-of-type{border-top:0}
+.pipe{display:flex;flex-direction:column;justify-content:center;gap:10px;padding:0 10px}
+.lane{font:500 11.5px/1.3 "JetBrains Mono";text-align:center;padding:7px 6px;border-radius:8px}
+.lane.ok{color:#a7f3d0;background:rgba(52,211,153,.10);border:1px solid rgba(52,211,153,.35)}
+.lane.no{color:#fda4af;background:rgba(251,113,133,.08);border:1px dashed rgba(251,113,133,.45)}
+
+/* waves */
+.waves{position:relative;margin-top:10px}
+.wave{display:grid;grid-template-columns:120px 1fr;gap:20px;padding:20px 0;border-top:1px solid var(--line)}
+.wave:first-child{border-top:0}
+.wl{font:700 12px/1.2 "JetBrains Mono";letter-spacing:.1em;text-transform:uppercase;color:var(--ink3)}
+.wl .wn{display:block;font:800 30px/1 Inter;color:var(--ink);letter-spacing:-.03em;margin-bottom:6px;text-transform:none}
+.wave h3{margin-bottom:6px}
+.wave .chips{margin-top:10px}
+.gate{display:inline-block;margin-top:10px;font-size:12.5px;color:var(--behav);background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);padding:4px 10px;border-radius:8px}
+
+/* decisions */
+.decs{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.dec{background:var(--card);border:1px solid rgba(251,191,36,.28);border-radius:18px;padding:20px}
+.dec .q{font-weight:650;color:var(--ink);margin:8px 0 8px;font-size:15.5px}
+.dec p{font-size:13.5px}
+.dec .rec{font-size:13px;color:var(--band);margin-top:8px}
+
+.closed{columns:2;column-gap:28px;font-size:13.5px;color:var(--ink2)}
+.closed div{break-inside:avoid;margin-bottom:8px}
+.closed b{color:var(--ink)}
+.foot{margin-top:80px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--ink3)}
+.foot p{color:var(--ink3);font-size:13px}
+
+@media (max-width:860px){
+  .funnel{grid-template-columns:repeat(2,1fr)} .fstep::after{display:none}
+  .heads,.decs{grid-template-columns:1fr} .cols{grid-template-columns:1fr}
+  .row{grid-template-columns:1fr} .bridge{grid-template-columns:1fr} .pipe{padding:10px 0}
+  .bells{grid-template-columns:repeat(10,1fr)} .closed{columns:1} .wave{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="kicker">post · papercut triage · 2026-09-22</div>
+<h1>21 live papercuts.<br>8 real problems underneath.</h1>
+<p class="lede">I swept every post-related papercut on the Mac and the devbox, closed what recent work already fixed, then had three Luna xhigh lanes trace the survivors to the code. I spot-checked their claims myself and corrected two: Lane A's guess at why the Astra doorbell never rang, and Lane C's "just flip the channel config". <b>Most of the pain is not 21 separate bugs. It's a few structural gaps that keep producing new cuts.</b></p>
+
+<div class="funnel">
+  <div class="fstep"><div class="n">87</div><div class="l">open cuts that mention post, both machines</div></div>
+  <div class="fstep g"><div class="n">60</div><div class="l">closed tonight: 59 verified fixed, 1 duplicate</div></div>
+  <div class="fstep"><div class="n">7</div><div class="l">not actually about post (ffmpeg, TaskList, CoS…)</div></div>
+  <div class="fstep h"><div class="n">21</div><div class="l">live post cuts, incl. one the first pass missed</div></div>
+  <div class="fstep p"><div class="n">8</div><div class="l">root causes behind them</div></div>
+</div>
+
+<section>
+  <div class="kicker">three things worth knowing first</div>
+  <div class="heads" style="margin-top:16px">
+    <div class="head r">
+      <div class="kicker">doorbells</div>
+      <div class="big">15 / 19</div>
+      <p>Codex doorbell timers on the devbox point at herdr panes that no longer exist. Each one still fires every 5 seconds, finds nobody, and <b>stays completely silent</b>. That's why Vale's Astra never got woken: 249 unread messages and one mail were sitting there.</p>
+    </div>
+    <div class="head y">
+      <div class="kicker">tonight's porch break</div>
+      <div class="big">1 field</div>
+      <p>Post added <code>key</code>/<code>legacy</code> to one JSON output, and Porch refused to launch on either machine. Same failure pattern as the Python doorbell rejecting participant mail: <b>strict readers of post's output, none of them tested against post</b>. Fixed in porch <code>39ca6df</code>.</p>
+    </div>
+    <div class="head b">
+      <div class="kicker">cross-machine</div>
+      <div class="big">v1</div>
+      <p>Both machines still run the old single-file bridge with a hand-kept list of the other side's workspaces. That's why <code>loom</code> is invisible from the Mac. The v2 bridge (auto room directory and channel sync) is <b>built but never shipped</b>: it sits on a devbox branch, 18 commits unpushed.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>The map</h2>
+  <p class="sub">Every live cut, grouped by the root cause that produces it, colored by the kind of fix it needs.</p>
+  <div class="legend">
+    <span><i class="dot d-band"></i>band-aid: small, mechanical</span>
+    <span><i class="dot d-behav"></i>behavior change: an existing feature works differently</span>
+    <span><i class="dot d-refac"></i>refactor</span>
+    <span><i class="dot d-feat"></i>new feature</span>
+    <span><i class="dot d-fixed"></i>already fixed, closed tonight</span>
+  </div>
+  <div class="map">
+    <div class="row"><div class="rc"><span class="num">01</span><span class="rcn">Contract drift</span></div><div class="chips">
+      <span class="chip c-fixed">Porch won't launch (fixed tonight)</span><span class="chip c-band">doorbell rejects participant mail</span><span class="chip c-feat">skill and binary drift apart</span><span class="chip c-band">dead SPEC-v2 link on Mac</span></div></div>
+    <div class="row"><div class="rc"><span class="num">02</span><span class="rcn">Five doorbells, all fail silently</span></div><div class="chips">
+      <span class="chip c-band">dead-pane timers ring nobody</span><span class="chip c-behav">focused pane never woken</span><span class="chip c-behav">Claude Monitor expires silently</span><span class="chip c-feat">no mention-only filter</span></div></div>
+    <div class="row"><div class="rc"><span class="num">03</span><span class="rcn">Watch rescans everything</span></div><div class="chips">
+      <span class="chip c-refac">a doorbell ate 67% of a core</span></div></div>
+    <div class="row"><div class="rc"><span class="num">04</span><span class="rcn">Bad cursor file = "everything unread"</span></div><div class="chips">
+      <span class="chip c-behav">digest shows "339 new"</span><span class="chip c-behav">intermittent invalid cursors.json</span></div></div>
+    <div class="row"><div class="rc"><span class="num">05</span><span class="rcn">Locks with no deadline</span></div><div class="chips">
+      <span class="chip c-behav">send hangs after it already landed</span></div></div>
+    <div class="row"><div class="rc"><span class="num">06</span><span class="rcn">CLI guesses intent</span></div><div class="chips">
+      <span class="chip c-band">piped text silently dropped</span><span class="chip c-band">…same, second report</span><span class="chip c-behav">"active" reads as "working"</span><span class="chip c-band">installers reject --help</span><span class="chip c-fixed">ambiguous short ids</span></div></div>
+    <div class="row"><div class="rc"><span class="num">07</span><span class="rcn">Registries without verbs</span></div><div class="chips">
+      <span class="chip c-feat">can't move a room</span><span class="chip c-feat">can't list taken sigils</span></div></div>
+    <div class="row"><div class="rc"><span class="num">08</span><span class="rcn">Cross-machine is v1</span></div><div class="chips">
+      <span class="chip c-band">loom missing from Mac</span><span class="chip c-refac">ship bridge v2 (channels)</span><span class="chip c-feat">DM one agent on another host</span></div></div>
+    <div class="row"><div class="rc"><span class="num">··</span><span class="rcn" style="color:var(--ink2)">Standalone tooling</span></div><div class="chips">
+      <span class="chip c-band">bridge tests fail on Mac /var</span><span class="chip c-band">porch test helpers not importable</span><span class="chip c-behav">porch mouse scroll under herdr/cmux</span><span class="chip c-band">gate under cargo shim (fix present, re-run to close)</span></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Each root cause, plainly</h2>
+  <p class="sub">What's actually broken, why, the quick fix available now, and the real fix that stops new cuts.</p>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">01</span><h3>Contract drift: post's output has many strict readers and no shared tests</h3></div>
+      <div class="badges"><span class="badge b-pri">highest leverage</span><span class="badge b-refac">refactor</span></div></div>
+    <div class="why">Post's JSON is read by Porch, the Python doorbell, the Codex monitor, the Claude/Cursor/Grok hooks, and the skill docs. Each one validates the shape its own way. <b>When post changes one field, a reader somewhere breaks, and nobody finds out until something stops working.</b> It happened tonight with Porch. It has been happening quietly with the Python doorbell since participants shipped: post deliberately leaves <code>room</code> off participant-addressed mail, and the doorbell requires it.</div>
+    <div class="cols">
+      <div class="now"><h4>Band-aid now</h4><ul>
+        <li>Python doorbell: take the mail namespace from <code>address.kind/name</code> when <code>room</code> is absent.</li>
+        <li>Point the bridge reference at a stable, versioned URL for SPEC-v2, not a devbox-only path.</li></ul></div>
+      <div class="real"><h4>Real fix</h4><ul>
+        <li><b>Post ships contract fixtures</b>: golden samples of every event and every <code>--json</code> output that other tools read.</li>
+        <li><b>Every reader tests against those fixtures</b> in its own suite, so a post change that breaks Porch goes red in Porch's tests first.</li>
+        <li><b>The install smoke runs the readers' startup checks</b> (Porch's launch check, the doorbell parser) before an install counts as done.</li>
+        <li>The skill carries a contract version that <code>post doctor</code> compares against the binary.</li></ul></div>
+    </div>
+    <div class="refs">doorbell/post-doorbell:118-143 · src/output.rs:904-930 · porch roomcheck.py · skills/post/references/post-bridge.md:7</div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">02</span><h3>Five separate doorbells, all of which fail silently</h3></div>
+      <div class="badges"><span class="badge b-pri">most user-visible</span><span class="badge b-refac">refactor</span><span class="badge b-feat">+ feature</span></div></div>
+    <div class="why">Waking an idle agent is done five different ways: a Claude Monitor, per-harness hooks, a Python daemon, a Codex systemd timer that drives herdr, and Cursor/Grok wrappers. Each has its own filters, lifetime, and failure handling. They share one habit: <b>when delivery can't happen, they do nothing and say nothing.</b> A timer whose pane is gone just keeps running. Error messages drop the reason ("snapshot failed; notification state is unknown"). Claude's Monitor expires without a trace.</div>
+    <div class="bells" title="devbox post-codex-doorbell timers">
+      <div class="bell live">✓</div><div class="bell live">✓</div><div class="bell live">✓</div><div class="bell live">✓</div>
+      <div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div>
+    </div>
+    <div class="bellcap">Devbox Codex doorbell timers right now: 4 with a live pane, 15 ringing panes that no longer exist (astra, porch-*, atlas-*, sill, reed-cos…).</div>
+    <div class="cols" style="margin-top:16px">
+      <div class="now"><h4>Band-aid now</h4><ul>
+        <li>Codex monitor: log "pane not found" loudly, and pass the real error text through instead of a generic line.</li>
+        <li>Add <code>post watch --reason mention|mail|channel</code> so doorbells stop carrying their own jq filters.</li>
+        <li>Say plainly in the Monitor doorbell doc that it expires and gives no warning.</li>
+        <li>Turn off the 15 dead-pane timers (your call, below).</li></ul></div>
+      <div class="real"><h4>Real fix: one doorbell per host</h4><ul>
+        <li><b>One supervisor per machine</b> reads <code>post watch</code> and keeps the filtering, dedupe, and health logic in one place.</li>
+        <li><b>Small plug-in "sinks" per harness</b>: herdr prompt, cmux notify, Claude.</li>
+        <li><b>Its lifetime is tied to the participant.</b> When the agent's session ends or its pane disappears, the doorbell retires itself, loudly.</li>
+        <li>Waking a focused pane is an explicit opt-in, never a guess.</li></ul></div>
+    </div>
+    <div class="refs">skills/post/hooks/codex-notify-monitor.mjs:303-313, 355-402 · post-mail-doorbell.md · src/cli.rs:822 (WatchArgs)</div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">03</span><h3>Watch re-reads the whole store on every wake</h3></div>
+      <div class="badges"><span class="badge b-refac">refactor · large</span></div></div>
+    <div class="why">Every wake-up re-lists every channel file and re-parses the whole inbox, so a doorbell's CPU grows with history and with how busy everyone else is, not with new mail. The sweep's theory that watch "spins in a loop" is outdated; this is simply the cost of the work it repeats. Post already skips parsing channel messages you've seen.</div>
+    <div class="cols"><div class="now"><h4>First step</h4><ul><li>Measure: time mail scans and channel listing separately, on a real heavy participant.</li></ul></div>
+      <div class="real"><h4>Real fix</h4><ul><li>Keep an index of what's unseen for each watcher, updated from file events, with a periodic full pass as a correctness backstop. The periodic pass guards the edge cases this could otherwise miss: renames, overflow, files arriving from the bridge.</li></ul></div></div>
+    <div class="refs">src/commands/watch.rs:717-760,1273 · src/eligibility.rs:77-163, 268-304</div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">04</span><h3>A bad cursor file turns into "everything is unread"</h3></div>
+      <div class="badges"><span class="badge b-behav">mostly mitigated</span></div></div>
+    <div class="why">Writes are safe: post writes a temp file and renames it into place. Reads don't take the lock, though, and they check the file and then read it in two separate steps, so a race can make a valid file look broken for a moment. Current code already retries once, names the path and the reason in the warning, and flags a digest built from bad cursor state as a re-report rather than new mail. <b>The "339 new" false alarm should no longer look like a real burst.</b></div>
+    <div class="cols"><div class="now"><h4>Now</h4><ul><li>Nothing urgent. Make sure every doorbell shows the re-report flag instead of ringing on it.</li></ul></div>
+      <div class="real"><h4>Later</h4><ul><li>Open the file once and check that same open file, to close the race. Keep failing open: never auto-reset read history.</li></ul></div></div>
+    <div class="refs">src/cursor_state.rs:32-64, 222-260, 327-359 · src/commands/watch.rs:199-207</div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">05</span><h3>A send can hang after it has already landed</h3></div>
+      <div class="badges"><span class="badge b-behav">behavior change · small</span></div></div>
+    <div class="why">After a channel message is written, post marks it as seen for you. That step waits on a file lock <b>with no time limit</b>. If another process holds the lock, your terminal hangs even though the message was delivered. That's a live mechanism for the August "11-minute send" report.</div>
+    <div class="cols"><div class="now"><h4>Fix</h4><ul><li>Give that wait a deadline. If it expires, print a warning and return the send receipt. Nothing is lost: the message is already written.</li></ul></div>
+      <div class="real"><h4>Follow-on</h4><ul><li>One shared lock helper with a deadline for every blocking lock in post, each with a defined outcome on timeout.</li></ul></div></div>
+    <div class="refs">src/commands/chat.rs:2260-2336 · src/cursor_state.rs:362-394</div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">06</span><h3>The CLI guesses what you meant</h3></div>
+      <div class="badges"><span class="badge b-band">band-aids</span></div></div>
+    <div class="why"><code>echo hi | post chat ops</code> reads the channel and throws your text away, because only <code>--send</code>/<code>--body</code> count as send intent. <code>post who</code> prints <code>state=active</code> for a lease that hasn't expired, and readers take it to mean the agent is working; that belief once held a launch for 30 minutes. The installers reject <code>--help</code> because it hits argument validation first.</div>
+    <div class="cols"><div class="now"><h4>Fixes</h4><ul>
+      <li>Piped input on a read → refuse, and hand back the exact <code>--send</code> command. Never auto-send: a missing flag shouldn't be able to deliver anything.</li>
+      <li><code>state=active</code> → <code>lease=active</code>, plus a hint pointing to <code>--seen-by</code>, which is the tool that actually answers "did they read it?"</li>
+      <li>Installers: handle <code>--help</code> first, exit 0.</li></ul></div>
+      <div class="real"><h4>Already fixed</h4><ul><li>Shortened ids now print the shortest prefix that's unique in the channel, plus a "…", and every flag that takes an id accepts it back. Closed tonight.</li></ul></div></div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">07</span><h3>Registries without the verbs to maintain them</h3></div>
+      <div class="badges"><span class="badge b-feat">new feature · medium</span></div></div>
+    <div class="why">Rooms and sigils live in JSON files, and the only tool for changing them is editing by hand. Moving brief-app from the Mac to the devbox meant hand-editing <code>rooms.json</code>, and choosing a sigil is trial and error.</div>
+    <div class="cols"><div class="now"><h4>Build</h4><ul><li><code>post rooms set-path NAME PATH</code>, under the registry lock, with checks.</li><li><code>post profile list</code>: who holds which sigil, using the same lease rule that enforces uniqueness.</li></ul></div>
+      <div class="real"><h4>Hold</h4><ul><li>Renaming a room is its own design: history, memberships, routes, and old references all point at the name.</li></ul></div></div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">08</span><h3>Cross-machine post is still on bridge v1</h3></div>
+      <div class="badges"><span class="badge b-band">band-aid</span><span class="badge b-refac">ship v2</span><span class="badge b-feat">+ feature</span></div></div>
+    <div class="why">Both machines run the old single-file bridge. It knows the other side's workspaces only from a <b>hand-kept list in each machine's config</b>. The Mac's list has cos-devbox, devbox-linux-devbox, post-devbox, yu-gi-ho-solver, and hq-devbox, and no one ever added <code>loom</code>. v2 replaces that list with an automatic room directory and adds opt-in channel sync, and <b>it has never been deployed</b>. It sits on branch <code>post-bridge-v2</code> in claude-space on the devbox, 18 commits ahead of Forgejo, with someone's staged edits on top. v1 also logs a warning on every participant-era envelope: about 30k lines on the Mac and 39k on the devbox. That's noise worth checking, to make sure it isn't dropping sender attribution.</div>
+    <div class="bridge">
+      <div class="host"><div class="hn">MAC</div><div class="item">Astra (its own harness)</div><div class="item">bridge v1 · static peers list</div><div class="item">channels: off</div></div>
+      <div class="pipe"><div class="lane ok">workspace mail ✓<br>(listed rooms only)</div><div class="lane no">channels ✕</div><div class="lane no">DM one agent ✕</div></div>
+      <div class="host"><div class="hn">DEVBOX</div><div class="item">Fable + Astra in #loom-build</div><div class="item">bridge v1 · static peers list</div><div class="item">v2 on an unpushed branch</div></div>
+    </div>
+    <div class="cols"><div class="now"><h4>Band-aid now</h4><ul><li>Add <code>loom</code> to the Mac's peers list, and the Mac rooms to the devbox's. Workspace DMs to loom then work natively.</li><li>The ssh route you gave Astra covers <code>#loom-build</code> in the meantime.</li></ul></div>
+      <div class="real"><h4>Real fix, in order</h4><ul><li><b>Ship bridge v2</b>: automatic room directory, then allow <code>loom-build</code> only, on both sides. Once a channel is published, anyone with access to the relay can read it. Expect the first import to mark old history as unread.</li><li><b>Then <code>participant:&lt;id&gt;@&lt;host&gt;</code></b>: a real DM to one agent on the other machine, resolved on the receiving side. No global directory of participants.</li></ul></div></div>
+    <div class="refs">~/.claude-mail/bridge/config.json (both) · claude-space/post-bridge @ db01766 (post-bridge-v2, ahead 18) · bridgelib/channels.py, rooms.py</div>
+  </div>
+</section>
+
+<section>
+  <h2>The plan</h2>
+  <p class="sub">Ordered by dependency and leverage. Each step ships on its own.</p>
+  <div class="waves">
+    <div class="wave"><div class="wl"><span class="wn">1</span>band-aids</div><div>
+      <h3>One sitting of small, safe fixes</h3><p>Each is small, the fix is clear, and each gets its own test.</p>
+      <div class="chips"><span class="chip c-band">doorbell accepts participant mail</span><span class="chip c-band">monitor: loud "pane not found" + real errors</span><span class="chip c-behav">send: bounded lock wait</span><span class="chip c-band">piped read refuses</span><span class="chip c-band">installers --help</span><span class="chip c-behav">who: lease=</span><span class="chip c-feat">watch --reason</span><span class="chip c-band">bridge test fixtures</span><span class="chip c-band">porch helpers path</span><span class="chip c-band">SPEC link</span><span class="chip c-band">loom in peers</span></div></div></div>
+    <div class="wave"><div class="wl"><span class="wn">2</span>contract</div><div>
+      <h3>Post's output becomes a tested contract</h3><p>Fixtures from post, tests in every reader, and an install smoke that runs Porch's and the doorbell's startup checks. This is what would have caught tonight's Porch break.</p></div></div>
+    <div class="wave"><div class="wl"><span class="wn">3</span>doorbell</div><div>
+      <h3>One doorbell supervisor per host</h3><p>Consolidates the five paths, ties each doorbell's lifetime to its participant, fails loudly, and makes focus-waking an explicit option. The dead-timer problem can't come back after this.</p><span class="gate">needs your call on focus-waking</span></div></div>
+    <div class="wave"><div class="wl"><span class="wn">4</span>bridge</div><div>
+      <h3>Ship bridge v2, then turn on #loom-build</h3><p>Finish, review, and deploy the v2 branch on both machines. Then allow the one channel. After that, add <code>participant@host</code> for real cross-machine DMs.</p><span class="gate">needs your call on whose branch that is</span></div></div>
+    <div class="wave"><div class="wl"><span class="wn">5</span>depth</div><div>
+      <h3>Scale and registries</h3><p>Measure, then index the watch scans. Add <code>rooms set-path</code> and <code>profile list</code>. Close the cursor read race.</p></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Three calls only you can make</h2>
+  <div class="decs" style="margin-top:14px">
+    <div class="dec"><div class="kicker">bridge v2</div><div class="q">The v2 branch has 18 unpushed commits plus staged edits. Whose work is it, and should I take it to ship?</div><p>I can't finish or push it without knowing whether another session is mid-flight on it.</p><div class="rec">My lean: I take it over if it's parked.</div></div>
+    <div class="dec"><div class="kicker">zombie doorbells</div><div class="q">Turn off the 15 Codex doorbell timers whose herdr panes are gone?</div><p>Other sessions installed them, so turning them off needs your OK. It's reversible: disable, don't delete.</p><div class="rec">My lean: yes, disable all 15.</div></div>
+    <div class="dec"><div class="kicker">focus policy</div><div class="q">Should a doorbell ever wake the pane you're looking at?</div><p>Today it never does, which is why the two-seat review sat stuck. Letting it wake the focused pane risks interrupting you mid-thought.</p><div class="rec">My lean: opt-in per doorbell, off by default.</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Closed tonight (60)</h2>
+  <p class="sub">59 verified against post c808283 or porch 99ba81e+ with a live probe or a source read, each with a note saying what fixed it; 1 archived as a duplicate.</p>
+  <div class="closed">
+    <div><b>Participant binding (≈15)</b>: "posted as the wrong room", cwd identity, stray <code>POST_FROM</code>/<code>--from</code> pins. Post now refuses when a pin conflicts with the bound participant.</div>
+    <div><b>Installing the latest build</b>: <code>--max-bytes</code>, <code>--message</code>, archive, and a clean channel for a leading <code>#</code>.</div>
+    <div><b>0.6–0.9 fixes whose cuts were never closed</b>: <code>--body-file -</code>, reading a channel-message id, send-to-channel handoff, crossed_send narrowing, seen-set cursors.</div>
+    <div><b>Per-participant profiles</b>: one agent's rename no longer changes another agent's name in a shared workspace.</div>
+    <div><b>Porch</b>: porchd keep-alive poisoning (fixed in August), the stale launcher symlink, keyboard scrolling.</div>
+    <div><b>Doesn't reproduce now</b>: phantom unread counts, digest replaying history already read, watch dying on a rebind, watch following the workspace's read position instead of the participant's.</div>
+  </div>
+</section>
+
+<div class="foot">
+  <p><b style="color:var(--ink2)">How this was checked.</b> Three GPT-6 Luna xhigh lanes did read-only root-cause work: watch and doorbells, CLI and tooling, cross-machine design. Their reports are in <code>post/docs/triage-2026-09-22/diag-{A,B,C}.md</code>. I re-verified the load-bearing claims myself, and two lane conclusions changed. Lane A blamed the Astra doorbell on "snapshot failed" errors; the real cause is a missing pane, and those errors stopped at 18:52. Lane C proposed flipping a config switch to sync channels; that switch only exists in v2, which isn't deployed. The CPU mechanism and the cursor race are traced in source but not reproduced live.</p>
+</div>
+
+</div>
+</body>
+</html>
