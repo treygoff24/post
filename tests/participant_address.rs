@@ -590,8 +590,9 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     // The boundary stamps come from a fresh clock read: `now` is seconds old
     // by here, and rfc3339 drops subseconds, so a stale base would drift a
-    // stamp across the 5 s allowance. 7 s ahead stays outside it after both.
-    rig.write_health(&both, SystemTime::now() + Duration::from_secs(7), 30);
+    // stamp across the 5 s allowance. 9 s ahead stays outside it after both,
+    // with room for a slow prelude, and inside a 10 s allowance.
+    rig.write_health(&both, SystemTime::now() + Duration::from_secs(9), 30);
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     for broken in [
         "{not json".to_owned(),
@@ -610,7 +611,7 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     rig.write_health(&both, SystemTime::now() - Duration::from_secs(80), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
     // A stamp 4 s ahead is inside the 5 s allowance even after truncation, so
-    // together with the 7 s refusal this pins the allowance between 4 and 6 s.
+    // together with the 9 s refusal this pins the allowance between 4 and 8 s.
     rig.write_health(&both, SystemTime::now() + Duration::from_secs(4), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
 }
