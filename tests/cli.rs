@@ -2757,6 +2757,38 @@ fn send_refuses_a_room_an_interrupted_rename_names() {
     );
 }
 
+/// G4: a committed-rename resume that fails keeps the journal and, like the
+/// fresh-rename path, names the resume command as the fix.
+#[test]
+fn rooms_rename_failed_committed_resume_names_the_resume_command() {
+    let sandbox = Sandbox::new();
+    register_alpha_beta(&sandbox);
+    let renamed = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+    assert_eq!(renamed.status.code(), Some(0), "{}", stderr(&renamed));
+    // A journal left after the commit, with one rewrite still pending that
+    // cannot be written (the channel directory is read-only).
+    plant_rename_journal(&sandbox, "alpha", "alpha2");
+    let channel_dir = sandbox.mail_root.join("channels/ops");
+    fs::create_dir_all(&channel_dir).expect("channel dir");
+    fs::write(channel_dir.join("members.json"), "{\"alpha\":\"t0\"}").expect("members");
+    fs::set_permissions(&channel_dir, fs::Permissions::from_mode(0o555)).expect("read-only dir");
+    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+    fs::set_permissions(&channel_dir, fs::Permissions::from_mode(0o755)).expect("restore dir");
+
+    assert_ne!(output.status.code(), Some(0), "the resume must fail");
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "io_error");
+    assert!(
+        error
+            .error
+            .suggested_fix
+            .contains("resume with `post rooms rename 'alpha' 'alpha2'`"),
+        "{}",
+        error.error.suggested_fix
+    );
+    assert!(sandbox.mail_root.join("rename-journal.json").exists());
+}
+
 /// F6: resume never merges. Mail that recreated `<root>/<old>` after the
 /// interrupted move is listed, and nothing changes.
 #[test]

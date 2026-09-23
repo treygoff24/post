@@ -518,15 +518,12 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
             remove_rename_journal(context);
             Err(failure.error)
         }
-        Err(failure) => {
-            let mut error = failure.error;
-            error.suggested_fix = format!(
-                "The rename stopped part-way and {} records it. Fix the cause above, then resume with `{}`.",
-                context.root.join(RENAME_JOURNAL_FILE).display(),
-                resume_command(&args.old, &args.new)
-            );
-            Err(error)
-        }
+        Err(failure) => Err(journal_kept_error(
+            context,
+            &args.old,
+            &args.new,
+            failure.error,
+        )),
     }
 }
 
@@ -558,6 +555,18 @@ fn remove_rename_journal(context: &Context) {
             path.display()
         ),
     }
+}
+
+/// A failure that leaves the journal standing: the error keeps its cause and
+/// the fix becomes the resume command. Shared by the fresh-rename and both
+/// resume paths so every kept journal names how to finish.
+fn journal_kept_error(context: &Context, old: &str, new: &str, mut error: AppError) -> AppError {
+    error.suggested_fix = format!(
+        "The rename stopped part-way and {} records it. Fix the cause above, then resume with `{}`.",
+        context.root.join(RENAME_JOURNAL_FILE).display(),
+        resume_command(old, new)
+    );
+    error
 }
 
 fn resume_warning(journal: &RenameJournal) -> String {
@@ -678,7 +687,8 @@ fn resume_committed_rename(
         eprintln!("post: dry run: nothing was written");
         return Ok(result);
     }
-    apply_rename(&plan, new_home, new_home, || Ok(())).map_err(|failure| failure.error)?;
+    apply_rename(&plan, new_home, new_home, || Ok(()))
+        .map_err(|failure| journal_kept_error(context, &args.old, &args.new, failure.error))?;
     remove_rename_journal(context);
     Ok(result.registration_committed())
 }
