@@ -2804,3 +2804,528 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     walk(root, root, &mut out);
     out
 }
+
+fn register_remote_placeholder(sandbox: &Sandbox, name: &str) {
+    let remote = sandbox.mail_root.join("remote/peer-host").join(name);
+    fs::create_dir_all(&remote).expect("remote placeholder");
+    assert_success(&sandbox.run(&["rooms", "add", name, remote.to_string_lossy().as_ref()]));
+}
+
+fn snapshot_ids(sandbox: &Sandbox, participant: &str, cwd: &Path) -> Vec<String> {
+    let watch = sandbox.run_as_participant(&["watch", "--snapshot", "--json"], participant, cwd);
+    assert_success(&watch);
+    String::from_utf8_lossy(&watch.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("watch event JSON"))
+        .filter_map(|event| event["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// R7: participant ids are host-local. Mail whose remote-origin evidence says
+/// it was bridged in is never "own" for a local participant whose id happens
+/// to equal the remote `from_participant`, and that id never drops the local
+/// participant from the workspace recipients. The control message carries the
+/// same id with no remote evidence and stays own (not delivered to its
+/// sender), so the test tells locality apart rather than ignoring the id.
+#[test]
+fn routing_remote_mail_with_colliding_sender_id_reaches_the_local_participant() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "collision-local", &alpha, "alpha");
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+
+    register_remote_placeholder(&sandbox, "remote-room");
+    let by_placeholder = "20990923-040101-bb0001";
+    write_custom_mail(
+        &inbox,
+        by_placeholder,
+        &json!({"id":by_placeholder,"from":"remote-room","to":"alpha","kind":"note","subject":"remote placeholder","sent":"2026-09-23 04:01:01 -0500","from_participant":local,"address_kind":"workspace"}),
+        "remote placeholder body",
+    );
+    let by_provenance = "20990923-040102-bb0002";
+    write_custom_mail(
+        &inbox,
+        by_provenance,
+        &json!({"id":by_provenance,"from":"unregistered-peer","to":"alpha","kind":"note","subject":"bridge provenance","sent":"2026-09-23 04:01:02 -0500","from_participant":local,"address_kind":"workspace","sender_provenance":"bridge-import"}),
+        "bridge provenance body",
+    );
+    let local_own = "20990923-040103-bb0003";
+    write_custom_mail(
+        &inbox,
+        local_own,
+        &json!({"id":local_own,"from":"alpha","to":"alpha","kind":"note","subject":"local own","sent":"2026-09-23 04:01:03 -0500","from_participant":local,"address_kind":"workspace","sender_provenance":"participant-binding"}),
+        "local own body",
+    );
+
+    let unread_ids = || -> Vec<String> {
+        inbox_as(&sandbox, &local, &alpha)["unread"]
+            .as_array()
+            .expect("unread")
+            .iter()
+            .map(|message| message["id"].as_str().expect("id").to_owned())
+            .collect()
+    };
+
+    // A consuming read routes the workspace's pending mail (freezing each
+    // receipt) and then delivers the named message to this participant.
+    let read = sandbox.run_as_participant(&["read", by_provenance, "--json"], &local, &alpha);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    assert_eq!(read["envelope"]["id"], by_provenance);
+
+    let receipt = |id: &str| -> Option<Value> {
+        fs::read(sandbox.mail_root.join(format!("alpha/routing/{id}.json")))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).expect("receipt JSON"))
+    };
+    for id in [by_placeholder, by_provenance] {
+        let receipt = receipt(id).expect("remote mail was routed");
+        assert!(
+            receipt["recipients"]
+                .as_array()
+                .expect("recipients")
+                .iter()
+                .any(|recipient| recipient == local.as_str()),
+            "{id}: {receipt}"
+        );
+    }
+    // The local control is routed to alpha's other participant and still
+    // excludes its own local sender.
+    let own_receipt = receipt(local_own).expect("local mail routed to the other member");
+    assert!(
+        !own_receipt["recipients"]
+            .as_array()
+            .expect("recipients")
+            .iter()
+            .any(|recipient| recipient == local.as_str()),
+        "{own_receipt}"
+    );
+
+    let unread = unread_ids();
+    assert!(unread.iter().any(|id| id == by_placeholder), "{unread:?}");
+    assert!(!unread.iter().any(|id| id == by_provenance), "{unread:?}");
+    assert!(!unread.iter().any(|id| id == local_own), "{unread:?}");
+
+    let watched = snapshot_ids(&sandbox, &local, &alpha);
+    assert!(watched.iter().any(|id| id == by_placeholder), "{watched:?}");
+    assert!(!watched.iter().any(|id| id == local_own), "{watched:?}");
+}
+
+/// R7, channel side: a bridged channel message whose `from_participant`
+/// equals a local member's id is unread for, and rings, that member.
+#[test]
+fn routing_remote_channel_message_with_colliding_sender_id_is_unread_for_the_local_member() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "collision-member", &alpha, "alpha");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--join", "--json"],
+        &local,
+        &alpha,
+    ));
+    register_remote_placeholder(&sandbox, "remote-workspace");
+    let messages = sandbox.mail_root.join("channels/tax/messages");
+    let write = |id: &str, from: &str, provenance: &str, body: &str| {
+        fs::write(
+            messages.join(format!("{id}.msg")),
+            format!(
+                "{}\n---\n{body}",
+                json!({
+                    "id": id,
+                    "from": from,
+                    "channel": "tax",
+                    "subject": body,
+                    "sent": "2026-09-23 05:11:00 -0500",
+                    "from_participant": local,
+                    "address_kind": "channel",
+                    "sender_provenance": provenance
+                })
+            ),
+        )
+        .expect("write channel message");
+    };
+    let remote = "20990923-051100-000001-acde11";
+    write(
+        remote,
+        "remote-workspace",
+        "participant-binding",
+        "remote collision",
+    );
+    let local_own = "20990923-051100-000002-acde12";
+    write(local_own, "alpha", "participant-binding", "local own");
+
+    let read = sandbox.run_as_participant(&["chat", "tax", "--peek", "--json"], &local, &alpha);
+    assert_success(&read);
+    let read: Value = from_stdout(&read);
+    let ids: Vec<&str> = read["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|message| message["id"].as_str().expect("id"))
+        .collect();
+    assert!(ids.contains(&remote), "{ids:?}");
+    assert!(!ids.contains(&local_own), "{ids:?}");
+
+    let watched = snapshot_ids(&sandbox, &local, &alpha);
+    assert!(watched.iter().any(|id| id == remote), "{watched:?}");
+    assert!(!watched.iter().any(|id| id == local_own), "{watched:?}");
+}
+
+/// B1 fixture: one bound member of `tax` with one direct mail, one plain
+/// channel message, one channel message that mentions its workspace, and one
+/// unreadable channel message. The mention id sorts FIRST among the channel
+/// messages so a limit applied before the filter would drop it.
+fn reason_filter_fixture() -> (Sandbox, PathBuf, String) {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "reason-filter", &alpha, "alpha");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--join", "--json"],
+        &local,
+        &alpha,
+    ));
+    let target = format!("participant:{local}");
+    let mail = sandbox.run_in(
+        &[
+            "send", "--to", &target, "--from", "beta", "--body", "mail", "--json",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&mail);
+    let messages = sandbox.mail_root.join("channels/tax/messages");
+    let write = |id: &str, subject: &str, mentions: &[&str]| {
+        fs::write(
+            messages.join(format!("{id}.msg")),
+            format!(
+                "{}\n---\n{subject} body",
+                json!({
+                    "id": id,
+                    "from": "beta",
+                    "channel": "tax",
+                    "subject": subject,
+                    "sent": "2026-09-23 06:00:00 -0500",
+                    "mentions": mentions
+                })
+            ),
+        )
+        .expect("write channel message");
+    };
+    write(REASON_MENTION, "mention", &["alpha"]);
+    write(REASON_CHANNEL, "plain", &[]);
+    fs::write(
+        messages.join(format!("{REASON_UNREADABLE}.msg")),
+        "{not json",
+    )
+    .expect("write unreadable channel message");
+    (sandbox, alpha, local)
+}
+
+const REASON_MENTION: &str = "20990923-060000-000001-bbbb01";
+const REASON_CHANNEL: &str = "20990923-060000-000002-bbbb02";
+const REASON_UNREADABLE: &str = "20990923-060000-000003-bbbb03";
+
+/// (event, id, reason) per emitted line; `--reason` values are appended.
+fn watch_reasons(
+    sandbox: &Sandbox,
+    participant: &str,
+    cwd: &Path,
+    extra: &[&str],
+) -> Vec<(String, String, String)> {
+    let mut args = vec!["watch", "--snapshot", "--json"];
+    args.extend_from_slice(extra);
+    let watch = sandbox.run_as_participant(&args, participant, cwd);
+    assert!(
+        watch.status.success(),
+        "`post {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&watch.stderr)
+    );
+    String::from_utf8_lossy(&watch.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("watch event JSON"))
+        .map(|event| {
+            let field = |key: &str| event[key].as_str().unwrap_or_default().to_owned();
+            let id = if event["event"] == "digest" {
+                format!(
+                    "{}..{}#{}",
+                    field("first_id"),
+                    field("last_id"),
+                    event["count"]
+                )
+            } else {
+                field("id")
+            };
+            (field("event"), id, field("reason"))
+        })
+        .collect()
+}
+
+fn reason_set(events: &[(String, String, String)]) -> Vec<(String, String)> {
+    let mut set: Vec<(String, String)> = events
+        .iter()
+        .map(|(event, _, reason)| (event.clone(), reason.clone()))
+        .collect();
+    set.sort();
+    set
+}
+
+#[test]
+fn watch_reason_filter_selects_each_reason_alone() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let all = watch_reasons(&sandbox, &local, &alpha, &[]);
+    // The fixture really produces every reason, and the unreadable channel
+    // message is reason `channel` (its mention, if any, cannot be read).
+    assert_eq!(
+        reason_set(&all),
+        vec![
+            ("channel_message".to_owned(), "channel".to_owned()),
+            ("channel_message".to_owned(), "mention".to_owned()),
+            ("mail".to_owned(), "mail".to_owned()),
+            ("unreadable".to_owned(), "channel".to_owned()),
+        ],
+        "{all:?}"
+    );
+
+    let mail = watch_reasons(&sandbox, &local, &alpha, &["--reason", "mail"]);
+    assert_eq!(
+        reason_set(&mail),
+        vec![("mail".to_owned(), "mail".to_owned())],
+        "{mail:?}"
+    );
+    let channel = watch_reasons(&sandbox, &local, &alpha, &["--reason", "channel"]);
+    let ids: Vec<&str> = channel.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(ids, vec![REASON_CHANNEL, REASON_UNREADABLE], "{channel:?}");
+    let mention = watch_reasons(&sandbox, &local, &alpha, &["--reason", "mention"]);
+    let ids: Vec<&str> = mention.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![REASON_MENTION],
+        "the unreadable message never matches mention: {mention:?}"
+    );
+}
+
+#[test]
+fn watch_reason_filter_combines_and_leaves_the_default_unfiltered() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let default = watch_reasons(&sandbox, &local, &alpha, &[]);
+    let every = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &[
+            "--reason", "mail", "--reason", "channel", "--reason", "mention",
+        ],
+    );
+    assert_eq!(default, every, "selecting every reason equals the default");
+    assert_eq!(default.len(), 4, "{default:?}");
+
+    let combined = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--reason", "mention", "--reason", "mail"],
+    );
+    let expected: Vec<_> = default
+        .iter()
+        .filter(|(_, _, reason)| reason == "mail" || reason == "mention")
+        .cloned()
+        .collect();
+    assert_eq!(combined, expected, "combination keeps scan order");
+    assert_eq!(combined.len(), 2, "{combined:?}");
+
+    // The filter runs before --limit: the mention is not the last event in
+    // scan order, so limiting first would leave nothing to select.
+    let limited = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--reason", "mention", "--limit", "1"],
+    );
+    let ids: Vec<&str> = limited.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(ids, vec![REASON_MENTION], "{limited:?}");
+}
+
+#[test]
+fn watch_reason_filter_applies_before_digest_grouping() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let unfiltered = watch_reasons(&sandbox, &local, &alpha, &["--digest"]);
+    assert!(
+        unfiltered
+            .iter()
+            .any(|(event, _, reason)| event == "digest" && reason == "mixed"),
+        "the unfiltered channel digest mixes reasons: {unfiltered:?}"
+    );
+
+    let channel = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--digest", "--reason", "channel"],
+    );
+    assert_eq!(
+        channel,
+        vec![(
+            "digest".to_owned(),
+            format!("{REASON_CHANNEL}..{REASON_UNREADABLE}#2"),
+            "channel".to_owned()
+        )],
+        "only the selected members are digested"
+    );
+    let mention = watch_reasons(
+        &sandbox,
+        &local,
+        &alpha,
+        &["--digest", "--reason", "mention"],
+    );
+    assert_eq!(
+        mention,
+        vec![(
+            "digest".to_owned(),
+            format!("{REASON_MENTION}..{REASON_MENTION}#1"),
+            "mention".to_owned()
+        )]
+    );
+}
+
+/// The long-watch path filters before its --once exit check: a batch whose
+/// every event is filtered out is not a delivery, so the watch keeps waiting.
+#[test]
+fn watch_once_with_reason_emits_only_selected_events_and_ignores_filtered_batches() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let once = common::run_under_deadline(
+        &sandbox,
+        &["watch", "--once", "--json", "--reason", "mail"],
+        &alpha,
+        &local,
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(once.status.code(), Some(0), "{once:?}");
+    let events: Vec<Value> = String::from_utf8_lossy(&once.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("watch event JSON"))
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["reason"], "mail");
+
+    // Remove the mention: the first batch then holds mail and channel events
+    // only, so a mention-only watch has nothing selected and must keep waiting.
+    fs::remove_file(
+        sandbox
+            .mail_root
+            .join(format!("channels/tax/messages/{REASON_MENTION}.msg")),
+    )
+    .expect("remove the mention");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_post"))
+        .args(["watch", "--once", "--json", "--reason", "mention"])
+        .current_dir(&alpha)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &local)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn watch");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let still_running = child.try_wait().expect("poll watch").is_none();
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("collect watch output");
+    assert!(
+        still_running,
+        "a batch with no selected event must not end --once: {output:?}"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+/// B2: `POST_WATCH_PROFILE=1` adds one stderr line per target scan with phase
+/// times and file counts, and changes nothing else -- stdout is byte-identical
+/// and the store is untouched.
+#[test]
+fn watch_profile_env_prints_one_stderr_line_per_target_scan_and_changes_nothing_else() {
+    let (sandbox, alpha, local) = reason_filter_fixture();
+    let args = ["watch", "--snapshot", "--json"];
+    let quiet = sandbox.run_in_env(&args, None, &alpha, &[("POST_PARTICIPANT", &local)]);
+    assert!(quiet.status.success(), "{quiet:?}");
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("watch profile"),
+        "no profile line without the env: {quiet:?}"
+    );
+    let before = common::tree_snapshot(&sandbox.mail_root);
+    let profiled = sandbox.run_in_env(
+        &args,
+        None,
+        &alpha,
+        &[("POST_PARTICIPANT", &local), ("POST_WATCH_PROFILE", "1")],
+    );
+    assert!(profiled.status.success(), "{profiled:?}");
+    assert_eq!(profiled.stdout, quiet.stdout, "stdout must not change");
+    assert_eq!(
+        common::tree_snapshot(&sandbox.mail_root),
+        before,
+        "profiling must not write"
+    );
+
+    let stderr = String::from_utf8_lossy(&profiled.stderr);
+    let lines: Vec<BTreeMap<String, String>> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("post: watch profile: "))
+        .map(|fields| {
+            fields
+                .split(' ')
+                .map(|pair| {
+                    let (key, value) = pair.split_once('=').expect("key=value");
+                    (key.to_owned(), value.to_owned())
+                })
+                .collect()
+        })
+        .collect();
+    assert!(!lines.is_empty(), "one line per target scan: {stderr}");
+    for line in &lines {
+        for key in [
+            "room",
+            "mode",
+            "mail_snapshot_ms",
+            "mail_files",
+            "channel_enum_ms",
+            "channels",
+            "channel_scan_ms",
+            "channel_files",
+            "events",
+            "total_ms",
+        ] {
+            assert!(line.contains_key(key), "missing {key}: {line:?}");
+        }
+        assert_eq!(line["mode"], "complete", "snapshot is a complete scan");
+        for key in [
+            "mail_snapshot_ms",
+            "channel_enum_ms",
+            "channel_scan_ms",
+            "total_ms",
+        ] {
+            line[key].parse::<f64>().expect("milliseconds");
+        }
+        // Every target resolves the participant's channels: one channel, whose
+        // directory holds the join event, the mention, the plain message, and
+        // the unreadable one.
+        assert_eq!(line["channels"], "1", "{line:?}");
+        assert_eq!(line["channel_files"], "4", "{line:?}");
+    }
+    // One line per watched address (the participant and its workspace), and
+    // each line counts that target's deliveries before cross-target dedupe:
+    // both targets resolve the same channel, so the unreadable message is
+    // produced twice and emitted once.
+    assert_eq!(lines.len(), 2, "{stderr}");
+    let emitted = String::from_utf8_lossy(&profiled.stdout).lines().count();
+    let events: Vec<usize> = lines
+        .iter()
+        .map(|line| line["events"].parse::<usize>().expect("events"))
+        .collect();
+    assert_eq!(events.iter().max(), Some(&emitted), "{stderr}");
+    assert!(events.iter().sum::<usize>() >= emitted, "{stderr}");
+    let mail_files: usize = lines
+        .iter()
+        .map(|line| line["mail_files"].parse::<usize>().expect("mail files"))
+        .sum();
+    assert_eq!(mail_files, 1, "the one participant mail file: {stderr}");
+}

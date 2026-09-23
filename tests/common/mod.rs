@@ -761,6 +761,9 @@ pub fn write_bad_channel(
 pub fn post_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_post"));
     command
+        // A developer shell profiling watch must not add stderr lines to tests
+        // that assert a quiet stderr.
+        .env_remove("POST_WATCH_PROFILE")
         .env_remove("POST_FROM")
         .env_remove("POST_SENDER_ADDRESS")
         .env_remove("POST_ARX_GENERATION")
@@ -877,4 +880,25 @@ pub fn stdout(output: &Output) -> String {
 
 pub fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Every file under `root` with its bytes, for "this command wrote nothing"
+/// assertions.
+pub fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(at: &Path, found: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("tree entry").path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else {
+                found.insert(path.clone(), fs::read(&path).expect("read tree file"));
+            }
+        }
+    }
+    let mut found = std::collections::BTreeMap::new();
+    walk(root, &mut found);
+    found
 }

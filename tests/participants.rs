@@ -2463,3 +2463,110 @@ fn participant_profile_belongs_to_the_participant_not_the_workspace() {
     assert_eq!(shown["profile"]["name"], "Solo");
     assert_eq!(shown["participant"], solo.as_str());
 }
+
+/// A5: `profile list` reports sigil occupancy with the same predicate
+/// `profile set` refuses on. Every entry the listing marks `holds_sigil` is
+/// refused to another participant, every entry it does not is accepted, and a
+/// holder whose lease lapses flips both at once.
+#[test]
+fn profile_list_agrees_with_the_sigil_uniqueness_refusal() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let fire = sandbox.bind_claude("list-fire", &alpha, Some("alpha"));
+    let fire = participant_id(&fire).to_owned();
+    let vale = sandbox.bind_codex("list-vale", &alpha, Some("alpha"));
+    let vale = participant_id(&vale).to_owned();
+    assert_success(&sandbox.run_as_participant(
+        &["profile", "set", "--name", "Fire", "--pfp", "🔥"],
+        &fire,
+        &alpha,
+    ));
+    // Legacy entries: `beta` is a registered room (holds its sigil), `ghost`
+    // is not registered (never renders, so never holds one).
+    let profiles_path = sandbox.mail_root.join("profiles.json");
+    let mut profiles: Value =
+        serde_json::from_slice(&fs::read(&profiles_path).expect("profiles")).expect("JSON");
+    profiles["beta"] = serde_json::json!({"name": "Beta Room", "pfp": "👻"});
+    profiles["ghost"] = serde_json::json!({"pfp": "👾"});
+    fs::write(
+        &profiles_path,
+        serde_json::to_vec_pretty(&profiles).unwrap(),
+    )
+    .expect("plant");
+
+    let list = |who: &str| -> Vec<Value> {
+        let out = sandbox.run_as_participant(&["profile", "list", "--json"], who, &alpha);
+        assert_success(&out);
+        let out: Value = from_stdout(&out);
+        assert_eq!(out["ok"], true);
+        out["profiles"].as_array().expect("profiles").clone()
+    };
+    let entry = |entries: &[Value], key: &str| -> Value {
+        entries
+            .iter()
+            .find(|entry| entry["key"] == key)
+            .unwrap_or_else(|| panic!("no {key} in {entries:?}"))
+            .clone()
+    };
+    let try_set =
+        |pfp: &str| sandbox.run_as_participant(&["profile", "set", "--pfp", pfp], &vale, &alpha);
+
+    let entries = list(&vale);
+    let fire_key = format!("participant:{fire}");
+    let fire_entry = entry(&entries, &fire_key);
+    assert_eq!(fire_entry["participant"], fire.as_str());
+    assert_eq!(fire_entry["workspace"], "alpha");
+    assert_eq!(fire_entry["name"], "Fire");
+    assert_eq!(fire_entry["pfp"], "🔥");
+    assert_eq!(fire_entry["lease"], "active");
+    assert_eq!(fire_entry["holds_sigil"], true);
+    let beta_entry = entry(&entries, "beta");
+    assert_eq!(beta_entry["legacy"], true);
+    assert!(beta_entry.get("lease").is_none());
+    assert_eq!(beta_entry["holds_sigil"], true);
+    assert_eq!(entry(&entries, "ghost")["holds_sigil"], false);
+
+    for (pfp, holder) in [("🔥", fire_key.as_str()), ("👻", "beta")] {
+        let refused = try_set(pfp);
+        assert_eq!(refused.status.code(), Some(2), "{pfp} must be refused");
+        assert!(
+            common::stderr(&refused).contains(holder),
+            "refusal names the listed holder {holder}: {}",
+            common::stderr(&refused)
+        );
+    }
+    assert_success(&try_set("👾"));
+
+    // Fire's lease lapses: the listing releases the sigil and set agrees.
+    let record_path = sandbox
+        .mail_root
+        .join("participants")
+        .join(&fire)
+        .join("participant.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("JSON");
+    record["last_seen"] = Value::String("2000-01-01T00:00:00Z".to_owned());
+    fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).expect("age fire");
+    let fire_entry = entry(&list(&vale), &fire_key);
+    assert_eq!(fire_entry["lease"], "stale");
+    assert_eq!(fire_entry["holds_sigil"], false);
+    assert_success(&try_set("🔥"));
+
+    let text = sandbox.run_as_participant(&["profile", "list"], &vale, &alpha);
+    assert_success(&text);
+    let text = common::stdout(&text);
+    assert!(
+        text.contains(&format!("profile participant:{vale}  name=none  pfp=🔥  workspace=alpha  lease=active  holds-sigil=yes")),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "profile beta  name=Beta Room  pfp=👻  workspace=beta  lease=legacy  holds-sigil=yes"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("note: sigil occupancy is lease-dependent"),
+        "{text}"
+    );
+}

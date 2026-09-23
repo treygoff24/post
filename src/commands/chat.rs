@@ -93,6 +93,7 @@ pub(super) fn run(
         return discard_through(context, &args.name, target, json_output, pretty);
     }
     if args.message.is_some() {
+        refuse_unintended_stdin(&args, json_output, pretty)?;
         return read_message_slice(context, &args, json_output, pretty);
     }
     // --body and --body-file carry their own intent: naming a body is asking
@@ -138,7 +139,59 @@ pub(super) fn run(
     if sending {
         return send(context, args, json_output, pretty);
     }
+    refuse_unintended_stdin(&args, json_output, pretty)?;
     read(context, args, json_output, pretty)
+}
+
+/// A2: a read never reads stdin, so input on it is a body that would be lost
+/// -- usually a send missing `--send` -- while the read consumed the backlog.
+/// Refuse before anything is routed or marked seen. Only actual input is
+/// refused: `/dev/null`, an empty file, a pipe at EOF, and an interactive
+/// terminal are all normal reads (see `stdin_guard`). Never sends.
+fn refuse_unintended_stdin(args: &ChatArgs, json_output: bool, pretty: bool) -> AppResult<()> {
+    use crate::stdin_guard::{probe, StdinVerdict, READINESS_BOUND};
+    let verdict = probe(libc::STDIN_FILENO, READINESS_BOUND);
+    if verdict == StdinVerdict::Clear {
+        return Ok(());
+    }
+    // Runs as written: the send correction reads the body from stdin, so it
+    // works re-attached to the producer and refuses an empty body on its own.
+    // The read correction is named in the trailing shell comment rather than
+    // rebuilt, because a rebuilt read that dropped --peek or a window flag
+    // would consume what the caller asked only to glance at.
+    let mut send = format!(
+        "post chat {} --send --body-file -",
+        crate::mailbox::shell_quote(&args.name)
+    );
+    if json_output {
+        send.push_str(" --json");
+    }
+    if pretty {
+        send.push_str(" --pretty");
+    }
+    let fix = format!(
+        "{send} # or, to read on purpose, re-run the same command with stdin from /dev/null: < /dev/null"
+    );
+    let corrections = "To send the input, add --send (the body comes from stdin, as with --body-file -). To read on purpose, re-run the same command with stdin redirected from /dev/null. Nothing was read, sent, or marked seen.";
+    let error = match verdict {
+        StdinVerdict::Queued => AppError::new(
+            ErrorCode::InvalidArgument,
+            "stdin carries input, but this `post chat` invocation is a read and would drop it",
+            corrections,
+        )
+        .reason("stdin has queued input on a read"),
+        StdinVerdict::Ambiguous => AppError::new(
+            ErrorCode::InputAmbiguous,
+            format!(
+                "stdin is an open pipe that stayed silent for {} ms, so post cannot tell a read from input still on its way",
+                READINESS_BOUND.as_millis()
+            ),
+            format!("{corrections} A producer slower than this wait cannot be told apart from an intentional read, so post refuses instead of guessing."),
+        )
+        .reason("stdin stayed open and silent through the readiness wait"),
+        StdinVerdict::Clear => unreachable!("handled above"),
+    };
+    Err(error.exact_fix(fix).input("stdin"))
 }
 
 /// The bare-name correction for a `#name` argument, when -- and only when --
@@ -2257,8 +2310,10 @@ fn send(
         },
     )?;
     // The message is committed; a failed seen-mark must not turn the send
-    // into an error, so it degrades to a warning.
-    if let Err(error) = mark_own_message_seen(context, &message) {
+    // into an error, so it degrades to a warning. It is also bounded: a
+    // cursor lock held elsewhere must not keep a finished send's receipt
+    // waiting, so after OWN_SEEN_LOCK_BUDGET it gives up with that warning.
+    if let Err(error) = mark_own_message_seen(context, &message, OWN_SEEN_LOCK_BUDGET) {
         eprintln!(
             "post: warning: sent ok, but could not record own message as seen for #{}: {}",
             message.channel, error.message
@@ -2319,28 +2374,43 @@ fn seen_by(
     Ok(CommandResult::success(rendered))
 }
 
+/// How long the post-commit own-message seen update waits for the cursor lock
+/// before giving up with a warning. The send is already durable by then.
+const OWN_SEEN_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A sender's own message must never sit unseen for the sender — it rang
 /// their own doorbell and would otherwise re-show in their own next read.
 /// Record the sender's own message id as seen UNCONDITIONALLY: `from == self`
 /// is excluded from unread anyway, and under the seen-set model the old
 /// caught-up gating is unnecessary — other members' unseen messages simply
 /// stay unseen, so nothing is swallowed by this mark.
-fn mark_own_message_seen(context: &Context, message: &ChannelMessage) -> AppResult<()> {
+///
+/// `lock_budget` bounds only the wait for the cursor lock. Production passes
+/// `OWN_SEEN_LOCK_BUDGET`; tests may pass a shorter one.
+fn mark_own_message_seen(
+    context: &Context,
+    message: &ChannelMessage,
+    lock_budget: std::time::Duration,
+) -> AppResult<()> {
     match context.sender() {
-        Ok(sender) => ParticipantCursors::consume_channel(
+        Ok(sender) => ParticipantCursors::consume_channel_within(
             context,
             &sender.participant,
             &message.channel,
             std::slice::from_ref(&message.id),
+            lock_budget,
         )
         .map(|_| ()),
-        Err(error) if error.code == ErrorCode::NoParticipant => cursor_state::consume_channel(
-            context,
-            &message.from,
-            &message.channel,
-            vec![message.id.clone()],
-        )
-        .map(|_| ()),
+        Err(error) if error.code == ErrorCode::NoParticipant => {
+            cursor_state::consume_channel_within(
+                context,
+                &message.from,
+                &message.channel,
+                vec![message.id.clone()],
+                lock_budget,
+            )
+            .map(|_| ())
+        }
         Err(error) => Err(error),
     }
 }
@@ -2515,7 +2585,7 @@ mod tests {
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
             .expect("parse own message")
             .message;
-        mark_own_message_seen(&context, &own).expect("record own id");
+        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
         let state = ChannelState::load(&context, "alpha").expect("reload");
         assert!(state.has_seen("tax", ID2), "own send is in the seen-set");
 
@@ -2538,7 +2608,7 @@ mod tests {
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
             .expect("parse own message")
             .message;
-        mark_own_message_seen(&context, &own).expect("record own id");
+        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
         let state = ChannelState::load(&context, "alpha").expect("reload");
         assert!(
             !state.has_seen("tax", ID1),
@@ -2575,7 +2645,7 @@ mod tests {
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID3}.msg")))
             .expect("parse own message")
             .message;
-        mark_own_message_seen(&context, &own).expect("record own id");
+        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
         // ...and THEN the bridge lands T2 below both.
         seed_message(&dir, ID2, "beta", "bridged late arrival");
 

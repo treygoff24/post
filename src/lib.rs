@@ -17,6 +17,7 @@ mod participant;
 pub use commands::watch::sanitize_preview;
 mod presence;
 mod profile;
+mod stdin_guard;
 #[cfg(test)]
 mod test_support;
 

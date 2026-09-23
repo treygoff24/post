@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Changed
+- `post who --text` labels each participant's lease `lease=active|stale|ended`
+  instead of `state=…`, and adds one hint line: a lease is not attention; use
+  `post chat <channel> --seen-by <message-id>` to ask who read a message. The
+  JSON output is unchanged (its `state` key stays, with no alias).
 - Profiles belong to one participant. `profiles.json` entries are keyed
   `participant:<id>`; `profile set`/`clear` act on the acting participant; a
   bare workspace-keyed entry (the old format, shared by everyone bound to the
@@ -20,6 +24,25 @@
   `profile set` after the profile change.
 
 ### Added
+- `POST_WATCH_PROFILE=1` makes `post watch` print one diagnostic stderr line
+  per target scan: mail-snapshot time, channel-enumeration time, channel scan
+  time, and file counts. Nothing else changes. An ignored bench test,
+  `watch_projection_cost_bench`, reports each watch projection's cost against
+  synthetic history sizes.
+- `post watch --reason mail|channel|mention` (repeatable) delivers only events
+  with a selected reason; omitting it keeps every event. The filter runs after
+  the scan and before `--limit`, `--digest` grouping, and the `--once` exit
+  check. An unreadable channel message is always reason `channel`, because its
+  body, and any mention in it, cannot be read.
+- `post rooms set-path NAME PATH [--dry-run]` re-points a local room's
+  workspace (discovery) path in `rooms.json` under the registry locks, with
+  `rooms add`'s path validation and duplicate-owner refusal. It never moves
+  mail or history, never rewrites participant records, and always refuses
+  remote placeholders. It reports the path before and after.
+- `post profile list` lists every profile with its holder, workspace, name,
+  sigil, lease, and whether it holds its sigil now, using the same predicate
+  `profile set` refuses on. Text by default, `{ok, profiles:[…]}` with
+  `--json`. Occupancy is lease-dependent and can change before a `set`.
 - Channel archive. `post chat <channel> --archive` hides a channel from
   `post channels` and Porch without touching its history; `--unarchive`
   restores it, and a new conversational post restores it on its own (joins
@@ -69,6 +92,31 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- A `post chat` read (plain, `--peek`, `--history`/`--since`, `--discard`,
+  `--message`) no longer swallows a body piped to it. Stdin that carries input
+  (a nonempty file, or a pipe, heredoc, or socket with a queued byte) is refused
+  with `invalid_argument`, exit 2, before anything is routed or marked seen. A
+  pipe still open and silent after a bounded wait of at most 100 ms is refused
+  with the new `input_ambiguous` error code, also exit 2. Both refusals name
+  the two fixes: add `--send` to send the input, or redirect stdin from
+  `/dev/null` for an intentional read. An interactive terminal, `/dev/null`,
+  an empty file, and a pipe at EOF read normally with no wait. A producer slower
+  than the wait is refused as ambiguous; no finite wait detects every delayed
+  producer. Nothing is ever sent automatically.
+- Own-message and sender-exclusion checks are origin-aware. A message with
+  remote-origin evidence (a bridge `sender_provenance`, or a `from` workspace
+  registered under `remote/<host>/`) is never a local participant's own, and
+  its `from_participant` never drops a local recipient, so a bridged sender
+  whose id collides with a local participant's no longer hides the message
+  from that participant.
+- Participant cursor reads open `cursors.json` once (`O_NOFOLLOW`) and check
+  and read that same descriptor, so a file replaced between the check and the
+  read can no longer pair one file's verdict with another's content. Reads
+  still fail open, and the retry-once and re-report marker are unchanged.
+- A channel send no longer waits indefinitely to mark its own message seen.
+  The message is durable before that step, so the cursor lock is now polled
+  for at most 2s; on timeout the send still returns its unchanged receipt and
+  stderr warns, naming the lock. Other cursor transactions still block.
 - Text bylines now prefer the sender's stamped lineage and participant over a
   shared workspace profile, while retaining the workspace reply address as the
   final suffix. Lineage bylines deliberately omit the workspace pfp because it
