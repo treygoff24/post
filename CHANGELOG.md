@@ -242,6 +242,14 @@
   UTF-8 scalar, including decimal-width changes throughout the chain;
   large valid subjects and mention lists no longer produce a continuation that
   immediately fails.
+- The doorbell supervisor no longer freezes participant discovery once
+  `post participant list --json` outgrows 1 MiB. That call now passes an
+  explicit 64 MiB cap (`participantListCapBytes`), as do the other host-wide
+  listings (`herdr agent list`, `post channels --all --json`); `post
+  participant show` keeps the 1 MiB default because post bounds a participant
+  record at 64 KiB. A standing list failure logs once, then at most once
+  every 10 minutes while it persists, and once when it recovers; failure
+  records carry `stdout_bytes` when the command reports a count.
 
 ## 0.9.0 — 2026-09-01
 

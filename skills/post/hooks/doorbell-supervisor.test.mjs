@@ -432,6 +432,71 @@ describe("discovery", () => {
     assert.equal(w.outcomes("retired").length, 0);
     assert.equal(w.logs.filter((r) => r.problem === "herdr agent list failed").length, 1, "logged once");
   });
+
+  test("a participant list larger than the old 1 MiB cap still loads", async () => {
+    const w = makeWorld();
+    w.addParticipant("codex-aaaaaaaa", "session-a");
+    w.addPane("wC:p1", "session-a");
+    // The fake exec ignores capBytes, so enforce it the way runCommand does:
+    // stdout over the cap is an oversize kill, never parsed.
+    const inner = w.exec;
+    let listBytes = 0;
+    w.sup.exec = async (kind, args, opts = {}) => {
+      if (kind === "post" && args[0] === "participant" && args[1] === "list") {
+        const body = JSON.stringify({
+          ok: true,
+          participants: w.participants,
+          count: w.participants.length,
+          filler: "x".repeat(1_300_000),
+        });
+        listBytes = Buffer.byteLength(body);
+        if (listBytes > (opts.capBytes ?? (1 << 20))) {
+          return { ok: false, code: null, signal: "SIGKILL", oversize: true, stdout: "", stderr: "", stdoutBytes: listBytes };
+        }
+        return ok(body);
+      }
+      return inner(kind, args, opts);
+    };
+    await w.run();
+    assert.ok(listBytes > (1 << 20), `the fake list is ${listBytes} bytes, over the old cap`);
+    assert.equal(w.sup.postOk, true);
+    assert.ok(w.sup.participants.has("codex-aaaaaaaa"), "the participant map loaded");
+    assert.equal(w.sup.bindings.get("codex-aaaaaaaa")?.state, "bound");
+  });
+
+  test("a standing participant-list failure logs once, again after ten minutes, and its recovery", async () => {
+    const w = standardWorld();
+    const inner = w.exec;
+    let failing = true;
+    w.sup.exec = async (kind, args, opts = {}) => {
+      if (kind === "post" && args[0] === "participant" && args[1] === "list" && failing) {
+        return { ok: false, code: null, signal: "SIGKILL", oversize: true, stdout: "", stderr: "", stdoutBytes: 1_246_652 };
+      }
+      return inner(kind, args, opts);
+    };
+    const failed = () => w.logs.filter((r) => r.problem === "post participant list failed");
+    await w.run();
+    assert.equal(w.sup.postOk, false);
+    assert.equal(failed().length, 1, "the first failure logs immediately");
+    assert.equal(failed()[0].oversize, true);
+    assert.equal(failed()[0].stdout_bytes, 1_246_652);
+    await w.run();
+    w.clock.t += 9 * 60_000;
+    await w.run();
+    assert.equal(failed().length, 1, "a persisting failure stays quiet inside the window");
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(failed().length, 2, "the next log lands once ten minutes pass");
+    failing = false;
+    await w.run();
+    assert.equal(failed().length, 2);
+    assert.equal(w.sup.postOk, true);
+    assert.equal(w.logs.filter((r) => r.problem === "post participant list recovered").length, 1, "recovery logs once");
+    failing = true;
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(failed().length, 3, "a new streak is a new first failure");
+  });
 });
 
 // ------------------------------------------------------------------ generations

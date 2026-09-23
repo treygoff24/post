@@ -61,6 +61,10 @@ export const DEFAULTS = Object.freeze({
   concurrency: 2,
   snapshotTimeoutMs: 20_000,
   snapshotCapBytes: 32 * 1024 * 1024,
+  // `post participant list --json` is one row per participant ever bound on
+  // the host; the store grows daily, so the 1 MiB runCommand default is not a
+  // safe cap for it or the other host-wide listings.
+  participantListCapBytes: 64 * 1024 * 1024,
   commandTimeoutMs: 10_000,
   backoffBaseMs: 5_000,
   backoffCapMs: 300_000,
@@ -69,6 +73,8 @@ export const DEFAULTS = Object.freeze({
   staleHeartbeatMs: 10_000,
   retiredPruneMs: 7 * 24 * 3600 * 1000,
   membershipRefreshMs: 10 * 60 * 1000,
+  // A standing participant-list failure re-logs at most this often.
+  postListFailLogMs: 10 * 60 * 1000,
   lockAcquireRetryMs: 1_500,
 });
 
@@ -275,6 +281,7 @@ export function runCommand(bin, args, { env, cwd, timeoutMs = DEFAULTS.commandTi
         timedOut,
         oversize,
         spawnError,
+        stdoutBytes: outBytes,
         stdout: oversize ? "" : Buffer.concat(out).toString("utf8"),
         stderr: Buffer.concat(err).toString("utf8"),
         durationMs: Date.now() - started,
@@ -292,6 +299,7 @@ function failureDetail(result) {
   if (result.signal && !result.timedOut && !result.oversize) detail.signal = result.signal;
   if (result.timedOut) detail.timed_out = true;
   if (result.oversize) detail.oversize = true;
+  if (typeof result.stdoutBytes === "number") detail.stdout_bytes = result.stdoutBytes;
   const excerpt = stderrExcerpt(result.stderr);
   if (excerpt) detail.stderr = excerpt;
   return detail;
@@ -592,6 +600,8 @@ export class Supervisor {
     this.retired = [];
     this.retiredKeys = new Map();
     this.participantsListSeq = 0;
+    this.postListFailing = false;
+    this.postListFailLogAt = -Infinity;
     this.knownRootDirs = null;
     this.prefsCache = new Map();
     this.membership = new Map();
@@ -714,7 +724,9 @@ export class Supervisor {
       mtime !== this.participantsDirMtime ||
       this.now() - this.participantsFetchedAt >= this.config.participantRefreshMs;
     if (!due) return;
-    const result = await this.exec("post", ["participant", "list", "--json"], {});
+    const result = await this.exec("post", ["participant", "list", "--json"], {
+      capBytes: this.config.participantListCapBytes,
+    });
     let parsed;
     if (result.ok) {
       try {
@@ -725,10 +737,20 @@ export class Supervisor {
     }
     if (!parsed || parsed.ok !== true || !Array.isArray(parsed.participants)) {
       this.postOk = false;
-      this.logOnce("post-list-failed", { type: "discovery", problem: "post participant list failed", ...failureDetail(result) });
+      // A standing failure must stay visible: the first failure logs at once,
+      // then at most once every postListFailLogMs while it persists.
+      if (!this.postListFailing || this.now() - this.postListFailLogAt >= this.config.postListFailLogMs) {
+        this.emit({ type: "discovery", problem: "post participant list failed", ...failureDetail(result) });
+        this.postListFailLogAt = this.now();
+      }
+      this.postListFailing = true;
       return;
     }
-    this.logged.delete("post-list-failed");
+    if (this.postListFailing) {
+      this.emit({ type: "discovery", problem: "post participant list recovered" });
+      this.postListFailing = false;
+      this.postListFailLogAt = -Infinity;
+    }
     this.postOk = true;
     const participants = new Map();
     const byDigest = new Map();
@@ -756,7 +778,7 @@ export class Supervisor {
   async discover() {
     if (this.halted) return;
     this.stats.discoveries += 1;
-    const listed = await this.exec("herdr", ["agent", "list"], {});
+    const listed = await this.exec("herdr", ["agent", "list"], { capBytes: this.config.participantListCapBytes });
     let agents;
     if (listed.ok) {
       try {
@@ -1064,7 +1086,7 @@ export class Supervisor {
     try {
       // --all: a subscribed channel that is archived still gets its targeted
       // watch, since a new post resurrects it.
-      const result = await this.exec("post", ["channels", "--all", "--json"], {});
+      const result = await this.exec("post", ["channels", "--all", "--json"], { capBytes: this.config.participantListCapBytes });
       if (!result.ok) return;
       let parsed;
       try {
