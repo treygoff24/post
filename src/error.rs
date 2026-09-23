@@ -83,10 +83,23 @@ pub enum ErrorCode {
     /// A read's stdin is an open pipe that stayed silent through the bounded
     /// readiness wait: post cannot tell a read from a body still on its way.
     InputAmbiguous,
+    /// The bridge registry copy this host needs to resolve a remote host is
+    /// missing or invalid (or the bridge config is unreadable). Retryable.
+    TopologyUnavailable,
+    /// A host-qualified address names a host outside the enrolled peer set.
+    UnknownHost,
+    /// A host-qualified address was used on a host with no bridge config.
+    NoBridge,
+    /// The acting participant has no real local room to send remote mail from.
+    RemoteSenderUnroutable,
+    /// The running bridge is known to predate participant mail.
+    BridgeUnsupported,
+    /// The running bridge's capabilities cannot be established. Retryable.
+    BridgeStatusUnavailable,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 23] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -104,6 +117,12 @@ impl ErrorCode {
         Self::NotYet,
         Self::CrossedSend,
         Self::InputAmbiguous,
+        Self::TopologyUnavailable,
+        Self::UnknownHost,
+        Self::NoBridge,
+        Self::RemoteSenderUnroutable,
+        Self::BridgeUnsupported,
+        Self::BridgeStatusUnavailable,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -125,6 +144,12 @@ impl ErrorCode {
             Self::NotYet => "not_yet",
             Self::CrossedSend => "crossed_send",
             Self::InputAmbiguous => "input_ambiguous",
+            Self::TopologyUnavailable => "topology_unavailable",
+            Self::UnknownHost => "unknown_host",
+            Self::NoBridge => "no_bridge",
+            Self::RemoteSenderUnroutable => "remote_sender_unroutable",
+            Self::BridgeUnsupported => "bridge_unsupported",
+            Self::BridgeStatusUnavailable => "bridge_status_unavailable",
         }
     }
 
@@ -138,18 +163,23 @@ impl ErrorCode {
             | Self::DuplicateWorkspace
             | Self::NotAMember
             | Self::NoParticipant
-            | Self::CrossedSend => 65,
-            Self::NotYet => 69,
+            | Self::CrossedSend
+            | Self::UnknownHost
+            | Self::RemoteSenderUnroutable => 65,
+            Self::NotYet | Self::BridgeUnsupported => 69,
             Self::NotFound => 66,
             Self::BlockedRoute => 77,
-            Self::ConfigInvalid => 78,
-            Self::IoError => 75,
+            Self::ConfigInvalid | Self::NoBridge => 78,
+            Self::IoError | Self::TopologyUnavailable | Self::BridgeStatusUnavailable => 75,
             Self::DeliveredOutputFailure | Self::DeliveredUnarchived => 70,
         }
     }
 
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::IoError)
+        matches!(
+            self,
+            Self::IoError | Self::TopologyUnavailable | Self::BridgeStatusUnavailable
+        )
     }
 }
 

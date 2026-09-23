@@ -58,9 +58,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "send",
-            "post send --to <workspace:<room>|lineage:<name>|participant:<id>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | --body-file - | stdin)",
+            "post send --to <workspace:<room>|lineage:<name>|participant:<id>|participant:<id>@<host>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] (--body <text> | --body-file <path> | --body-file - | stdin)",
             "text; JSON with --json",
-            "atomically writes the resolved address's canonical inbox plus archive/<id>.mail, then publishes an atomic routing receipt when recipients exist; workspace/lineage fan-out suppresses only the sending local participant (remote-origin mail never excludes a local id), while an explicit participant:<self> target is readable; subjects over 1 KiB fail, body forms are exclusive, and --from that disagrees with the bound reply address is refused",
+            "atomically writes the resolved address's canonical inbox plus archive/<id>.mail, then publishes an atomic routing receipt when recipients exist; workspace/lineage fan-out suppresses only the sending local participant (remote-origin mail never excludes a local id), while an explicit participant:<self> target is readable; subjects over 1 KiB fail, body forms are exclusive, and --from that disagrees with the bound reply address is refused; participant:<id>@<host> (split at the last @; an exact local participant record of that full name stays local; this host's bridge host resolves as participant:<id>) queues a letter for an enrolled peer host: the sender must be bound to a registered local room (remote_sender_unroutable otherwise), bridge/health.json must be fresh (ticked_at within 3x interval_s) and list typed-outbound-exclusion and participant-mail-v1 (bridge_unsupported when a fresh file lacks one; retryable bridge_status_unavailable when missing, malformed, or stale), and a local rule blocking this sender (or *) to * applies; the letter (to=<id>, address_kind=participant, to_host=<host>) is written only to archive/<id>.mail, never to a workspace or participant inbox or outbox/, is not routed, and the receipt says delivery.state=queued; the enrolled set is bridge/registry/hosts.json minus this host, intersected with bridge/config.json peers when non-empty, with no fallback to config peers (retryable topology_unavailable when the registry or config is missing or invalid; unknown_host lists the enrolled hosts in details.matches; no_bridge without bridge/config.json); a host-qualified error never falls back to a room, lineage, or bare id",
         ),
         command(
             "chat",
@@ -268,7 +268,12 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "environment",
             "owner (state: configured|legacy|none, wire_grammar, note?, owner?: {room, sidecar_dir, allowed_signers, principal, namespace, marker, label})",
         ]),
-        send_json: fields(&["ok", "envelope", "archived"]),
+        send_json: fields(&[
+            "ok",
+            "envelope",
+            "archived",
+            "delivery? ({state=queued, host}; participant:<id>@<host> sends only; never claims remote delivery)",
+        ]),
         chat_join: fields(&[
             "ok",
             "channel",

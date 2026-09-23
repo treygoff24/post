@@ -510,6 +510,17 @@ pub struct SendOutput {
     pub ok: bool,
     pub envelope: Envelope,
     pub archived: bool,
+    /// Present only for a host-qualified send: the letter is queued for the
+    /// bridge, and this receipt never claims remote delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SendDelivery>,
+}
+
+/// Delivery state at send time for a host-qualified letter: always `queued`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendDelivery {
+    pub state: String,
+    pub host: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
