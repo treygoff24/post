@@ -761,6 +761,79 @@ fn a_replay_after_a_blocking_rule_is_added_still_delivers() {
     assert_outcome(&value, "delivered", None);
     assert_eq!(value["replay"], json!(true));
     assert_eq!(fs::read(rig.inbox_path()).unwrap(), bytes);
+    // Routing is bound by the admission decision, not the rule added since:
+    // the recipient can read what the bridge will ack as delivered.
+    assert_routed_to_the_recipient_and_readable(&rig);
+}
+
+#[test]
+fn a_blocking_rule_added_between_admission_and_routing_does_not_strand_the_letter() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    let release = rig.sandbox.path.join("release-rule");
+    let paused = rig.sandbox.path.join("release-rule.paused");
+    let fault = format!("pause-after-d1:{}", release.display());
+    let child = rig
+        .command(
+            &rig.recipient,
+            PEER,
+            MAIL_ID,
+            &hex(&bytes),
+            &file,
+            &[("POST_TEST_DELIVER_FAULT", fault.as_str())],
+        )
+        .spawn()
+        .expect("spawn paused delivery");
+    wait_for(&paused, "the paused delivery");
+    fs::write(
+        rig.root().join("rules.json"),
+        json!({"blocked": [{"from": "*", "to": "*", "reason": "closed mid-delivery"}]}).to_string(),
+    )
+    .unwrap();
+    fs::write(&release, b"go").unwrap();
+    let value = decision(&finish(child), &rig.recipient, PEER, MAIL_ID, &hex(&bytes));
+    assert_outcome(&value, "delivered", None);
+    assert_eq!(value["replay"], json!(false));
+    assert_routed_to_the_recipient_and_readable(&rig);
+}
+
+/// The routing receipt names exactly the admitted participant, and a
+/// consuming `post read` of the id returns the letter.
+fn assert_routed_to_the_recipient_and_readable(rig: &Rig) {
+    let receipt_path = rig
+        .root()
+        .join("participants")
+        .join(&rig.recipient)
+        .join("routing")
+        .join(format!("{MAIL_ID}.json"));
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("deliver wrote a routing receipt"))
+            .expect("receipt json");
+    assert_eq!(receipt["recipients"], json!([rig.recipient]), "{receipt}");
+    let read = rig.reader_json(&["read", MAIL_ID, "--json"]);
+    assert_ne!(read.get("pending"), Some(&json!(true)), "{read}");
+    assert_eq!(read["envelope"]["id"], json!(MAIL_ID), "{read}");
+}
+
+#[test]
+fn a_failed_routing_receipt_is_a_retry_never_a_delivery() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    // A file where the routing directory belongs: the receipt cannot be written.
+    let routing = rig
+        .root()
+        .join("participants")
+        .join(&rig.recipient)
+        .join("routing");
+    fs::create_dir_all(routing.parent().unwrap()).unwrap();
+    fs::write(&routing, b"not a directory").unwrap();
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "retry", Some("io_error"));
+    fs::remove_file(&routing).unwrap();
+    let again = rig.deliver(&file, &bytes);
+    assert_outcome(&again, "delivered", None);
+    assert_eq!(again["replay"], json!(true));
+    assert_routed_to_the_recipient_and_readable(&rig);
 }
 
 // ------------------------------------------------------------- collisions
@@ -775,6 +848,7 @@ fn a_cross_host_same_bytes_retry_is_an_id_collision_and_changes_nothing() {
     let before = rig.snapshot();
     let value = rig.deliver_from("other", &file, &bytes, &[]);
     assert_outcome(&value, "rejected", Some("id_collision"));
+    assert_eq!(value["replay"], json!(true), "the record already existed");
     assert_eq!(fs::read(rig.record_path()).unwrap(), record);
     assert_eq!(fs::read(rig.inbox_path()).unwrap(), inbox);
     assert_eq!(rig.snapshot(), before);
@@ -791,6 +865,7 @@ fn different_bytes_under_an_admitted_id_are_an_id_collision() {
     let before = rig.snapshot();
     let value = rig.deliver(&changed, &changed_bytes);
     assert_outcome(&value, "rejected", Some("id_collision"));
+    assert_eq!(value["replay"], json!(true), "the record already existed");
     assert_eq!(rig.snapshot(), before);
 }
 
@@ -803,6 +878,7 @@ fn an_unrecorded_inbox_file_with_identical_bytes_is_an_id_collision() {
     let before = rig.snapshot();
     let value = rig.deliver(&file, &bytes);
     assert_outcome(&value, "rejected", Some("id_collision"));
+    assert_eq!(value["replay"], json!(false), "no record existed");
     assert_eq!(
         rig.snapshot(),
         before,
@@ -821,6 +897,7 @@ fn a_matching_record_with_a_mismatched_inbox_file_is_an_id_collision_preserving_
     let record = fs::read(rig.record_path()).unwrap();
     let value = rig.deliver(&file, &bytes);
     assert_outcome(&value, "rejected", Some("id_collision"));
+    assert_eq!(value["replay"], json!(true), "the record already existed");
     assert_eq!(fs::read(rig.record_path()).unwrap(), record);
     assert_eq!(fs::read(rig.inbox_path()).unwrap(), b"someone else's bytes");
 }

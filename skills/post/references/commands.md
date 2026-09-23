@@ -200,6 +200,8 @@ binding is alive, not that anyone read anything: ask `post chat <channel>
   `bridge_status_unavailable` means its state is unknown (retry once it is
   running). Other refusals: `topology_unavailable` (retryable), `unknown_host`
   (lists the enrolled hosts), and `no_bridge`.
+- A letter over 1 MiB, the bridge's per-letter cap, is refused
+  (`invalid_argument`) even with `--oversize`; nothing is written.
 - The letter goes only to `archive/`. The receipt says
   `delivery: {state: queued, host}` and the text says "queued for <host>; not
   yet delivered." Nothing about a send claims remote delivery.

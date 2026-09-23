@@ -344,7 +344,7 @@ fn read_only_must_not_mutate(context: &Context) -> bool {
 
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {
     let path = state_path(context);
-    AppError::new(
+    let mut error = AppError::new(
         ErrorCode::ConfigInvalid,
         format!(
             "write refused by migration fence '{}': {}",
@@ -354,7 +354,9 @@ fn refuse(context: &Context, reason: impl Into<String>) -> AppError {
         format!("Complete the migration or run this writer with the current {GENERATION_ENV}."),
     )
     .path(path.display().to_string())
-    .reason("migration generation is not admitted")
+    .reason("migration generation is not admitted");
+    error.details.migration_fence_refused = true;
+    error
 }
 
 pub(crate) fn admit(context: &Context, writes: bool) -> AppResult<WriteAdmission> {
