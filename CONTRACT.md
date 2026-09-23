@@ -611,6 +611,13 @@ their existing success semantics.
   only with `--join`, including from a legacy member) records a start before
   every message, restoring the all-unread join. A bridge-imported channel message keeps its original id,
   so an import older than a member's start reads as history.
+  The membership start is a participant's, so it binds only participant reads.
+  Unbound room mode has no participant and therefore no start and no floor:
+  `post watch --snapshot --room <room>` run without a participant binding
+  (as `codex-notify-monitor.mjs` runs it from launchd) keeps the old rule that
+  every channel message the room has not seen is new, so a message from
+  before any join still surfaces there, including as `reason: mention`. Join from now does not cover room
+  mode.
   `--seen-by <id>` is a read-only listing of member participants whose seen-set
   contains that message (`cursor` fields in JSON output are max-seen-id
   summaries for compatibility, never the model). Consuming reads fail closed:
