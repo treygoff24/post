@@ -544,12 +544,17 @@ pub struct ChatJoinOutput {
     pub room: String,
     pub created: bool,
     pub already_member: bool,
+    /// True when `--backlog` came with a join by an explicit member: nothing
+    /// was recorded, and `history_hint` names the leave-and-rejoin that would
+    /// make the whole backlog unread.
+    pub backlog_ignored: bool,
     pub event_id: Option<String>,
     /// Messages that predated the join and now read as history — null on an
     /// already-member response, which records no new membership start.
     pub history_before_join: Option<usize>,
-    /// Runnable command that reads that history (`post chat <ch> --history
-    /// 20`); null on an already-member response.
+    /// Runnable follow-up command: the history read (`post chat <ch>
+    /// --history 20`) after a new join; `post chat <ch> --leave && post chat
+    /// <ch> --join --backlog` when `backlog_ignored`; otherwise null.
     pub history_hint: Option<String>,
 }
 

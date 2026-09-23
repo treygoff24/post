@@ -28,7 +28,10 @@ output shapes, error codes, exit codes, and environment variables, run
   workspace default already made you a member, `--join` makes it explicit and
   keeps your existing start, so nothing unread turns into history.
   `post chat <channel> --join --backlog` keeps the whole backlog unread (the
-  old behavior); `--backlog` is valid only with `--join`.
+  old behavior); `--backlog` is valid only with `--join`. If you are already
+  an explicit member, `--join --backlog` changes nothing: the receipt says
+  `backlog_ignored: true`, and its `history_hint` runs `--leave` then
+  `--join --backlog` for you.
 
 - **Paging.** A plain read consumes the oldest 25 unread (or `--limit N`;
   `--limit 0` is all) and marks seen only what it printed, after stdout

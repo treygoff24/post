@@ -2140,14 +2140,21 @@ fn join(
         acting_notice(provenance)
     );
     let outcome = channel::join(context, name, description, backlog)?;
+    // An explicit member keeps its recorded start, so `--backlog` changes
+    // nothing; say so rather than report a silent success.
+    let backlog_ignored = backlog && outcome.already_member;
     // The hint is a runnable command, not prose: it must carry the quoted
     // channel name so it runs as written.
-    let history_hint = outcome.history_before_join.map(|_| {
-        format!(
-            "post chat {} --history 20",
-            crate::mailbox::shell_quote(name)
-        )
-    });
+    let quoted = crate::mailbox::shell_quote(name);
+    let history_hint = if backlog_ignored {
+        Some(format!(
+            "post chat {quoted} --leave && post chat {quoted} --join --backlog"
+        ))
+    } else {
+        outcome
+            .history_before_join
+            .map(|_| format!("post chat {quoted} --history 20"))
+    };
     let rendered = if json_output {
         output::json(
             &output::ChatJoinOutput {
@@ -2156,6 +2163,7 @@ fn join(
                 room: outcome.room.clone(),
                 created: outcome.channel_created,
                 already_member: outcome.already_member,
+                backlog_ignored,
                 event_id: outcome.event_id.clone(),
                 history_before_join: outcome.history_before_join,
                 history_hint,
@@ -2163,7 +2171,7 @@ fn join(
             pretty,
         )?
     } else if outcome.already_member {
-        match description {
+        let mut line = match description {
             Some(desc) if !desc.is_empty() => {
                 format!(
                     "post: {} is already a member of #{name}; updated description\n",
@@ -2175,7 +2183,14 @@ fn join(
                 outcome.room
             ),
             None => format!("post: {} is already a member of #{name}\n", outcome.room),
+        };
+        if backlog_ignored {
+            line.push_str(&format!(
+                "post: --backlog changed nothing: a member keeps its membership start. To make the whole backlog unread, run `{}`\n",
+                history_hint.as_deref().unwrap_or_default()
+            ));
         }
+        line
     } else {
         let mut line = if outcome.channel_created {
             format!("post: created #{name} and joined as {}\n", outcome.room)

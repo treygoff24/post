@@ -594,7 +594,12 @@ their existing success semantics.
   that makes a new member reports `history_before_join` (messages older than
   the start) and a runnable `history_hint` (`post chat '<ch>' --history 20`);
   an `already_member` join (the channel is already in the explicit joined
-  set) reports neither (null). A legacy workspace member's `--join` still
+  set) records nothing and reports `history_before_join` null. Every join
+  receipt carries `backlog_ignored`, true only when an explicit member passed
+  `--backlog`: its start is kept, and `history_hint` is then
+  `post chat '<ch>' --leave && post chat '<ch>' --join --backlog`, the
+  sequence that makes the whole backlog unread; otherwise an already-member
+  `history_hint` is null. A legacy workspace member's `--join` still
   records an explicit join and posts the join event, but its start is the one
   it already had (its `created` watermark, or the backlog floor if `created`
   is unparseable), never now, so no unread message becomes history;

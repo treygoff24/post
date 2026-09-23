@@ -426,6 +426,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "room",
             "created",
             "already_member",
+            "backlog_ignored",
             "event_id",
             "history_before_join",
             "history_hint"

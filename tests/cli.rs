@@ -13305,6 +13305,34 @@ fn jfn_send(sandbox: &Sandbox, participant: &str, cwd: &Path, channel: &str, bod
     sent.message.id
 }
 
+/// Runs a receipt's hint through a real shell, as the acting participant, with
+/// the built `post` first on PATH.
+fn jfn_run_hint(sandbox: &Sandbox, participant: &str, cwd: &Path, command: &str) -> Output {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_post"))
+        .parent()
+        .expect("binary dir")
+        .to_owned();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .env("PATH", path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", participant)
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .expect("run the hint")
+}
+
 /// A 60-message channel `tax`: beta's join event plus 59 older fixture
 /// messages from beta. Returns (alpha dir, beta dir, beta participant).
 fn jfn_sixty(sandbox: &Sandbox) -> (PathBuf, PathBuf, String) {
@@ -13340,29 +13368,12 @@ fn join_from_now_fresh_joiner_sees_no_backlog_then_exactly_new_mail() {
     let hint = joined.history_hint.expect("history hint");
     assert_eq!(hint, "post chat 'tax' --history 20");
     // The hint runs as written, through a real shell.
-    let bin_dir = Path::new(env!("CARGO_BIN_EXE_post"))
-        .parent()
-        .expect("binary dir")
-        .to_owned();
-    let path = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
+    let ran = jfn_run_hint(
+        &sandbox,
+        &fresh,
+        &alpha,
+        &format!("{hint} --json </dev/null"),
     );
-    let ran = Command::new("sh")
-        .arg("-c")
-        .arg(format!("{hint} --json </dev/null"))
-        .current_dir(&alpha)
-        .env("PATH", path)
-        .env("HOME", &sandbox.home)
-        .env("POST_MAIL_ROOT", &sandbox.mail_root)
-        .env("POST_PARTICIPANT", &fresh)
-        .env_remove("POST_FROM")
-        .env_remove("POST_SENDER_ADDRESS")
-        .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .output()
-        .expect("run the hint");
     assert_success(&ran);
     let history: ChatReadOutput = from_stdout(&ran);
     assert_eq!(history.count, 20);
@@ -13543,6 +13554,58 @@ fn join_from_now_backlog_flag_restores_the_whole_backlog_as_unread() {
         all[..25].to_vec(),
         "the first read is the oldest 25"
     );
+}
+
+#[test]
+fn join_from_now_backlog_from_an_explicit_member_says_it_changed_nothing() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta, _beta_participant) = jfn_sixty(&sandbox);
+    let fresh = jfn_bind(&sandbox, "jfn-backlog-member", &alpha, "alpha");
+    let joined = jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    assert!(
+        !joined.backlog_ignored,
+        "a new member's join ignores nothing"
+    );
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(0));
+    let starts_path = sandbox
+        .mail_root
+        .join("participants")
+        .join(&fresh)
+        .join("membership-starts.json");
+    let starts_before = fs::read(&starts_path).expect("membership starts");
+
+    let again = jfn_join(&sandbox, &fresh, &alpha, "tax", true);
+    assert!(again.already_member);
+    assert!(again.backlog_ignored);
+    assert_eq!(again.history_before_join, None);
+    let hint = again.history_hint.expect("leave-and-rejoin hint");
+    assert_eq!(
+        hint,
+        "post chat 'tax' --leave && post chat 'tax' --join --backlog"
+    );
+    assert_eq!(
+        fs::read(&starts_path).expect("membership starts"),
+        starts_before,
+        "--backlog from a member records nothing"
+    );
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(0));
+
+    let text = sandbox.run_as_participant(&["chat", "tax", "--join", "--backlog"], &fresh, &alpha);
+    assert!(text.status.success(), "{}", common::stderr(&text));
+    let text = common::stdout(&text);
+    assert!(text.contains("--backlog changed nothing"), "{text}");
+    assert!(text.contains(&hint), "{text}");
+
+    // Without --backlog an explicit member's join stays a plain no-op.
+    let plain = jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    assert!(plain.already_member);
+    assert!(!plain.backlog_ignored);
+    assert_eq!(plain.history_hint, None);
+
+    // The hint runs as written and makes the whole backlog unread.
+    let ran = jfn_run_hint(&sandbox, &fresh, &alpha, &hint);
+    assert!(ran.status.success(), "{}", common::stderr(&ran));
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(60));
 }
 
 #[test]

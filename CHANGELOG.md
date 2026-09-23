@@ -13,7 +13,9 @@
   `history_before_join` and a runnable `history_hint`. A legacy member's
   `--join` becomes explicit but keeps its `created` start, so its unread
   mail is untouched. `post chat <ch> --join
-  --backlog` restores the old all-unread join. The join instant is stored in
+  --backlog` restores the old all-unread join. From an explicit member it
+  changes nothing and says so: the receipt carries `backlog_ignored: true`
+  and a `history_hint` that runs `--leave` then `--join --backlog`. The join instant is stored in
   a new `participants/<id>/membership-starts.json`; `channels.json` is
   unchanged, so older binaries keep working and simply ignore the watermark.
 - A real `post rooms rename` is now a migration-fenced write. During an
