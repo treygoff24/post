@@ -1605,6 +1605,7 @@ export class Supervisor {
         generation: sub ? { hash: sub.genHash, pane: sub.generation.pane, terminal: sub.generation.terminal } : null,
         pane_status: sub?.paneStatus ?? null,
         scannable: Boolean(sub?.scannable),
+        in_flight: Boolean(sub?.inFlight),
         last_outcome: sub?.lastOutcome ?? null,
         last_outcome_at: sub?.lastOutcomeAt ?? null,
         last_success_scan_at: sub?.lastSuccessAt ?? null,

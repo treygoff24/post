@@ -60,6 +60,16 @@ else if (args[0] === "participant" && args[1] === "list") {
 } else if (args[0] === "watch") {
   if (control.watchFails) { process.stderr.write("post: watch failed\\n"); process.exit(1); }
   if (control.watchHangs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15000);
+  if (control.watchFlipsPaneThenFails) {
+    // The pane goes busy while this scan runs; discovery sees it before the scan fails.
+    const next = { ...control, panes: control.panes.map((pane, i) => (i === 0 ? { ...pane, status: "working" } : pane)) };
+    const tmp = process.env.DOORBELL_FAKE_CONTROL + ".flip.tmp";
+    fs.writeFileSync(tmp, JSON.stringify(next));
+    fs.renameSync(tmp, process.env.DOORBELL_FAKE_CONTROL);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
+    process.stderr.write("post: watch failed\\n");
+    process.exit(1);
+  }
 } else if (args[0] === "channels") out({ ok: true, channels: [] });
 else { process.stderr.write("fake post: unexpected " + args.join(" ") + "\\n"); process.exit(64); }
 `;
@@ -442,7 +452,22 @@ describe("install: a healthy start with participants already armed", () => {
     host.save();
     const result = host.install(["--startup-timeout-seconds", "4"]);
     assert.equal(result.status, 1, result.stdout + result.stderr);
-    assert.match(result.stderr, /the first scan for ada has not finished/);
+    assert.match(result.stderr, /the first scan for ada is still running/);
+    assert.equal(host.receipt().supervisor.state, "failed_start");
+  });
+
+  test("a first scan that fails after its pane went busy still fails the start", () => {
+    // Grok, fix round 3: the scan started while the pane was idle; the pane
+    // turning busy must not let the start pass before the scan's result.
+    const host = makeHost("linux");
+    host.agent("ada", "ada");
+    fs.mkdirSync(path.join(host.doorbell, "prefs"), { recursive: true });
+    fs.writeFileSync(path.join(host.doorbell, "prefs", "ada.json"), JSON.stringify({ version: 1, enabled: true, channels: [] }));
+    Object.assign(host.control, { watchFlipsPaneThenFails: true });
+    host.save();
+    const result = host.install(["--startup-timeout-seconds", "15"]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /the first scan for ada failed/);
     assert.equal(host.receipt().supervisor.state, "failed_start");
   });
 
