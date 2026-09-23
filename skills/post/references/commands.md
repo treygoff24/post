@@ -173,8 +173,9 @@ supply `/dev/null`.
 - `post rooms rename <old> <new> [--dry-run]` renames a local room and keeps
   its mail: `<root>/<old>` moves to `<root>/<new>`, live references
   (participant workspaces, cursor keys, channel members, bare profile keys,
-  and the address in each of the room's routing receipts) are rewritten, and `rooms.json` commits last with rollback on failure.
-  History keeps the old name. It refuses remote placeholders, case-only
+  and the address in each of the room's routing receipts) are rewritten, and
+  `rooms.json` commits last. Any failure through that commit rolls
+  everything back. History keeps the old name. It refuses remote placeholders, case-only
   renames, and an `owner.json` or `rules.json` naming the room; on a bridged
   host it needs a fresh `bridge/health.json` whose `local_held` counters are
   both zero, and every letter to the old name the bridge would export must
@@ -183,6 +184,13 @@ supply `/dev/null`.
   full tick). It holds `.rename.lock` exclusively; `send`, and `read`/`chat`
   when they write, hold it shared, so a send issued during a rename waits and
   then resolves the name against the committed registry.
+- **Interrupted renames.** A crash mid-rename leaves
+  `<root>/rename-journal.json`. `post doctor` reports it
+  (`rooms.rename_interrupted`), and every other rename refuses with the
+  resume command as `exact_fix`. Rerun the same `post rooms rename <old>
+  <new>` to finish it (`resumed: true`). If mail recreated `<root>/<old>`
+  after the crash, the resume refuses and lists those files. Move them into
+  the new mailbox by hand, remove the old directory, and rerun.
 - There is no `rooms remove`.
 
 ## `who`

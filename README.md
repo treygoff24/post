@@ -435,6 +435,8 @@ mailbox directory moves and every live reference to the name is rewritten,
 while archive letters and channel history keep the old name. On a bridged
 host it runs only while the bridge's export guard is provably holding this
 host's names, and it refuses remote placeholders — the bridge owns those.
+A failed rename rolls back. A crash mid-rename leaves `rename-journal.json`,
+which `post doctor` reports; rerunning the same rename finishes it.
 
 A bound participant is the channel actor. A session-only participant can join a
 channel explicitly without a registered workspace. Cwd is consulted when bind

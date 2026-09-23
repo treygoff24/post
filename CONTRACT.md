@@ -141,7 +141,11 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   `.participants.lock`, then `.rooms.lock`, then a participant's
   `.cursors.lock`; nothing takes `.rename.lock` while holding another store
   lock, so it adds no cycle. A send issued during a rename waits for it and
-  then resolves the name against the committed registry.
+  then resolves the name against the committed registry. The lock does not
+  outlive a crashed rename: until the interrupted rename is resumed (see
+  `rename-journal.json` under `post rooms rename`), a send can still resolve
+  the old name and recreate `<root>/<old>`, which the resume then refuses
+  rather than merging.
 - Canonical mail is stored by address: workspace mail at
   `<root>/<room>/inbox/<id>.mail`, lineage mail at
   `<root>/lineages/<name>/inbox/<id>.mail`, and participant mail at
@@ -468,8 +472,25 @@ their existing success semantics.
   write it for `<new>`; when `members.json` or `profiles.json` already has a
   bare `<new>` key, the renamed room's entry replaces it and the receipt
   carries a warning naming each overwritten key and its store), then commits
-  `rooms.json` last; a failure before the
-  commit restores the moved directory and every written file. Published
+  `rooms.json` last. The `rooms.json` write is inside the rollback: any
+  failure up to and including it restores every rewritten file to its
+  original bytes and moves the directory back. If a restore itself fails,
+  stderr names each file it could not restore and the journal below stays.
+  Before its first store change the rename atomically writes
+  `<root>/rename-journal.json` (`{"v":1,"old":…,"new":…,"started_at":…}`),
+  and it removes the journal after `rooms.json` commits or a clean rollback
+  finishes. A journal that survives (a crash, or a failed rollback) is an
+  interrupted rename. `post doctor` reports it as the error
+  `rooms.rename_interrupted` with the resume command. Every other
+  `post rooms rename` refuses (`invalid_argument`, `exact_fix`
+  `post rooms rename '<old>' '<new>'`). Rerunning that same pair resumes it:
+  when `<root>/<old>` is gone and `<root>/<new>` exists, the move is skipped,
+  the rewrites are re-planned from `<root>/<new>` (each is idempotent), and
+  `rooms.json` commits. When `rooms.json` already names `<new>`, only
+  pending rewrites run. The receipt says `resumed: true`. A resume refuses,
+  and never merges, when `<root>/<old>` exists again (mail that reached the
+  old name after the crash): it lists that directory's files in
+  `details.matches` so they can be moved by hand. Published
   history is never rewritten: archive letters, channel messages, and the
   moved directory's other contents keep the old name. It refuses an unknown or
   remote-placeholder old room, any `add` check on the new name (including

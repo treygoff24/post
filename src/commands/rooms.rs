@@ -190,12 +190,13 @@ fn set_path(context: &Context, args: RoomsSetPathArgs, pretty: bool) -> AppResul
 }
 
 /// Rename a local room: the mailbox directory moves, every live reference to
-/// the name is rewritten, and rooms.json commits last. History — archive
-/// letters, channel messages, the room's own cursor and channel state
-/// contents — keeps the old name; only the live state that KEYS or BINDS on
-/// the name changes (routing receipts bind `workspace:<name>`, so they
-/// follow the room). Same locks and lock order as `add`:
-/// participant lock, then rooms lock.
+/// the name is rewritten, and rooms.json commits last, inside the rollback.
+/// History — archive letters, channel messages, the room's own cursor and
+/// channel state contents — keeps the old name; only the live state that
+/// KEYS or BINDS on the name changes (routing receipts bind
+/// `workspace:<name>`, so they follow the room). `rename-journal.json`
+/// records the intent so an interrupted rename can be resumed. Locks: the
+/// rename lock (exclusive), then participant, then rooms.
 fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<CommandResult> {
     validate_new_room_name(&args.new).map_err(|reason| {
         AppError::new(
@@ -931,7 +932,7 @@ fn union_seen_values(
 }
 
 /// Collect every live-state file that names the room, in rewrite order.
-/// Each entry pairs the file's original bytes (the rollback journal) with
+/// Each entry pairs the file's original bytes (restored on rollback) with
 /// the rewritten document.
 fn plan_live_rewrites(
     context: &Context,
