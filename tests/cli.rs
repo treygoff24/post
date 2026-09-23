@@ -2405,6 +2405,205 @@ fn rooms_rename_rolls_back_on_a_failed_rewrite() {
     );
 }
 
+/// Every non-dotfile under `root`, byte for byte, except lock files (created
+/// on first use, no state) and the acting participant's `last_seen` refresh.
+fn store_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    participant_records_without_activity(root)
+        .into_iter()
+        .filter(|(path, _)| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .collect()
+}
+
+/// Assert two `store_bytes` snapshots match, naming each differing path.
+fn assert_same_store(
+    after: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    before: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    what: &str,
+) {
+    let differing: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| before.get(*path) != after.get(*path))
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        differing.is_empty(),
+        "{what}: differing paths {differing:?}"
+    );
+}
+
+/// A store with real routed mail: alpha's participant has two letters from
+/// beta, both routed (receipts published), the first read. Returns
+/// (alpha path, recipient id, first id, second id).
+fn routed_alpha_store(sandbox: &Sandbox) -> (PathBuf, String, String, String) {
+    let (alpha, beta) = register_alpha_beta(sandbox);
+    let recipient = bind_workspace_participant(sandbox, "rename-recipient", &alpha, "alpha");
+    let sender = bind_workspace_participant(sandbox, "rename-sender", &beta, "beta");
+    let first = send_mail_as(sandbox, &sender, &beta, "workspace:alpha", "first letter");
+    let second = send_mail_as(sandbox, &sender, &beta, "workspace:alpha", "second letter");
+    let (listing, _) = inbox_listing(sandbox, &recipient, &alpha);
+    assert_eq!(listing["unread_count"], 2, "{listing}");
+    assert_success(&sandbox.run_as_participant(&["read", &first, "--json"], &recipient, &alpha));
+    (alpha, recipient, first, second)
+}
+
+fn plant_rename_journal(sandbox: &Sandbox, old: &str, new: &str) {
+    fs::write(
+        sandbox.mail_root.join("rename-journal.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "v": 1, "old": old, "new": new, "started_at": "2026-09-23T10:00:00-05:00"
+        }))
+        .unwrap(),
+    )
+    .expect("plant journal");
+}
+
+fn doctor_check_ids(sandbox: &Sandbox) -> Vec<String> {
+    let output = sandbox.run(&["doctor"]);
+    let report: serde_json::Value = from_stdout(&output);
+    report["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .map(|check| check["id"].as_str().expect("check id").to_owned())
+        .collect()
+}
+
+/// F6: the rooms.json commit is inside the rollback. A rooms.json the commit
+/// cannot replace (a symlink: the registry reads through it, `write_rooms`
+/// refuses it) fails after the mailbox moved and every rewrite landed; the
+/// whole store must come back byte for byte and the journal must be gone.
+#[test]
+fn rooms_rename_rolls_back_a_failed_rooms_commit_byte_for_byte() {
+    let sandbox = Sandbox::new();
+    let (alpha, recipient, _first, second) = routed_alpha_store(&sandbox);
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let real_rooms = sandbox.mail_root.join("rooms-real.json");
+    fs::rename(&rooms_path, &real_rooms).expect("move registry");
+    std::os::unix::fs::symlink(&real_rooms, &rooms_path).expect("symlink registry");
+    let before = store_bytes(&sandbox.mail_root);
+
+    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+
+    assert_ne!(output.status.code(), Some(0), "the commit must fail");
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "config_invalid", "{}", stderr(&output));
+    assert_same_store(
+        &store_bytes(&sandbox.mail_root),
+        &before,
+        "rollback is byte-for-byte",
+    );
+    assert!(!sandbox.mail_root.join("alpha2").exists());
+    assert!(!sandbox.mail_root.join("rename-journal.json").exists());
+    let (listing, warnings) = inbox_listing(&sandbox, &recipient, &alpha);
+    assert_eq!(unread_ids(&listing), vec![second], "{listing}\n{warnings}");
+}
+
+/// F6: a crash after the mailbox move leaves the journal and a moved
+/// directory. Doctor names it, any other rename refuses with the resume
+/// command, and the same rename resumes to a consistent store. A journal
+/// left after the commit resumes to a no-op.
+#[test]
+fn rooms_rename_resumes_an_interrupted_rename_from_its_journal() {
+    let sandbox = Sandbox::new();
+    let (alpha, recipient, first, second) = routed_alpha_store(&sandbox);
+    plant_rename_journal(&sandbox, "alpha", "alpha2");
+    fs::rename(
+        sandbox.mail_root.join("alpha"),
+        sandbox.mail_root.join("alpha2"),
+    )
+    .expect("the interrupted move");
+
+    assert!(doctor_check_ids(&sandbox).contains(&"rooms.rename_interrupted".to_owned()));
+    let other = sandbox.run(&["rooms", "rename", "beta", "beta2", "--json"]);
+    assert_ne!(other.status.code(), Some(0));
+    let error: ErrorEnvelope = from_stderr(&other);
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post rooms rename 'alpha' 'alpha2'")
+    );
+
+    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    assert_eq!(receipt["resumed"], true, "{receipt}");
+    assert_eq!(receipt["mailbox_moved"], true);
+    assert_eq!(receipt["rewritten"]["routing_receipts"], 2, "{receipt}");
+    assert_eq!(receipt["rewritten"]["participants"], 2, "{receipt}");
+    assert_eq!(receipt["rewritten"]["participant_cursors"], 1, "{receipt}");
+    assert!(!sandbox.mail_root.join("rename-journal.json").exists());
+    let rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("rooms.json")).unwrap()).unwrap();
+    assert!(
+        rooms.get("alpha").is_none() && rooms.get("alpha2").is_some(),
+        "{rooms}"
+    );
+    let (listing, warnings) = inbox_listing(&sandbox, &recipient, &alpha);
+    assert_eq!(listing["skipped_unreadable"], 0, "{listing}\n{warnings}");
+    assert_eq!(unread_ids(&listing), vec![second], "{listing}");
+    let reread = sandbox.run_as_participant(&["read", &first, "--json"], &recipient, &alpha);
+    assert_success(&reread);
+    assert!(!doctor_check_ids(&sandbox).contains(&"rooms.rename_interrupted".to_owned()));
+
+    // Crash after the commit, before the journal removal: resume is a no-op.
+    plant_rename_journal(&sandbox, "alpha", "alpha2");
+    let before = store_bytes(&sandbox.mail_root);
+    let again = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+    assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
+    let receipt: serde_json::Value = from_stdout(&again);
+    assert_eq!(receipt["resumed"], true);
+    assert_eq!(receipt["rewritten"], serde_json::json!({}), "{receipt}");
+    let mut expected = before;
+    expected.remove(&sandbox.mail_root.join("rename-journal.json"));
+    assert_same_store(
+        &store_bytes(&sandbox.mail_root),
+        &expected,
+        "a committed resume is a no-op",
+    );
+}
+
+/// F6: resume never merges. Mail that recreated `<root>/<old>` after the
+/// interrupted move is listed, and nothing changes.
+#[test]
+fn rooms_rename_resume_refuses_when_the_old_mailbox_was_recreated() {
+    let sandbox = Sandbox::new();
+    routed_alpha_store(&sandbox);
+    plant_rename_journal(&sandbox, "alpha", "alpha2");
+    fs::rename(
+        sandbox.mail_root.join("alpha"),
+        sandbox.mail_root.join("alpha2"),
+    )
+    .expect("the interrupted move");
+    fs::create_dir_all(sandbox.mail_root.join("alpha/inbox")).expect("recreated inbox");
+    fs::write(sandbox.mail_root.join("alpha/inbox/late.mail"), "late").expect("late mail");
+    let before = store_bytes(&sandbox.mail_root);
+
+    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+
+    assert_ne!(output.status.code(), Some(0));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert_eq!(
+        error.error.details.matches.as_deref(),
+        Some(&["inbox/late.mail".to_owned()][..])
+    );
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post rooms rename 'alpha' 'alpha2'"));
+    assert_same_store(
+        &store_bytes(&sandbox.mail_root),
+        &before,
+        "a refused resume writes nothing",
+    );
+}
+
 #[test]
 fn rooms_rename_dry_run_checks_everything_and_writes_nothing() {
     let sandbox = Sandbox::new();

@@ -1715,6 +1715,9 @@ pub struct RoomsRenameOutput {
     /// routing_receipts).
     pub rewritten: std::collections::BTreeMap<String, usize>,
     pub warnings: Vec<String>,
+    /// True when this run finished a rename that `rename-journal.json`
+    /// recorded as interrupted.
+    pub resumed: bool,
     pub dry_run: bool,
 }
 

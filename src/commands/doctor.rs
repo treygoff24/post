@@ -244,6 +244,7 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_dir(&context.root.join("archive"), "dir.archive", &mut checks);
     detect_participant_lifecycle(context, &mut checks);
     detect_routing_receipts(context, &mut checks);
+    detect_rename_journal(context, &mut checks);
 
     // owner.json is the trust anchor: a broken one makes every
     // badge-computing chat read fail closed (A0a Decision 3), so doctor
@@ -1353,6 +1354,37 @@ fn detect_owner_surface(
                 ));
             }
         }
+    }
+}
+
+/// A standing `rename-journal.json` is an interrupted `post rooms rename`:
+/// the store may be half-moved until the same rename is resumed.
+fn detect_rename_journal(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let path = context.root.join(crate::mailbox::RENAME_JOURNAL_FILE);
+    match super::rooms::read_rename_journal(context) {
+        Ok(None) => {}
+        Ok(Some(journal)) => {
+            let fix = super::rooms::resume_command(&journal.old, &journal.new);
+            checks.push(check(
+                "rooms.rename_interrupted",
+                DoctorSeverity::Error,
+                &path,
+                &format!(
+                    "a rename of '{}' to '{}' started at {} did not finish; the room's mailbox and live state may be split between the two names",
+                    journal.old, journal.new, journal.started_at
+                ),
+                false,
+                &format!("Resume it with `{fix}`."),
+            ));
+        }
+        Err(error) => checks.push(check(
+            "rooms.rename_journal_invalid",
+            DoctorSeverity::Error,
+            &path,
+            &error.message,
+            false,
+            "Inspect the mail root to see which rename was interrupted, finish it by hand, then delete the journal.",
+        )),
     }
 }
 

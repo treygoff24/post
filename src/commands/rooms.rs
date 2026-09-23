@@ -1,7 +1,7 @@
 use crate::cli::{RoomsAddArgs, RoomsArgs, RoomsCommand, RoomsRenameArgs, RoomsSetPathArgs};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{shell_quote, validate_new_room_name, Context};
+use crate::mailbox::{shell_quote, validate_new_room_name, Context, RENAME_JOURNAL_FILE};
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{RoomOutput, RoomsOutput, RoomsRenameOutput, RoomsSetPathOutput};
 use std::collections::BTreeMap;
@@ -213,6 +213,21 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
     let _participant_lock = crate::participant::lock(context)?;
     let _lock = context.lock_rooms()?;
     let mut rooms = context.load_rooms()?;
+    // A standing rename journal means an earlier rename of this pair was
+    // interrupted. Only that same pair may run (it resumes); anything else
+    // would plan against a half-moved store.
+    let journal = read_rename_journal(context)?;
+    if let Some(journal) = &journal {
+        if journal.old != args.old || journal.new != args.new {
+            return Err(journal_standing_error(context, journal));
+        }
+    }
+    let resuming = journal.is_some();
+    let old_home = context.root.join(&args.old);
+    let new_home = context.root.join(&args.new);
+    if resuming && !rooms.contains_key(&args.old) {
+        return resume_committed_rename(context, &args, &rooms, &new_home, pretty);
+    }
     let Some(stored_path) = rooms.get(&args.old).cloned() else {
         return Err(AppError::new(
             ErrorCode::UnknownRoom,
@@ -322,9 +337,25 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         .input(args.old)
         .reason("a rules.json entry names the old room"));
     }
-    let old_home = context.root.join(&args.old);
-    let new_home = context.root.join(&args.new);
+    // On resume, a present NEW with an absent OLD is the interrupted move
+    // itself; the move is skipped and the rewrites re-planned from NEW.
+    let mut moved_before = false;
     match fs::symlink_metadata(&new_home) {
+        Ok(metadata) if resuming => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(AppError::config(
+                    &new_home,
+                    "the interrupted rename's target is a symlink or not a directory; repair it by hand before resuming",
+                ));
+            }
+            match fs::symlink_metadata(&old_home) {
+                Ok(_) => return Err(recreated_old_error(&args.old, &args.new, &old_home)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => moved_before = true,
+                Err(error) => {
+                    return Err(AppError::io("inspect room directory", &old_home, error));
+                }
+            }
+        }
         Ok(_) => {
             return Err(AppError::new(
                 ErrorCode::InvalidArgument,
@@ -413,28 +444,36 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         }
     }
     let mut plan = RenamePlan {
-        dir_move: match fs::symlink_metadata(&old_home) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                Some((old_home.clone(), new_home.clone()))
-            }
-            Ok(_) => {
-                return Err(AppError::config(
+        dir_move: if moved_before {
+            None
+        } else {
+            match fs::symlink_metadata(&old_home) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    Some((old_home.clone(), new_home.clone()))
+                }
+                Ok(_) => {
+                    return Err(AppError::config(
                     &old_home,
                     "the room's mailbox directory is a symlink or not a directory; repair or remove it before renaming",
                 ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(AppError::io("inspect room directory", &old_home, error)),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(AppError::io("inspect room directory", &old_home, error)),
         },
         ..RenamePlan::default()
     };
     // The receipts are read where the mailbox is now and written where it
     // will be once the directory has moved.
+    let home_now = if moved_before { &new_home } else { &old_home };
     plan_live_rewrites(
-        context, &args.old, &args.new, &old_home, &new_home, &mut plan,
+        context, &args.old, &args.new, home_now, &new_home, &mut plan,
     )?;
 
     let mut warnings = rename_warnings(context, &args.old, &args.new, bridged);
+    if let Some(journal) = &journal {
+        warnings.insert(0, resume_warning(journal));
+    }
     warnings.extend(plan.warnings.clone());
     let mut rewritten: BTreeMap<String, usize> = BTreeMap::new();
     for write in &plan.writes {
@@ -445,9 +484,10 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         old: args.old.clone(),
         new: args.new.clone(),
         path: stored_path.clone(),
-        mailbox_moved: plan.dir_move.is_some(),
+        mailbox_moved: plan.dir_move.is_some() || moved_before,
         rewritten,
         warnings,
+        resumed: resuming,
         dry_run: args.dry_run,
     };
     let result = CommandResult::json(&output, pretty)?;
@@ -455,10 +495,230 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         eprintln!("post: dry run: nothing was written");
         return Ok(result);
     }
-    apply_rename(&plan, &old_home, &new_home)?;
-    rooms.remove(&args.old);
-    rooms.insert(args.new.clone(), stored_path);
-    context.write_rooms(&rooms)?;
+    // The journal lands after every check and before the first store
+    // change, so any crash from here on leaves a resumable record.
+    if !resuming {
+        write_rename_journal(context, &args.old, &args.new)?;
+    }
+    let committed = apply_rename(&plan, &old_home, &new_home, || {
+        rooms.remove(&args.old);
+        rooms.insert(args.new.clone(), stored_path);
+        context.write_rooms(&rooms)
+    });
+    match committed {
+        Ok(()) => {
+            remove_rename_journal(context);
+            Ok(result.registration_committed())
+        }
+        Err(failure) if failure.rolled_back && !resuming => {
+            remove_rename_journal(context);
+            Err(failure.error)
+        }
+        Err(failure) => {
+            let mut error = failure.error;
+            error.suggested_fix = format!(
+                "The rename stopped part-way and {} records it. Fix the cause above, then resume with `{}`.",
+                context.root.join(RENAME_JOURNAL_FILE).display(),
+                resume_command(&args.old, &args.new)
+            );
+            Err(error)
+        }
+    }
+}
+
+/// `<root>/rename-journal.json`: the intent record a rename writes before its
+/// first store change and removes once rooms.json commits (or a clean
+/// rollback finishes).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RenameJournal {
+    pub v: u32,
+    pub old: String,
+    pub new: String,
+    pub started_at: String,
+}
+
+pub(crate) fn resume_command(old: &str, new: &str) -> String {
+    format!(
+        "post rooms rename {} {}",
+        shell_quote(old),
+        shell_quote(new)
+    )
+}
+
+/// Read a standing rename journal. Absent is None; unreadable or malformed
+/// refuses, because a rename cannot know whether the store is half-moved.
+pub(crate) fn read_rename_journal(context: &Context) -> AppResult<Option<RenameJournal>> {
+    let path = context.root.join(RENAME_JOURNAL_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io("read rename journal", &path, error)),
+    };
+    let journal: RenameJournal = serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::config(
+            &path,
+            format!("the rename journal is malformed ({error}); inspect the mail root to see which rename was interrupted, finish it by hand, then delete the journal"),
+        )
+    })?;
+    if journal.v != 1 {
+        return Err(AppError::config(
+            &path,
+            format!("the rename journal has unsupported version {}", journal.v),
+        ));
+    }
+    Ok(Some(journal))
+}
+
+fn write_rename_journal(context: &Context, old: &str, new: &str) -> AppResult<()> {
+    let path = context.root.join(RENAME_JOURNAL_FILE);
+    let journal = RenameJournal {
+        v: 1,
+        old: old.to_owned(),
+        new: new.to_owned(),
+        started_at: crate::mailbox::local_timestamp()?.1,
+    };
+    let mut bytes = serde_json::to_vec_pretty(&journal)
+        .map_err(|error| AppError::io("serialize rename journal", &path, error))?;
+    bytes.push(b'\n');
+    crate::mailbox::atomic_replace(&path, &bytes)
+        .map_err(|error| AppError::io("write rename journal", &path, error))
+}
+
+/// Remove the journal after a commit or a clean rollback. A failed removal
+/// only warns: the store is consistent, and a standing journal for a
+/// committed rename resumes to a no-op.
+fn remove_rename_journal(context: &Context) {
+    let path = context.root.join(RENAME_JOURNAL_FILE);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!(
+            "post: warning: could not remove {}: {error}; `post doctor` will report it until it is gone",
+            path.display()
+        ),
+    }
+}
+
+fn resume_warning(journal: &RenameJournal) -> String {
+    format!(
+        "resumed the rename of '{}' to '{}' started at {}",
+        journal.old, journal.new, journal.started_at
+    )
+}
+
+fn journal_standing_error(context: &Context, journal: &RenameJournal) -> AppError {
+    let fix = resume_command(&journal.old, &journal.new);
+    AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "an interrupted rename of '{}' to '{}' (started {}) is recorded in {}",
+            journal.old,
+            journal.new,
+            journal.started_at,
+            context.root.join(RENAME_JOURNAL_FILE).display()
+        ),
+        format!("Finish it first with `{fix}`, then retry this rename."),
+    )
+    .room(journal.old.clone())
+    .exact_fix(fix)
+    .reason("an interrupted rename must be resumed before another runs")
+}
+
+/// Resume refuses when `<root>/<old>` came back after the move (mail sent to
+/// the old name before rooms.json committed). Merging is never automatic.
+fn recreated_old_error(old: &str, new: &str, old_home: &Path) -> AppError {
+    let mut files = Vec::new();
+    list_files(old_home, old_home, &mut files);
+    files.sort();
+    let shown: Vec<String> = files.iter().take(20).cloned().collect();
+    let more = files.len() - shown.len();
+    AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "cannot resume the rename of '{old}' to '{new}': '{}' exists again and holds {} file(s): {}{}",
+            old_home.display(),
+            files.len(),
+            shown.join(", "),
+            if more > 0 { format!(" (and {more} more)") } else { String::new() }
+        ),
+        format!(
+            "Rename never merges mailboxes. Move each listed file into the matching place under the '{new}' mailbox by hand (or remove it if it is not mail), remove '{}', then run `{}`.",
+            old_home.display(),
+            resume_command(old, new)
+        ),
+    )
+    .room(old.to_owned())
+    .path(old_home.display().to_string())
+    .matches(shown)
+    .reason("the old mailbox was recreated after the interrupted move")
+}
+
+fn list_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        out.push(format!("{} (unreadable)", dir.display()));
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => list_files(root, &path, out),
+            _ => out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Resume a rename whose rooms.json commit landed before the crash: re-plan
+/// from NEW (every rewrite is idempotent), apply any rewrite still pending,
+/// and remove the journal.
+fn resume_committed_rename(
+    context: &Context,
+    args: &RoomsRenameArgs,
+    rooms: &RoomMap,
+    new_home: &Path,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let journal_path = context.root.join(RENAME_JOURNAL_FILE);
+    let Some(stored_path) = rooms.get(&args.new).cloned() else {
+        return Err(AppError::config(
+            &journal_path,
+            format!(
+                "the journal records a rename of '{}' to '{}', but rooms.json registers neither; restore rooms.json, then resume",
+                args.old, args.new
+            ),
+        ));
+    };
+    let journal = read_rename_journal(context)?.expect("resume runs with a journal");
+    let mut plan = RenamePlan::default();
+    plan_live_rewrites(context, &args.old, &args.new, new_home, new_home, &mut plan)?;
+    let mut warnings = vec![resume_warning(&journal)];
+    warnings.extend(plan.warnings.clone());
+    let mut rewritten: BTreeMap<String, usize> = BTreeMap::new();
+    for write in &plan.writes {
+        *rewritten.entry(write.store.to_owned()).or_default() += 1;
+    }
+    let output = RoomsRenameOutput {
+        ok: true,
+        old: args.old.clone(),
+        new: args.new.clone(),
+        path: stored_path,
+        mailbox_moved: new_home.is_dir(),
+        rewritten,
+        warnings,
+        resumed: true,
+        dry_run: args.dry_run,
+    };
+    let result = CommandResult::json(&output, pretty)?;
+    if args.dry_run {
+        eprintln!("post: dry run: nothing was written");
+        return Ok(result);
+    }
+    apply_rename(&plan, new_home, new_home, || Ok(())).map_err(|failure| failure.error)?;
+    remove_rename_journal(context);
     Ok(result.registration_committed())
 }
 
@@ -943,10 +1203,24 @@ fn rename_warnings(context: &Context, old: &str, new: &str, bridged: bool) -> Ve
     warnings
 }
 
-/// Apply a planned rename, rolling back on the first failure: rewritten
-/// files restore their original bytes and the mailbox directory moves back.
-/// rooms.json is written separately as the commit point after this returns.
-fn apply_rename(plan: &RenamePlan, old_home: &Path, new_home: &Path) -> AppResult<()> {
+/// A failed apply: the first error, and whether the rollback restored every
+/// file and moved the mailbox back.
+struct RenameFailure {
+    error: AppError,
+    rolled_back: bool,
+}
+
+/// Apply a planned rename, rolling back on the first failure: move the
+/// mailbox, rewrite live state, then run `commit` (the rooms.json write).
+/// Any failure, the commit's included, restores rewritten files to their
+/// original bytes and moves the mailbox back. `commit` must leave its
+/// target untouched when it fails (`atomic_replace` does).
+fn apply_rename(
+    plan: &RenamePlan,
+    old_home: &Path,
+    new_home: &Path,
+    commit: impl FnOnce() -> AppResult<()>,
+) -> Result<(), RenameFailure> {
     let mut applied = 0usize;
     let outcome = (|| -> AppResult<()> {
         if plan.dir_move.is_some() {
@@ -959,28 +1233,31 @@ fn apply_rename(plan: &RenamePlan, old_home: &Path, new_home: &Path) -> AppResul
             })?;
             applied += 1;
         }
-        Ok(())
+        commit()
     })();
-    if let Err(error) = outcome {
-        for write in plan.writes[..applied].iter().rev() {
-            if let Err(restore) = crate::mailbox::atomic_replace(&write.path, &write.original) {
-                eprintln!(
-                    "post: warning: rollback could not restore {}: {restore}",
-                    write.path.display()
-                );
-            }
+    let Err(error) = outcome else {
+        return Ok(());
+    };
+    let mut rolled_back = true;
+    for write in plan.writes[..applied].iter().rev() {
+        if let Err(restore) = crate::mailbox::atomic_replace(&write.path, &write.original) {
+            rolled_back = false;
+            eprintln!(
+                "post: warning: rollback could not restore {}: {restore}",
+                write.path.display()
+            );
         }
-        if plan.dir_move.is_some() {
-            if let Err(restore) = fs::rename(new_home, old_home) {
-                eprintln!(
-                    "post: warning: rollback could not move the mailbox back to {}: {restore}",
-                    old_home.display()
-                );
-            }
-        }
-        return Err(error);
     }
-    Ok(())
+    if plan.dir_move.is_some() && !old_home.exists() && new_home.exists() {
+        if let Err(restore) = fs::rename(new_home, old_home) {
+            rolled_back = false;
+            eprintln!(
+                "post: warning: rollback could not move the mailbox back to {}: {restore}",
+                old_home.display()
+            );
+        }
+    }
+    Err(RenameFailure { error, rolled_back })
 }
 
 /// Expand and canonicalize a room path argument, requiring an existing
