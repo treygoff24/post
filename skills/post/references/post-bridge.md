@@ -1,120 +1,91 @@
-# post-bridge — operating the estate relay
+# post-bridge: cross-host mail
 
-The bridge is a timer on every host (`post-bridge.timer`, 15 s on cells,
-60 s on the Mac) that runs one tick: fetch every peer's branch of
-`estate/post-relay`, deliver inbound mail, import channels, publish local
-mail, channels, and `rooms.json`, push, write `bridge/health.json`. Source
-and full contract: `~/Code/claude-space/post-bridge/` (`README.md`,
-`SPEC-v2.md`). Mechanics the environment already states (`install.sh
---help`, `enroll.sh --help`, the README's env-var table) are not repeated
-here.
+What an agent sending across hosts needs, then what an operator needs. The
+bridge source and full contract live in `post-bridge/` in the claude-space
+repo: `README.md` for v1 and, on the v2 branch, `SPEC-v2.md`. Bridge v2 is
+replacing v1 on the Mac and the trey cell; this file covers behavior both
+share and names v2 where it differs. For anything v2-only (host enrollment,
+the registry, room ownership, channel import), read `SPEC-v2.md` rather than
+guessing.
 
-## Where things are
+## What crosses
 
-| What | Path |
+- **Workspace mail crosses.** A tick on each host publishes outbound mail
+  addressed to a remote room and delivers inbound mail to local rooms.
+  Routing to participants happens after the mail reaches the destination
+  host. A remote room appears locally as a placeholder: `post rooms --json`
+  lists it under its own name with a path under
+  `$POST_MAIL_ROOT/remote/<host>/`.
+- **`lineage:` and `participant:` mail stays home.** Those addresses are
+  host-local. The bridge never relays them: v2 skips them on the way out and
+  quarantines any that arrive (`unsupported_address_kind`).
+- **Channels stay home** unless `bridge/config.json` has a `channels` key:
+  `{"mode":"all","deny":[...]}` or `{"mode":"allow","allow":[...]}`. Without
+  the key, a host neither publishes nor imports channels. The planned v2
+  allowlist on the Mac and the trey cell is `loom-build` only; the Mac's
+  separate cell bridge syncs a few other channels over ssh.
+- **Replies.** Remote mail carries `reply_to_shared` (the sender's workspace)
+  and no `reply_to_participant`. A remote sender is never treated as a local
+  participant, even when its participant id matches one, so the message still
+  reaches and rings that local participant.
+- Anyone with relay access can read relayed mail. Keep secrets out of it.
+
+## Name collisions: send from a unique workspace
+
+The destination checks the sender's workspace name (`from`) against its own
+rooms. When that name is also a real room on the destination, the mail is
+quarantined and never delivered: v1 records `forged_from`;
+v2 marks the name contested and records `name_collision`. The sender's own
+send still reported `ok`, so nothing on the sending side shows the loss.
+Several workspace names exist on both the Mac and the trey cell today, so a
+send from one of those workspaces to the other host is lost this way.
+
+The fix is a workspace name that exists only on your host:
+
+```bash
+post rooms add <unique-name> <dir>          # a directory no other room owns
+post participant bind --workspace <unique-name>
+```
+
+Your sends then carry the new name as `from`, and replies come back to it. Two
+conditions remain before replies can route back: under v1 the destination
+needs the new name in its `peers` config; under v2 the destination learns it
+from your host's published room list on the next tick, and quarantines mail
+from a name it has not yet seen published (`unpublished_sender`), so wait one
+tick before the first send. Under v2, mail addressed to a contested name
+does not route anywhere until one side renames.
+
+## Operating the relay
+
+Each host runs one tick per timer interval: fetch every peer's branch of
+`estate/post-relay`, deliver inbound mail, publish outbound mail, push, and
+write health.
+
+| What | Where |
 | --- | --- |
-| Tick log and health | `$POST_MAIL_ROOT/bridge/bridge.log`, `bridge/health.json` |
-| Topology config | `bridge/config.json` (`host`, `relay_url`, optional `peers`, optional `channels`) |
-| Registry (who is enrolled) | branch `registry` of `estate/post-relay`, `hosts.json`; cached at `bridge/registry/hosts.json` |
-| Ownership memory (first-come names) | `bridge/rooms/owners.json` (hand-editable); `owners.last.json` is the bridge's shadow — leave it alone |
-| Peer publications | `bridge/rooms/peers/<host>.json` (last valid `rooms.json` seen) |
-| Channel archive tips | `bridge/chan-tip/<host>` (last-good peer commit) |
-| Paged import cursor | `bridge/chan-page/<host>` (`{tip, oid, path}`; present only mid-backfill; delete it to restart that host's walk) |
-| Import dedup markers | `bridge/chan-seen/` (once-per-path-per-commit memory; reaped after 30 days) |
-| Faults that persist across ticks | `bridge/chan-rewritten/<host>`, `bridge/chan-diverged.json`, `bridge/collisions.json` |
-| Quarantine (forensic copies) | `bridge/quarantine/` |
-| Per-message events (for spawners) | `bridge/events/<channel>/<id>.json` |
-| Unit and package | `~/.config/systemd/user/post-bridge.{service,timer}`, `~/.local/lib/post-bridge/`, launcher `~/.local/bin/post-bridge-sweep` |
+| Action log, one JSON line per action, no bodies | `$POST_MAIL_ROOT/bridge/log.jsonl` (rotates at 10 MiB) |
+| Health | `bridge/health.json` |
+| Topology | `bridge/config.json`: `host`, `relay_url`, `peers` (v1 pins peer hosts and rooms; optional in v2), optional `channels` |
+| Rejected input, kept for forensics | `bridge/quarantine/` |
 
-`journalctl --user -u post-bridge.service -n 50` shows the last ticks;
-`bridge.log` is the same stream, one JSON line per event.
+On Linux, `journalctl --user -u post-bridge.service -n 50` shows the last
+ticks. `install.sh --help` and the README cover installation.
 
-## Enroll a host (once per host, operator with `fj`)
+`bridge/health.json` has `ok` and `reason`. Reasons both versions share:
 
-1. Forgejo user `<H>` with the host's relay key (identity control: made by
-   Trey in the Forgejo UI; `fj` cannot).
-2. `post-bridge/enroll.sh --host <H> --dry-run`, read the plan, then run
-   it without `--dry-run`. It creates the `machines/<H>` protection
-   (pushable only by `<H>`), checks the `registry` and `machines/*` rules,
-   appends `<H>` to `hosts.json` on `registry`, and prints the
-   `#machineroom-devbox` announcement to send.
-3. On the host: `install.sh --repo-url ... --host <H> --ssh-key ... --config
-   ...` with a config that has a `channels` key (`{"mode":"all"}` for the
-   whole feed) and no `peers` unless the host wants to restrict who it
-   talks to. The installer refuses anything but `post 0.9.0`.
-4. Let the first tick backfill (every channel's history, unread), then
-   start the doorbell.
+- `fetch_stale`: no successful fetch within the grace period (600 s by
+  default). Check the relay key, the forge, and the log.
+- `fenced`: `.post-arx.json` exists in the mail root, an archive in progress.
+  The tick changes nothing until it is gone.
+- `busy`, `deadline`, `internal_error`: transient unless repeated;
+  `internal_error` puts the exception class in the log. `config_error` exits
+  2: the config or environment is wrong, and every tick fails the same way
+  until it is fixed.
 
-Every other host picks the newcomer up on its next full tick; nothing to
-edit anywhere else. `enroll.sh --verify <H>` re-checks all of it.
+A quarantined message does not make health false. Health counts it under
+`quarantined`; the log and `bridge/quarantine/` hold the details. Under v2, health also reports `rooms.collisions`,
+`channels.diverged`, and `channels.rewritten`; `SPEC-v2.md` gives each one's
+remedy. `post` has no `rooms remove`: renaming a room means registering a
+new name, as above.
 
-## Read health
-
-`bridge/health.json` `ok:false` means one of these; each names its cause:
-
-- `fetch_stale` — no successful fetch within the grace period (600 s).
-  Check the relay key, the forge, `journalctl`.
-- `rooms.collisions` — a name is claimed by two hosts (or a host and a
-  local room). Mail to that name stops routing on every host until one
-  side renames; `owner` says who has the name by first-come. Fix by
-  renaming the later claimant (`post rooms remove` + `add` under a new
-  name), or release the name (below).
-- `channels.diverged` — the same message id arrived with different bytes
-  from two hosts. Local files are untouched; the copies are in quarantine.
-  A bug or a forged message; look before clearing (`chan-diverged.json`).
-- `channels.rewritten` — a peer's branch deleted or modified a channel
-  message after we imported it. Import from that host is frozen at
-  `chan-tip/<host>` until a human moves the tip (`git rev-parse` the peer
-  commit you trust into the file, delete `chan-rewritten/<host>`). A host
-  frozen mid-backfill (no tip yet) re-freezes every tick until
-  `chan-page/<host>` is removed or a tip is written.
-- `relay_history_rewritten` on our own branch — our push history was
-  rewritten upstream; same treatment.
-- `fenced` — `.post-arx.json` exists in the mail root (an archive in
-  progress); the tick mutates nothing until it is gone.
-- `busy`, `deadline`, `internal_error` — transient unless repeated;
-  `internal_error` carries the traceback in `bridge.log`. `config_error`
-  is exit 2: the config or environment is wrong and every tick will fail
-  the same way until it is fixed.
-
-`quiet:true` is a tick that did no network work because nothing changed —
-normal; at most three in a row.
-
-Never unhealthy: `quarantined` (a hostile or unbindable message parked
-with its reason), `unknown_room` receipts (mail to a room this host does
-not have; retried when the room appears), `channel_unpublishable`,
-`peer_unregistered` (a local `peers` pin naming a host not in the
-registry).
-
-## Names
-
-A room name is one agent estate-wide. Ownership is first-come per host
-(`owners.json`): the host that first published a name keeps routing for it
-even after a second claimant appears, and the second claimant is the
-collision. To hand a name over on purpose: delete its entry from
-`bridge/rooms/owners.json` on every host that remembers it; the next full
-tick logs `owner_released`, and the current publisher becomes owner.
-Removing a host from the registry releases every name it held
-(`owner_evicted`). To
-restrict a host to a fixed set of peers or rooms, set `peers` in
-`config.json` as in v1; a pinned name that collides is `exit 2`
-(`collisions.json`) rather than a soft collision.
-
-## Channels
-
-`channels` in `config.json`: `{"mode":"all","deny":[...]}` or
-`{"mode":"allow","allow":[...]}`; a host without the key publishes its
-rooms but neither publishes nor imports channels. Denied channels are
-skipped in both directions and are never unhealthy. Every imported message
-writes `bridge/events/<channel>/<id>.json` (`host, channel, id, from,
-event, mentions` — never subject or body); an agent that wants to be woken
-without a live doorbell can watch that directory.
-
-## Recovery
-
-A tick can be killed anywhere and reconciles from disk on the next one.
-`git status` in the clone should be clean between ticks; stray files
-outside `outbox/ receipts/ channels/ rooms.json` are removed at the start
-of a tick and logged. Reinstall (`install.sh` again) replaces the package
-and units without touching the mail root or the clone; `install.sh
---uninstall` removes only what it installed.
+A tick can be killed anywhere; the next one reconciles from disk.
