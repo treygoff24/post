@@ -1539,6 +1539,8 @@ export class Supervisor {
       post_ok: this.postOk,
       last_discovery_at: this.lastDiscoveryAt === null ? null : new Date(this.lastDiscoveryAt).toISOString(),
       concurrency: this.config.concurrency,
+      // Cumulative since start: snapshots taken, split by what caused them.
+      stats: { ...this.stats },
       bindings,
       retired_recent: this.retired,
     };

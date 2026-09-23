@@ -858,5 +858,7 @@ describe("health", () => {
     assert.equal(health.bindings[0].last_outcome, "accepted");
     assert.equal(health.bindings[0].generation.hash, generationHash({ pane: "wC:p1", terminal: w.panes[0].terminal_id, digest: sha256("session-a") }));
     assert.ok(!text.includes(samples().workspaceMail.subject));
+    assert.equal(health.stats.snapshots, health.stats.hintScans + health.stats.reconcileScans);
+    assert.ok(health.stats.snapshots >= 1 && health.stats.discoveries >= 1);
   });
 });
