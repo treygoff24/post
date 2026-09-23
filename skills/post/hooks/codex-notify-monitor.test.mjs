@@ -31,11 +31,13 @@ for (const [file, calls, kind] of [
       `fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
       `const control = JSON.parse(fs.readFileSync(${JSON.stringify(CONTROL)}, "utf8"));`,
       `if (control.${kind}Stdout) process.stdout.write(control.${kind}Stdout);`,
+      `if (control.${kind}Stderr) process.stderr.write(control.${kind}Stderr);`,
       // Natural exit when the control exit is 0: process.exit() would drop
       // stdout bytes still buffered for a pipe (over-cap snapshots exceed the
       // 64 KiB pipe buffer), truncating the snapshot mid-line.
       `const exit = control.${kind}Exit ?? 0;`,
-      "if (exit) process.exit(exit);",
+      `if (control.${kind}SleepMs) { setTimeout(() => process.exit(exit), control.${kind}SleepMs); }`,
+      "else if (exit) process.exit(exit);",
       "",
     ].join("\n")
   );
@@ -218,7 +220,7 @@ test("incomplete Herdr state fails closed without submitting or deduping mail", 
   assert.equal(fs.existsSync(state), false);
 });
 
-test("a missing Herdr target waits quietly and leaves mail eligible", () => {
+test("a missing Herdr target is reported and leaves mail eligible", () => {
   const state = path.join(ROOT, "herdr-missing.json");
   setControl({
     postStdout: `${JSON.stringify(MAIL)}\n`,
@@ -232,13 +234,82 @@ test("a missing Herdr target waits quietly and leaves mail eligible", () => {
   ).length;
   const result = run({ state, herdrAgent: "sol-buddy" });
 
+  // A pane that is simply gone is not a failure to retry loudly, but silence
+  // is indistinguishable from a monitor that is working: say which pane.
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stderr, "");
+  assert.equal(result.stderr, "post-notify: pane not found: sol-buddy\n");
   assert.equal(
     calls(HERDR_CALLS).filter((args) => args[1] === "prompt").length,
     promptBefore
   );
   assert.equal(fs.existsSync(state), false);
+});
+
+test("a snapshot timeout reports the timeout and the sanitized stderr", () => {
+  const state = path.join(ROOT, "snapshot-timeout.json");
+  const before = calls(CMUX_CALLS).length;
+  setControl({ postSleepMs: 30000, postStderr: "waiting for mail\n" });
+  const result = run({ state });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /snapshot failed; notification state is unknown/);
+  assert.match(result.stderr, /post watch --snapshot timed out after \d+ms/);
+  assert.match(result.stderr, /stderr: waiting for mail/);
+  assert.equal(calls(CMUX_CALLS).length, before);
+  assert.equal(fs.existsSync(state), false);
+});
+
+test("a snapshot exit reports the exit code and not a timeout", () => {
+  const state = path.join(ROOT, "snapshot-exit.json");
+  setControl({ postExit: 3, postStderr: "post: warning: unreadable mail\n" });
+  const result = run({ state });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /post watch --snapshot exited 3/);
+  assert.ok(!result.stderr.includes("timed out"));
+  assert.match(result.stderr, /stderr: post: warning: unreadable mail/);
+  assert.equal(fs.existsSync(state), false);
+});
+
+test("a snapshot stderr excerpt is capped, sanitized, and one line", () => {
+  const state = path.join(ROOT, "snapshot-hostile-stderr.json");
+  const hostile = `\u001b[31mfailed\u0000\r\n${"SECRET-BODY ".repeat(40)}\n`;
+  setControl({ postExit: 2, postStderr: hostile, postStdout: `${JSON.stringify(MAIL)}\n` });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(calls(CMUX_CALLS).length, before, result.stderr);
+  assert.equal(result.stderr.split("\n").length, 2, "one log line plus its newline");
+  assert.ok(!/[\u0000-\u001f\u007f]/.test(result.stderr.slice(0, -1)), result.stderr);
+  // Only post's stderr is logged; the snapshot's stdout (which carries subjects
+  // and previews) never reaches the service log.
+  assert.ok(!result.stderr.includes("UNTRUSTED"), result.stderr);
+  const excerpt = result.stderr.match(/stderr: (.*)\)\n$/);
+  assert.ok(excerpt, result.stderr);
+  const excerptBytes = Buffer.byteLength(excerpt[1], "utf8");
+  assert.ok(excerptBytes <= 300, `excerpt is ${excerptBytes} bytes`);
+  assert.ok(excerptBytes >= 290, `the excerpt should fill the budget, got ${excerptBytes}`);
+  // The escape byte and the CRLF are gone; the message survives, truncated.
+  assert.match(excerpt[1], /^\[31mfailed SECRET-BODY/);
+  assert.ok(
+    !excerpt[1].includes("SECRET-BODY ".repeat(30)),
+    "the excerpt must be truncated, not the whole stderr"
+  );
+});
+
+test("a successful snapshot is unchanged by the new failure detail", () => {
+  const state = path.join(ROOT, "snapshot-success.json");
+  setControl({ postStdout: `${JSON.stringify(MAIL)}\n`, postStderr: "post: warning: noise\n" });
+  const before = calls(CMUX_CALLS).length;
+  const result = run({ state });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(calls(CMUX_CALLS).length, before + 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(state, "utf8")), {
+    seen: ["sol:20260804-220000-abc123"],
+  });
 });
 
 test("working or focused Herdr agents are not interrupted and retry when safe", () => {
