@@ -4,8 +4,8 @@ use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::Context;
 use crate::profile::{
-    load_profiles, participant_key, participant_of_key, validate_display_name, validate_pfp,
-    write_profiles, Profile,
+    counts_for_sigil_uniqueness, load_profiles, participant_key, participant_of_key,
+    validate_display_name, validate_pfp, write_profiles, Profile,
 };
 use serde::Serialize;
 
@@ -30,11 +30,51 @@ struct ProfileOutput<'a> {
     retired_legacy_entry: Option<String>,
 }
 
-pub(super) fn run(context: &Context, args: ProfileArgs, pretty: bool) -> AppResult<CommandResult> {
+#[derive(Serialize)]
+struct ProfileListOutput {
+    ok: bool,
+    profiles: Vec<ProfileListEntry>,
+}
+
+/// One registry entry as `profile list` reports it.
+#[derive(Serialize)]
+struct ProfileListEntry {
+    /// Registry key: `participant:<id>`, or a bare legacy workspace name.
+    key: String,
+    /// The participant id behind a participant-keyed entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    participant: Option<String>,
+    /// The holder's bound workspace, or the legacy entry's own room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pfp: Option<String>,
+    /// Participant lease: active, stale, ended, no lease record, or
+    /// no participant record. Absent for a legacy entry, which has no lease.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    legacy: bool,
+    /// True when this entry's pfp blocks another participant from setting it
+    /// now: the exact predicate `profile set` refuses on.
+    holds_sigil: bool,
+}
+
+const OCCUPANCY_NOTE: &str = "sigil occupancy is lease-dependent: a sigil is held only while its participant's lease is active (or its legacy room is registered), so it can change between this listing and `post profile set`";
+
+pub(super) fn run(
+    context: &Context,
+    args: ProfileArgs,
+    json: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
     match args.command {
         Some(ProfileCommand::Set(args)) => set(context, args, pretty),
         Some(ProfileCommand::Show(args)) => show(context, args, pretty),
         Some(ProfileCommand::Clear) => clear(context, pretty),
+        Some(ProfileCommand::List) => list(context, json, pretty),
         None => show(context, ProfileShowArgs { room: None }, pretty),
     }
 }
@@ -198,6 +238,86 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
         retired_legacy_entry: None,
     };
     CommandResult::json(&output, pretty)
+}
+
+/// Read-only: every profile entry, its holder, and whether its sigil is held
+/// right now, computed with `profile set`'s own uniqueness predicate.
+fn list(context: &Context, json: bool, pretty: bool) -> AppResult<CommandResult> {
+    let rooms = context.load_rooms()?;
+    let profiles = load_profiles(context)?;
+    let now = std::time::SystemTime::now();
+    let records: std::collections::BTreeMap<String, crate::participant::Participant> =
+        crate::participant::list(context)?
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect();
+    let active: std::collections::BTreeSet<String> = crate::participant::list_active(context)?
+        .into_iter()
+        .map(|record| record.id)
+        .collect();
+    let entries: Vec<ProfileListEntry> = profiles
+        .into_iter()
+        .map(|(key, profile)| {
+            let holds_sigil =
+                profile.pfp.is_some() && counts_for_sigil_uniqueness(&key, &rooms, &active);
+            let (participant, workspace, lease, legacy) = match participant_of_key(&key) {
+                Some(id) => {
+                    let record = records.get(id);
+                    (
+                        Some(id.to_owned()),
+                        record.and_then(|record| record.workspace.clone()),
+                        Some(
+                            record
+                                .map_or("no participant record", |record| record.state_label(now)),
+                        ),
+                        false,
+                    )
+                }
+                None => (None, Some(key.clone()), None, true),
+            };
+            ProfileListEntry {
+                participant,
+                workspace,
+                name: profile.name,
+                pfp: profile.pfp,
+                lease: lease.map(str::to_owned),
+                legacy,
+                holds_sigil,
+                key,
+            }
+        })
+        .collect();
+    if json {
+        return CommandResult::json(
+            &ProfileListOutput {
+                ok: true,
+                profiles: entries,
+            },
+            pretty,
+        );
+    }
+    let mut rendered = String::new();
+    if entries.is_empty() {
+        rendered.push_str("post: no profiles set\n");
+    }
+    let clean = |value: Option<&String>| {
+        value
+            .map(|value| crate::output::sanitize_text_header(value))
+            .unwrap_or_else(|| "none".to_owned())
+    };
+    for entry in &entries {
+        rendered.push_str(&format!(
+            "profile {}  name={}  pfp={}  workspace={}  lease={}  holds-sigil={}\n",
+            crate::output::sanitize_text_header(&entry.key),
+            clean(entry.name.as_ref()),
+            clean(entry.pfp.as_ref()),
+            clean(entry.workspace.as_ref()),
+            entry.lease.as_deref().unwrap_or("legacy"),
+            if entry.holds_sigil { "yes" } else { "no" },
+        ));
+    }
+    rendered.push_str(&format!("note: {OCCUPANCY_NOTE}\n"));
+    Ok(CommandResult::success(rendered))
 }
 
 fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {

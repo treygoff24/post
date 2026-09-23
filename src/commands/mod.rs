@@ -115,7 +115,7 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Catchup(args) => catchup::run(&context, args, json, pretty),
         Command::Search(args) => search::run(&context, args, json, pretty),
         Command::Rooms(args) => rooms::run(&context, args, pretty),
-        Command::Profile(args) => profile::run(&context, args, pretty),
+        Command::Profile(args) => profile::run(&context, args, json, pretty),
         Command::Owner(args) => owner::run(&context, args, pretty),
         Command::Schema => schema::run(&context, pretty),
         Command::Watch(args) => watch::run(&context, args),

@@ -177,15 +177,27 @@ pub(crate) fn validate_pfp(
     // rooms: an unregistered (hand-edited) bare entry never stamps or
     // renders, so it must not squat a sigil either.
     for (key, profile) in profiles {
-        let counts = match participant_of_key(key) {
-            Some(id) => active.contains(id),
-            None => rooms.contains_key(key),
-        };
+        let counts = counts_for_sigil_uniqueness(key, rooms, active);
         if key != own_room && counts && profile.pfp.as_deref() == Some(pfp) {
             return Err(pfp_taken(pfp, key));
         }
     }
     Ok(())
+}
+
+/// Whether the entry under `key` competes for sigil uniqueness right now: a
+/// participant-keyed entry while that participant is `active`, a legacy
+/// workspace-keyed entry while its room is registered. `profile set` refuses
+/// on it and `profile list` reports it, so the two cannot disagree.
+pub(crate) fn counts_for_sigil_uniqueness(
+    key: &str,
+    rooms: &RoomMap,
+    active: &std::collections::BTreeSet<String>,
+) -> bool {
+    match participant_of_key(key) {
+        Some(id) => active.contains(id),
+        None => rooms.contains_key(key),
+    }
 }
 
 /// A sigil is unique among the profiles that render now, so the refusal has to

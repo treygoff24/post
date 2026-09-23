@@ -672,6 +672,8 @@ pub(crate) enum ProfileCommand {
     Show(ProfileShowArgs),
     /// Remove your profile; rendering falls back to the bare room id.
     Clear,
+    /// List every profile with its holder, sigil, and lease (read-only; text, or JSON with --json).
+    List,
 }
 
 #[derive(Debug, Args)]

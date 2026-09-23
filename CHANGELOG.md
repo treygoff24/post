@@ -24,6 +24,10 @@
   `profile set` after the profile change.
 
 ### Added
+- `post profile list` lists every profile with its holder, workspace, name,
+  sigil, lease, and whether it holds its sigil now, using the same predicate
+  `profile set` refuses on. Text by default, `{ok, profiles:[…]}` with
+  `--json`. Occupancy is lease-dependent and can change before a `set`.
 - Channel archive. `post chat <channel> --archive` hides a channel from
   `post channels` and Porch without touching its history; `--unarchive`
   restores it, and a new conversational post restores it on its own (joins
