@@ -1,6 +1,6 @@
 # Design: participant DM across hosts (lane F3)
 
-Status: revision 3, approved for implementation. Revision 1 (4aa7ef3) was reviewed by Aster, who kept the host-qualified target, the separate relay namespace, the archive-only queue, and the read-only delivery query, and required F3-1 through F3-8. Revision 2 (5ad1c1d) folded those in and moved admission into post. Aster approved revision 2's architecture with two blocking ordering corrections, F3-R2-A (write the admission record before the inbox bytes) and F3-R2-B (keep typed letters out of the workspace outbox path, and refuse the feature while the local bridge lacks that guard), plus five implementation constraints. Revision 3 adopts all seven as rulings; the table at the end indexes them. Depends on wave 1 (R7, F1) being merged and on F2 (bridge v2 live on both hosts). Author: Nightjar.
+Status: revision 3.1, approved for implementation. Revision 1 (4aa7ef3) was reviewed by Aster, who kept the host-qualified target, the separate relay namespace, the archive-only queue, and the read-only delivery query, and required F3-1 through F3-8. Revision 2 (5ad1c1d) folded those in and moved admission into post. Aster approved revision 2's architecture with two blocking ordering corrections, F3-R2-A (write the admission record before the inbox bytes) and F3-R2-B (keep typed letters out of the workspace outbox path, and refuse the feature while the local bridge lacks that guard), plus five implementation constraints. Revision 3 adopts all seven as rulings. Aster then made two final corrections to revision 3, adopted here as revision 3.1: receipts are never pruned tonight, and a replay of an admitted letter skips the checks that read mutable room and policy state. The table at the end indexes every ruling. Depends on wave 1 (R7, F1) being merged and on F2 (bridge v2 live on both hosts). Author: Nightjar.
 
 ## What Trey asked for
 
@@ -103,31 +103,38 @@ A new namespace, so participant ids cannot collide with room names, and so pre-F
 
 **The bridge's part.** Per `pmail/<self>/<id>/<mail-id>.mail` on peer branch H:
 
-1. If a receipt for this letter already exists at `HEAD` of this host's own relay branch, skip it. A committed receipt is never recomputed (see Crash states).
+1. If a receipt for this letter already exists at `HEAD` of this host's own relay branch, skip it. A committed receipt is never recomputed, whatever has changed since (see Crash states).
 2. Run the transport checks: v1 path, mode, size, and readability.
 3. Run `parse_envelope`, extended for this namespace:
    - `address_kind` must be `participant`;
    - `to` must equal the path's `<id>`;
    - `to_host` must equal this host.
-4. Apply trust fact 2 to `from`: it must be a placeholder homed at H.
 
-A failure in 2–4 is a terminal rejection. Then the bridge writes the bytes to a private temporary file and runs:
+A failure in 2–3 is a terminal rejection. These checks, together with the source-branch trust that chose branch H, read only the letter's bytes, its path, and the branch. They run on every attempt. **The bridge does not apply trust fact 2 to `from` for participant mail.** That check reads the placeholder table, which changes over time, so it runs in post and only when a letter is first admitted (post's step 4). If the bridge ran it before post, a replay of an already-admitted letter would fail after a room changed owner, and the recovery that the admission record exists for would never happen.
+
+Then the bridge writes the bytes to a private temporary file and runs:
 
 `post bridge deliver --participant <id> --source-host <H> --mail-id <mail-id> --sha256 <hex> --file <tmp> --json`
 
 **Post's part.** `post bridge deliver` is a bridge-only writer. It runs under post's migration fence admission, like every other writer, and under the same lock that `post participant end` holds for that participant's record. The builder confirms and names that lock, and adds one only if none exists. Holding it makes admission and ending serialize. In order:
 
-1. **Revalidate every argument and the envelope.** The intended caller is the bridge, but a malformed call must not bypass post's invariants.
+Post's checks come in two kinds. **Structural checks** read only the call's arguments, the letter's bytes, and this host's fixed identity; they run on every attempt (step 1). **Admission checks** read state that changes over time: the participant record, the placeholder table, and the route rules. They run only when a letter is admitted for the first time (step 4). A valid, matching admission record is the proof that those checks already passed. A missing, unreadable, or mismatching record never skips them.
+
+1. **Structural checks: revalidate every argument and the envelope.** The intended caller is the bridge, but a malformed call must not bypass post's invariants.
    - Arguments: `--participant` passes `validate_participant_id`; `--source-host` matches `^[a-z0-9-]{1,32}$` and is not this host; `--mail-id` passes post's mail-id grammar; `--sha256` is 64 lowercase hex; `--file` is a regular file within post's size cap. A failure here is post's ordinary `invalid_argument` error (exit 2), which the bridge treats as `invalid_invocation`, a retry.
    - Digest: `--sha256` must equal the digest post computes from the file. A mismatch is retryable `digest_mismatch`, a local fault the sender did not cause.
-   - Envelope, parsed with post's own mail parser: `id` equals `--mail-id`; `to` equals `--participant` (else `to_mismatch`); `address_kind` is `participant`; `to_host` equals this host's bridge `host` (else `to_mismatch`; an unreadable bridge config is retryable `topology_unavailable`); `from_participant` is present, passes `validate_participant_id`, and contains no `@`; `from` is a room registered as a placeholder homed under `remote/<source-host>/` (else `forged_from`; an unreadable rooms registry is retryable). Any other parse failure is terminal `malformed`.
+   - Envelope, parsed with post's own mail parser: `id` equals `--mail-id`; `to` equals `--participant` (else `to_mismatch`); `address_kind` is `participant`; `to_host` equals this host's bridge `host` (else `to_mismatch`; an unreadable bridge config is retryable `topology_unavailable`); `from_participant` is present, passes `validate_participant_id`, and contains no `@`; `from` passes room-name grammar. Any other parse failure is terminal `malformed`.
 2. **Look up the admission record** at `participants/<id>/imports/<mail-id>.json`: `{v, participant, mail_id, source_host, sha256, from_participant, admitted_at}`, exact keys, `v == 1`. It is the admission point, the idempotence ledger, and the frozen origin in one immutable file.
-   - Valid, with the same `source_host` and `sha256`: this letter was already admitted. Go to step 5; admission is not re-run, so a participant ended or a rule added since then does not undo it.
+   - Valid, with the same `source_host` and `sha256`: this letter was already admitted. Go to step 5. The admission checks are not re-run, so a participant ended, a rule added, or a room that changed owner since then does not undo the admission.
    - Valid, with a different `source_host` or `sha256`: terminal `id_collision`. The record and any inbox file stay untouched.
    - Present but unreadable or invalid: retryable `import_record_unreadable`. It never becomes a terminal answer and never licenses a write.
    - Absent: step 3.
 3. **No record: an existing inbox file is a collision.** If `participants/<id>/inbox/<mail-id>.mail` exists, the outcome is terminal `id_collision` and the file stays untouched, even when its bytes are identical. The inbox bytes do not carry `source_host`, so they cannot prove which host sent them, and post never invents an origin for an unrecorded file.
-4. **Admit and record** (F3-2, F3-3). The participant lookup must be exact: read `participants/<id>/participant.json` through post's validated loader, which distinguishes absent from unreadable.
+4. **Admission checks, then the record** (F3-2, F3-3). These run only here, for a letter with no admission record.
+
+   First the sender: `from` must be a room registered as a placeholder homed under `remote/<source-host>/`, which is trust fact 2. If it is not, the outcome is terminal `forged_from`, with `detail` saying whether `from` names a local room or no placeholder of that host. An unreadable rooms registry is retryable `topology_unavailable`.
+
+   Then the participant. The lookup must be exact: read `participants/<id>/participant.json` through post's validated loader, which distinguishes absent from unreadable.
    - Record conclusively absent: terminal `unknown_participant`.
    - Record valid with `ended_at` set: terminal `ended_participant`.
    - Record unreadable, corrupt, or any I/O error: retryable `participant_unreadable`.
@@ -216,7 +223,7 @@ Between D1 and D2 a concurrent reader sees no inbox file. From the moment the fi
 
 **A receipt may outrun the marker.** A valid receipt establishes the terminal state even when S4 never happened.
 
-**Receipt pruning.** The destination removes a receipt only after the letter's pmail has left the peer branch. A delivered letter replayed after that gets a byte-identical receipt rebuilt from its admission record. A rejected letter replayed after that is re-evaluated. If the new answer differs, the sender's first `acked` record stands, and the sender logs `receipt_conflict` (see Sender acknowledgement).
+**Receipts are tombstones: no pruning tonight.** The destination keeps every receipt in `preceipts/`, rejections included, even after the sender prunes its pmail. That is what makes a rejection final. Suppose a rejected letter's receipt were pruned, and later someone replayed the same pmail bytes after the participant or the rules changed. The bridge would call post, post would admit the letter, and it would reach the inbox. The sender's first `acked` record would still say `rejected`, but the delivery would already have happened. With every receipt kept, step 1 skips that replay before post is called. Admission records in `participants/<id>/imports/` are never pruned either. Retention for both needs its own design later, one that fixes a replay horizon first; until then `preceipts/` grows by one small file per letter.
 
 The crash-injection tests run every write above, and every point before and after a push, in both directions. Each rerun must converge to one canonical inbox message on the destination and one `acked` record on the sender.
 
@@ -286,6 +293,8 @@ The runtime guard (Sender side, step 2) refuses the feature on a host whose brid
   - every revalidation rule, each alone: participant and mail-id disagreement, `address_kind`, a foreign `to_host`, source-host grammar and own host, `from_participant` grammar and `@`, a `from` not homed at the source host, and a digest mismatch (retry, not rejection);
   - the contract: every decided outcome exits 0 with the schema; `admitted_at` is non-null exactly for `delivered`; the contract sample matches the real output;
   - admission-record first: fault injection after D1 and after D2, each rerun converging to `delivered` with the original `admitted_at`;
+  - a replay of an admitted letter after its `from` placeholder is removed or re-homed, after the participant ends, and after a blocking rule is added: each still completes and reports `delivered`, with no admission check run;
+  - a letter with no record whose `from` is not homed at the source host: `forged_from`, nothing written;
   - a concurrent reader, looping during an injected pause after D1 and again after D2, never sees the letter without remote origin or with a local-own reply;
   - a cross-host same-bytes retry (host B sends the bytes host A delivered): `id_collision`, and A's record and inbox file are unchanged;
   - an unrecorded inbox file with identical bytes: `id_collision`;
@@ -305,6 +314,8 @@ The runtime guard (Sender side, step 2) refuses the feature on a host whose brid
 - The crash-injection matrices above, including the rejection rows: a decision lost before commit is re-evaluated; a committed rejection is pushed as is and post is not called again, even after the rejecting condition clears.
 - The import contract: a nonzero exit, empty stdout, garbage, the wrong schema, a disagreeing echoed field, and an out-of-vocabulary reason are each a retry, never a rejection. Red-proof it against a generic "nonzero means rejected" handler.
 - A delivered receipt rebuilt after a crash is byte-identical to the original.
+- A rejection stays final: reject a letter, let the sender prune its pmail, change the participant and the rules so that admission would now pass, then replay the same pmail bytes. There is no inbox delivery, no admission record, no post call, and no second receipt.
+- An admitted letter whose inbox write was lost (crash after D1), replayed after its `from` room changed owner: the bridge still calls post, and the letter is delivered.
 - Pushes: a stage without a push is not `published`; a receipt that outran the marker still reaches the terminal state.
 - Receipts: a receipt from the wrong branch, or with a wrong digest or an extra key, is rejected; a second, conflicting receipt is ignored and reported.
 - Visible queued states: `blocked_reason` for a peer that is not effective and for an unpublished sender.
@@ -347,3 +358,5 @@ The runtime guard (Sender side, step 2) refuses the feature on a host whose brid
 | R2 constraint: a durable terminal receipt wins; rejection crash cases; when a rejection is final | Crash states, Rejection |
 | R2 constraint: frozen JSON and exit-code contract; failures stay retryable | The import command's contract |
 | R2 constraint: one origin lookup across every comparison | Receiving side |
+| r3 correction 1: receipts are tombstones, no pruning; replay-after-rejection test | Crash states, "Receipts are tombstones"; bridge tests |
+| r3 correction 2: structural checks every attempt, mutable checks on first admission only, on both sides | Destination delivery, the bridge's part and post's steps 1 and 4; tests |
