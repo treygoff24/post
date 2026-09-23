@@ -150,7 +150,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "contract",
             "post contract samples [--dir <path>] | post contract skill-manifest [--verify <path>]",
             "JSON",
-            "store-free: reads no mailbox and needs no participant; samples prints the normalized output samples compiled into this binary (contract/samples/, produced by the real commands in the test suite: ids, timestamps, paths, digests, and build_sha replaced by same-format stand-ins, field presence, types, and enum values kept) as one object keyed by file name; --dir <path> creates the directory if missing and writes each sample as <path>/<name>, replacing a same-named file whole, so a consumer's contract tests run against the binary it will actually call; skill-manifest prints the sha256 of every served skill file (skills/post: SKILL.md, references/, hooks/, agents/; dot-files excluded) computed when this binary was built -- an install receipt, not a runtime check; --verify <path> checks a served skill directory against it and records the served root's kind: symlink (checked through the files it resolves to) or copy (checked as served; a file whose source carries skill-render fence markers may legitimately differ and is listed as rendered_unverified, never drift); exit 0 on match, 1 on drift (a changed, missing, or extra covered file), and an error envelope when the path cannot be read",
+            "store-free: reads no mailbox and needs no participant; samples prints the normalized output samples compiled into this binary (contract/samples/, produced by the real commands in the test suite: ids, timestamps, paths, digests, and build_sha replaced by same-format stand-ins, field presence, types, and enum values kept) as one object keyed by file name; --dir <path> creates the directory if missing and writes each sample as <path>/<name>, replacing a same-named file whole, so a consumer's contract tests run against the binary it will actually call; skill-manifest prints the sha256 of every served skill file (skills/post: SKILL.md, references/, hooks/, agents/; dot-files excluded) computed when this binary was built -- an install receipt, not a runtime check; --verify <path> checks a served skill directory against it and records the served root's kind: symlink (checked through the files it resolves to) or copy (checked as served; a file whose source carries skill-render fence markers and differs is listed as rendered_unverified and makes the verdict unverified, not match, because the rendering is not checked); exit 0 on match, 1 on drift (a changed, missing, or extra covered file) or unverified, and an error envelope when the path cannot be read",
         ),
     ];
     let output_shapes = OutputShapes {
@@ -369,7 +369,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "samples: ok, samples{<file name>: <sample text>}",
             "samples_dir: (samples --dir) ok, dir, samples[<file name>]",
             "skill_manifest: ok, root, covered, count, files[{path, sha256, fenced}]",
-            "skill_verify: (skill-manifest --verify) ok, verdict=match|drift, served, kind=symlink|copy, resolved, checked, mismatched, missing, extra, rendered_unverified",
+            "skill_verify: (skill-manifest --verify) ok, verdict=match|drift|unverified, served, kind=symlink|copy, resolved, checked, mismatched, missing, extra, rendered_unverified",
         ]),
         who: fields(&[
             "ok",
