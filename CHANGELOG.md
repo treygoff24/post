@@ -69,6 +69,10 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- Participant cursor reads open `cursors.json` once (`O_NOFOLLOW`) and check
+  and read that same descriptor, so a file replaced between the check and the
+  read can no longer pair one file's verdict with another's content. Reads
+  still fail open, and the retry-once and re-report marker are unchanged.
 - A channel send no longer waits indefinitely to mark its own message seen.
   The message is durable before that step, so the cursor lock is now polled
   for at most 2s; on timeout the send still returns its unchanged receipt and

@@ -256,31 +256,66 @@ fn read_participant_cursor(path: &Path) -> ParticipantCursorRead {
     }
 }
 
+/// One open, one verdict. The cursor file is opened once with
+/// `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, and both the solitary-regular-file
+/// check and the content read go through that held descriptor, the same
+/// pattern as `mailbox::read_owner_file`. Two pathname operations (inspect,
+/// then read) let a replacement between them pair one file's metadata with
+/// another's content.
 fn read_participant_cursor_once(path: &Path) -> ParticipantCursorRead {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ParticipantCursorRead::Missing;
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return ParticipantCursorRead::invalid(NOT_SOLITARY_REGULAR_FILE);
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink is a replaced state file, not an absent one.
+            return match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    ParticipantCursorRead::invalid(NOT_SOLITARY_REGULAR_FILE)
+                }
+                _ => ParticipantCursorRead::Missing,
+            };
+        }
+        Err(error) => {
+            return ParticipantCursorRead::transient(format!("cannot open file: {error}"));
+        }
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
         Err(error) => {
             return ParticipantCursorRead::transient(format!("cannot inspect file: {error}"));
         }
     };
     if !metadata.file_type().is_file() || metadata.nlink() != 1 {
-        return ParticipantCursorRead::invalid(
-            "not a solitary regular file (a symlink, directory, or multiply-linked file is refused)"
-                .to_owned(),
-        );
+        return ParticipantCursorRead::invalid(NOT_SOLITARY_REGULAR_FILE);
     }
-    let raw = match fs::read(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            return ParticipantCursorRead::transient(format!("cannot read file: {error}"));
-        }
-    };
+    // Test seam: runs after the held descriptor passed its checks and before
+    // the read, the exact window a path-based reread used to expose.
+    #[cfg(test)]
+    if let Some(hook) = CURSOR_READ_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+    let mut raw = Vec::new();
+    if let Err(error) = std::io::Read::read_to_end(&mut file, &mut raw) {
+        return ParticipantCursorRead::transient(format!("cannot read file: {error}"));
+    }
     parse_participant_cursor(&raw)
         .map(ParticipantCursorRead::Valid)
         .unwrap_or_else(ParticipantCursorRead::invalid)
+}
+
+const NOT_SOLITARY_REGULAR_FILE: &str =
+    "not a solitary regular file (a symlink, directory, or multiply-linked file is refused)";
+
+#[cfg(test)]
+thread_local! {
+    static CURSOR_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn parse_participant_cursor(raw: &[u8]) -> Result<ParticipantCursors, String> {
@@ -1622,6 +1657,72 @@ mod tests {
             fs::read(root.join("target.json")).expect("target"),
             target_before
         );
+        trash_test_root(&root);
+    }
+
+    /// A6: a participant cursor file that is a symlink (live or dangling) is
+    /// still refused on read, never followed and never treated as missing.
+    #[cfg(unix)]
+    #[test]
+    fn participant_cursor_symlink_is_refused_on_read() {
+        let (root, context) = context("participant-symlink");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        fs::create_dir_all(&participant.dir).expect("participant dir");
+        let valid = format!(
+            "{{\"version\":2,\"mail\":{{}},\"channels\":{{\"tax\":{{\"seen\":[\"{ID1}\"]}}}}}}\n"
+        );
+        fs::write(root.join("target.json"), &valid).expect("target");
+        let cursor = participant.dir.join(CURSORS_FILE);
+        std::os::unix::fs::symlink(root.join("target.json"), &cursor).expect("symlink");
+        assert!(participant_cursor_defect(&participant)
+            .is_some_and(|reason| reason.contains("solitary regular file")));
+        assert!(!ParticipantCursors::load(&context, &participant).channel_has_seen("tax", ID1));
+
+        fs::remove_file(&cursor).expect("drop live symlink");
+        std::os::unix::fs::symlink(root.join("absent.json"), &cursor).expect("dangling");
+        assert!(participant_cursor_defect(&participant).is_some());
+        trash_test_root(&root);
+    }
+
+    /// A6: the file validated is the file read. Between the check and the
+    /// read the path is swapped for a symlink to a different, valid cursor
+    /// document; a pathname reread would accept that content under the
+    /// original file's verdict. The held descriptor still reads the original.
+    #[cfg(unix)]
+    #[test]
+    fn participant_cursor_replaced_between_check_and_read_keeps_one_verdict() {
+        let (root, context) = context("participant-swap");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        fs::create_dir_all(&participant.dir).expect("participant dir");
+        let document = |id: &str| {
+            format!(
+                "{{\"version\":2,\"mail\":{{}},\"channels\":{{\"tax\":{{\"seen\":[\"{id}\"]}}}}}}\n"
+            )
+        };
+        let cursor = participant.dir.join(CURSORS_FILE);
+        fs::write(&cursor, document(ID1)).expect("original cursor");
+        let impostor = root.join("impostor.json");
+        fs::write(&impostor, document(ID2)).expect("impostor");
+        let swap_link = participant.dir.join("swap.tmp");
+        std::os::unix::fs::symlink(&impostor, &swap_link).expect("stage symlink");
+        let (swap_from, swap_to) = (swap_link.clone(), cursor.clone());
+        CURSOR_READ_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&swap_from, &swap_to).expect("swap cursor for symlink");
+            }));
+        });
+
+        match read_participant_cursor_once(&cursor) {
+            ParticipantCursorRead::Valid(state) => {
+                assert!(
+                    state.channel_has_seen("tax", ID1),
+                    "read the validated file"
+                );
+                assert!(!state.channel_has_seen("tax", ID2), "never the impostor");
+            }
+            _ => panic!("the held descriptor's content is the verdict"),
+        }
+        assert!(cursor.is_symlink(), "the hook really swapped the path");
         trash_test_root(&root);
     }
 
