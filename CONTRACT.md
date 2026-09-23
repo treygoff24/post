@@ -449,7 +449,10 @@ their existing success semantics.
   keys, `channels/*/members.json` keys, bare `profiles.json` keys, and the
   `address.name` of every `routing/<id>.json` receipt bound to
   `workspace:<old>`, written at its moved location exactly as routing would
-  write it for `<new>`), then commits `rooms.json` last; a failure before the
+  write it for `<new>`; when `members.json` or `profiles.json` already has a
+  bare `<new>` key, the renamed room's entry replaces it and the receipt
+  carries a warning naming each overwritten key and its store), then commits
+  `rooms.json` last; a failure before the
   commit restores the moved directory and every written file. Published
   history is never rewritten: archive letters, channel messages, and the
   moved directory's other contents keep the old name. It refuses an unknown or

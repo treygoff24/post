@@ -608,19 +608,24 @@ fn plan_json_write(
 
 /// Move a JSON object's `old` key to `new`. When `new` already exists the
 /// renamed room's record wins — a stray same-named entry predates the rename
-/// and does not describe this room. Returns whether a key moved.
+/// and does not describe this room — and the overwrite is reported: returns
+/// `Some(true)` when an existing `new` key was replaced, `Some(false)` for a
+/// plain move, and None when `old` was absent.
 fn move_json_key(
     map: &mut serde_json::Map<String, serde_json::Value>,
     old: &str,
     new: &str,
-) -> bool {
-    match map.remove(old) {
-        Some(value) => {
-            map.insert(new.to_owned(), value);
-            true
-        }
-        None => false,
-    }
+) -> Option<bool> {
+    let value = map.remove(old)?;
+    Some(map.insert(new.to_owned(), value).is_some())
+}
+
+/// The receipt warning for an existing `new` key a rename replaced.
+fn overwrite_warning(store: &str, path: &Path, new: &str) -> String {
+    format!(
+        "{store} at {} already had an entry for '{new}'; the renamed room's entry replaced it",
+        path.display()
+    )
 }
 
 /// Union the `seen` id arrays of two cursor entries, sorted and deduplicated.
@@ -761,18 +766,24 @@ fn plan_live_rewrites(
                 {
                     continue;
                 }
+                let members_path = entry.path().join("members.json");
+                let mut overwrote = false;
                 plan_json_write(
-                    entry.path().join("members.json"),
+                    members_path.clone(),
                     old,
                     "channel_members",
                     plan,
                     |value| {
                         if let Some(map) = value.as_object_mut() {
-                            move_json_key(map, old, new);
+                            overwrote = move_json_key(map, old, new) == Some(true);
                         }
                         Ok(())
                     },
                 )?;
+                if overwrote {
+                    plan.warnings
+                        .push(overwrite_warning("channel_members", &members_path, new));
+                }
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -781,20 +792,20 @@ fn plan_live_rewrites(
 
     // profiles.json: legacy bare (workspace-keyed) entries only; typed
     // `participant:<id>` keys never name a room.
-    plan_json_write(
-        context.root.join(crate::profile::PROFILES_FILE),
-        old,
-        "profiles",
-        plan,
-        |value| {
-            if let Some(map) = value.as_object_mut() {
-                if !old.starts_with(crate::profile::PARTICIPANT_KEY_PREFIX) {
-                    move_json_key(map, old, new);
-                }
+    let profiles_path = context.root.join(crate::profile::PROFILES_FILE);
+    let mut overwrote = false;
+    plan_json_write(profiles_path.clone(), old, "profiles", plan, |value| {
+        if let Some(map) = value.as_object_mut() {
+            if !old.starts_with(crate::profile::PARTICIPANT_KEY_PREFIX) {
+                overwrote = move_json_key(map, old, new) == Some(true);
             }
-            Ok(())
-        },
-    )?;
+        }
+        Ok(())
+    })?;
+    if overwrote {
+        plan.warnings
+            .push(overwrite_warning("profiles", &profiles_path, new));
+    }
     Ok(())
 }
 

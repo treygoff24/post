@@ -1835,6 +1835,53 @@ fn rooms_rename_keeps_routed_workspace_mail_readable() {
     assert_eq!(receipt["rewritten"]["routing_receipts"], 2, "{receipt}");
 }
 
+/// F9: when a store already has a bare key for the new name, the renamed
+/// room's record still wins, but the receipt names each overwritten key.
+#[test]
+fn rooms_rename_warns_for_each_overwritten_new_name_key() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    fs::write(
+        sandbox.mail_root.join("profiles.json"),
+        "{\"hq\":{\"name\":\"HQ\"},\"hq-mac\":{\"name\":\"stray\"}}",
+    )
+    .expect("profiles");
+    let channel_dir = sandbox.mail_root.join("channels/ops");
+    fs::create_dir_all(&channel_dir).expect("channel dir");
+    fs::write(
+        channel_dir.join("members.json"),
+        "{\"hq\":\"t-room\",\"hq-mac\":\"t-stray\"}",
+    )
+    .expect("members");
+
+    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let receipt: serde_json::Value = from_stdout(&output);
+    let warnings: Vec<&str> = receipt["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .filter(|w| w.contains("already had an entry for 'hq-mac'"))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{receipt}");
+    assert!(warnings.iter().any(|w| w.starts_with("profiles at ")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.starts_with("channel_members at ") && w.contains("channels/ops/members.json")));
+    let profiles: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("profiles.json")).unwrap())
+            .unwrap();
+    assert_eq!(profiles["hq-mac"]["name"], "HQ");
+    let members: serde_json::Value =
+        serde_json::from_slice(&fs::read(channel_dir.join("members.json")).unwrap()).unwrap();
+    assert_eq!(members["hq-mac"], "t-room");
+}
+
 #[test]
 fn rooms_rename_receipt_carries_heartbeat_and_bridge_warnings() {
     let sandbox = Sandbox::new();
