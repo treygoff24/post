@@ -88,7 +88,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
     assert_success(&schema_output);
     let schema: SchemaOutput = from_stdout(&schema_output);
     assert!(schema.ok);
-    assert_eq!(schema.commands.len(), 17);
+    assert_eq!(schema.commands.len(), 18);
     assert!(schema
         .error_codes
         .iter()
