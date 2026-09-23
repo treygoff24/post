@@ -1217,10 +1217,20 @@ impl WakeSource for NotifyWake {
                     Ok(event) => self.collect(&mut dirs, &event),
                     Err(_) => dirs = self.watched.clone(),
                 }
+                if Instant::now() >= deadline {
+                    break;
+                }
             }
             dirs.retain(|dir| self.watched.contains(dir));
             if !dirs.is_empty() {
                 return Some(Wake::Events(dirs));
+            }
+            // Past the deadline, a queued filtered event must not start
+            // another round: a steady stream of them (another process reading
+            // a file in the anchor) would hold the wait open and starve the
+            // heartbeat. What is still queued waits for the next call.
+            if Instant::now() >= deadline {
+                return Some(Wake::TimedOut);
             }
         }
     }
@@ -3825,6 +3835,31 @@ body
         assert!(
             elapsed >= timeout - Duration::from_millis(50),
             "a wake of filtered events returned after {elapsed:?}, before its {timeout:?} deadline"
+        );
+    }
+
+    #[test]
+    fn past_its_deadline_the_wait_stops_consuming_filtered_events() {
+        // A steady stream of reads (another process polling a file in the
+        // anchor) must not hold the wait open past its deadline and starve
+        // the heartbeat. Once the deadline passes, the wait returns and leaves
+        // the rest of the stream queued for the next call.
+        let dir = PathBuf::from("/post-watch-test/participants/codex-aaaaaaaa");
+        let (mut backend, sender) = injected_notify_wake(&dir);
+        let [read, ..] = read_events();
+        for _ in 0..1_000 {
+            sender
+                .send(file_event(read, dir.join("cursors.json")))
+                .expect("queue read event");
+        }
+        let wake = backend.wait(Duration::ZERO);
+        assert!(
+            matches!(wake, Some(Wake::TimedOut)),
+            "reads alone must not be a wake"
+        );
+        assert!(
+            backend.receiver.try_recv().is_ok(),
+            "the wait kept consuming reads past its deadline"
         );
     }
 
