@@ -158,6 +158,7 @@ Each accepted or rejected review point gets one line with its reason.
 - (Aster, ruling) Builder re-route to Opus R and F1, DeepSeek C, GLM and Grok review. **Ruled GO.**
 - (Aster, stdin probe) Codex exec stdin is `/dev/null` as well, so the harnesses are safe under P1. Keep the ambiguous-stream error, and don't treat every character device as `/dev/null`. **Accepted**, plus the lead's addition that a TTY is a normal read.
 - (Aster, ruling) cell_bridge coexists with disjoint allowlists; v2 gets loom-build only. **Ruled.**
+- (Aster, D manifest) Skill serving can deliver rendered copies with fences stripped, so the manifest hashes the artifact actually served on each host, or it confirms the served paths are unrendered symlinks. A legitimate rendered copy is never reported as drift. Keep it an install receipt, not a runtime subsystem. **Accepted.** Checked tonight: on both hosts every served `post` skill path is a symlink into the post checkout, and the skill has no fences. D records the served-path kind in the receipt and hashes a rendered copy if one ever appears.
 
 ## Run log
 
