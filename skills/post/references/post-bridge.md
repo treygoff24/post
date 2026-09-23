@@ -63,30 +63,48 @@ The two versions differ in what the destination records meanwhile:
   healthy. The receipt does not prune the letter from the sender's outbox, so
   the retry continues.
 
-## Name collisions: send from a unique workspace
+## Name collisions: one host renames its copy
 
 The destination checks the sender's workspace name (`from`) against its own
 rooms. When that name is also a real room on the destination, the mail is
 quarantined and never delivered: v1 records `forged_from`;
 v2 marks the name contested and records `name_collision`. The sender's own
 send still reported `ok`, so nothing on the sending side shows the loss.
-Several workspace names exist on both the Mac and the trey cell today, so a
-send from one of those workspaces to the other host is lost this way.
+Under v2, mail addressed to a contested name does not route anywhere, and
+health reads `room_name_collision`, until one side renames.
 
-The fix is a workspace name that exists only on your host:
+A name belongs to one host: the room's home keeps the bare name, and the
+other host's copy takes a host suffix (`agent-memory-mac`). `post rooms add`
+refuses a name another host already publishes and prints the suffixed
+command. To fix a clash that already exists, rename the copy:
 
 ```bash
-post rooms add <unique-name> <dir>          # a directory no other room owns
-post participant bind --workspace <unique-name>
+post rooms rename <old> <old>-<host> --dry-run --json   # every check, no writes
+post rooms rename <old> <old>-<host> --json
 ```
 
-Your sends then carry the new name as `from`, and replies come back to it. Two
-conditions remain before replies can route back: under v1 the destination
-needs the new name in its `peers` config; under v2 the destination learns it
-from your host's published room list on the next tick, and quarantines mail
-from a name it has not yet seen published (`unpublished_sender`), so wait one
-tick before the first send. Under v2, mail addressed to a contested name
-does not route anywhere until one side renames.
+The rename moves `<root>/<old>` and rewrites the live state that names it.
+On a bridged host it refuses (`bridge_guard_unavailable`, retryable) unless
+`bridge/health.json` ticked within three intervals, its `local_held` faults
+and unaccounted candidates are both 0, and every archive letter the bridge
+would export for `<old>` has a `bridge/local-held/<id>.json` hold. It also
+refuses while `owner.json` names `<old>`: pin the owner's principal,
+namespace, and label and point `room` at the new name first. Around it:
+
+- **Pause the bridge.** Its import does not take post's rename lock. Stop the
+  timer (`systemctl --user stop post-bridge.timer`, or `launchctl bootout` the
+  Mac job) right after a tick, rename inside the freshness window, then start
+  it again.
+- **Re-arm watchers** armed on the old name, and update any config outside
+  post's store that names it (Porch `owner_room`, doorbell configs, CLAUDE.md
+  files). The receipt's `warnings` name these.
+- **After a crash**, `post doctor` reports `rooms.rename_interrupted`; rerun
+  the same pair to resume from `$POST_MAIL_ROOT/rename-journal.json`.
+
+The destination learns the new name from your host's published room list on
+the next tick and quarantines mail from a name it has not yet seen published
+(`unpublished_sender`), so wait one tick before the first send. Under v1, the
+destination needs the new name in its `peers` config instead.
 
 ## Operating the relay
 
@@ -123,7 +141,6 @@ A quarantined message does not make health false. Health counts it under
 `quarantined`; the log and `bridge/quarantine/` hold the details. Under v2,
 health also reports `rooms.collisions`,
 `channels.diverged`, and `channels.rewritten`; `SPEC-v2.md` gives each one's
-remedy. `post` has no `rooms remove`: renaming a room means registering a
-new name, as above.
+remedy. A contested name is fixed with `post rooms rename`, as above.
 
 A tick can be killed anywhere; the next one reconciles from disk.

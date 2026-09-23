@@ -194,12 +194,15 @@ The bridge (`post-bridge`) relays mail between enrolled hosts.
 - **Channels are host-local** unless a host's `bridge/config.json` sets
   `channels`, and then only for the channels it allows. Check that file before
   assuming a channel is shared.
-- **Your workspace name must not exist on the destination host.** If it does,
-  the destination quarantines your mail as forged, and it is never delivered,
-  though your own send reported `ok`. Several names exist on both the Mac and
-  the trey cell today. The fix is a source workspace with a unique name:
-  register one and bind to it (`post rooms add <unique-name> <dir>`, then
-  `post participant bind --workspace <unique-name>`).
+- **A room name belongs to one host.** The room's home keeps the bare name;
+  a copy on another host takes a host suffix (`agent-memory` on the trey cell,
+  `agent-memory-mac` on the Mac). `post rooms add` refuses a name another host
+  already has and prints a suffixed command that runs as written. To fix an
+  existing clash, `post rooms rename <old> <new>` moves the mailbox and
+  rewrites the live state that names the room; on a bridged host it refuses
+  until the export guard holds every letter delivered to it. A clash matters
+  because the destination quarantines mail from a workspace whose name it also
+  has, as forged, even though your send reported `ok`.
 - Reply to remote workspace mail at its `reply_to_shared` workspace; it has
   no `reply_to_participant`. An imported participant letter's
   `reply_to_participant` is `participant:<sender>@<host>`.
