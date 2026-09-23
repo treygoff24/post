@@ -36,7 +36,8 @@ Integration: lane branches merge into `overnight-0923` in `~/Code/post`. `script
 
 - **A1 bounded post-commit lock wait.** `mark_own_message_seen` (chat.rs ~2260–2336 → cursor_state.rs ~362–394) takes `flock(LOCK_EX)` with no deadline after the message is already durable. Give only this best-effort post-commit seen update a deadline: poll `LOCK_EX|LOCK_NB` with backoff until a fixed 2s budget, then retain the trusted-lock inode and path recheck after acquisition. Other cursor transactions keep their current behavior this wave. The budget is injectable only from tests (a function parameter or `cfg(test)` seam), not a new permanent env setting. On timeout, the existing non-fatal marker-failure path prints a stderr warning naming the lock. The receipt JSON is unchanged: `ChatSendOutput` has no warnings field, and adding one is the kind of additive key that broke strict consumers. Test: hold the lock before sending, then assert exactly one durable message, an `ok:true` receipt, and the stderr warning, returned within the budget. Red-proof against current code, which hangs.
 - **A2 refuse unintended stdin on a read.** Only an actual body is refused. Never refuse on "stdin is not a terminal" alone: this harness runs every command with stdin from `/dev/null`, and hooks pipe empty input. Required cases, each tested on its own:
-  - `/dev/null` (a character device), and a regular file of size 0: a normal read with no delay.
+  - An interactive terminal (`isatty`): a normal read with no probe. A human typing at a prompt has nothing queued, and that must never read as ambiguous.
+  - `/dev/null` and a regular file of size 0: a normal read with no delay. Decide other character devices by their readiness and read result, never by a blanket character-device exemption (`/dev/zero` has data). Both Claude's Bash tool and Codex's exec tool give commands `/dev/null`: a character device, immediately readable, reading EOF (probed live tonight).
   - A pipe already at EOF: a normal read.
   - A nonempty regular file, or a pipe, heredoc, or socket with at least one queued byte: a usage error with exit code 2. No channel or read state is consumed. `error.details.exact_fix` names both corrections: supply `--send`/`--body-file -` to send the body, or redirect stdin from `/dev/null` for an intentional read. A single queued byte is enough to reject; never drain to EOF.
   - A pipe that is still open and silent after a readiness wait of at most 100ms (this ambiguous case only): a distinct `input_ambiguous` error with the same two corrections and nothing consumed. Never a silent normal read, because a producer can write at 101ms.
@@ -155,6 +156,7 @@ Each accepted or rejected review point gets one line with its reason.
 - (Aster) B3: wake cost measured separately from reconciliation; no index or database unless measurements require it. **Accepted.**
 - (Aster) D: install smoke is a dedicated `scripts/install-smoke.sh`; `launcher/install` stays independent of Porch. **Accepted.**
 - (Aster, ruling) Builder re-route to Opus R and F1, DeepSeek C, GLM and Grok review. **Ruled GO.**
+- (Aster, stdin probe) Codex exec stdin is `/dev/null` as well, so the harnesses are safe under P1. Keep the ambiguous-stream error, and don't treat every character device as `/dev/null`. **Accepted**, plus the lead's addition that a TTY is a normal read.
 - (Aster, ruling) cell_bridge coexists with disjoint allowlists; v2 gets loom-build only. **Ruled.**
 
 ## Run log
