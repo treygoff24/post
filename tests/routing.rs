@@ -661,6 +661,71 @@ fn routing_corrupt_participant_channels_do_not_break_other_members() {
 }
 
 #[test]
+fn routing_doctor_names_a_malformed_membership_starts_file() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let corrupt = bind(&sandbox, "corrupt-starts", &alpha, "alpha");
+    let healthy = bind(&sandbox, "healthy-starts", &beta, "beta");
+    let starts = sandbox
+        .mail_root
+        .join("participants")
+        .join(&corrupt)
+        .join("membership-starts.json");
+    // One malformed file per rule the runtime loader enforces.
+    let cases: [(&str, &[u8], &str); 4] = [
+        ("shape", b"{corrupt", "invalid membership starts JSON"),
+        (
+            "version",
+            br#"{"version":2,"starts":{}}"#,
+            "unsupported membership starts version 2",
+        ),
+        (
+            "channel name",
+            br#"{"version":1,"starts":{"a/b":"20260101-000000-000000"}}"#,
+            "invalid channel name 'a/b'",
+        ),
+        (
+            "watermark",
+            br#"{"version":1,"starts":{"tax":"yesterday"}}"#,
+            "invalid membership start 'yesterday' for channel 'tax'",
+        ),
+    ];
+    for (rule, body, message) in cases {
+        fs::write(&starts, body).expect("malformed membership starts");
+        let doctor = sandbox.run_as_participant(&["doctor"], &healthy, &beta);
+        assert_eq!(doctor.status.code(), Some(1), "{rule}");
+        let doctor: Value = from_stdout(&doctor);
+        let checks = doctor["checks"].as_array().expect("doctor checks");
+        let found = checks
+            .iter()
+            .find(|check| check["id"] == format!("participant.{corrupt}.membership_starts_invalid"))
+            .unwrap_or_else(|| panic!("{rule}: no membership_starts_invalid check"));
+        assert_eq!(found["severity"], "error", "{rule}");
+        assert_eq!(found["fixable"], false, "{rule}: detect only");
+        assert_eq!(found["path"], starts.display().to_string(), "{rule}");
+        assert!(
+            found["message"]
+                .as_str()
+                .expect("message")
+                .contains(message),
+            "{rule}: {found}"
+        );
+        assert!(
+            !checks
+                .iter()
+                .any(|check| check["id"] == format!("participant.{corrupt}.channels_invalid")),
+            "{rule}: the defect is in membership-starts.json, not channels.json"
+        );
+    }
+
+    // The runtime keeps failing loud for that participant, as it does for a
+    // malformed channels.json.
+    let joined = sandbox.run_as_participant(&["chat", "tax", "--join", "--json"], &corrupt, &alpha);
+    assert!(!joined.status.success());
+    assert!(common::stderr(&joined).contains("invalid membership start"));
+}
+
+#[test]
 fn routing_join_treats_unknown_participant_membership_conservatively() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);

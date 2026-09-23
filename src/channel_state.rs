@@ -22,7 +22,7 @@ const MEMBERSHIP_STARTS_VERSION: u64 = 1;
 /// never open is the additive path — they ignore it entirely, and a newer
 /// file an older feature build reads is likewise tolerated (no
 /// `deny_unknown_fields` here either).
-const MEMBERSHIP_STARTS_FILE: &str = "membership-starts.json";
+pub(crate) const MEMBERSHIP_STARTS_FILE: &str = "membership-starts.json";
 
 /// `post chat --join --backlog`: the watermark that sorts before every real
 /// message id, so the whole backlog reads as unread — the pre-join-from-now
@@ -52,50 +52,7 @@ pub(crate) struct ParticipantChannels {
 
 impl ParticipantChannels {
     pub(crate) fn load(participant: &Participant) -> AppResult<Self> {
-        let path = participant.dir.join("channels.json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default())
-            }
-            Err(error) => {
-                return Err(crate::error::AppError::io(
-                    "read participant channels",
-                    &path,
-                    error,
-                ))
-            }
-        };
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Stored {
-            version: u64,
-            joined: Vec<String>,
-            left: Vec<String>,
-        }
-        let stored: Stored = serde_json::from_slice(&bytes).map_err(|error| {
-            crate::error::AppError::config(
-                &path,
-                format!("invalid participant channels JSON: {error}"),
-            )
-        })?;
-        if stored.version != PARTICIPANT_CHANNELS_VERSION {
-            return Err(crate::error::AppError::config(
-                &path,
-                format!(
-                    "unsupported participant channels version {}",
-                    stored.version
-                ),
-            ));
-        }
-        let joined = parse_names(&path, stored.joined)?;
-        let left = parse_names(&path, stored.left)?;
-        if joined.iter().any(|name| left.contains(name)) {
-            return Err(crate::error::AppError::config(
-                &path,
-                "participant channels joined/left sets overlap",
-            ));
-        }
+        let (joined, left) = load_sets(participant)?;
         let starts = load_starts(participant)?;
         Ok(Self {
             joined,
@@ -514,6 +471,65 @@ fn has_blocked_pair(
             || rule.matches_route(actor_id, candidate_id)
             || rule.matches_route(candidate_id, actor_id)
     })
+}
+
+/// Reads and validates `channels.json` alone; the membership-start sibling
+/// is `load_starts`. Doctor validates each file separately so a defect is
+/// reported against the file that holds it.
+fn load_sets(participant: &Participant) -> AppResult<(BTreeSet<String>, BTreeSet<String>)> {
+    let path = participant.dir.join("channels.json");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((BTreeSet::new(), BTreeSet::new()))
+        }
+        Err(error) => {
+            return Err(crate::error::AppError::io(
+                "read participant channels",
+                &path,
+                error,
+            ))
+        }
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Stored {
+        version: u64,
+        joined: Vec<String>,
+        left: Vec<String>,
+    }
+    let stored: Stored = serde_json::from_slice(&bytes).map_err(|error| {
+        crate::error::AppError::config(&path, format!("invalid participant channels JSON: {error}"))
+    })?;
+    if stored.version != PARTICIPANT_CHANNELS_VERSION {
+        return Err(crate::error::AppError::config(
+            &path,
+            format!(
+                "unsupported participant channels version {}",
+                stored.version
+            ),
+        ));
+    }
+    let joined = parse_names(&path, stored.joined)?;
+    let left = parse_names(&path, stored.left)?;
+    if joined.iter().any(|name| left.contains(name)) {
+        return Err(crate::error::AppError::config(
+            &path,
+            "participant channels joined/left sets overlap",
+        ));
+    }
+    Ok((joined, left))
+}
+
+/// Doctor: the participant's `channels.json` loads, or the error saying why not.
+pub(crate) fn validate_channels_file(participant: &Participant) -> AppResult<()> {
+    load_sets(participant).map(|_| ())
+}
+
+/// Doctor: the participant's `membership-starts.json` loads (shape, version,
+/// channel names, watermark form), or the error saying why not.
+pub(crate) fn validate_membership_starts_file(participant: &Participant) -> AppResult<()> {
+    load_starts(participant).map(|_| ())
 }
 
 fn load_starts(participant: &Participant) -> AppResult<BTreeMap<String, String>> {

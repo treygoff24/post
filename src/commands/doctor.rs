@@ -439,7 +439,7 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
                 ));
             }
             if let Some(participant) = crate::participant::load(context, &id).ok().flatten() {
-                if let Err(error) = crate::channel_state::ParticipantChannels::load(&participant) {
+                if let Err(error) = crate::channel_state::validate_channels_file(&participant) {
                     checks.push(check(
                         &format!("participant.{id}.channels_invalid"),
                         DoctorSeverity::Error,
@@ -447,6 +447,23 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
                         &error.message,
                         false,
                         "Restore or repair this participant's channels.json from a backup; other participants remain usable.",
+                    ));
+                }
+                // Channel operations fail loud (config_invalid) on a malformed
+                // membership-starts.json, as they do on channels.json; doctor
+                // names the file so the defect is not blamed on channels.json.
+                if let Err(error) =
+                    crate::channel_state::validate_membership_starts_file(&participant)
+                {
+                    checks.push(check(
+                        &format!("participant.{id}.membership_starts_invalid"),
+                        DoctorSeverity::Error,
+                        &participant
+                            .dir
+                            .join(crate::channel_state::MEMBERSHIP_STARTS_FILE),
+                        &error.message,
+                        false,
+                        "Repair this participant's membership-starts.json by hand or restore it from a backup; other participants remain usable. Removing it is a last resort: every joined channel then starts at the participant's created time, so messages between that time and each join read as unread again.",
                     ));
                 }
                 // Runtime reads degrade an unusable cursors.json to an empty

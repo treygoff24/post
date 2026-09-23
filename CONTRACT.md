@@ -197,7 +197,11 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   (`{version: 1, starts: {<channel>: "YYYYMMDD-HHMMSS-ffffff"}}`), a sibling
   file because `channels.json` parses with `deny_unknown_fields`; older
   binaries never open it. A joined channel with no recorded start falls back to
-  the participant's `created`.
+  the participant's `created`. A malformed file (shape, version, channel name,
+  or watermark form) makes that participant's channel operations fail with
+  `config_invalid`, as a malformed `channels.json` does; `post doctor`
+  reports it as `participant.<id>.membership_starts_invalid` (error, detect
+  only) with the file's path.
 - Cursor state is separate from message history: exact seen sets for every mail
   address and channel the participant consumed. Workspace and lineage fan-out
   exclude the sending participant. An explicit `participant:<self>` delivery

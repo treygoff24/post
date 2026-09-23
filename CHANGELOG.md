@@ -18,6 +18,9 @@
   and a `history_hint` that runs `--leave` then `--join --backlog`. The join instant is stored in
   a new `participants/<id>/membership-starts.json`; `channels.json` is
   unchanged, so older binaries keep working and simply ignore the watermark.
+  `post doctor` reports a malformed `membership-starts.json` as
+  `participant.<id>.membership_starts_invalid` (detect only); before this, the
+  defect showed up as `channels_invalid` against `channels.json`.
 - A real `post rooms rename` is now a migration-fenced write. During an
   active migration it refuses before it writes a journal or moves anything,
   unless `POST_ARX_GENERATION` matches the store's generation, like every
