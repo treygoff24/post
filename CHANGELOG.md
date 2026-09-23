@@ -39,8 +39,9 @@
   rewritten (participant workspace fields, cursor keys, channel members, bare
   profile keys, and the address each of the room's routing receipts binds), and `rooms.json` commits last with rollback on failure.
   History keeps the old name. On a bridged host it requires a fresh
-  `bridge/health.json` with zeroed `local_held` counters; the refusal is the
-  retryable `bridge_guard_unavailable`. Separately, `post rooms add` refusing
+  `bridge/health.json` with zeroed `local_held` counters and a local-held
+  record for every letter to the old name the bridge would export; the
+  refusal is the retryable `bridge_guard_unavailable`. Separately, `post rooms add` refusing
   a name that is a remote placeholder now names the owning host and suggests
   a runnable `<name>-<suffix>` registration instead of a `set-path` hint that
   could never work.

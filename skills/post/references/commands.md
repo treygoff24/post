@@ -177,7 +177,10 @@ supply `/dev/null`.
   History keeps the old name. It refuses remote placeholders, case-only
   renames, and an `owner.json` or `rules.json` naming the room; on a bridged
   host it needs a fresh `bridge/health.json` whose `local_held` counters are
-  both zero (`bridge_guard_unavailable`, retryable).
+  both zero, and every letter to the old name the bridge would export must
+  already have its `bridge/local-held/<id>.json` hold
+  (`bridge_guard_unavailable`, retryable: the bridge stamps holds on its next
+  full tick).
 - There is no `rooms remove`.
 
 ## `who`

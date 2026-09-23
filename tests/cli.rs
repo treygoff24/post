@@ -2024,6 +2024,74 @@ fn rooms_rename_bridge_interlock() {
     assert_eq!(receipt["new"], "hq-mac");
 }
 
+/// F2: a fresh health file does not prove the last full tick saw every
+/// letter. On a bridged host every letter delivered to the old name that the
+/// bridge would export must already carry its local-held record.
+#[test]
+fn rooms_rename_refuses_letters_the_bridge_has_not_held() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let sender = bind_workspace_participant(&sandbox, "held-sender", &beta, "beta");
+    write_bridge_config(&sandbox, "trey");
+    healthy_guard(&sandbox);
+    let id = send_mail_as(&sandbox, &sender, &beta, "workspace:alpha", "hold me");
+    assert!(sandbox
+        .mail_root
+        .join(format!("archive/{id}.mail"))
+        .is_file());
+    assert!(sandbox
+        .mail_root
+        .join(format!("alpha/inbox/{id}.mail"))
+        .is_file());
+    // A letter to another room, with no hold, never blocks this rename.
+    send_mail_as(
+        &sandbox,
+        &sender,
+        &beta,
+        "workspace:claude-space",
+        "not alpha",
+    );
+    let held_dir = sandbox.mail_root.join("bridge/local-held");
+    fs::create_dir_all(&held_dir).expect("local-held dir");
+    let record = held_dir.join(format!("{id}.json"));
+    fs::write(&record, "{}").expect("hold record");
+    let dry_run = || sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--dry-run", "--json"]);
+
+    // Held: the rename passes.
+    let output = dry_run();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // No hold record: refused, retryable, naming the letter.
+    fs::remove_file(&record).expect("drop hold");
+    let output = dry_run();
+    assert_eq!(output.status.code(), Some(75), "{}", stderr(&output));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "bridge_guard_unavailable");
+    assert!(error.error.retryable);
+    assert!(error.error.message.contains(&id), "{}", error.error.message);
+    assert!(
+        error.error.message.contains("1 letter"),
+        "{}",
+        error.error.message
+    );
+    assert!(error.error.suggested_fix.contains("next full tick"));
+
+    // Already imported (received marker): not an outbound candidate.
+    let received = sandbox.mail_root.join("bridge/received");
+    fs::create_dir_all(&received).expect("received dir");
+    fs::write(received.join(&id), "").expect("received marker");
+    let output = dry_run();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    fs::remove_file(received.join(&id)).expect("drop received marker");
+
+    // A delivered/<host>/<batch>/<id> marker also clears it.
+    let delivered = sandbox.mail_root.join("bridge/delivered/mac/batch1");
+    fs::create_dir_all(&delivered).expect("delivered dir");
+    fs::write(delivered.join(&id), "").expect("delivered marker");
+    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
 #[test]
 fn rooms_rename_skips_the_interlock_without_a_bridge_config() {
     let sandbox = Sandbox::new();

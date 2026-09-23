@@ -451,7 +451,16 @@ their existing success semantics.
   an `owner.json` or `rules.json` naming the old room, and on a bridged host
   any `bridge/health.json` that is not fresh or whose `local_held` counters
   are not both integer 0 (retryable `bridge_guard_unavailable`; `ok:false`
-  alone does not refuse). `--dry-run` runs every check and writes nothing.
+  alone does not refuse). Because the counters carry forward on busy and
+  quiet ticks, a bridged rename also scans `archive/*.mail` with the
+  bridge's own outbound candidate rule: a workspace-addressed envelope
+  (`address_kind` absent or `"workspace"`, no `to_host` key) whose `to` is
+  exactly `<old>` and that has no `bridge/received/<id>`,
+  `bridge/published/<id>`, or `bridge/delivered/*/*/<id>` marker must have a
+  `bridge/local-held/<id>.json` record. Any such letter without one refuses
+  with the same retryable `bridge_guard_unavailable`, naming the count and up
+  to 8 ids (`details.matches`); the bridge stamps holds on its next full
+  tick. Envelopes that do not parse are skipped, as the bridge skips them. `--dry-run` runs every check and writes nothing.
 - `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>]
   [--oversize] [--signature-ref <tag>] (--body <text> | --body-file <path> |
   stdin)`: sends to a shared channel as the bound participant. A session-only

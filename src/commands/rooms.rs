@@ -377,6 +377,36 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
                 .input(args.old.clone())
                 .reason(reason)
             })?;
+        let unheld = crate::bridge_topology::unheld_room_letters(context, &args.old).map_err(
+            |reason| {
+                AppError::new(
+                    ErrorCode::BridgeGuardUnavailable,
+                    format!("cannot rename '{}': cannot prove the bridge holds this room's letters ({reason})", args.old),
+                    "Fix the unreadable store path, then retry; nothing was written.",
+                )
+                .input(args.old.clone())
+                .reason(reason)
+            },
+        )?;
+        if !unheld.is_empty() {
+            let shown: Vec<String> = unheld.iter().take(8).cloned().collect();
+            let more = unheld.len() - shown.len();
+            return Err(AppError::new(
+                ErrorCode::BridgeGuardUnavailable,
+                format!(
+                    "cannot rename '{}': {} letter(s) delivered to it have no export hold yet: {}{}",
+                    args.old,
+                    unheld.len(),
+                    shown.join(", "),
+                    if more > 0 { format!(" (and {more} more)") } else { String::new() }
+                ),
+                "The bridge stamps holds on its next full tick; retry after it runs. A letter still unheld after a full tick is one the export guard cannot protect: do not rename until it is resolved.",
+            )
+            .input(args.old.clone())
+            .room(args.old.clone())
+            .matches(shown)
+            .reason("letters delivered to the room have no export hold"));
+        }
     }
     let mut plan = RenamePlan {
         dir_move: match fs::symlink_metadata(&old_home) {

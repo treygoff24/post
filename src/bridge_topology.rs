@@ -222,6 +222,118 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
     }
 }
 
+/// The second half of the room-rename interlock. Health counters are
+/// carried forward on busy and quiet ticks, so a fresh health file does not
+/// prove the last full tick saw every letter: a letter delivered to `room`
+/// after it has no hold yet, and once the name leaves this host the guard can
+/// no longer stamp one. This applies the bridge's own outbound candidate rule
+/// (`select_outbound` in post-bridge `sweep.py`) to `archive/*.mail`: a
+/// letter whose envelope is workspace-addressed (`address_kind` absent or
+/// `"workspace"`, no `to_host` key), whose `to` is exactly `room`, and that
+/// has none of `bridge/received/<id>`, `bridge/published/<id>`, or any
+/// `bridge/delivered/*/*/<id>`. Returns every such letter (sorted) that has
+/// no `bridge/local-held/<id>.json`; existence is enough, because the bridge
+/// holds any letter with a record and faults an invalid one. A letter whose
+/// envelope does not parse is skipped, as the bridge skips it. Err carries
+/// an operator-facing reason when the store cannot be read.
+pub(crate) fn unheld_room_letters(context: &Context, room: &str) -> Result<Vec<String>, String> {
+    let archive = context.root.join("archive");
+    let entries = match fs::read_dir(&archive) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot list {}: {error}", archive.display())),
+    };
+    let bridge = bridge_dir(context);
+    let mut delivered: Option<std::collections::HashSet<std::ffi::OsString>> = None;
+    let mut unheld = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot list {}: {error}", archive.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("mail") {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+        };
+        let Some(id) = outbound_candidate_id(&bytes, room) else {
+            continue;
+        };
+        let exists = |path: PathBuf| fs::symlink_metadata(path).is_ok();
+        if exists(bridge.join("received").join(&id)) || exists(bridge.join("published").join(&id)) {
+            continue;
+        }
+        let delivered = match &delivered {
+            Some(set) => set,
+            None => delivered.insert(delivered_marker_names(&bridge.join("delivered"))?),
+        };
+        if delivered.contains(std::ffi::OsStr::new(&id)) {
+            continue;
+        }
+        if !exists(bridge.join("local-held").join(format!("{id}.json"))) {
+            unheld.push(id);
+        }
+    }
+    unheld.sort();
+    Ok(unheld)
+}
+
+/// The mail id when `bytes` is an outbound candidate for `room` under the
+/// bridge's rule, else None (including every envelope that does not parse).
+fn outbound_candidate_id(bytes: &[u8], room: &str) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let (head, _) = text.split_once("\n---\n")?;
+    let envelope: serde_json::Map<String, serde_json::Value> = serde_json::from_str(head).ok()?;
+    match envelope.get("address_kind") {
+        None => {}
+        Some(serde_json::Value::String(kind)) if kind == "workspace" => {}
+        Some(_) => return None,
+    }
+    if envelope.contains_key("to_host") || envelope.get("to")?.as_str()? != room {
+        return None;
+    }
+    let id = envelope.get("id")?.as_str()?;
+    crate::mailbox::validate_component(id).ok()?;
+    Some(id.to_owned())
+}
+
+/// Every file name at depth two under `bridge/delivered/` (the
+/// `delivered/*/*/<id>` markers). A missing tree has no markers.
+fn delivered_marker_names(
+    root: &Path,
+) -> Result<std::collections::HashSet<std::ffi::OsString>, String> {
+    let mut names = std::collections::HashSet::new();
+    let list = |dir: &Path| -> Result<Vec<PathBuf>, String> {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.path())
+                        .map_err(|error| format!("cannot list {}: {error}", dir.display()))
+                })
+                .collect(),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(format!("cannot list {}: {error}", dir.display())),
+        }
+    };
+    for first in list(root)? {
+        for second in list(&first)? {
+            for marker in list(&second)? {
+                if let Some(name) = marker.file_name() {
+                    names.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    Ok(names)
+}
+
 /// The room-rename interlock: what the bridge's export guard must prove
 /// before a name can move under it. `bridge/health.json` must be fresh by
 /// the participant-mail rule AND carry a `local_held` object whose `faults`
