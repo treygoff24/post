@@ -576,53 +576,86 @@ fn mutate<T>(
     let mut state = ParticipantChannels::load(participant)?;
     let before = state.clone();
     let result = change(&mut state)?;
-    // The watermark file commits before the membership file: an orphan start
-    // is harmless (the next join overwrites it), while a join committed
-    // without its start would silently fall back to `created` and flood a
-    // long-lived channel's backlog into unread.
-    if state.starts != before.starts {
-        #[derive(serde::Serialize)]
-        struct Stored<'a> {
-            version: u64,
-            starts: &'a BTreeMap<String, String>,
+    for file in write_order(&before, &state) {
+        match file {
+            StateFile::Starts => write_starts(participant, &state.starts)?,
+            StateFile::Channels => write_channels(participant, &state)?,
         }
-        let path = participant.dir.join(MEMBERSHIP_STARTS_FILE);
-        let mut bytes = serde_json::to_vec_pretty(&Stored {
-            version: MEMBERSHIP_STARTS_VERSION,
-            starts: &state.starts,
-        })
-        .map_err(|error| {
-            crate::error::AppError::config(&path, format!("serialize membership starts: {error}"))
-        })?;
-        bytes.push(b'\n');
-        atomic_replace(&path, &bytes)
-            .map_err(|error| crate::error::AppError::io("write membership starts", &path, error))?;
-    }
-    if state.joined != before.joined || state.left != before.left {
-        #[derive(serde::Serialize)]
-        struct Stored<'a> {
-            version: u64,
-            joined: &'a BTreeSet<String>,
-            left: &'a BTreeSet<String>,
-        }
-        let path = participant.dir.join("channels.json");
-        let mut bytes = serde_json::to_vec_pretty(&Stored {
-            version: PARTICIPANT_CHANNELS_VERSION,
-            joined: &state.joined,
-            left: &state.left,
-        })
-        .map_err(|error| {
-            crate::error::AppError::config(
-                &path,
-                format!("serialize participant channels: {error}"),
-            )
-        })?;
-        bytes.push(b'\n');
-        atomic_replace(&path, &bytes).map_err(|error| {
-            crate::error::AppError::io("write participant channels", &path, error)
-        })?;
     }
     Ok(result)
+}
+
+/// The two files a membership mutation may rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateFile {
+    Starts,
+    Channels,
+}
+
+/// Which files change, in crash-safe order. A mutation that adds or changes a
+/// start (join) commits the watermark first: an orphan start is harmless, but
+/// a join committed without its start would fall back to `created` and flood
+/// the backlog into unread. A mutation that only removes starts (leave)
+/// commits `channels.json` first, for the same reason inverted: removing the
+/// start before the leave lands would leave a joined channel with no start.
+fn write_order(before: &ParticipantChannels, after: &ParticipantChannels) -> Vec<StateFile> {
+    let starts_changed = before.starts != after.starts;
+    let channels_changed = before.joined != after.joined || before.left != after.left;
+    let adds_start = after
+        .starts
+        .iter()
+        .any(|(channel, start)| before.starts.get(channel) != Some(start));
+    let mut order = Vec::new();
+    if starts_changed && adds_start {
+        order.push(StateFile::Starts);
+    }
+    if channels_changed {
+        order.push(StateFile::Channels);
+    }
+    if starts_changed && !adds_start {
+        order.push(StateFile::Starts);
+    }
+    order
+}
+
+fn write_starts(participant: &Participant, starts: &BTreeMap<String, String>) -> AppResult<()> {
+    #[derive(serde::Serialize)]
+    struct Stored<'a> {
+        version: u64,
+        starts: &'a BTreeMap<String, String>,
+    }
+    let path = participant.dir.join(MEMBERSHIP_STARTS_FILE);
+    let mut bytes = serde_json::to_vec_pretty(&Stored {
+        version: MEMBERSHIP_STARTS_VERSION,
+        starts,
+    })
+    .map_err(|error| {
+        crate::error::AppError::config(&path, format!("serialize membership starts: {error}"))
+    })?;
+    bytes.push(b'\n');
+    atomic_replace(&path, &bytes)
+        .map_err(|error| crate::error::AppError::io("write membership starts", &path, error))
+}
+
+fn write_channels(participant: &Participant, state: &ParticipantChannels) -> AppResult<()> {
+    #[derive(serde::Serialize)]
+    struct Stored<'a> {
+        version: u64,
+        joined: &'a BTreeSet<String>,
+        left: &'a BTreeSet<String>,
+    }
+    let path = participant.dir.join("channels.json");
+    let mut bytes = serde_json::to_vec_pretty(&Stored {
+        version: PARTICIPANT_CHANNELS_VERSION,
+        joined: &state.joined,
+        left: &state.left,
+    })
+    .map_err(|error| {
+        crate::error::AppError::config(&path, format!("serialize participant channels: {error}"))
+    })?;
+    bytes.push(b'\n');
+    atomic_replace(&path, &bytes)
+        .map_err(|error| crate::error::AppError::io("write participant channels", &path, error))
 }
 
 fn parse_names(path: &std::path::Path, names: Vec<String>) -> AppResult<BTreeSet<String>> {
@@ -681,6 +714,44 @@ mod tests {
 
     const ID1: &str = "20260831-171234-000001-a1b2c3";
     const ID2: &str = "20260831-171234-000002-b2c3d4";
+
+    #[test]
+    fn a_join_writes_its_start_first_and_a_leave_writes_channels_first() {
+        let start = "20260923-120000-000000".to_owned();
+        let empty = ParticipantChannels::default();
+        let joined = ParticipantChannels {
+            joined: BTreeSet::from(["tax".to_owned()]),
+            left: BTreeSet::new(),
+            starts: BTreeMap::from([("tax".to_owned(), start.clone())]),
+        };
+        let left = ParticipantChannels {
+            joined: BTreeSet::new(),
+            left: BTreeSet::from(["tax".to_owned()]),
+            starts: BTreeMap::new(),
+        };
+        // Join: a crash after the first write leaves an orphan start, never a
+        // joined channel without one.
+        assert_eq!(
+            write_order(&empty, &joined),
+            [StateFile::Starts, StateFile::Channels]
+        );
+        // Leave: a crash after the first write leaves the channel already left,
+        // never joined with its start removed.
+        assert_eq!(
+            write_order(&joined, &left),
+            [StateFile::Channels, StateFile::Starts]
+        );
+        // Rejoin after leave: the new start lands first.
+        let mut rejoined = joined.clone();
+        rejoined
+            .starts
+            .insert("tax".to_owned(), "20260924-120000-000000".to_owned());
+        assert_eq!(
+            write_order(&left, &rejoined),
+            [StateFile::Starts, StateFile::Channels]
+        );
+        assert!(write_order(&joined, &joined).is_empty());
+    }
 
     #[test]
     fn load_prefers_materialized_cursor_over_legacy_channel_state() {
