@@ -63,10 +63,12 @@ output shapes, error codes, exit codes, and environment variables, run
 ## Stdin on channel reads
 
 A `post chat` read never reads stdin, so input there is a body about to be
-lost, usually a send missing `--send`. These forms check stdin before they
-route or mark anything: plain reads, `--peek`, `--history` and `--since`,
-`--discard`, and `--message`. Give every non-send `post chat` closed stdin
-anyway; other forms may gain the check.
+lost, usually a send missing `--send`. Every form that reads or moves read
+state checks stdin before it routes or marks anything: plain reads, `--peek`,
+`--history` and `--since`, `--discard`, `--discard-through`, `--ack`, and
+`--message`. `--join`, `--leave`, `--archive`, `--unarchive`, and `--seen-by`
+consume nothing and skip the check. Give every non-send `post chat` closed
+stdin anyway.
 
 | stdin | result |
 | --- | --- |
