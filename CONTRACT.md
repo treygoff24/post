@@ -129,6 +129,19 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   reloads, validates, and atomically replaces `rooms.json` while preserving its
   mode. It never writes `rules.json`. A symlinked `rooms.json` is refused rather
   than detached.
+- `.rename.lock` is the room-rename flock. `post rooms rename` holds it
+  exclusively from before it takes any other store lock until `rooms.json`
+  commits. Every command that creates or writes a room's mailbox by room name
+  holds it shared: `post send`, `post read`, and `post chat` (when they write)
+  from before their body loads `rooms.json` or resolves its actor until their
+  after-stdout cursor commit finishes; `post doctor --fix` while it creates
+  room directories; and a writing `post watch` through its target setup only
+  (the long loop creates no room directory). Read-only commands do not take
+  it. Lock order is migration-fence admission, then `.rename.lock`, then
+  `.participants.lock`, then `.rooms.lock`, then a participant's
+  `.cursors.lock`; nothing takes `.rename.lock` while holding another store
+  lock, so it adds no cycle. A send issued during a rename waits for it and
+  then resolves the name against the committed registry.
 - Canonical mail is stored by address: workspace mail at
   `<root>/<room>/inbox/<id>.mail`, lineage mail at
   `<root>/lineages/<name>/inbox/<id>.mail`, and participant mail at
@@ -418,7 +431,8 @@ their existing success semantics.
   A dangling symlink cannot be fully verified until its target exists. Refuses
   invalid names; ASCII-case-folded
   collisions with existing names; the ASCII-case-insensitive reserved names
-  `*`, `archive`, `rooms.json`, `rules.json`, `.rooms.lock`, and the
+  `*`, `archive`, `rooms.json`, `rules.json`, `.rooms.lock`, `.rename.lock`,
+  `rename-journal.json`, and the
   `.rooms.json.*.tmp`, `.post-arx.json`, `.post-arx.lock`, and
   `..post-arx.json.*.tmp` atomic-write namespace; paths with control characters;
   missing/non-directory paths; and any registration targeted by a blocking rule

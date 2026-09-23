@@ -2201,6 +2201,89 @@ fn rooms_rename_refuses_letters_the_bridge_has_not_held() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 }
 
+/// F7: `post send` holds the room-rename lock shared from before it
+/// resolves its target until its writes finish, so while `rooms rename`
+/// holds it exclusively no letter can land in a room directory. The test
+/// holds the lock itself. With the lock held the child cannot write however
+/// long it waits, so the green assertion never depends on timing; the
+/// polling window only bounds how fast a regression is noticed.
+#[cfg(unix)]
+#[test]
+fn send_waits_for_the_room_rename_lock() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let _recipient = bind_workspace_participant(&sandbox, "lock-recipient", &alpha, "alpha");
+    let sender = bind_workspace_participant(&sandbox, "lock-sender", &beta, "beta");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(sandbox.mail_root.join(".rename.lock"))
+        .expect("open rename lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let mut child = post_command()
+        .args([
+            "send",
+            "--to",
+            "workspace:alpha",
+            "--body",
+            "blocked",
+            "--json",
+        ])
+        .current_dir(&beta)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &sender)
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn send");
+    let letters = |dir: &Path| -> usize {
+        fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mail"))
+                .count()
+        })
+    };
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+    let archive = sandbox.mail_root.join("archive");
+    for _ in 0..20 {
+        if child.try_wait().expect("probe send").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        letters(&inbox),
+        0,
+        "a letter landed while the rename lock was held"
+    );
+    assert_eq!(
+        letters(&archive),
+        0,
+        "an archive copy landed while the rename lock was held"
+    );
+    assert_child_running(&mut child, "send must wait for the rename lock");
+
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let output = child.wait_with_output().expect("wait send");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        letters(&inbox),
+        1,
+        "the letter is delivered once the lock is released"
+    );
+}
+
 #[test]
 fn rooms_rename_skips_the_interlock_without_a_bridge_config() {
     let sandbox = Sandbox::new();

@@ -46,6 +46,27 @@ static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// at the trust boundary.
 const OWNER_CONFIG_MAX_BYTES: u64 = 64 * 1024;
 const ROOMS_LOCK_FILE: &str = ".rooms.lock";
+/// The room-rename lock. `post rooms rename` holds it exclusively from before
+/// it takes any other lock until rooms.json commits; every command that
+/// creates or writes a room's mailbox BY ROOM NAME (send, legacy read, watch
+/// setup, doctor --fix) holds it shared from before it loads rooms.json or
+/// resolves its actor until its mailbox writes finish, so no writer can act
+/// on a name the rename is moving.
+///
+/// Lock order: this is the OUTERMOST store lock. The only lock ever held
+/// when it is taken is the migration-fence admission, which command
+/// dispatch acquires before any command body runs (and which nothing takes
+/// while holding this lock: a long watch drops this lock before its loop
+/// re-admits). No code path acquires it while holding `.participants.lock`,
+/// `.rooms.lock`, a participant's `.cursors.lock`, or a channel lock, so
+/// every one of those is always acquired after it and it cannot form a
+/// cycle with the existing order (fence → participants → rooms → cursors).
+/// Shared holders never nest a second acquisition, and an exclusive holder
+/// (`rooms rename`) takes it once, first.
+pub(crate) const RENAME_LOCK_FILE: &str = ".rename.lock";
+/// The rename intent journal: present from just before a rename moves the
+/// mailbox until rooms.json commits (or a rollback completes).
+pub(crate) const RENAME_JOURNAL_FILE: &str = "rename-journal.json";
 /// Stable room pin exported by the `agent-session` launch helper. Identity
 /// layer 1 (address): a declaration, not a credential — recorded as
 /// `declared-env` provenance so every reader sees the evidence.
@@ -61,7 +82,7 @@ pub(crate) const POST_FRAMING_ENV: &str = "POST_FRAMING";
 /// Bound on a declared sender address. `harness.repo.uuid` is well under
 /// this; the cap keeps a hostile environment from bloating every envelope.
 const SENDER_ADDRESS_MAX_BYTES: usize = 256;
-const RESERVED_ROOM_NAMES: [&str; 13] = [
+const RESERVED_ROOM_NAMES: [&str; 15] = [
     "*",
     "archive",
     "participants",
@@ -75,6 +96,8 @@ const RESERVED_ROOM_NAMES: [&str; 13] = [
     ROOMS_LOCK_FILE,
     crate::migration_fence::STATE_FILE,
     crate::migration_fence::LOCK_FILE,
+    RENAME_LOCK_FILE,
+    RENAME_JOURNAL_FILE,
 ];
 
 /// One refusal predicate for every profile-text enforcement point (both
@@ -213,6 +236,37 @@ impl Context {
         bytes.push(b'\n');
         atomic_replace(&path, &bytes)
             .map_err(|error| AppError::io("atomically update room registry", &path, error))
+    }
+
+    /// Take the room-rename lock (see `RENAME_LOCK_FILE` for the protocol and
+    /// lock order): exclusive for `rooms rename`, shared for every writer of a
+    /// room mailbox by name. Creates the mail root when it is missing, as the
+    /// participant lock does.
+    pub(crate) fn lock_rename(&self, exclusive: bool) -> AppResult<File> {
+        fs::create_dir_all(&self.root)
+            .map_err(|error| AppError::io("create mailbox root", &self.root, error))?;
+        let path = self.root.join(RENAME_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| AppError::io("open room rename lock", &path, error))?;
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == -1 {
+            return Err(AppError::io(
+                "lock room rename",
+                &path,
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(file)
     }
 
     pub(crate) fn lock_rooms(&self) -> AppResult<File> {

@@ -628,6 +628,13 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
                     ..
                 })),
         })
+        | Command::Rooms(crate::cli::RoomsArgs {
+            command:
+                Some(crate::cli::RoomsCommand::Rename(crate::cli::RoomsRenameArgs {
+                    dry_run: false,
+                    ..
+                })),
+        })
         | Command::Owner(crate::cli::OwnerArgs {
             command: Some(crate::cli::OwnerCommand::Init(_)),
         })
@@ -724,6 +731,7 @@ mod tests {
             &["post", "catchup"],
             &["post", "catchup", "--mail"],
             &["post", "rooms", "add", "alpha", "/tmp"],
+            &["post", "rooms", "rename", "alpha", "beta"],
             &["post", "profile", "set", "--name", "x"],
             &["post", "profile", "clear"],
             &["post", "owner", "init", "--room", "alpha"],
@@ -757,6 +765,7 @@ mod tests {
             ],
             &["post", "chat", "tax", "--seen-by", "id"],
             &["post", "rooms"],
+            &["post", "rooms", "rename", "alpha", "beta", "--dry-run"],
             &["post", "profile", "show"],
             &["post", "owner", "show"],
             &["post", "watch", "--snapshot"],

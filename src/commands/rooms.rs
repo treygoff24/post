@@ -206,6 +206,10 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         .input(args.new.clone())
         .reason(reason)
     })?;
+    // Lock order: rename (exclusive; the outermost store lock, see
+    // RENAME_LOCK_FILE), then participant, then rooms. All are held through
+    // the rooms.json commit.
+    let _rename_lock = context.lock_rename(true)?;
     let _participant_lock = crate::participant::lock(context)?;
     let _lock = context.lock_rooms()?;
     let mut rooms = context.load_rooms()?;

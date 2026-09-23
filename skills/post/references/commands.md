@@ -180,7 +180,9 @@ supply `/dev/null`.
   both zero, and every letter to the old name the bridge would export must
   already have its `bridge/local-held/<id>.json` hold
   (`bridge_guard_unavailable`, retryable: the bridge stamps holds on its next
-  full tick).
+  full tick). It holds `.rename.lock` exclusively; `send`, and `read`/`chat`
+  when they write, hold it shared, so a send issued during a rename waits and
+  then resolves the name against the committed registry.
 - There is no `rooms remove`.
 
 ## `who`

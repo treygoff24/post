@@ -116,6 +116,24 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
             format!("Drop {flag} for the JSON output, or drop --json for the human form."),
         ));
     }
+    // Commands that create or write a room's mailbox by room name — send's
+    // canonical inbox, legacy read's inbox/read move and room cursors, legacy
+    // chat's room cursors — hold the shared room-rename lock from before
+    // their body loads rooms.json or resolves its actor until their deferred
+    // after-stdout commits finish, so `rooms rename` (which holds it
+    // exclusively) can never move a room out from under them. Lock order:
+    // the migration fence admission (above) is the only lock taken before
+    // it; every store lock the body takes comes after it. See
+    // `mailbox::RENAME_LOCK_FILE`.
+    let rename_lock = if writes
+        && matches!(
+            &cli.command,
+            Command::Send(_) | Command::Read(_) | Command::Chat(_)
+        ) {
+        Some(context.lock_rename(false)?)
+    } else {
+        None
+    };
     let mut result = match cli.command {
         Command::Participant(args) => participant::run(&context, args, json, pretty),
         Command::Identity(args) => identity::run(&context, args, json, pretty),
@@ -140,6 +158,9 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Bridge(_) => unreachable!("bridge dispatches before participant resolution"),
         Command::Delivery(args) => delivery::run(&context, args, json, pretty),
     }?;
+    if let Some(lock) = rename_lock {
+        result = result.holding(lock);
+    }
     if report_unbound {
         eprintln!("participant: unbound (run: post participant bind)");
         if let Some(error) = resolution_error.as_deref() {

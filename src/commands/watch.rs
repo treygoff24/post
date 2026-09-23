@@ -492,6 +492,17 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
         reason: reasons,
     } = args;
+    // Target setup can create `<root>/<room>/{inbox,read}` by name (the
+    // legacy branch's `mailbox_dirs`) unless this is a read-only watch. Hold
+    // the shared rename lock through setup only: the long-running loop never
+    // creates a room directory (heartbeats are create-new files inside an
+    // existing one), and holding it for the watch's life would block every
+    // rename.
+    let rename_lock = if crate::mailbox::read_only_command() {
+        None
+    } else {
+        Some(context.lock_rename(false)?)
+    };
     let rooms = context.load_rooms()?;
     let resolved = crate::participant::resolve(context)?;
     let requested_rooms = if requested_rooms.is_empty() {
@@ -612,6 +623,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // three independent reviewers and a live reproduction all confirmed.
     // Ownership is therefore declared, never inferred from selection: the
     // default is empty, and the per-room rule below is unchanged.
+    drop(rename_lock);
     let owned_rooms: BTreeSet<String> = owned_rooms.into_iter().collect();
 
     // Ring for anything not yet handled. Load each channel's seen-set as a

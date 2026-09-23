@@ -1167,6 +1167,9 @@ fn check_archive_copy(context: &Context, delivered: &Path, checks: &mut Vec<Doct
 
 fn apply_fixes(context: &Context, fixed: &mut Vec<String>) -> Result<(), AppError> {
     create_dir(&context.root, fixed)?;
+    // --fix creates `<root>/<room>/{inbox,read}` for every registered name:
+    // hold the shared rename lock so a rename cannot move a room under it.
+    let _rename_lock = context.lock_rename(false)?;
     if context.write_default_if_missing("rooms.json", DEFAULT_ROOMS_JSON)? {
         fixed.push(context.root.join("rooms.json").display().to_string());
     }

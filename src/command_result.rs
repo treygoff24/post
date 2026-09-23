@@ -30,6 +30,18 @@ impl CommandResult {
         Ok(Self::success(crate::output::json(value, pretty)?))
     }
 
+    /// Keep `guard` (a held lock) alive until this result's after-stdout
+    /// action, if any, has run: deferred cursor commits then happen under the
+    /// same lock as the command body.
+    pub(crate) fn holding(mut self, guard: std::fs::File) -> Self {
+        let action = self.after_stdout.take();
+        self.after_stdout = Some(Box::new(move || {
+            let _guard = guard;
+            action.map_or(Ok(()), |action| action())
+        }));
+        self
+    }
+
     pub(crate) fn registration_committed(mut self) -> Self {
         self.registration_committed = true;
         self
