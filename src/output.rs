@@ -545,6 +545,12 @@ pub struct ChatJoinOutput {
     pub created: bool,
     pub already_member: bool,
     pub event_id: Option<String>,
+    /// Messages that predated the join and now read as history — null on an
+    /// already-member response, which records no new membership start.
+    pub history_before_join: Option<usize>,
+    /// Runnable command that reads that history (`post chat <ch> --history
+    /// 20`); null on an already-member response.
+    pub history_hint: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

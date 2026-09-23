@@ -230,14 +230,39 @@ fn parse_routed_mail(path: &std::path::Path, receipt: &routing::Receipt) -> AppR
     parse_mail(path)
 }
 
+/// The join-from-now rule, shared by every channel-unread surface: a message
+/// whose id sorts before the participant's membership start is history, never
+/// unread. The watermark is an id prefix (`YYYYMMDD-HHMMSS-ffffff`), so the
+/// comparison is a plain string ordering — and a same-microsecond id still
+/// sorts past it on the hash suffix, erring toward delivery.
+pub(crate) fn is_channel_history(id: &str, membership_start: &str) -> bool {
+    id < membership_start
+}
+
+/// The participant's membership start in `channel_name` (the watermark
+/// `is_channel_history` compares against), or `None` when it is not an
+/// effective member. Every channel-unread surface resolves its floor here.
+pub(crate) fn channel_history_floor(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+) -> AppResult<Option<String>> {
+    ParticipantChannels::load(participant)?.membership_start(context, participant, channel_name)
+}
+
 pub(crate) fn unread_channel(
     context: &Context,
     participant: &Participant,
     channel_name: &str,
 ) -> AppResult<Vec<EligibleChannelMessage>> {
-    Ok(visible_channel(context, participant, channel_name)?
+    let Some(start) = channel_history_floor(context, participant, channel_name)? else {
+        return Ok(Vec::new());
+    };
+    Ok(all_channel_messages(context, participant, channel_name)?
         .into_iter()
-        .filter(|item| !item.own && !item.already_read)
+        .filter(|item| {
+            !item.own && !item.already_read && !is_channel_history(&item.message.id, &start)
+        })
         .collect())
 }
 
@@ -269,10 +294,9 @@ pub(crate) fn unread_channel_skipping_consumed(
     participant: &Participant,
     channel_name: &str,
 ) -> AppResult<Vec<EligibleChannelMessage>> {
-    let membership = ParticipantChannels::load(participant)?;
-    if !membership.effective(context, participant, channel_name)? {
+    let Some(start) = channel_history_floor(context, participant, channel_name)? else {
         return Ok(Vec::new());
-    }
+    };
     let cursors = ParticipantCursors::load(context, participant);
     let paths = ChannelPaths::new(context, channel_name)?;
     if !paths.exists() {
@@ -283,6 +307,12 @@ pub(crate) fn unread_channel_skipping_consumed(
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
+        // History is excluded by id before its body is opened, like a consumed
+        // id: a pre-membership message can never be delivered, so parsing it
+        // was pure cost.
+        if is_channel_history(id, &start) {
+            continue;
+        }
         if cursors.channel_has_seen(channel_name, id) {
             continue;
         }
@@ -315,6 +345,21 @@ pub(crate) fn visible_channel(
         return Ok(Vec::new());
     }
     all_channel_messages(context, participant, channel_name)
+}
+
+/// Every unseen message from someone else, IGNORING the membership start:
+/// the `--peek` domain. A peek consumes nothing, so it may glance at history
+/// a fresh member never saw; it is the one unseen-message surface that is not
+/// a report of unread (Trey-approved join-from-now design, 2026-09-23).
+pub(crate) fn unseen_channel_including_history(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+) -> AppResult<Vec<EligibleChannelMessage>> {
+    Ok(visible_channel(context, participant, channel_name)?
+        .into_iter()
+        .filter(|item| !item.own && !item.already_read)
+        .collect())
 }
 
 /// Every message of an ARCHIVED channel, membership not required. Archived

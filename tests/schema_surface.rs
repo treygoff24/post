@@ -426,7 +426,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "room",
             "created",
             "already_member",
-            "event_id"
+            "event_id",
+            "history_before_join",
+            "history_hint"
         ]
     );
     assert_shape!(

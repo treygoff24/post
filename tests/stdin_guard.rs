@@ -32,7 +32,8 @@ fn fixture() -> Fixture {
         .expect("participant id")
         .to_owned();
     assert_success(&sandbox.run_as_participant(
-        &["chat", "tax", "--join", "--json"],
+        // --backlog: the fixture seeds a fixed historical id as unread.
+        &["chat", "tax", "--join", "--backlog", "--json"],
         &participant,
         &alpha,
     ));

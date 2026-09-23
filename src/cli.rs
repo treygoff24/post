@@ -477,8 +477,15 @@ pub(crate) struct ChatArgs {
     pub name: String,
 
     /// Join the channel (creates it on first join); recorded in history.
+    /// Unread starts at the join instant — pre-join messages are history,
+    /// readable with --history; --backlog restores the old all-unread join.
     #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway"])]
     pub join: bool,
+
+    /// With --join: keep the whole backlog unread instead of starting unread
+    /// from the join instant.
+    #[arg(long, requires = "join")]
+    pub backlog: bool,
 
     /// Archive the channel for everyone on this host: hidden from `post
     /// channels` and Porch, never deleted. Any participant may archive; a new

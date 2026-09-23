@@ -169,6 +169,20 @@ const fn default_lease_hours() -> u64 {
     DEFAULT_LEASE_HOURS
 }
 
+impl Participant {
+    /// `created` as a channel-message-id watermark (`YYYYMMDD-HHMMSS-ffffff`
+    /// UTC): messages sorting before it predate this participant. `created`
+    /// carries only seconds, so its zeroed micros field errs toward unread
+    /// for a same-second message — the side that can never hide mail. `None`
+    /// when `created` is unparseable: a corrupt record then degrades to the
+    /// pre-watermark rule (everything unread) rather than hiding history
+    /// behind a guessed instant.
+    pub(crate) fn created_watermark(&self) -> Option<String> {
+        let when = parse_sent_timestamp(&self.created)?;
+        crate::mailbox::utc_id_watermark(when).ok()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Provenance {
@@ -1133,6 +1147,57 @@ pub(crate) fn parse_rfc3339(value: &str) -> Option<SystemTime> {
     {
         return None;
     }
+    let year = parse_digits(bytes, 0, 4)?;
+    let month = parse_digits(bytes, 5, 2)?;
+    let day = parse_digits(bytes, 8, 2)?;
+    let hour = parse_digits(bytes, 11, 2)?;
+    let minute = parse_digits(bytes, 14, 2)?;
+    let second = parse_digits(bytes, 17, 2)?;
+    if year < 1970
+        || !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let local_seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add(hour * 3600 + minute * 60 + second)?;
+    let utc_seconds = local_seconds.checked_sub(offset_seconds)?;
+    let utc_seconds = u64::try_from(utc_seconds).ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(utc_seconds))
+}
+
+/// Parse the `sent`-form timestamp `YYYY-MM-DD HH:MM:SS ±HHMM` that
+/// `mailbox::local_timestamp` stamps on `created`/`sent` fields — the
+/// human-facing counterpart of `parse_rfc3339` (space separators and a
+/// colon-less offset, where the RFC carries `T` and `+HH:MM`).
+pub(crate) fn parse_sent_timestamp(value: &str) -> Option<SystemTime> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 25
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b' ')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+        || bytes.get(19) != Some(&b' ')
+    {
+        return None;
+    }
+    let sign = match bytes[20] {
+        b'+' => 1_i64,
+        b'-' => -1_i64,
+        _ => return None,
+    };
+    let offset_hours = parse_digits(bytes, 21, 2)?;
+    let offset_minutes = parse_digits(bytes, 23, 2)?;
+    if offset_hours > 23 || offset_minutes > 59 {
+        return None;
+    }
+    let offset_seconds = sign * (offset_hours * 3600 + offset_minutes * 60);
     let year = parse_digits(bytes, 0, 4)?;
     let month = parse_digits(bytes, 5, 2)?;
     let day = parse_digits(bytes, 8, 2)?;

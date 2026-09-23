@@ -4581,7 +4581,14 @@ fn channel_two_room_flow_lists_participants_and_advances_each_seen_set() {
 
     let read: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
-    assert_eq!(read.count, peek.count, "peek must not advance the cursor");
+    // Peek also shows beta's unseen pre-join history (alpha's join event), so
+    // counts differ by design; what peek must not do is consume the message.
+    assert!(
+        read.messages
+            .iter()
+            .any(|message| message.message.id == sent.message.id),
+        "peek must not advance the cursor"
+    );
     let empty: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--json"], None, &beta));
     assert_eq!(empty.count, 0, "read must advance the cursor");
@@ -12914,4 +12921,514 @@ fn profile_show_names_its_argument_a_participant() {
         "{}",
         profile.usage
     );
+}
+
+// ---- join from now (post-0ku) -------------------------------------------
+//
+// A participant's channel unread starts at its membership start: the explicit
+// join instant, or its own `created` under legacy workspace membership.
+// Anything older is history: never unread, still readable via --peek,
+// --history, and search.
+
+fn jfn_id(n: usize) -> String {
+    format!("20260801-{:06}-000001-{:06x}", n, n)
+}
+
+fn jfn_write(
+    sandbox: &Sandbox,
+    channel: &str,
+    id: &str,
+    from: &str,
+    mentions: &[&str],
+    body: &str,
+) {
+    let message = serde_json::json!({
+        "id": id,
+        "from": from,
+        "channel": channel,
+        "subject": "",
+        "sent": "2026-08-01 00:00:00 +0000",
+        "mentions": mentions,
+    });
+    fs::write(
+        sandbox
+            .mail_root
+            .join("channels")
+            .join(channel)
+            .join("messages")
+            .join(format!("{id}.msg")),
+        format!(
+            "{}\n---\n{body}",
+            serde_json::to_string_pretty(&message).expect("serialize channel message")
+        ),
+    )
+    .expect("write channel message fixture");
+}
+
+fn jfn_bind(sandbox: &Sandbox, key: &str, cwd: &Path, workspace: &str) -> String {
+    sandbox.bind_claude(key, cwd, Some(workspace))["id"]
+        .as_str()
+        .expect("participant id")
+        .to_owned()
+}
+
+fn jfn_unread(sandbox: &Sandbox, participant: &str, cwd: &Path, channel: &str) -> Option<usize> {
+    let output = sandbox.run_as_participant(&["channels", "--json"], participant, cwd);
+    assert_success(&output);
+    let listed: ChannelsOutput = from_stdout(&output);
+    listed
+        .channels
+        .iter()
+        .find(|item| item.name == channel)
+        .unwrap_or_else(|| panic!("channel {channel} listed"))
+        .unread
+}
+
+fn jfn_snapshot_ids(
+    sandbox: &Sandbox,
+    participant: &str,
+    cwd: &Path,
+    channel: &str,
+) -> Vec<(String, WatchReason)> {
+    let output = sandbox.run_as_participant(
+        &["watch", "--snapshot", "--json", "--limit", "0"],
+        participant,
+        cwd,
+    );
+    assert_success(&output);
+    watch_events(&output.stdout)
+        .into_iter()
+        .filter_map(|event| match event {
+            WatchEvent::ChannelMessage {
+                channel: name,
+                id,
+                reason,
+                ..
+            } if name == channel => Some((id, reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn jfn_read(sandbox: &Sandbox, participant: &str, cwd: &Path, args: &[&str]) -> ChatReadOutput {
+    let output = sandbox.run_as_participant(args, participant, cwd);
+    assert_success(&output);
+    from_stdout(&output)
+}
+
+fn jfn_join(
+    sandbox: &Sandbox,
+    participant: &str,
+    cwd: &Path,
+    channel: &str,
+    backlog: bool,
+) -> ChatJoinOutput {
+    let mut args = vec!["chat", channel, "--join", "--json"];
+    if backlog {
+        args.push("--backlog");
+    }
+    let output = sandbox.run_as_participant(&args, participant, cwd);
+    assert_success(&output);
+    from_stdout(&output)
+}
+
+fn jfn_send(sandbox: &Sandbox, participant: &str, cwd: &Path, channel: &str, body: &str) -> String {
+    let output = sandbox.run_as_participant(
+        &[
+            "chat", channel, "--send", "--anyway", "--body", body, "--json",
+        ],
+        participant,
+        cwd,
+    );
+    assert_success(&output);
+    let sent: ChatSendOutput = from_stdout(&output);
+    sent.message.id
+}
+
+/// A 60-message channel `tax`: beta's join event plus 59 older fixture
+/// messages from beta. Returns (alpha dir, beta dir, beta participant).
+fn jfn_sixty(sandbox: &Sandbox) -> (PathBuf, PathBuf, String) {
+    let (alpha, beta) = register_alpha_beta(sandbox);
+    let beta_participant = jfn_bind(sandbox, "jfn-beta", &beta, "beta");
+    jfn_join(sandbox, &beta_participant, &beta, "tax", false);
+    for n in 0..59 {
+        jfn_write(
+            sandbox,
+            "tax",
+            &jfn_id(n),
+            "beta",
+            &[],
+            &format!("backlog {n}"),
+        );
+    }
+    let files = fs::read_dir(sandbox.mail_root.join("channels/tax/messages"))
+        .expect("messages dir")
+        .count();
+    assert_eq!(files, 60, "fixture channel holds 60 messages");
+    (alpha, beta, beta_participant)
+}
+
+#[test]
+fn join_from_now_fresh_joiner_sees_no_backlog_then_exactly_new_mail() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta, beta_participant) = jfn_sixty(&sandbox);
+    let fresh = jfn_bind(&sandbox, "jfn-fresh", &alpha, "alpha");
+
+    let joined = jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    assert!(!joined.already_member);
+    assert_eq!(joined.history_before_join, Some(60));
+    let hint = joined.history_hint.expect("history hint");
+    assert_eq!(hint, "post chat 'tax' --history 20");
+    // The hint runs as written, through a real shell.
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_post"))
+        .parent()
+        .expect("binary dir")
+        .to_owned();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{hint} --json </dev/null"))
+        .current_dir(&alpha)
+        .env("PATH", path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &fresh)
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .expect("run the hint");
+    assert_success(&ran);
+    let history: ChatReadOutput = from_stdout(&ran);
+    assert_eq!(history.count, 20);
+    // The participant channel file stays in the old format: the watermark
+    // lives in a sibling file an older post never opens.
+    let participants = sandbox.mail_root.join("participants").join(&fresh);
+    let stored: serde_json::Value = serde_json::from_slice(
+        &fs::read(participants.join("channels.json")).expect("channels.json"),
+    )
+    .expect("channels.json parses");
+    let keys: Vec<&String> = stored.as_object().expect("object").keys().collect();
+    assert_eq!(keys, ["joined", "left", "version"]);
+    assert!(participants.join("membership-starts.json").is_file());
+
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(0));
+    assert!(jfn_snapshot_ids(&sandbox, &fresh, &alpha, "tax").is_empty());
+    let read = jfn_read(&sandbox, &fresh, &alpha, &["chat", "tax", "--json"]);
+    assert_eq!(read.count, 0);
+    assert!(!read.has_more);
+
+    // A rejoin by an existing member is a no-op receipt.
+    let again = jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    assert!(again.already_member);
+    assert_eq!(again.history_before_join, None);
+    assert_eq!(again.history_hint, None);
+
+    let new_id = jfn_send(&sandbox, &beta_participant, &beta, "tax", "after the join");
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(1));
+    assert_eq!(
+        jfn_snapshot_ids(&sandbox, &fresh, &alpha, "tax"),
+        vec![(new_id.clone(), WatchReason::Channel)]
+    );
+    let read = jfn_read(&sandbox, &fresh, &alpha, &["chat", "tax", "--json"]);
+    assert_eq!(read.count, 1);
+    assert_eq!(read.messages[0].message.id, new_id);
+    assert!(!read.has_more);
+}
+
+/// A channel whose legacy `members.json` names workspace gamma, holding 30
+/// fixture messages from beta, one of them an @gamma mention.
+fn jfn_legacy(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
+    let (_alpha, beta) = register_alpha_beta(sandbox);
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&gamma).expect("create gamma room path");
+    register_room(sandbox, "gamma", &gamma);
+    let channel = sandbox.mail_root.join("channels/legacy");
+    fs::create_dir_all(channel.join("messages")).expect("channel messages");
+    fs::write(
+        channel.join("channel.json"),
+        r#"{"name":"legacy","created":"2026-08-01 00:00:00 +0000","created_by":"gamma"}"#,
+    )
+    .expect("channel info");
+    fs::write(
+        channel.join("members.json"),
+        r#"{"gamma":"2026-08-01 00:00:00 +0000"}"#,
+    )
+    .expect("legacy members");
+    for n in 0..29 {
+        jfn_write(
+            sandbox,
+            "legacy",
+            &jfn_id(n),
+            "beta",
+            &[],
+            &format!("legacy {n}"),
+        );
+    }
+    jfn_write(
+        sandbox,
+        "legacy",
+        &jfn_id(29),
+        "beta",
+        &["gamma"],
+        "@gamma old mention",
+    );
+    (gamma, beta)
+}
+
+#[test]
+fn join_from_now_legacy_membership_starts_at_created_and_keeps_old_members_mail() {
+    let sandbox = Sandbox::new();
+    let (gamma, _beta) = jfn_legacy(&sandbox);
+    // Bound before the fixtures (created 2026-01-01): an existing member.
+    let old = sandbox.test_participant("gamma");
+    assert_eq!(jfn_unread(&sandbox, &old, &gamma, "legacy"), Some(30));
+
+    let fresh = jfn_bind(&sandbox, "jfn-legacy-fresh", &gamma, "gamma");
+    assert_eq!(jfn_unread(&sandbox, &fresh, &gamma, "legacy"), Some(0));
+    assert!(jfn_snapshot_ids(&sandbox, &fresh, &gamma, "legacy").is_empty());
+
+    let new_id = jfn_send(&sandbox, &old, &gamma, "legacy", "posted after binding");
+    assert_eq!(jfn_unread(&sandbox, &fresh, &gamma, "legacy"), Some(1));
+    let read = jfn_read(&sandbox, &fresh, &gamma, &["chat", "legacy", "--json"]);
+    assert_eq!(read.count, 1);
+    assert_eq!(read.messages[0].message.id, new_id);
+    // The change never hides mail from the existing member.
+    assert_eq!(jfn_unread(&sandbox, &old, &gamma, "legacy"), Some(30));
+    // History stays readable without a flag.
+    let history = jfn_read(
+        &sandbox,
+        &fresh,
+        &gamma,
+        &["chat", "legacy", "--history", "50", "--json"],
+    );
+    assert_eq!(history.count, 31);
+}
+
+#[test]
+fn join_from_now_mentions_obey_the_watermark() {
+    let sandbox = Sandbox::new();
+    let (gamma, _beta) = jfn_legacy(&sandbox);
+    let old = sandbox.test_participant("gamma");
+    let fresh = jfn_bind(&sandbox, "jfn-mention-fresh", &gamma, "gamma");
+    // The pre-binding @gamma mention rings the old member but not the fresh one.
+    assert!(jfn_snapshot_ids(&sandbox, &old, &gamma, "legacy")
+        .iter()
+        .any(|(id, reason)| id == &jfn_id(29) && *reason == WatchReason::Mention));
+    assert!(jfn_snapshot_ids(&sandbox, &fresh, &gamma, "legacy").is_empty());
+    let mention = jfn_send(&sandbox, &old, &gamma, "legacy", "@gamma new mention");
+    assert_eq!(
+        jfn_snapshot_ids(&sandbox, &fresh, &gamma, "legacy"),
+        vec![(mention.clone(), WatchReason::Mention)]
+    );
+    // Peek's @mention rescue skips history: a one-message peek shows only the
+    // new mention, not the pre-binding one.
+    let peek = jfn_read(
+        &sandbox,
+        &fresh,
+        &gamma,
+        &["chat", "legacy", "--peek", "--limit", "1", "--json"],
+    );
+    assert_eq!(
+        peek.messages
+            .iter()
+            .map(|m| m.message.id.clone())
+            .collect::<Vec<_>>(),
+        vec![mention]
+    );
+}
+
+#[test]
+fn join_from_now_backlog_flag_restores_the_whole_backlog_as_unread() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta, _beta_participant) = jfn_sixty(&sandbox);
+    let fresh = jfn_bind(&sandbox, "jfn-backlog", &alpha, "alpha");
+
+    let refused =
+        sandbox.run_as_participant(&["chat", "tax", "--backlog", "--json"], &fresh, &alpha);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "--backlog is valid only with --join"
+    );
+
+    let joined = jfn_join(&sandbox, &fresh, &alpha, "tax", true);
+    assert_eq!(joined.history_before_join, Some(0));
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(60));
+    assert_eq!(jfn_snapshot_ids(&sandbox, &fresh, &alpha, "tax").len(), 60);
+    let read = jfn_read(&sandbox, &fresh, &alpha, &["chat", "tax", "--json"]);
+    assert_eq!(read.count, 25);
+    assert!(read.has_more);
+    let mut all: Vec<String> = fs::read_dir(sandbox.mail_root.join("channels/tax/messages"))
+        .expect("messages dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("stem")
+                .to_owned()
+        })
+        .collect();
+    all.sort();
+    let read_ids: Vec<String> = read.messages.iter().map(|m| m.message.id.clone()).collect();
+    assert_eq!(
+        read_ids,
+        all[..25].to_vec(),
+        "the first read is the oldest 25"
+    );
+}
+
+#[test]
+fn join_from_now_rejoin_after_leave_treats_the_gap_as_history() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta, beta_participant) = jfn_sixty(&sandbox);
+    let fresh = jfn_bind(&sandbox, "jfn-rejoin", &alpha, "alpha");
+    jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    let first = jfn_send(&sandbox, &beta_participant, &beta, "tax", "while joined");
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(1));
+
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "tax", "--leave", "--json"],
+        &fresh,
+        &alpha,
+    ));
+    let away = jfn_send(&sandbox, &beta_participant, &beta, "tax", "while away");
+    let rejoined = jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    assert!(!rejoined.already_member);
+    assert!(rejoined.history_before_join.expect("new member count") >= 62);
+
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(0));
+    let read = jfn_read(&sandbox, &fresh, &alpha, &["chat", "tax", "--json"]);
+    assert_eq!(
+        read.count, 0,
+        "neither {first} nor {away} is unread after the rejoin"
+    );
+    let after = jfn_send(
+        &sandbox,
+        &beta_participant,
+        &beta,
+        "tax",
+        "after the rejoin",
+    );
+    let read = jfn_read(&sandbox, &fresh, &alpha, &["chat", "tax", "--json"]);
+    assert_eq!(
+        read.messages
+            .iter()
+            .map(|m| m.message.id.clone())
+            .collect::<Vec<_>>(),
+        vec![after]
+    );
+}
+
+#[test]
+fn join_from_now_history_stays_reachable_by_peek_history_and_search() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta, beta_participant) = jfn_sixty(&sandbox);
+    let fresh = jfn_bind(&sandbox, "jfn-reach", &alpha, "alpha");
+    jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    let target = jfn_id(58);
+
+    let peek = jfn_read(
+        &sandbox,
+        &fresh,
+        &alpha,
+        &["chat", "tax", "--peek", "--json"],
+    );
+    assert!(
+        peek.messages.iter().any(|m| m.message.id == target),
+        "peek shows pre-join history"
+    );
+    let history = jfn_read(
+        &sandbox,
+        &fresh,
+        &alpha,
+        &["chat", "tax", "--history", "5", "--json"],
+    );
+    assert!(history.messages.iter().any(|m| m.message.id == target));
+    let grep = jfn_read(
+        &sandbox,
+        &fresh,
+        &alpha,
+        &[
+            "chat",
+            "tax",
+            "--history",
+            "100",
+            "--grep",
+            "backlog 58",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        grep.messages
+            .iter()
+            .map(|m| m.message.id.clone())
+            .collect::<Vec<_>>(),
+        vec![target.clone()]
+    );
+    let search = sandbox.run_as_participant(
+        &["search", "backlog 58", "--channel", "tax", "--json"],
+        &fresh,
+        &alpha,
+    );
+    assert_success(&search);
+    let search: serde_json::Value = from_stdout(&search);
+    assert_eq!(search["count"], 1);
+    assert_eq!(search["results"][0]["id"], target.as_str());
+    // None of those reads consumed anything or turned history into unread.
+    assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(0));
+    // --discard-through counts and marks only unread, never history.
+    let new_id = jfn_send(&sandbox, &beta_participant, &beta, "tax", "one new");
+    let discarded = sandbox.run_as_participant(
+        &["chat", "tax", "--discard-through", &new_id, "--json"],
+        &fresh,
+        &alpha,
+    );
+    assert_success(&discarded);
+    let discarded: ChatDiscardThroughOutput = from_stdout(&discarded);
+    // The new message plus this member's own join event (discard-through has
+    // always marked own unseen ids); without the floor it would be 62.
+    assert_eq!(discarded.discarded, 2);
+}
+
+#[test]
+fn join_from_now_old_format_channel_file_loads_and_falls_back_to_created() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta, _beta_participant) = jfn_sixty(&sandbox);
+    // Seeded participant: created 2026-01-01. An old-format channels.json
+    // (no membership-starts.json) names tax as joined.
+    let old = sandbox.test_participant("alpha");
+    let dir = sandbox.mail_root.join("participants").join(&old);
+    fs::write(
+        dir.join("channels.json"),
+        "{\n  \"version\": 1,\n  \"joined\": [\"tax\"],\n  \"left\": []\n}\n",
+    )
+    .expect("old-format channels.json");
+    assert!(!dir.join("membership-starts.json").exists());
+    // One message older than `created`: history under the fallback.
+    jfn_write(
+        &sandbox,
+        "tax",
+        "20251231-235959-000001-0000aa",
+        "beta",
+        &[],
+        "before created",
+    );
+    // Fallback to created (2026-01-01): the 59 August fixtures and beta's
+    // join event are unread; the December message is history.
+    assert_eq!(jfn_unread(&sandbox, &old, &alpha, "tax"), Some(60));
+    let history = jfn_read(
+        &sandbox,
+        &old,
+        &alpha,
+        &["chat", "tax", "--history", "100", "--json"],
+    );
+    assert_eq!(history.count, 61);
 }

@@ -151,10 +151,14 @@ impl ParticipantCursors {
     ) -> AppResult<CursorAdvance> {
         channel::validate_channel_name(channel)?;
         validate_channel_id(target)?;
+        // History (ids before the membership start) is not unread, so a
+        // discard neither counts nor marks it.
+        let floor = eligibility::channel_history_floor(context, participant, channel)?;
         update_participant(context, participant, LockWait::Blocking, |state| {
             let seen = state.channels.entry(channel.to_owned()).or_default();
             let prior = seen.last().cloned();
-            let candidates = unseen_candidates(context, channel, seen, Some(target))?;
+            let candidates =
+                unseen_candidates(context, channel, seen, Some(target), floor.as_deref())?;
             let marked = candidates.len();
             seen.extend(candidates);
             let cursor = seen.last().cloned().or(prior.clone()).unwrap_or_default();
@@ -735,7 +739,7 @@ fn consume_inner(
         Some((channel, target)) => {
             let empty = BTreeSet::new();
             let seen = state.channels.get(channel).unwrap_or(&empty);
-            unseen_candidates(context, channel, seen, Some(target))?
+            unseen_candidates(context, channel, seen, Some(target), None)?
         }
         None => BTreeSet::new(),
     };
@@ -1163,6 +1167,7 @@ fn unseen_candidates(
     channel: &str,
     seen: &BTreeSet<String>,
     target: Option<&str>,
+    history_floor: Option<&str>,
 ) -> AppResult<BTreeSet<String>> {
     let directory = context
         .root
@@ -1196,7 +1201,10 @@ fn unseen_candidates(
             channel::parse_channel_message(&path)?;
             continue;
         };
-        if seen.contains(id) || target.is_some_and(|target| id > target) {
+        if seen.contains(id)
+            || target.is_some_and(|target| id > target)
+            || history_floor.is_some_and(|floor| eligibility::is_channel_history(id, floor))
+        {
             continue;
         }
         channel::parse_channel_message(&path)?;

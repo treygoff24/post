@@ -201,12 +201,16 @@ pub(crate) struct JoinOutcome {
     pub channel_created: bool,
     pub already_member: bool,
     pub event_id: Option<String>,
+    /// Messages that predated this join and now read as history. Absent on
+    /// an already-member response, which records no new membership start.
+    pub history_before_join: Option<usize>,
 }
 
 pub(crate) fn join(
     context: &Context,
     channel: &str,
     description: Option<&str>,
+    backlog: bool,
 ) -> AppResult<JoinOutcome> {
     let rooms = context.load_rooms()?;
     let (room, provenance) = acting_room(context, &rooms)?;
@@ -229,6 +233,7 @@ pub(crate) fn join(
             channel_created: false,
             already_member: true,
             event_id: None,
+            history_before_join: None,
         });
     }
 
@@ -287,6 +292,25 @@ pub(crate) fn join(
         AppError::io("create channel messages directory", &paths.messages, error)
     })?;
 
+    // The membership start: join-from-now records this instant, so the whole
+    // pre-join backlog is history rather than unread; `--backlog` records the
+    // minimum watermark instead, keeping every message unread (the old
+    // behavior, as an opt-in). The count mirrors exactly what the new member
+    // will not see as unread: existing ids that sort below the start.
+    let start = if backlog {
+        crate::channel_state::BACKLOG_MEMBERSHIP_START.to_owned()
+    } else {
+        local_timestamp_micros()?.0
+    };
+    let history_before_join = message_files(&paths.messages)?
+        .iter()
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|id| id < start.as_str())
+        })
+        .count();
+
     let (_, sent) = local_timestamp_micros()?;
     let channel_created = if paths.exists() {
         if let Some(description) = description {
@@ -325,13 +349,19 @@ pub(crate) fn join(
             provenance,
         },
     )?;
-    crate::channel_state::ParticipantChannels::join(context, &actor.participant, channel)?;
+    crate::channel_state::ParticipantChannels::join_at(
+        context,
+        &actor.participant,
+        channel,
+        &start,
+    )?;
 
     Ok(JoinOutcome {
         room,
         channel_created,
         already_member: false,
         event_id: Some(event_id),
+        history_before_join: Some(history_before_join),
     })
 }
 

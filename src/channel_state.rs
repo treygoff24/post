@@ -13,11 +13,41 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 const PARTICIPANT_CHANNELS_VERSION: u64 = 1;
+const MEMBERSHIP_STARTS_VERSION: u64 = 1;
+
+/// Per-channel membership-start watermarks for one participant, kept in a
+/// sibling of `channels.json` rather than inside it: `channels.json` parses
+/// with `deny_unknown_fields`, so an in-file field would make an older post
+/// fail EVERY channel operation for the participant. A file older binaries
+/// never open is the additive path — they ignore it entirely, and a newer
+/// file an older feature build reads is likewise tolerated (no
+/// `deny_unknown_fields` here either).
+const MEMBERSHIP_STARTS_FILE: &str = "membership-starts.json";
+
+/// `post chat --join --backlog`: the watermark that sorts before every real
+/// message id, so the whole backlog reads as unread — the pre-join-from-now
+/// behavior, kept as an explicit opt-in.
+pub(crate) const BACKLOG_MEMBERSHIP_START: &str = "00000000-000000-000000";
+
+/// `YYYYMMDD-HHMMSS-ffffff`: a channel message id without its hash suffix.
+fn is_membership_start(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 22
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[8] == b'-'
+        && bytes[9..15].iter().all(u8::is_ascii_digit)
+        && bytes[15] == b'-'
+        && bytes[16..22].iter().all(u8::is_ascii_digit)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParticipantChannels {
     joined: BTreeSet<String>,
     left: BTreeSet<String>,
+    /// Explicit-join instant per channel, as a message-id watermark. A joined
+    /// channel with no recorded instant (old-format state) falls back to the
+    /// participant's `created` at read time; nothing is backfilled here.
+    starts: BTreeMap<String, String>,
 }
 
 impl ParticipantChannels {
@@ -66,7 +96,42 @@ impl ParticipantChannels {
                 "participant channels joined/left sets overlap",
             ));
         }
-        Ok(Self { joined, left })
+        let starts = load_starts(participant)?;
+        Ok(Self {
+            joined,
+            left,
+            starts,
+        })
+    }
+
+    /// The instant this participant's membership in `channel` began, as a
+    /// message-id watermark: a message whose id sorts before it is history —
+    /// never unread. `None` when the participant is not an effective member.
+    /// An explicit join uses its recorded instant; a joined channel with no
+    /// recorded instant (old-format state) and legacy workspace membership
+    /// both fall back to the participant's own `created`.
+    pub(crate) fn membership_start(
+        &self,
+        context: &Context,
+        participant: &Participant,
+        channel: &str,
+    ) -> AppResult<Option<String>> {
+        if !self.effective(context, participant, channel)? {
+            return Ok(None);
+        }
+        let recorded = if self.joined.contains(channel) {
+            self.starts.get(channel).cloned()
+        } else {
+            None
+        };
+        // A member whose `created` cannot be parsed keeps the pre-watermark
+        // rule — everything unread — rather than an indeterminate floor that
+        // would hide mail it has never seen.
+        Ok(Some(
+            recorded
+                .or_else(|| participant.created_watermark())
+                .unwrap_or_else(|| BACKLOG_MEMBERSHIP_START.to_owned()),
+        ))
     }
 
     pub(crate) fn effective(
@@ -98,15 +163,41 @@ impl ParticipantChannels {
         self.left.contains(channel)
     }
 
+    /// Test fixture: join with the `--backlog` watermark, so fixtures that seed
+    /// fixed historical ids keep the membership semantics they were written
+    /// for. Join-from-now is exercised through `join_at` and the CLI.
+    #[cfg(test)]
     pub(crate) fn join(
         context: &Context,
         participant: &Participant,
         channel: &str,
     ) -> AppResult<bool> {
+        Self::join_at(context, participant, channel, BACKLOG_MEMBERSHIP_START)
+    }
+
+    /// Join `channel` recording `start` (a `YYYYMMDD-HHMMSS-ffffff` id
+    /// watermark) as the membership start. `BACKLOG_MEMBERSHIP_START` is the
+    /// `--backlog` spelling: it sorts before every real message, so the whole
+    /// history stays unread.
+    pub(crate) fn join_at(
+        context: &Context,
+        participant: &Participant,
+        channel: &str,
+        start: &str,
+    ) -> AppResult<bool> {
         crate::channel::validate_channel_name(channel)?;
+        if !is_membership_start(start) {
+            return Err(crate::error::AppError::invalid_argument(format!(
+                "membership start '{start}' is not a channel-id watermark"
+            )));
+        }
         mutate(context, participant, |state| {
             state.left.remove(channel);
-            Ok(state.joined.insert(channel.to_owned()))
+            let inserted = state.joined.insert(channel.to_owned());
+            if inserted {
+                state.starts.insert(channel.to_owned(), start.to_owned());
+            }
+            Ok(inserted)
         })
     }
 
@@ -120,6 +211,9 @@ impl ParticipantChannels {
         mutate(context, participant, |state| {
             let was_effective = state.effective(context, participant, channel)?;
             state.joined.remove(channel);
+            // The membership start resets with the membership: a rejoin
+            // records its own instant rather than inheriting this one.
+            state.starts.remove(channel);
             state.left.insert(channel.to_owned());
             Ok(was_effective)
         })
@@ -422,6 +516,54 @@ fn has_blocked_pair(
     })
 }
 
+fn load_starts(participant: &Participant) -> AppResult<BTreeMap<String, String>> {
+    let path = participant.dir.join(MEMBERSHIP_STARTS_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(crate::error::AppError::io(
+                "read membership starts",
+                &path,
+                error,
+            ))
+        }
+    };
+    // Tolerant reader: no `deny_unknown_fields`, so a newer post's fields
+    // survive a downgrade. `starts` is defaulted so the first written form is
+    // not the only one this build accepts.
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        version: u64,
+        #[serde(default)]
+        starts: BTreeMap<String, String>,
+    }
+    let stored: Stored = serde_json::from_slice(&bytes).map_err(|error| {
+        crate::error::AppError::config(&path, format!("invalid membership starts JSON: {error}"))
+    })?;
+    if stored.version != MEMBERSHIP_STARTS_VERSION {
+        return Err(crate::error::AppError::config(
+            &path,
+            format!("unsupported membership starts version {}", stored.version),
+        ));
+    }
+    for (name, start) in &stored.starts {
+        crate::channel::validate_channel_name(name).map_err(|error| {
+            crate::error::AppError::config(
+                &path,
+                format!("invalid channel name '{name}': {}", error.message),
+            )
+        })?;
+        if !is_membership_start(start) {
+            return Err(crate::error::AppError::config(
+                &path,
+                format!("invalid membership start '{start}' for channel '{name}'"),
+            ));
+        }
+    }
+    Ok(stored.starts)
+}
+
 fn mutate<T>(
     context: &Context,
     participant: &Participant,
@@ -434,7 +576,29 @@ fn mutate<T>(
     let mut state = ParticipantChannels::load(participant)?;
     let before = state.clone();
     let result = change(&mut state)?;
-    if state != before {
+    // The watermark file commits before the membership file: an orphan start
+    // is harmless (the next join overwrites it), while a join committed
+    // without its start would silently fall back to `created` and flood a
+    // long-lived channel's backlog into unread.
+    if state.starts != before.starts {
+        #[derive(serde::Serialize)]
+        struct Stored<'a> {
+            version: u64,
+            starts: &'a BTreeMap<String, String>,
+        }
+        let path = participant.dir.join(MEMBERSHIP_STARTS_FILE);
+        let mut bytes = serde_json::to_vec_pretty(&Stored {
+            version: MEMBERSHIP_STARTS_VERSION,
+            starts: &state.starts,
+        })
+        .map_err(|error| {
+            crate::error::AppError::config(&path, format!("serialize membership starts: {error}"))
+        })?;
+        bytes.push(b'\n');
+        atomic_replace(&path, &bytes)
+            .map_err(|error| crate::error::AppError::io("write membership starts", &path, error))?;
+    }
+    if state.joined != before.joined || state.left != before.left {
         #[derive(serde::Serialize)]
         struct Stored<'a> {
             version: u64,

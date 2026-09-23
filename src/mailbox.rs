@@ -1051,6 +1051,46 @@ pub(crate) fn new_mail_id(timestamp: &str, attempt: u64) -> AppResult<String> {
     Ok(format!("{timestamp}-{:06x}", mixed & 0x00ff_ffff))
 }
 
+/// The id-order watermark form of an instant: the `YYYYMMDD-HHMMSS-ffffff`
+/// UTC prefix every channel message id carries (`new_mail_id` over
+/// `local_timestamp_micros`). A message whose id sorts below the watermark
+/// predates it; a same-microsecond id still sorts past it on the hash
+/// suffix, so the comparison errs toward showing, never hiding.
+pub(crate) fn utc_id_watermark(when: SystemTime) -> AppResult<String> {
+    let elapsed = when.duration_since(UNIX_EPOCH).map_err(|error| {
+        AppError::new(
+            ErrorCode::IoError,
+            format!("timestamp is before the Unix epoch: {error}"),
+            "Correct the system clock and retry.",
+        )
+    })?;
+    let seconds = libc::time_t::try_from(elapsed.as_secs()).map_err(|_| {
+        AppError::new(
+            ErrorCode::IoError,
+            "system time cannot be represented by the local clock",
+            "Correct the system clock and retry.",
+        )
+    })?;
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut utc) }.is_null() {
+        return Err(AppError::new(
+            ErrorCode::IoError,
+            "UTC time conversion failed",
+            "Correct the system clock and retry.",
+        ));
+    }
+    Ok(format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}-{:06}",
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec,
+        elapsed.subsec_micros()
+    ))
+}
+
 pub(crate) fn closest_room<'a>(input: &str, rooms: &'a RoomMap) -> Option<&'a str> {
     rooms
         .keys()

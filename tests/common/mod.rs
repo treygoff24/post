@@ -508,7 +508,10 @@ impl Sandbox {
             "id": id,
             "harness": "test",
             "conversation_key_digest": digest,
-            "created": "2026-09-16 00:00:00 +0000",
+            // Before every fixed fixture id: these participants model
+            // long-standing members, so legacy workspace membership reads the
+            // fixtures as unread rather than join-from-now history.
+            "created": "2026-01-01 00:00:00 +0000",
             "last_seen": "2099-01-01T00:00:00Z",
             "lease_hours": 24,
             "workspace": workspace,
@@ -701,8 +704,16 @@ pub fn register_room(sandbox: &Sandbox, name: &str, path: &Path) {
     sandbox.seed_test_participant(Some(name), None);
 }
 
+/// Fixture join with `--backlog`: suites seed fixed historical ids after
+/// joining and assert on them as unread, which is the pre-join-from-now
+/// membership. Join-from-now itself is covered by the dedicated
+/// `join_from_now_*` tests in `tests/cli.rs`.
 pub fn join_channel(sandbox: &Sandbox, channel: &str, cwd: &Path) {
-    let output = sandbox.run_in(&["chat", channel, "--join", "--json"], None, cwd);
+    let output = sandbox.run_in(
+        &["chat", channel, "--join", "--backlog", "--json"],
+        None,
+        cwd,
+    );
     assert_success(&output);
 }
 

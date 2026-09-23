@@ -73,6 +73,7 @@ pub(super) fn run(
             context,
             &args.name,
             args.description.as_deref(),
+            args.backlog,
             json_output,
             pretty,
         );
@@ -220,7 +221,11 @@ fn bare_name_fix(args: &ChatArgs, bare: &str, json_output: bool, pretty: bool) -
     let verb = if args.leave {
         "--leave"
     } else if args.join && args.description.is_none() {
-        "--join"
+        if args.backlog {
+            "--join --backlog"
+        } else {
+            "--join"
+        }
     } else {
         return None;
     };
@@ -730,10 +735,23 @@ fn read(
         }
         all
     } else {
+        // A peek consumes nothing, so its domain is every unseen message,
+        // history included: that keeps pre-membership messages reachable
+        // through --peek. Consuming reads select unread only (join-from-now).
         match participant.as_ref() {
-            Some(participant) => read_batch_participant(context, participant, &args.name)?,
+            Some(participant) => {
+                read_batch_participant(context, participant, &args.name, args.peek)?
+            }
             None => read_batch(context, &room, &args.name)?,
         }
+    };
+    // Peek's @mention rescue is scoped to the member's own span: history
+    // mentions predate the membership and are not addressed to this session.
+    let peek_rescue_floor = match participant.as_ref() {
+        Some(participant) if args.peek => {
+            cursor_state::eligibility::channel_history_floor(context, participant, &args.name)?
+        }
+        _ => None,
     };
     // Keep the full unread selection for --discard: it deliberately consumes
     // everything, independent of the display bound used by ordinary reads.
@@ -764,7 +782,7 @@ fn read(
     let skipped = if cursorless {
         0
     } else if args.peek {
-        apply_peek_catch_up(&mut batch, args.limit, &room)?
+        apply_peek_catch_up(&mut batch, args.limit, &room, peek_rescue_floor.as_deref())?
     } else {
         apply_consuming_catch_up(&mut batch, args.limit)
     };
@@ -1029,6 +1047,7 @@ fn apply_peek_catch_up(
     batch: &mut Vec<(ChannelMessage, String)>,
     limit: Option<usize>,
     room: &str,
+    rescue_floor: Option<&str>,
 ) -> AppResult<usize> {
     let n = match limit {
         None => DEFAULT_CATCH_UP,
@@ -1043,7 +1062,9 @@ fn apply_peek_catch_up(
     let mut rescued = Vec::new();
     let mut skipped = 0;
     for item in older {
-        if item.0.mentions.iter().any(|m| m == room) {
+        let history = rescue_floor
+            .is_some_and(|floor| cursor_state::eligibility::is_channel_history(&item.0.id, floor));
+        if !history && item.0.mentions.iter().any(|m| m == room) {
             rescued.push(item);
         } else {
             skipped += 1;
@@ -1729,10 +1750,13 @@ fn read_batch(
     )
 }
 
+/// A participant's read selection: unread (after the membership start) for a
+/// consuming read, or every unseen message including history for `--peek`.
 fn read_batch_participant(
     context: &Context,
     participant: &crate::participant::Participant,
     channel_name: &str,
+    include_history: bool,
 ) -> AppResult<Vec<(ChannelMessage, String)>> {
     let membership = crate::channel_state::ParticipantChannels::load(participant)?;
     if !membership.effective(context, participant, channel_name)? {
@@ -1750,12 +1774,19 @@ fn read_batch_participant(
         .input(participant.id.clone())
         .reason("participant is not an effective channel member"));
     }
-    Ok(
+    let selected = if include_history {
+        cursor_state::eligibility::unseen_channel_including_history(
+            context,
+            participant,
+            channel_name,
+        )?
+    } else {
         cursor_state::eligibility::unread_channel(context, participant, channel_name)?
-            .into_iter()
-            .map(|item| (item.message, item.body))
-            .collect(),
-    )
+    };
+    Ok(selected
+        .into_iter()
+        .map(|item| (item.message, item.body))
+        .collect())
 }
 
 /// Which messages a collection includes. `AfterId` serves the cursorless
@@ -2098,6 +2129,7 @@ fn join(
     context: &Context,
     name: &str,
     description: Option<&str>,
+    backlog: bool,
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
@@ -2107,7 +2139,15 @@ fn join(
         "post: joining #{name} as room '{acting}' ({})",
         acting_notice(provenance)
     );
-    let outcome = channel::join(context, name, description)?;
+    let outcome = channel::join(context, name, description, backlog)?;
+    // The hint is a runnable command, not prose: it must carry the quoted
+    // channel name so it runs as written.
+    let history_hint = outcome.history_before_join.map(|_| {
+        format!(
+            "post chat {} --history 20",
+            crate::mailbox::shell_quote(name)
+        )
+    });
     let rendered = if json_output {
         output::json(
             &output::ChatJoinOutput {
@@ -2117,6 +2157,8 @@ fn join(
                 created: outcome.channel_created,
                 already_member: outcome.already_member,
                 event_id: outcome.event_id.clone(),
+                history_before_join: outcome.history_before_join,
+                history_hint,
             },
             pretty,
         )?
@@ -2134,10 +2176,19 @@ fn join(
             ),
             None => format!("post: {} is already a member of #{name}\n", outcome.room),
         }
-    } else if outcome.channel_created {
-        format!("post: created #{name} and joined as {}\n", outcome.room)
     } else {
-        format!("post: joined #{name} as {}\n", outcome.room)
+        let mut line = if outcome.channel_created {
+            format!("post: created #{name} and joined as {}\n", outcome.room)
+        } else {
+            format!("post: joined #{name} as {}\n", outcome.room)
+        };
+        if let Some(history) = outcome.history_before_join.filter(|count| *count > 0) {
+            line.push_str(&format!(
+                "post: {history} message(s) predate this join — read them with `{}`\n",
+                history_hint.as_deref().unwrap_or_default()
+            ));
+        }
+        line
     };
     Ok(CommandResult::committed(rendered))
 }
@@ -2735,7 +2786,7 @@ mod tests {
         seed_message(&dir, ID3, "beta", "newest");
 
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha").expect("limit");
+        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha", None).expect("limit");
         assert_eq!(skipped, 1);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].0.id, ID2, "peek keeps the newest slice");
@@ -2747,12 +2798,12 @@ mod tests {
     fn catch_up_larger_than_batch_is_a_plain_read() {
         let mut batch = vec![];
         assert_eq!(
-            apply_peek_catch_up(&mut batch, Some(5), "alpha").expect("empty"),
+            apply_peek_catch_up(&mut batch, Some(5), "alpha", None).expect("empty"),
             0
         );
         // Default (None) on an empty batch is also a no-op.
         assert_eq!(
-            apply_peek_catch_up(&mut batch, None, "alpha").expect("default"),
+            apply_peek_catch_up(&mut batch, None, "alpha", None).expect("default"),
             0
         );
     }
@@ -2763,7 +2814,7 @@ mod tests {
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "only");
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(0), "alpha").expect("unlimited");
+        let skipped = apply_peek_catch_up(&mut batch, Some(0), "alpha", None).expect("unlimited");
         assert_eq!(skipped, 0);
         assert_eq!(batch.len(), 1, "limit 0 must keep every message");
         assert_eq!(apply_consuming_catch_up(&mut batch, Some(0)), 0);
@@ -2785,7 +2836,7 @@ mod tests {
         seed_message(&dir, ID2, "beta", "middle");
         seed_message(&dir, ID3, "beta", "newest");
         let mut batch = read_batch(&context, "alpha", "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha").expect("catch-up");
+        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha", None).expect("catch-up");
         assert_eq!(skipped, 0, "the mention must not count as silently skipped");
         assert_eq!(batch.len(), 3);
         assert_eq!(batch[0].0.id, ID1);

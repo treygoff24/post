@@ -1731,6 +1731,14 @@ fn scan_unreadable_participant_channel(
     batch: &mut Vec<WatchDelivery>,
 ) -> AppResult<()> {
     let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    // The join-from-now watermark applies here too: this degraded scan is
+    // already a best-effort pass, so a membership record that cannot be read
+    // degrades to no floor (every deliverable file is considered) rather than
+    // hiding the scan's report.
+    let history_floor =
+        crate::cursor_state::eligibility::channel_history_floor(context, participant, channel)
+            .ok()
+            .flatten();
     let paths = ChannelPaths::new(context, channel)?;
     for path in message_files(&paths.messages)? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
@@ -1747,7 +1755,16 @@ fn scan_unreadable_participant_channel(
         if emitted_channel_ids.contains(&dedupe) {
             continue;
         }
+        // History is never delivered as an event — but it still parses here:
+        // this scan exists to report what is unreadable, and a corrupt
+        // pre-membership file is still corruption worth one event.
+        let history = history_floor
+            .as_deref()
+            .is_some_and(|floor| crate::cursor_state::eligibility::is_channel_history(id, floor));
         match parse_channel_message(&path) {
+            Ok(_) if history => {
+                seen_paths.insert(path);
+            }
             Ok(parsed)
                 if crate::cursor_state::eligibility::message_is_own(
                     context,

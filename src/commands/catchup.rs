@@ -1159,7 +1159,10 @@ mod tests {
             r#"{"alpha":"2026-08-20 12:00:00 -0500"}"#,
         )
         .expect("legacy membership");
-        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let mut participant = crate::participant::bind_test_actor(&context, "alpha");
+        // A long-standing legacy member: bound before the fixed ids below, so
+        // they are unread rather than history (join-from-now floor).
+        participant.created = "2026-08-20 12:00:00 -0500".to_owned();
         let first_id = "20260831-171234-000001-a1b2c3";
         let late_id = "20260831-171234-000002-b2c3d4";
         let write_message = |id: &str| {
