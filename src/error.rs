@@ -80,10 +80,13 @@ pub enum ErrorCode {
     NotYet,
     /// Unseen messages from other rooms exist in the channel; send was not delivered.
     CrossedSend,
+    /// A read's stdin is an open pipe that stayed silent through the bounded
+    /// readiness wait: post cannot tell a read from a body still on its way.
+    InputAmbiguous,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -100,6 +103,7 @@ impl ErrorCode {
         Self::NoParticipant,
         Self::NotYet,
         Self::CrossedSend,
+        Self::InputAmbiguous,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -120,12 +124,13 @@ impl ErrorCode {
             Self::NoParticipant => "no_participant",
             Self::NotYet => "not_yet",
             Self::CrossedSend => "crossed_send",
+            Self::InputAmbiguous => "input_ambiguous",
         }
     }
 
     pub const fn exit_code(self) -> i32 {
         match self {
-            Self::InvalidArgument => 2,
+            Self::InvalidArgument | Self::InputAmbiguous => 2,
             Self::UnknownRoom
             | Self::ReservedSender
             | Self::EmptyBody

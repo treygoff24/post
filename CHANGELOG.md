@@ -92,6 +92,17 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- A `post chat` read (plain, `--peek`, `--history`/`--since`, `--discard`,
+  `--message`) no longer swallows a body piped to it. Stdin that carries input
+  (a nonempty file, or a pipe, heredoc, or socket with a queued byte) is refused
+  with `invalid_argument`, exit 2, before anything is routed or marked seen. A
+  pipe still open and silent after a bounded wait of at most 100 ms is refused
+  with the new `input_ambiguous` error code, also exit 2. Both refusals name
+  the two fixes: add `--send` to send the input, or redirect stdin from
+  `/dev/null` for an intentional read. An interactive terminal, `/dev/null`,
+  an empty file, and a pipe at EOF read normally with no wait. A producer slower
+  than the wait is refused as ambiguous; no finite wait detects every delayed
+  producer. Nothing is ever sent automatically.
 - Own-message and sender-exclusion checks are origin-aware. A message with
   remote-origin evidence (a bridge `sender_provenance`, or a `from` workspace
   registered under `remote/<host>/`) is never a local participant's own, and

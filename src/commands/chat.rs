@@ -93,6 +93,7 @@ pub(super) fn run(
         return discard_through(context, &args.name, target, json_output, pretty);
     }
     if args.message.is_some() {
+        refuse_unintended_stdin(&args, json_output, pretty)?;
         return read_message_slice(context, &args, json_output, pretty);
     }
     // --body and --body-file carry their own intent: naming a body is asking
@@ -138,7 +139,59 @@ pub(super) fn run(
     if sending {
         return send(context, args, json_output, pretty);
     }
+    refuse_unintended_stdin(&args, json_output, pretty)?;
     read(context, args, json_output, pretty)
+}
+
+/// A2: a read never reads stdin, so input on it is a body that would be lost
+/// -- usually a send missing `--send` -- while the read consumed the backlog.
+/// Refuse before anything is routed or marked seen. Only actual input is
+/// refused: `/dev/null`, an empty file, a pipe at EOF, and an interactive
+/// terminal are all normal reads (see `stdin_guard`). Never sends.
+fn refuse_unintended_stdin(args: &ChatArgs, json_output: bool, pretty: bool) -> AppResult<()> {
+    use crate::stdin_guard::{probe, StdinVerdict, READINESS_BOUND};
+    let verdict = probe(libc::STDIN_FILENO, READINESS_BOUND);
+    if verdict == StdinVerdict::Clear {
+        return Ok(());
+    }
+    // Runs as written: the send correction reads the body from stdin, so it
+    // works re-attached to the producer and refuses an empty body on its own.
+    // The read correction is named in the trailing shell comment rather than
+    // rebuilt, because a rebuilt read that dropped --peek or a window flag
+    // would consume what the caller asked only to glance at.
+    let mut send = format!(
+        "post chat {} --send --body-file -",
+        crate::mailbox::shell_quote(&args.name)
+    );
+    if json_output {
+        send.push_str(" --json");
+    }
+    if pretty {
+        send.push_str(" --pretty");
+    }
+    let fix = format!(
+        "{send} # or, to read on purpose, re-run the same command with stdin from /dev/null: < /dev/null"
+    );
+    let corrections = "To send the input, add --send (the body comes from stdin, as with --body-file -). To read on purpose, re-run the same command with stdin redirected from /dev/null. Nothing was read, sent, or marked seen.";
+    let error = match verdict {
+        StdinVerdict::Queued => AppError::new(
+            ErrorCode::InvalidArgument,
+            "stdin carries input, but this `post chat` invocation is a read and would drop it",
+            corrections,
+        )
+        .reason("stdin has queued input on a read"),
+        StdinVerdict::Ambiguous => AppError::new(
+            ErrorCode::InputAmbiguous,
+            format!(
+                "stdin is an open pipe that stayed silent for {} ms, so post cannot tell a read from input still on its way",
+                READINESS_BOUND.as_millis()
+            ),
+            format!("{corrections} A producer slower than this wait cannot be told apart from an intentional read, so post refuses instead of guessing."),
+        )
+        .reason("stdin stayed open and silent through the readiness wait"),
+        StdinVerdict::Clear => unreachable!("handled above"),
+    };
+    Err(error.exact_fix(fix).input("stdin"))
 }
 
 /// The bare-name correction for a `#name` argument, when -- and only when --
