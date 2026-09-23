@@ -239,12 +239,17 @@ pub(crate) fn authored_locally_by(
 /// `<root>/remote/<host>/<name>` (at least two normal components after
 /// `remote/`). The placeholder directory need not exist.
 ///
-/// A missing `rooms.json` registers nothing, so nothing is remote. A
-/// `rooms.json` that exists but cannot be loaded answers true, failing closed: a message whose
-/// origin cannot be established is never a local participant's own (so a
-/// colliding `from_participant` cannot hide it), its sender never drops a
-/// local recipient, and `rooms set-path` refuses. The cost is that reply
-/// metadata labels such a message remote while the registry is broken.
+/// Only a `rooms.json` that exists and loads is evidence of which rooms are
+/// local. A registry that is missing, cannot be probed, or cannot be loaded
+/// answers true, failing closed: absence of evidence is not proof of local
+/// origin (Aster ruling 20260923-052555). So a message whose origin cannot
+/// be established is never a local participant's own (a colliding
+/// `from_participant` cannot hide it), never gets a private local reply
+/// target, its sender never drops a local recipient, and `rooms set-path`
+/// refuses. An explicit empty registry (`{}`) is a real state: it registers
+/// no placeholder, so nothing is remote. The cost is that, while the
+/// registry is missing or broken, reply metadata labels such messages remote
+/// and a participant's own channel messages read as someone else's.
 pub(crate) fn remote_workspace(context: &crate::mailbox::Context, workspace: &str) -> bool {
     remote_index::lookup(context, workspace)
 }
@@ -338,29 +343,34 @@ mod remote_index {
     fn build(context: &crate::mailbox::Context, key: FileKey) -> Index {
         #[cfg(test)]
         BUILDS.with(|builds| builds.set(builds.get() + 1));
-        // No registry registers no placeholder: nothing is remote. A registry
-        // that exists but cannot be loaded fails closed (None).
-        if key.0.is_none() && !context.root.join("rooms.json").exists() {
-            return Index {
-                root: context.root.clone(),
-                home: context.home.clone(),
-                key,
-                remote: Some(BTreeSet::new()),
-            };
-        }
-        let remote = context.load_rooms().ok().map(|rooms| {
-            let canonical_root =
-                std::fs::canonicalize(&context.root).unwrap_or_else(|_| context.root.clone());
-            rooms
-                .iter()
-                .filter(|(_, stored)| {
-                    context.expand_room_path(stored).is_ok_and(|path| {
-                        super::stored_path_is_remote(&path, &context.root, &canonical_root)
-                    })
+        // Only a registry that exists and loads is evidence (None fails
+        // closed; see remote_workspace). `key.0` is None when rooms.json is
+        // missing or its metadata cannot be read: both are absence of
+        // evidence, never "no remote rooms". load_rooms answers an empty map
+        // for a missing file in read-only commands, so the file's identity is
+        // re-read after the load: a registry that vanished or changed mid-load
+        // fails closed, and the next lookup rebuilds because its key differs.
+        let remote = if key.0.is_none() {
+            None
+        } else {
+            context
+                .load_rooms()
+                .ok()
+                .filter(|_| file_key(context) == key)
+                .map(|rooms| {
+                    let canonical_root = std::fs::canonicalize(&context.root)
+                        .unwrap_or_else(|_| context.root.clone());
+                    rooms
+                        .iter()
+                        .filter(|(_, stored)| {
+                            context.expand_room_path(stored).is_ok_and(|path| {
+                                super::stored_path_is_remote(&path, &context.root, &canonical_root)
+                            })
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect()
                 })
-                .map(|(name, _)| name.clone())
-                .collect()
-        });
+        };
         Index {
             root: context.root.clone(),
             home: context.home.clone(),
@@ -2177,8 +2187,20 @@ mod tests {
             Some("p1"),
             None
         ));
-        // A missing registry registers no placeholder: the id match is own.
+        // A missing registry is absence of evidence, not proof of local
+        // origin: it fails closed the same way (Aster ruling 20260923-052555).
         std::fs::remove_file(root.join("rooms.json")).expect("remove rooms.json");
+        assert!(remote_workspace(&context, "alpha"));
+        assert!(!authored_locally_by(
+            &context,
+            "p1",
+            "alpha",
+            Some("p1"),
+            None
+        ));
+        // An explicit valid empty registry is a real state: nothing is
+        // remote, and the id match is own.
+        std::fs::write(root.join("rooms.json"), "{}").expect("empty rooms.json");
         assert!(!remote_workspace(&context, "alpha"));
         assert!(authored_locally_by(
             &context,
@@ -2187,6 +2209,61 @@ mod tests {
             Some("p1"),
             None
         ));
+        crate::test_support::trash_test_root(&root);
+    }
+
+    /// Aster ruling 20260923-052555: an imported message from a real remote
+    /// placeholder, stamped with a colliding local participant id, never
+    /// becomes local-own or gets a private local reply target, whether the
+    /// registry is intact, removed, unparseable, or unreadable.
+    #[test]
+    fn a_colliding_import_never_turns_local_when_the_registry_goes_away() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, context) = remote_fixture("remote-registry-gone", "{}");
+        let placeholder = root.join("remote/peer/far");
+        let registry = serde_json::to_vec(&serde_json::json!({
+            "far": placeholder.to_string_lossy(),
+        }))
+        .unwrap();
+        std::fs::write(root.join("rooms.json"), &registry).expect("rooms.json");
+        crate::participant::bind_test_actor(&context, "alpha");
+        let local = crate::participant::list(&context)
+            .expect("participants")
+            .into_iter()
+            .next()
+            .expect("one local participant")
+            .id;
+        let assert_never_local = |state: &str| {
+            assert!(
+                !authored_locally_by(&context, &local, "far", Some(&local), None),
+                "{state}: the colliding import read as local-own"
+            );
+            let reply = reply_metadata(&context, "far", Some(&local), None);
+            assert_ne!(reply.origin, "local", "{state}: origin read as local");
+            assert_eq!(
+                reply.participant, None,
+                "{state}: a private local reply target was offered"
+            );
+        };
+        assert_never_local("registry intact");
+        std::fs::remove_file(root.join("rooms.json")).expect("remove rooms.json");
+        assert_never_local("registry removed");
+        std::fs::write(root.join("rooms.json"), "{ not json").expect("corrupt rooms.json");
+        assert_never_local("registry unparseable");
+        std::fs::write(root.join("rooms.json"), &registry).expect("rooms.json again");
+        std::fs::set_permissions(
+            root.join("rooms.json"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod 000");
+        if std::fs::read(root.join("rooms.json")).is_err() {
+            assert_never_local("registry unreadable");
+        }
+        std::fs::set_permissions(
+            root.join("rooms.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod back");
         crate::test_support::trash_test_root(&root);
     }
 

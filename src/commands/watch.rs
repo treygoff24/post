@@ -2940,6 +2940,17 @@ mod tests {
             home: root.clone(),
         };
         let participant = crate::participant::bind_test_actor(&context, "alpha");
+        // Own detection needs a valid registry: a missing rooms.json is no
+        // evidence of local origin and fails closed (Aster ruling
+        // 20260923-052555).
+        fs::write(
+            root.join("rooms.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "alpha": root.join("alpha").to_string_lossy(),
+            }))
+            .expect("encode rooms.json"),
+        )
+        .expect("write rooms.json");
         let channel = "collide";
         let remote_id = "20260923-050000-000001-acde01";
         let local_id = "20260923-050000-000002-acde02";
