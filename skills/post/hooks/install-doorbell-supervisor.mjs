@@ -621,14 +621,17 @@ function supervisorHealth(ctx, since) {
   if (health.herdr_ok !== true) return { ok: false, why: "herdr agent list is failing" };
   if (health.post_ok !== true) return { ok: false, why: "post participant list is failing" };
   if (!health.last_discovery_at) return { ok: false, why: "no discovery yet" };
-  // Every subscription armed at start must have finished its first scan, and
-  // a first scan that failed is a failed start.
+  // Every armed subscription the supervisor can scan must have finished its
+  // first scan, and a first scan that failed is a failed start. A scan that
+  // finds nothing new records no outcome, and a busy or focused pane is not
+  // scanned until it goes idle, so neither holds up a start.
   for (const binding of health.bindings ?? []) {
     if (!binding.armed) continue;
     if (!binding.last_success_scan_at && binding.consecutive_failures > 0) {
       return { ok: false, fatal: true, why: `the first scan for ${binding.participant} failed at ${binding.last_error?.stage ?? "an unknown stage"}` };
     }
-    if (!binding.last_outcome) return { ok: false, why: `the first scan for ${binding.participant} has not finished` };
+    if (binding.scannable === false) continue;
+    if (!binding.last_success_scan_at) return { ok: false, why: `the first scan for ${binding.participant} has not finished` };
   }
   return { ok: true, health };
 }

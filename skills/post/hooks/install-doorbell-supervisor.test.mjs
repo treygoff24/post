@@ -59,6 +59,7 @@ else if (args[0] === "participant" && args[1] === "list") {
   out({ ok: true, participants: control.participants, count: control.participants.length });
 } else if (args[0] === "watch") {
   if (control.watchFails) { process.stderr.write("post: watch failed\\n"); process.exit(1); }
+  if (control.watchHangs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15000);
 } else if (args[0] === "channels") out({ ok: true, channels: [] });
 else { process.stderr.write("fake post: unexpected " + args.join(" ") + "\\n"); process.exit(64); }
 `;
@@ -67,7 +68,7 @@ const FAKE_HERDR = `#!/usr/bin/env node
 import fs from "node:fs";
 const args = process.argv.slice(2);
 const control = JSON.parse(fs.readFileSync(process.env.DOORBELL_FAKE_CONTROL, "utf8"));
-const agent = (pane) => ({ pane_id: pane.pane_id, name: pane.name, terminal_id: "term_" + pane.pane_id.replace(/\\W/g, ""), agent: "codex", agent_status: "idle", focused: false, agent_session: { agent: "codex", kind: "id", source: "herdr:codex", value: pane.session } });
+const agent = (pane) => ({ pane_id: pane.pane_id, name: pane.name, terminal_id: "term_" + pane.pane_id.replace(/\\W/g, ""), agent: "codex", agent_status: pane.status ?? "idle", focused: pane.focused ?? false, agent_session: { agent: "codex", kind: "id", source: "herdr:codex", value: pane.session } });
 if (args[0] === "--version") process.stdout.write("herdr 0.9.1\\n");
 else if (control.herdrFails) { process.stderr.write("herdr: server not running\\n"); process.exit(1); }
 else if (args[1] === "list") process.stdout.write(JSON.stringify({ result: { agents: control.panes.map(agent) } }));
@@ -423,6 +424,44 @@ describe("install: failed starts", () => {
       assert.match(result.stderr, /it was stopped again/);
       assert.equal(host.sm().running[supervisorUnit(host)], undefined, "the supervisor is no longer running");
       assert.equal(host.receipt().supervisor.state, "failed_start");
+    });
+  }
+});
+
+describe("install: a healthy start with participants already armed", () => {
+  // A reinstall finds participants armed before it started. A first scan
+  // that finds nothing new rings nobody and records no outcome, and a busy or
+  // focused pane is not scanned until it goes idle; neither is a failed start
+  // (the devbox reinstall, 2026-09-23).
+  test("an armed participant on an idle pane whose first scan has not finished holds up the start", () => {
+    const host = makeHost("linux");
+    host.agent("ada", "ada");
+    fs.mkdirSync(path.join(host.doorbell, "prefs"), { recursive: true });
+    fs.writeFileSync(path.join(host.doorbell, "prefs", "ada.json"), JSON.stringify({ version: 1, enabled: true, channels: [] }));
+    Object.assign(host.control, { watchHangs: true });
+    host.save();
+    const result = host.install(["--startup-timeout-seconds", "4"]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /the first scan for ada has not finished/);
+    assert.equal(host.receipt().supervisor.state, "failed_start");
+  });
+
+  for (const [label, pane] of [
+    ["an idle pane with no new mail", {}],
+    ["a busy pane", { status: "working" }],
+    ["a focused pane", { focused: true }],
+  ]) {
+    test(`an armed participant on ${label} is a healthy start`, () => {
+      const host = makeHost("linux");
+      host.agent("ada", "ada");
+      Object.assign(host.control.panes[0], pane);
+      fs.mkdirSync(path.join(host.doorbell, "prefs"), { recursive: true });
+      fs.writeFileSync(path.join(host.doorbell, "prefs", "ada.json"), JSON.stringify({ version: 1, enabled: true, channels: [] }));
+      host.save();
+      const result = host.install(["--startup-timeout-seconds", "6"]);
+      ok(result);
+      assert.equal(host.receipt().supervisor.state, "healthy");
+      assert.ok(host.sm().running[supervisorUnit(host)], "the supervisor is still running");
     });
   }
 });
