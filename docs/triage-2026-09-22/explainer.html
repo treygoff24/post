@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Post Papercut Triage</title>
+<title>Post Overnight Closeout</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -127,232 +127,245 @@ section{margin-top:72px}
 .foot{margin-top:80px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--ink3)}
 .foot p{color:var(--ink3);font-size:13px}
 
+/* closeout additions */
+.c-hot{color:#fecdd3;border-color:rgba(251,113,133,.4);background:rgba(251,113,133,.09)}
+.d-hot{background:var(--hot)}
+.b-hot{background:rgba(251,113,133,.14);color:var(--hot)}
+.tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:16px;background:var(--card);box-shadow:var(--glow)}
+table.where{width:100%;border-collapse:collapse;font-size:13.5px}
+table.where th,table.where td{text-align:left;vertical-align:top;padding:12px 16px;border-top:1px solid var(--line)}
+table.where thead th{border-top:0;font:600 11.5px/1 "JetBrains Mono";letter-spacing:.12em;text-transform:uppercase;color:var(--ink3)}
+table.where tbody th{font-weight:650;color:var(--ink);white-space:nowrap}
+table.where td{color:var(--ink2)} table.where td b{color:var(--ink)}
+.open{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.oitem{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
+.oitem .on{font-weight:650;color:var(--ink);margin-bottom:6px}
+.oitem p{font-size:13.5px;margin:0}
+
 @media (max-width:860px){
   .funnel{grid-template-columns:repeat(2,1fr)} .fstep::after{display:none}
   .heads,.decs{grid-template-columns:1fr} .cols{grid-template-columns:1fr}
   .row{grid-template-columns:1fr} .bridge{grid-template-columns:1fr} .pipe{padding:10px 0}
   .bells{grid-template-columns:repeat(10,1fr)} .closed{columns:1} .wave{grid-template-columns:1fr}
+  .open{grid-template-columns:1fr} table.where th,table.where td{padding:10px 12px}
 }
 </style>
 </head>
 <body>
 <div class="wrap">
-
-<div class="kicker">post · papercut triage · 2026-09-22</div>
-<h1>21 live papercuts.<br>8 real problems underneath.</h1>
-<p class="lede">I swept every post-related papercut on the Mac and the devbox, closed what recent work already fixed, then had three Luna xhigh lanes trace the survivors to the code. I spot-checked their claims myself and corrected two: Lane A's guess at why the Astra doorbell never rang, and Lane C's "just flip the channel config". <b>Most of the pain is not 21 separate bugs. It's a few structural gaps that keep producing new cuts.</b></p>
+<div class="kicker">post · overnight closeout · 2026-09-23</div>
+<h1>All 8 root causes have a fix.<br>21 of 22 cuts are closed.</h1>
+<p class="lede">Last night's triage traced 22 post papercuts to eight structural problems. Overnight, Aster (Astra, the judgment seat) and I (Nightjar, Claude, the lead) built the structural fix for each one, not only the band-aids. Every "fixed" below was checked on the running machines, not only in a green test. Every feature, and nearly every fix round, was reviewed by models from other families; the three small late fixes that were not re-reviewed are named at the bottom. <b>Everything is on Forgejo. Nothing went to GitHub and no release was cut: those wait for your review.</b></p>
 
 <div class="funnel">
-  <div class="fstep"><div class="n">87</div><div class="l">open cuts that mention post, both machines</div></div>
-  <div class="fstep g"><div class="n">60</div><div class="l">closed tonight: 59 verified fixed, 1 duplicate</div></div>
-  <div class="fstep"><div class="n">7</div><div class="l">not actually about post (ffmpeg, TaskList, CoS…)</div></div>
-  <div class="fstep h"><div class="n">21</div><div class="l">live post cuts, incl. one the first pass missed</div></div>
-  <div class="fstep p"><div class="n">8</div><div class="l">root causes behind them</div></div>
+  <div class="fstep"><div class="n">22</div><div class="l">live cuts from last night's triage</div></div>
+  <div class="fstep g"><div class="n">21</div><div class="l">resolved in their ledgers, each with the commit and evidence</div></div>
+  <div class="fstep h"><div class="n">1</div><div class="l">left for you: Porch scrolling under herdr in cmux</div></div>
+  <div class="fstep g"><div class="n">8/8</div><div class="l">root causes with a structural fix shipped</div></div>
+  <div class="fstep g"><div class="n">212</div><div class="l">protected letters, all held by the new export guard</div></div>
 </div>
 
 <section>
   <div class="kicker">three things worth knowing first</div>
   <div class="heads" style="margin-top:16px">
-    <div class="head r">
+    <div class="head b">
       <div class="kicker">doorbells</div>
-      <div class="big">15 / 19</div>
-      <p>Codex doorbell timers on the devbox point at herdr panes that no longer exist. Each one still fires every 5 seconds, finds nobody, and <b>stays completely silent</b>. That's why Vale's Astra never got woken: 249 unread messages and one mail were sitting there.</p>
+      <div class="big">1 per host</div>
+      <p>One doorbell supervisor per machine replaces the per-agent timers. It rang Aster's pane live at 07:11:50Z and mine at 07:51:36Z. <b>No Codex doorbell timer runs on the devbox any more</b>, and a doorbell whose pane has closed now shows up in the health file instead of failing silently. Waking the pane you're looking at is opt-in and off.</p>
+    </div>
+    <div class="head r">
+      <div class="kicker">the CPU burn</div>
+      <div class="big">93% → 1.7%</div>
+      <p>One devbox watch ran at about 93% of a core for 16 hours. The cause wasn't backlog size, as the triage guessed. <b>On Linux, a watch was waking itself</b>: it read its own cursor file, and Linux reports reads as file events (macOS doesn't). The fixed build is installed; that watch's owner restarted it on the fix after my letter, and it now uses about 1.7% of a core.</p>
     </div>
     <div class="head y">
-      <div class="kicker">tonight's porch break</div>
-      <div class="big">1 field</div>
-      <p>Post added <code>key</code>/<code>legacy</code> to one JSON output, and Porch refused to launch on either machine. Same failure pattern as the Python doorbell rejecting participant mail: <b>strict readers of post's output, none of them tested against post</b>. Fixed in porch <code>39ca6df</code>.</p>
-    </div>
-    <div class="head b">
       <div class="kicker">cross-machine</div>
-      <div class="big">v1</div>
-      <p>Both machines still run the old single-file bridge with a hand-kept list of the other side's workspaces. That's why <code>loom</code> is invisible from the Mac. The v2 bridge (auto room directory and channel sync) is <b>built but never shipped</b>: it sits on a devbox branch, 18 commits unpushed.</p>
+      <div class="big">DMs work</div>
+      <p><code>participant:&lt;id&gt;@&lt;host&gt;</code> now reaches one agent on the other machine; I proved it live in both directions. Bridge v2 runs on both machines with a new export guard. <b>It runs degraded on purpose</b>: 8 workspace names exist on both machines, so the bridge holds their mail rather than guess where it belongs. Renaming those is your call.</p>
     </div>
   </div>
 </section>
 
 <section>
-  <h2>The map</h2>
-  <p class="sub">Every live cut, grouped by the root cause that produces it, colored by the kind of fix it needs.</p>
+  <h2>What's installed where</h2>
+  <p class="sub">Read from each machine after the last install (09:15Z), not from the plan.</p>
+  <div class="tblwrap"><table class="where">
+    <thead><tr><th></th><th>Mac</th><th>Devbox (trey-agent)</th></tr></thead>
+    <tbody>
+      <tr><th>post</th><td><b><code>6f70511</code></b>, installed 09:06Z. Receipt: skill manifest <b>match</b>, all six smoke checks <b>pass</b></td><td><b><code>6f70511</code></b>, installed 09:04Z. Same receipt</td></tr>
+      <tr><th>Doorbell supervisor</th><td>launchd, pid 62720, 7 bindings (3 armed)</td><td>systemd user service, pid 3819018, 2 bindings (1 armed). Same script on both (<code>2db2c7f9</code>)</td></tr>
+      <tr><th>Old doorbell timers</th><td><code>locus</code> still on (see Still open); <code>tower-astra</code> off</td><td>All 22 off, unit files kept</td></tr>
+      <tr><th>Bridge</th><td>claude-space <b><code>2655dbe</code></b>, launchd every 15 s, system Python 3.9.6</td><td><b><code>2655dbe</code></b>, systemd timer every 15 s, with 1 s accuracy</td></tr>
+      <tr><th>Export guard</th><td>879 holds: the 45 inventoried letters plus 834 observed local deliveries. 0 faults</td><td>382 holds: the 167 inventoried letters plus 215 observed. 0 faults</td></tr>
+      <tr><th>Bridge health</th><td colspan="2">Degraded on both (8 duplicate names). Both advertise participant mail, with a fresh tick time and a 15 s interval</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>The map, closed out</h2>
+  <p class="sub">The same eight rows as last night's triage, each cut now marked by where it landed.</p>
   <div class="legend">
-    <span><i class="dot d-band"></i>band-aid: small, mechanical</span>
-    <span><i class="dot d-behav"></i>behavior change: an existing feature works differently</span>
-    <span><i class="dot d-refac"></i>refactor</span>
-    <span><i class="dot d-feat"></i>new feature</span>
-    <span><i class="dot d-fixed"></i>already fixed, closed tonight</span>
+    <span><i class="dot d-band"></i>fixed and installed on both machines</span>
+    <span><i class="dot d-behav"></i>fixed, with a caveat noted below</span>
+    <span><i class="dot d-feat"></i>new capability beyond the cut</span>
+    <span><i class="dot d-hot"></i>still open</span>
   </div>
   <div class="map">
     <div class="row"><div class="rc"><span class="num">01</span><span class="rcn">Contract drift</span></div><div class="chips">
-      <span class="chip c-fixed">Porch won't launch (fixed tonight)</span><span class="chip c-band">doorbell rejects participant mail</span><span class="chip c-feat">skill and binary drift apart</span><span class="chip c-band">dead SPEC-v2 link on Mac</span></div></div>
+      <span class="chip c-band">Porch strict reader (Sep 22)</span><span class="chip c-band">doorbell reads participant mail</span><span class="chip c-band">skill and binary fingerprinted</span><span class="chip c-band">SPEC-v2 link</span><span class="chip c-feat">install smoke runs every reader</span></div></div>
     <div class="row"><div class="rc"><span class="num">02</span><span class="rcn">Five doorbells, all fail silently</span></div><div class="chips">
-      <span class="chip c-band">dead-pane timers ring nobody</span><span class="chip c-behav">focused pane never woken</span><span class="chip c-behav">Claude Monitor expires silently</span><span class="chip c-feat">no mention-only filter</span></div></div>
+      <span class="chip c-band">one supervisor per host</span><span class="chip c-band">dead-pane timers off</span><span class="chip c-band">focused wake: opt-in</span><span class="chip c-band">Monitor expiry documented</span><span class="chip c-band">mention-only filter</span><span class="chip c-behav">locus timer kept (focused pane)</span></div></div>
     <div class="row"><div class="rc"><span class="num">03</span><span class="rcn">Watch rescans everything</span></div><div class="chips">
-      <span class="chip c-refac">a doorbell ate 67% of a core</span></div></div>
+      <span class="chip c-band">self-wake loop fixed</span><span class="chip c-band">scan profiling</span><span class="chip c-behav">index not built: not needed</span></div></div>
     <div class="row"><div class="rc"><span class="num">04</span><span class="rcn">Bad cursor file = "everything unread"</span></div><div class="chips">
-      <span class="chip c-behav">digest shows "339 new"</span><span class="chip c-behav">intermittent invalid cursors.json</span></div></div>
+      <span class="chip c-band">"cursor unusable" marker</span><span class="chip c-band">cursor read race closed</span></div></div>
     <div class="row"><div class="rc"><span class="num">05</span><span class="rcn">Locks with no deadline</span></div><div class="chips">
-      <span class="chip c-behav">send hangs after it already landed</span></div></div>
+      <span class="chip c-band">send returns after 2 s at most</span></div></div>
     <div class="row"><div class="rc"><span class="num">06</span><span class="rcn">CLI guesses intent</span></div><div class="chips">
-      <span class="chip c-band">piped text silently dropped</span><span class="chip c-band">…same, second report</span><span class="chip c-behav">"active" reads as "working"</span><span class="chip c-band">installers reject --help</span><span class="chip c-fixed">ambiguous short ids</span></div></div>
+      <span class="chip c-band">piped text refused, not dropped</span><span class="chip c-band">…same, heredoc</span><span class="chip c-band"><code>lease=</code> wording</span><span class="chip c-band">installers take --help</span><span class="chip c-band">short ids round-trip</span></div></div>
     <div class="row"><div class="rc"><span class="num">07</span><span class="rcn">Registries without verbs</span></div><div class="chips">
-      <span class="chip c-feat">can't move a room</span><span class="chip c-feat">can't list taken sigils</span></div></div>
+      <span class="chip c-band">rooms set-path</span><span class="chip c-band">profile list</span></div></div>
     <div class="row"><div class="rc"><span class="num">08</span><span class="rcn">Cross-machine is v1</span></div><div class="chips">
-      <span class="chip c-band">loom missing from Mac</span><span class="chip c-refac">ship bridge v2 (channels)</span><span class="chip c-feat">DM one agent on another host</span></div></div>
+      <span class="chip c-band">loom visible from Mac</span><span class="chip c-behav">bridge v2 live, degraded</span><span class="chip c-band">export guard live</span><span class="chip c-feat">DM one agent on another host</span><span class="chip c-hot">8 duplicate names: your call</span></div></div>
     <div class="row"><div class="rc"><span class="num">··</span><span class="rcn" style="color:var(--ink2)">Standalone tooling</span></div><div class="chips">
-      <span class="chip c-band">bridge tests fail on Mac /var</span><span class="chip c-band">porch test helpers not importable</span><span class="chip c-behav">porch mouse scroll under herdr/cmux</span><span class="chip c-band">gate under cargo shim (fix present, re-run to close)</span></div></div>
+      <span class="chip c-band">bridge tests on Mac /var</span><span class="chip c-band">Porch test helpers note</span><span class="chip c-band">gate green under the cargo shim</span><span class="chip c-hot">Porch mouse scroll under herdr in cmux</span></div></div>
   </div>
 </section>
 
 <section>
-  <h2>Each root cause, plainly</h2>
-  <p class="sub">What's actually broken, why, the quick fix available now, and the real fix that stops new cuts.</p>
+  <h2>Each root cause, closed out</h2>
+  <p class="sub">What changed, in plain terms, and how we know it works on the real machines.</p>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">01</span><h3>Contract drift: post's output has many strict readers and no shared tests</h3></div>
-      <div class="badges"><span class="badge b-pri">highest leverage</span><span class="badge b-refac">refactor</span></div></div>
-    <div class="why">Post's JSON is read by Porch, the Python doorbell, the Codex monitor, the Claude/Cursor/Grok hooks, and the skill docs. Each one validates the shape its own way. <b>When post changes one field, a reader somewhere breaks, and nobody finds out until something stops working.</b> It happened tonight with Porch. It has been happening quietly with the Python doorbell since participants shipped: post deliberately leaves <code>room</code> off participant-addressed mail, and the doorbell requires it.</div>
+    <div class="rtop"><div class="left"><span class="rnum">01</span><h3>Post's readers are now tested against post</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why">Porch, the doorbells, the hooks, and the skill docs all read post's output, and last night one new field stopped Porch from launching. <b>Now the post binary carries a fingerprint of the skill it was built with, and the installer refuses to call an install good until each reader's startup check passes against the new binary.</b> The Python doorbell now reads participant mail, which it had been rejecting since participants shipped.</div>
     <div class="cols">
-      <div class="now"><h4>Band-aid now</h4><ul>
-        <li>Python doorbell: take the mail namespace from <code>address.kind/name</code> when <code>room</code> is absent.</li>
-        <li>Point the bridge reference at a stable, versioned URL for SPEC-v2, not a devbox-only path.</li></ul></div>
-      <div class="real"><h4>Real fix</h4><ul>
-        <li><b>Post ships contract fixtures</b>: golden samples of every event and every <code>--json</code> output that other tools read.</li>
-        <li><b>Every reader tests against those fixtures</b> in its own suite, so a post change that breaks Porch goes red in Porch's tests first.</li>
-        <li><b>The install smoke runs the readers' startup checks</b> (Porch's launch check, the doorbell parser) before an install counts as done.</li>
-        <li>The skill carries a contract version that <code>post doctor</code> compares against the binary.</li></ul></div>
+      <div class="now"><h4>Shipped</h4><ul>
+        <li>Build-time skill manifest and <code>post contract skill-manifest --verify</code> (<code>758e389</code>, <code>051289f</code>)</li>
+        <li><code>install-post.sh</code>: keeps a verified backup, rolls back on a failed smoke, and requires all six smoke checks (<code>b926506</code>)</li>
+        <li>The smoke now works under macOS's temp folder, whose path ends in a slash (<code>9cc0032</code>; this morning's first Mac install stopped on it and installed nothing)</li>
+        <li>Doorbell reads the address kind, not a <code>room</code> field participant mail never had (<code>93cba87</code>)</li>
+        <li>Bridge v2 reads the participant envelope keys v1 logged as unknown (bead post-782)</li>
+      </ul></div>
+      <div class="real"><h4>How we know</h4><ul>
+        <li>Install receipts on both machines read <b>match / pass</b> for <code>6f70511</code></li>
+        <li>Installer suite 19/19, covering the exit-code table, rollback, and the temp-folder case</li>
+        <li>Doorbell suite 49/49 with participant-addressed fixtures</li>
+      </ul></div>
     </div>
-    <div class="refs">doorbell/post-doorbell:118-143 · src/output.rs:904-930 · porch roomcheck.py · skills/post/references/post-bridge.md:7</div>
   </div>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">02</span><h3>Five separate doorbells, all of which fail silently</h3></div>
-      <div class="badges"><span class="badge b-pri">most user-visible</span><span class="badge b-refac">refactor</span><span class="badge b-feat">+ feature</span></div></div>
-    <div class="why">Waking an idle agent is done five different ways: a Claude Monitor, per-harness hooks, a Python daemon, a Codex systemd timer that drives herdr, and Cursor/Grok wrappers. Each has its own filters, lifetime, and failure handling. They share one habit: <b>when delivery can't happen, they do nothing and say nothing.</b> A timer whose pane is gone just keeps running. Error messages drop the reason ("snapshot failed; notification state is unknown"). Claude's Monitor expires without a trace.</div>
-    <div class="bells" title="devbox post-codex-doorbell timers">
-      <div class="bell live">✓</div><div class="bell live">✓</div><div class="bell live">✓</div><div class="bell live">✓</div>
-      <div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div><div class="bell gone">✕</div>
+    <div class="rtop"><div class="left"><span class="rnum">02</span><h3>One doorbell supervisor per machine</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why">There were five separate wake paths, and a timer whose pane had closed kept firing every five seconds and said nothing. <b>Now one supervisor per machine finds every armed participant, rings its herdr pane when the pane is idle, and writes every outcome to a health file</b>, so a doorbell that can't find its pane is visible. Old timers move over one at a time: a timer is switched off only after the supervisor has scanned for that agent successfully. Focused-pane waking is <code>post-doorbell enable --focused</code>, off by default.</div>
+    <div class="cols">
+      <div class="now"><h4>Shipped</h4><ul>
+        <li>Supervisor and installer (<code>6583042</code>…<code>0102211</code>), plus installer fixes <code>800e901</code> (start check) and <code>1d3272c</code> (waits for launchd to let go of the old job)</li>
+        <li>All 22 devbox doorbell timers off, unit files kept; <code>tower-astra</code> off on the Mac</li>
+        <li><code>watch --reason mention</code> filter (<code>e7fbdd3</code>); the Codex monitor now logs why it did nothing (<code>3fda6ec</code>)</li>
+        <li>The Monitor's 30-minute expiry is documented, with a liveness probe</li>
+      </ul></div>
+      <div class="real"><h4>How we know</h4><ul>
+        <li>Rang Aster's pane: outcome <b>accepted</b>, 07:11:50Z; she confirmed the conversation resumed</li>
+        <li>Rang my pane at 07:51:36Z, under three seconds after it went idle</li>
+        <li>Bench: 17.0 s CPU against 53.9 s for the timers, for the same 44 rings (fixture, one run)</li>
+      </ul></div>
     </div>
-    <div class="bellcap">Devbox Codex doorbell timers right now: 4 with a live pane, 15 ringing panes that no longer exist (astra, porch-*, atlas-*, sill, reed-cos…).</div>
-    <div class="cols" style="margin-top:16px">
-      <div class="now"><h4>Band-aid now</h4><ul>
-        <li>Codex monitor: log "pane not found" loudly, and pass the real error text through instead of a generic line.</li>
-        <li>Add <code>post watch --reason mention|mail|channel</code> so doorbells stop carrying their own jq filters.</li>
-        <li>Say plainly in the Monitor doorbell doc that it expires and gives no warning.</li>
-        <li>Turn off the 15 dead-pane timers (your call, below).</li></ul></div>
-      <div class="real"><h4>Real fix: one doorbell per host</h4><ul>
-        <li><b>One supervisor per machine</b> reads <code>post watch</code> and keeps the filtering, dedupe, and health logic in one place.</li>
-        <li><b>Small plug-in "sinks" per harness</b>: herdr prompt, cmux notify, Claude.</li>
-        <li><b>Its lifetime is tied to the participant.</b> When the agent's session ends or its pane disappears, the doorbell retires itself, loudly.</li>
-        <li>Waking a focused pane is an explicit opt-in, never a guess.</li></ul></div>
+  </div>
+
+  <div class="rcard">
+    <div class="rtop"><div class="left"><span class="rnum">03</span><h3>The CPU burn was a watch waking itself</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why">The triage guessed that watch cost grows with backlog. Profiling showed a 10,000-message store costs about 1.3 s per full scan: real, but nowhere near a whole core. <b>The actual cause was a loop that only happens on Linux.</b> A participant with no inbox folder had its watch anchored on its own participant folder, where the watch writes its heartbeat. The heartbeat woke the scan, the scan read the cursor file, Linux reported the read as a new event, and the watch went round again with no pause. macOS never reports reads, which is why the Mac never showed it.</div>
+    <div class="cols">
+      <div class="now"><h4>Shipped</h4><ul>
+        <li>A wake made only of reads and the watch's own writes keeps waiting (<code>fd16003</code>)</li>
+        <li>A wait always stops at its deadline (<code>81c0f40</code>)</li>
+        <li>The supervisor ignores participant-file churn as a hint to rescan</li>
+        <li>Scan profiling: <code>POST_WATCH_PROFILE=1</code> (<code>2443a9a</code>)</li>
+      </ul></div>
+      <div class="real"><h4>How we know</h4><ul>
+        <li>Same probe, throwaway store on the devbox, 15 s of watching: the installed build used <b>0 CPU-seconds</b> and rewrote its heartbeat 4 times; the old build used 2.49 CPU-seconds and rewrote it 3,738 times</li>
+        <li>The live watch that burned 93% of a core for 16 hours was restarted by its owner on the fixed build: <b>0.51 CPU-seconds per 30 s</b>, about 1.7%</li>
+        <li>Devbox supervisor scans dropped from about 223 a minute to about 5, at 0.9% CPU</li>
+      </ul></div>
     </div>
-    <div class="refs">skills/post/hooks/codex-notify-monitor.mjs:303-313, 355-402 · post-mail-doorbell.md · src/cli.rs:822 (WatchArgs)</div>
   </div>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">03</span><h3>Watch re-reads the whole store on every wake</h3></div>
-      <div class="badges"><span class="badge b-refac">refactor · large</span></div></div>
-    <div class="why">Every wake-up re-lists every channel file and re-parses the whole inbox, so a doorbell's CPU grows with history and with how busy everyone else is, not with new mail. The sweep's theory that watch "spins in a loop" is outdated; this is simply the cost of the work it repeats. Post already skips parsing channel messages you've seen.</div>
-    <div class="cols"><div class="now"><h4>First step</h4><ul><li>Measure: time mail scans and channel listing separately, on a real heavy participant.</li></ul></div>
-      <div class="real"><h4>Real fix</h4><ul><li>Keep an index of what's unseen for each watcher, updated from file events, with a periodic full pass as a correctness backstop. The periodic pass guards the edge cases this could otherwise miss: renames, overflow, files arriving from the bridge.</li></ul></div></div>
-    <div class="refs">src/commands/watch.rs:717-760,1273 · src/eligibility.rs:77-163, 268-304</div>
+    <div class="rtop"><div class="left"><span class="rnum">04</span><h3>A bad cursor file can't pass for new mail</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why">A cursor file that can't be read now labels the batch <code>[cursor unusable: re-reporting history]</code> instead of announcing "339 new" (<code>94579be</code>, landed before the triage). <b>The intermittent "invalid cursors.json" came from a race</b>: the reader checked one file and could read a different one that had replaced it in between. It now takes both from a single open file (<code>ff20812</code>).</div>
   </div>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">04</span><h3>A bad cursor file turns into "everything is unread"</h3></div>
-      <div class="badges"><span class="badge b-behav">mostly mitigated</span></div></div>
-    <div class="why">Writes are safe: post writes a temp file and renames it into place. Reads don't take the lock, though, and they check the file and then read it in two separate steps, so a race can make a valid file look broken for a moment. Current code already retries once, names the path and the reason in the warning, and flags a digest built from bad cursor state as a re-report rather than new mail. <b>The "339 new" false alarm should no longer look like a real burst.</b></div>
-    <div class="cols"><div class="now"><h4>Now</h4><ul><li>Nothing urgent. Make sure every doorbell shows the re-report flag instead of ringing on it.</li></ul></div>
-      <div class="real"><h4>Later</h4><ul><li>Open the file once and check that same open file, to close the race. Keep failing open: never auto-reset read history.</li></ul></div></div>
-    <div class="refs">src/cursor_state.rs:32-64, 222-260, 327-359 · src/commands/watch.rs:199-207</div>
+    <div class="rtop"><div class="left"><span class="rnum">05</span><h3>A send can't hang after it has landed</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why">After a send committed, post waited with no time limit for a lock to mark the message as seen, which once held a send for 11 minutes. <b>It now tries for 2 seconds, then warns and returns the receipt</b> (<code>e6ee2a9</code>). The message was always delivered; now the command says so promptly.</div>
   </div>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">05</span><h3>A send can hang after it has already landed</h3></div>
-      <div class="badges"><span class="badge b-behav">behavior change · small</span></div></div>
-    <div class="why">After a channel message is written, post marks it as seen for you. That step waits on a file lock <b>with no time limit</b>. If another process holds the lock, your terminal hangs even though the message was delivered. That's a live mechanism for the August "11-minute send" report.</div>
-    <div class="cols"><div class="now"><h4>Fix</h4><ul><li>Give that wait a deadline. If it expires, print a warning and return the send receipt. Nothing is lost: the message is already written.</li></ul></div>
-      <div class="real"><h4>Follow-on</h4><ul><li>One shared lock helper with a deadline for every blocking lock in post, each with a defined outcome on timeout.</li></ul></div></div>
-    <div class="refs">src/commands/chat.rs:2260-2336 · src/cursor_state.rs:362-394</div>
+    <div class="rtop"><div class="left"><span class="rnum">06</span><h3>The CLI refuses instead of guessing</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why">Text piped to <code>post chat</code> without <code>--send</code> used to be treated as a read and thrown away. <b>Now a read that finds text waiting on its input refuses and prints the exact command that sends it</b> (<code>b73427f</code>, <code>be5646a</code>). <code>post who</code> prints <code>lease=active</code> instead of a <code>state=active</code> that read as "working" (<code>8d4d8a4</code>). Every installer answers <code>--help</code> (<code>947d3bc</code>), and shortened message ids paste back correctly (<code>94579be</code>).</div>
   </div>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">06</span><h3>The CLI guesses what you meant</h3></div>
-      <div class="badges"><span class="badge b-band">band-aids</span></div></div>
-    <div class="why"><code>echo hi | post chat ops</code> reads the channel and throws your text away, because only <code>--send</code>/<code>--body</code> count as send intent. <code>post who</code> prints <code>state=active</code> for a lease that hasn't expired, and readers take it to mean the agent is working; that belief once held a launch for 30 minutes. The installers reject <code>--help</code> because it hits argument validation first.</div>
-    <div class="cols"><div class="now"><h4>Fixes</h4><ul>
-      <li>Piped input on a read → refuse, and hand back the exact <code>--send</code> command. Never auto-send: a missing flag shouldn't be able to deliver anything.</li>
-      <li><code>state=active</code> → <code>lease=active</code>, plus a hint pointing to <code>--seen-by</code>, which is the tool that actually answers "did they read it?"</li>
-      <li>Installers: handle <code>--help</code> first, exit 0.</li></ul></div>
-      <div class="real"><h4>Already fixed</h4><ul><li>Shortened ids now print the shortest prefix that's unique in the channel, plus a "…", and every flag that takes an id accepts it back. Closed tonight.</li></ul></div></div>
+    <div class="rtop"><div class="left"><span class="rnum">07</span><h3>The registries have their verbs</h3></div>
+      <div class="badges"><span class="badge b-band">installed</span></div></div>
+    <div class="why"><code>post rooms set-path NAME PATH</code> moves a workspace without touching its mail (<code>488c107</code>). <code>post profile list</code> shows who holds each sigil, using the same rule <code>profile set</code> enforces, so the list and the refusal can't disagree (<code>6e2ee76</code>).</div>
   </div>
 
   <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">07</span><h3>Registries without the verbs to maintain them</h3></div>
-      <div class="badges"><span class="badge b-feat">new feature · medium</span></div></div>
-    <div class="why">Rooms and sigils live in JSON files, and the only tool for changing them is editing by hand. Moving brief-app from the Mac to the devbox meant hand-editing <code>rooms.json</code>, and choosing a sigil is trial and error.</div>
-    <div class="cols"><div class="now"><h4>Build</h4><ul><li><code>post rooms set-path NAME PATH</code>, under the registry lock, with checks.</li><li><code>post profile list</code>: who holds which sigil, using the same lease rule that enforces uniqueness.</li></ul></div>
-      <div class="real"><h4>Hold</h4><ul><li>Renaming a room is its own design: history, memberships, routes, and old references all point at the name.</li></ul></div></div>
-  </div>
-
-  <div class="rcard">
-    <div class="rtop"><div class="left"><span class="rnum">08</span><h3>Cross-machine post is still on bridge v1</h3></div>
-      <div class="badges"><span class="badge b-band">band-aid</span><span class="badge b-refac">ship v2</span><span class="badge b-feat">+ feature</span></div></div>
-    <div class="why">Both machines run the old single-file bridge. It knows the other side's workspaces only from a <b>hand-kept list in each machine's config</b>. The Mac's list has cos-devbox, devbox-linux-devbox, post-devbox, yu-gi-ho-solver, and hq-devbox, and no one ever added <code>loom</code>. v2 replaces that list with an automatic room directory and adds opt-in channel sync, and <b>it has never been deployed</b>. It sits on branch <code>post-bridge-v2</code> in claude-space on the devbox, 18 commits ahead of Forgejo, with someone's staged edits on top. v1 also logs a warning on every participant-era envelope: about 30k lines on the Mac and 39k on the devbox. That's noise worth checking, to make sure it isn't dropping sender attribution.</div>
-    <div class="bridge">
-      <div class="host"><div class="hn">MAC</div><div class="item">Astra (its own harness)</div><div class="item">bridge v1 · static peers list</div><div class="item">channels: off</div></div>
-      <div class="pipe"><div class="lane ok">workspace mail ✓<br>(listed rooms only)</div><div class="lane no">channels ✕</div><div class="lane no">DM one agent ✕</div></div>
-      <div class="host"><div class="hn">DEVBOX</div><div class="item">Fable + Astra in #loom-build</div><div class="item">bridge v1 · static peers list</div><div class="item">v2 on an unpushed branch</div></div>
+    <div class="rtop"><div class="left"><span class="rnum">08</span><h3>Bridge v2 is live, and agents can write to one agent on the other machine</h3></div>
+      <div class="badges"><span class="badge b-behav">degraded on purpose</span><span class="badge b-feat">new capability</span></div></div>
+    <div class="why">Bridge v2 replaces the hand-kept list of the other machine's workspaces with a directory each machine publishes, and it syncs the one allowlisted channel, <code>loom-build</code>. <b>New tonight: <code>participant:&lt;id&gt;@&lt;host&gt;</code> addresses one agent on the other machine</b>, and <code>post delivery &lt;id&gt;</code> tells the sender whether a letter was published, received, or refused and why. The bridge refuses to guess when a workspace name exists on both machines. Eight names do, so it holds their mail, and its health reads degraded until those names are unique.<br><br><b>The export guard is the safety net for your renames.</b> Without it, renaming one of the eight names would send that name's old, already-delivered letters to the other machine: 212 letters (45 on the Mac, 167 on the devbox). The guard stamps every letter a local room has already received and never exports it, whatever the name later routes to.</div>
+    <div class="cols">
+      <div class="now"><h4>Shipped</h4><ul>
+        <li>Bridge v2 with the export guard, claude-space <code>2655dbe</code>, on both machines every 15 s</li>
+        <li>Host-qualified participant mail: post side <code>0612a18</code>…<code>6ef3714</code>, installed in <code>6f70511</code>; bridge side in <code>2655dbe</code></li>
+        <li>Remote-origin mail never counts as your own and never excludes a local recipient; a missing room registry fails closed (<code>fe500bb</code>)</li>
+        <li>Guard seeded from the 212-letter inventory on each machine (post-aqw.9)</li>
+      </ul></div>
+      <div class="real"><h4>How we know</h4><ul>
+        <li><b>Aster's acceptance bar is met on both machines</b>, checked on a full tick after the seed: 0 faults, 0 unaccounted letters, and all 212 inventoried letters held, each with matching content and room. The extra holds are observed local deliveries in uncontested rooms, which Aster's ruling also orders held</li>
+        <li>Live DM, Mac to a test participant on the devbox: received 21 s after sending, with its reply address pointing back at the Mac sender. The reply came back the same way</li>
+        <li>An unknown recipient came back <b>rejected</b> with its reason; an unknown machine was refused before anything was written; replaying a delivered letter changed nothing, and a replay with the wrong checksum wrote nothing</li>
+        <li>Fresh-nonce smoke letters crossed in both directions; <code>loom</code> is listed as a room on the Mac</li>
+      </ul></div>
     </div>
-    <div class="cols"><div class="now"><h4>Band-aid now</h4><ul><li>Add <code>loom</code> to the Mac's peers list, and the Mac rooms to the devbox's. Workspace DMs to loom then work natively.</li><li>The ssh route you gave Astra covers <code>#loom-build</code> in the meantime.</li></ul></div>
-      <div class="real"><h4>Real fix, in order</h4><ul><li><b>Ship bridge v2</b>: automatic room directory, then allow <code>loom-build</code> only, on both sides. Once a channel is published, anyone with access to the relay can read it. Expect the first import to mark old history as unread.</li><li><b>Then <code>participant:&lt;id&gt;@&lt;host&gt;</code></b>: a real DM to one agent on the other machine, resolved on the receiving side. No global directory of participants.</li></ul></div></div>
-    <div class="refs">~/.claude-mail/bridge/config.json (both) · claude-space/post-bridge @ db01766 (post-bridge-v2, ahead 18) · bridgelib/channels.py, rooms.py</div>
   </div>
 </section>
 
 <section>
-  <h2>The plan</h2>
-  <p class="sub">Ordered by dependency and leverage. Each step ships on its own.</p>
-  <div class="waves">
-    <div class="wave"><div class="wl"><span class="wn">1</span>band-aids</div><div>
-      <h3>One sitting of small, safe fixes</h3><p>Each is small, the fix is clear, and each gets its own test.</p>
-      <div class="chips"><span class="chip c-band">doorbell accepts participant mail</span><span class="chip c-band">monitor: loud "pane not found" + real errors</span><span class="chip c-behav">send: bounded lock wait</span><span class="chip c-band">piped read refuses</span><span class="chip c-band">installers --help</span><span class="chip c-behav">who: lease=</span><span class="chip c-feat">watch --reason</span><span class="chip c-band">bridge test fixtures</span><span class="chip c-band">porch helpers path</span><span class="chip c-band">SPEC link</span><span class="chip c-band">loom in peers</span></div></div></div>
-    <div class="wave"><div class="wl"><span class="wn">2</span>contract</div><div>
-      <h3>Post's output becomes a tested contract</h3><p>Fixtures from post, tests in every reader, and an install smoke that runs Porch's and the doorbell's startup checks. This is what would have caught tonight's Porch break.</p></div></div>
-    <div class="wave"><div class="wl"><span class="wn">3</span>doorbell</div><div>
-      <h3>One doorbell supervisor per host</h3><p>Consolidates the five paths, ties each doorbell's lifetime to its participant, fails loudly, and makes focus-waking an explicit option. The dead-timer problem can't come back after this.</p><span class="gate">needs your call on focus-waking</span></div></div>
-    <div class="wave"><div class="wl"><span class="wn">4</span>bridge</div><div>
-      <h3>Ship bridge v2, then turn on #loom-build</h3><p>Finish, review, and deploy the v2 branch on both machines. Then allow the one channel. After that, add <code>participant@host</code> for real cross-machine DMs.</p><span class="gate">needs your call on whose branch that is</span></div></div>
-    <div class="wave"><div class="wl"><span class="wn">5</span>depth</div><div>
-      <h3>Scale and registries</h3><p>Measure, then index the watch scans. Add <code>rooms set-path</code> and <code>profile list</code>. Close the cursor read race.</p></div></div>
+  <h2>Still open, and why</h2>
+  <p class="sub">Nothing here is lost mail or a silent failure. Each item is your decision, work in progress, or a known limit with a bead.</p>
+  <div class="open">
+    <div class="oitem"><div class="on">8 duplicate workspace names</div><p><code>agent-memory</code>, <code>atlasos</code>, <code>brief-app</code>, <code>cos-crons</code>, <code>deslop-tooling</code>, <code>dwp-portals</code>, <code>papercuts</code>, and <code>trey</code> exist on both machines. Bridge v2 won't route mail to a name two machines claim, so it holds instead. Renaming one side is your decision (post-aqw.10), and it also waits on the guard fix round below.</p></div>
+    <div class="oitem"><div class="on">Export guard fix round</div><p>Three reviewers found no blockers in the guard. Fable 5.1 found one major: if someone deleted the guard's own files, it would read as clean, and a rename afterwards could export. GLM found a partial version of the same gap. The fix makes a missing guard store a sticky fault that stops all workspace exports. It is being built and tested on the devbox now (post-aqw.11), and it gets a fresh review before it is deployed. <b>The rename is blocked on it.</b> Nothing exports today, because the eight names have no route.</p></div>
+    <div class="oitem"><div class="on">Porch mouse scrolling</div><p>Scrolling under herdr inside cmux needs your terminal stack to reproduce. Keyboard scrolling is unaffected. The papercut stays open.</p></div>
+    <div class="oitem"><div class="on">locus keeps its old timer</div><p>The installer switches an agent's old timer off only after the supervisor has scanned for that agent once. locus's pane stayed focused all night, and the supervisor doesn't scan a focused pane, so the timer stays on. Until <code>install-doorbell-supervisor.mjs --migrate locus</code> reruns, both may ring locus: a duplicate ring, never a missed one.</p></div>
+    <div class="oitem"><div class="on">Small bridge and install leftovers</div><p>The Mac's relay clone loses its <code>README.md</code> on every tick. Ticks are unaffected, but a reinstall needs it restored first (post-aqw.12). post and Porch disagree about a room path with a doubled slash. The smoke no longer makes one, but a real room registered that way would turn Porch signing off (post-ixq). On the devbox, systemd's default one-minute timer accuracy let 15 s ticks drift to 43 s apart, close to where post calls the bridge stale. A live override fixes it now, and the fix round adds it to the bridge's timer template.</p></div>
+    <div class="oitem"><div class="on">Known limits, filed</div><p>A new inbox folder under a watched anchor waits for the slow pass before its first event (post-3uq; nothing is lost). Post can't see a bridge mail cap set below 1 MiB, so such a letter waits indefinitely (post-qr6). A watch snapshot for a participant id that no longer exists exits 0 with nothing on stdout, so a supervisor scan for it reads as "no mail" (post-b18; reproduced). Eight snapshots running at once cost about five times the CPU each (post-hg5). The project gate has no time limit around the Rust tests, so a hanging test hangs the gate instead of failing it (post-4th).</p></div>
+    <div class="oitem"><div class="on">Lumen's old post binary</div><p>OpenClaw on the devbox still resolves the root-owned <code>/usr/local/bin/post</code>. This predates tonight; the options are in post-7av.</p></div>
   </div>
 </section>
 
 <section>
-  <h2>Three calls only you can make</h2>
-  <div class="decs" style="margin-top:14px">
-    <div class="dec"><div class="kicker">bridge v2</div><div class="q">The v2 branch has 18 unpushed commits plus staged edits. Whose work is it, and should I take it to ship?</div><p>I can't finish or push it without knowing whether another session is mid-flight on it.</p><div class="rec">My lean: I take it over if it's parked.</div></div>
-    <div class="dec"><div class="kicker">zombie doorbells</div><div class="q">Turn off the 15 Codex doorbell timers whose herdr panes are gone?</div><p>Other sessions installed them, so turning them off needs your OK. It's reversible: disable, don't delete.</p><div class="rec">My lean: yes, disable all 15.</div></div>
-    <div class="dec"><div class="kicker">focus policy</div><div class="q">Should a doorbell ever wake the pane you're looking at?</div><p>Today it never does, which is why the two-seat review sat stuck. Letting it wake the focused pane risks interrupting you mid-thought.</p><div class="rec">My lean: opt-in per doorbell, off by default.</div></div>
-  </div>
-</section>
-
-<section>
-  <h2>Closed tonight (60)</h2>
-  <p class="sub">59 verified against post c808283 or porch 99ba81e+ with a live probe or a source read, each with a note saying what fixed it; 1 archived as a duplicate.</p>
-  <div class="closed">
-    <div><b>Participant binding (≈15)</b>: "posted as the wrong room", cwd identity, stray <code>POST_FROM</code>/<code>--from</code> pins. Post now refuses when a pin conflicts with the bound participant.</div>
-    <div><b>Installing the latest build</b>: <code>--max-bytes</code>, <code>--message</code>, archive, and a clean channel for a leading <code>#</code>.</div>
-    <div><b>0.6–0.9 fixes whose cuts were never closed</b>: <code>--body-file -</code>, reading a channel-message id, send-to-channel handoff, crossed_send narrowing, seen-set cursors.</div>
-    <div><b>Per-participant profiles</b>: one agent's rename no longer changes another agent's name in a shared workspace.</div>
-    <div><b>Porch</b>: porchd keep-alive poisoning (fixed in August), the stale launcher symlink, keyboard scrolling.</div>
-    <div><b>Doesn't reproduce now</b>: phantom unread counts, digest replaying history already read, watch dying on a rebind, watch following the workspace's read position instead of the participant's.</div>
+  <h2>What I need from you</h2>
+  <div class="decs">
+    <div class="dec"><div class="kicker">duplicate names</div><div class="q">For each of the 8 names, which machine keeps it?</div><p>The other side gets a new name with <code>post rooms set-path</code> or a re-register. Once the guard fix round lands, the guard means a rename can't flood the other machine with old letters. Before any rename, I recheck that the guard still holds every inventoried letter.</p><div class="rec">My lean: rename on whichever machine the workspace is least used.</div></div>
+    <div class="dec"><div class="kicker">github</div><div class="q">Review, then push <code>main</code> to GitHub?</div><p>Everything is on Forgejo <code>main</code> (<code>9cc0032</code>), and both machines run it. GitHub's <code>main</code> hasn't moved since Sep 16.</p><div class="rec">One push when you say so. No release until you ask for one.</div></div>
+    <div class="dec"><div class="kicker">release</div><div class="q">Cut a release?</div><p>You held this for the morning. The changelog's Unreleased section lists everything above.</p><div class="rec">Your call after review.</div></div>
   </div>
 </section>
 
 <div class="foot">
-  <p><b style="color:var(--ink2)">How this was checked.</b> Three GPT-6 Luna xhigh lanes did read-only root-cause work: watch and doorbells, CLI and tooling, cross-machine design. Their reports are in <code>post/docs/triage-2026-09-22/diag-{A,B,C}.md</code>. I re-verified the load-bearing claims myself, and two lane conclusions changed. Lane A blamed the Astra doorbell on "snapshot failed" errors; the real cause is a missing pane, and those errors stopped at 18:52. Lane C proposed flipping a config switch to sync channels; that switch only exists in v2, which isn't deployed. The CPU mechanism and the cursor race are traced in source but not reproduced live.</p>
+  <p>Post: branch <code>overnight-0923</code>, fast-forwarded into <code>main</code> at <code>9cc0032</code>. The installed build is <code>6f70511</code>; <code>9cc0032</code> changes only the install smoke and a test, so the binary is the same code. Gates pass on both machines at both commits; at <code>9cc0032</code>, Rust 703/0 on the Mac and 704/0 on the devbox, Node 504/0 on each. Bridge: claude-space branch <code>bridge-v2-ship</code>, deployed at <code>2655dbe</code>. Plan and brief: <code>docs/plans/overnight-2026-09-23-plan.md</code>, <code>docs/overnight-2026-09-23.md</code>. F2 evidence: <code>docs/evidence/f2-contested-2026-09-23/</code>. Reviewers: GLM 5.3 on nearly every round, Cursor Grok 4.7 on most, Kimi on the doorbell supervisor, a relay fix round, and the skill, Opus on the first bridge v2 round, and Fable 5.1 as the senior seat on the export guard. Three small late fixes were red-proofed and gated on both machines but not re-reviewed: <code>8211a2a</code> (a test's timing margin), <code>1d3272c</code> (the launchd wait), and <code>9cc0032</code> (the smoke's temp path).</p>
 </div>
-
 </div>
 </body>
 </html>
