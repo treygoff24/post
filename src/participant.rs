@@ -1360,6 +1360,25 @@ mod tests {
     use crate::mailbox::Context;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
+
+    #[test]
+    fn created_offsets_convert_to_a_utc_id_watermark() {
+        let watermark = |created: &str| {
+            crate::mailbox::utc_id_watermark(super::parse_sent_timestamp(created).expect("parses"))
+                .expect("watermark")
+        };
+        // Negative offset: 20:00 at -0400 is midnight UTC the next day.
+        assert_eq!(
+            watermark("2026-08-16 20:00:00 -0400"),
+            "20260817-000000-000000"
+        );
+        // Positive offset, with a minute component.
+        assert_eq!(
+            watermark("2026-08-17 09:30:15 +0530"),
+            "20260817-040015-000000"
+        );
+        assert_eq!(super::parse_sent_timestamp("not a timestamp"), None);
+    }
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
 

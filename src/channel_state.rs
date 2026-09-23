@@ -716,6 +716,41 @@ mod tests {
     const ID2: &str = "20260831-171234-000002-b2c3d4";
 
     #[test]
+    fn unparseable_created_falls_back_to_the_backlog_floor() {
+        let root = test_root("channelstate-created-fallback");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let mut participant = crate::participant::bind_test_actor(&context, "alpha");
+        // Joined with no recorded start (old-format state).
+        let state = ParticipantChannels {
+            joined: BTreeSet::from(["tax".to_owned()]),
+            left: BTreeSet::new(),
+            starts: BTreeMap::new(),
+        };
+        participant.created = "2026-08-16 20:00:00 -0400".to_owned();
+        assert_eq!(
+            state
+                .membership_start(&context, &participant, "tax")
+                .expect("start")
+                .as_deref(),
+            Some("20260817-000000-000000"),
+            "a parseable created is the floor"
+        );
+        participant.created = "not a timestamp".to_owned();
+        assert_eq!(
+            state
+                .membership_start(&context, &participant, "tax")
+                .expect("start")
+                .as_deref(),
+            Some(BACKLOG_MEMBERSHIP_START),
+            "an unparseable created keeps everything unread"
+        );
+        trash_test_root(&root);
+    }
+
+    #[test]
     fn a_join_writes_its_start_first_and_a_leave_writes_channels_first() {
         let start = "20260923-120000-000000".to_owned();
         let empty = ParticipantChannels::default();
