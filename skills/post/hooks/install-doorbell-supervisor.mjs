@@ -371,12 +371,34 @@ function domain(ctx) {
 function startSupervisor(ctx) {
   if (ctx.platform === "darwin") {
     managerCall(ctx, ["bootout", `${domain(ctx)}/${LABEL}`], { allowNotLoaded: true });
+    if (!ctx.dryRun) waitUntilUnloaded(ctx, LABEL);
     managerCall(ctx, ["enable", `${domain(ctx)}/${LABEL}`]);
-    managerCall(ctx, ["bootstrap", domain(ctx), ctx.serviceFile]);
+    try {
+      managerCall(ctx, ["bootstrap", domain(ctx), ctx.serviceFile]);
+    } catch (error) {
+      if (error instanceof Fail) throw new Fail(`${error.message}; no supervisor is running now, so re-run the installer`);
+      throw error;
+    }
   } else {
     managerCall(ctx, ["--user", "daemon-reload"]);
     managerCall(ctx, ["--user", "enable", UNIT]);
     managerCall(ctx, ["--user", "restart", UNIT]);
+  }
+}
+
+// bootout returns before launchd has torn the old job down, and a bootstrap
+// inside that window fails with "5: Input/output error", leaving no
+// supervisor running (seen live on 2026-09-23). launchd sends SIGKILL after
+// its default 20 s exit timeout, so the job is gone well inside this bound.
+const BOOTOUT_TIMEOUT_MS = 30_000;
+
+function waitUntilUnloaded(ctx, label) {
+  const deadline = Date.now() + BOOTOUT_TIMEOUT_MS;
+  while (run(ctx.managerBin, ["print", `${domain(ctx)}/${label}`]).status === 0) {
+    if (Date.now() >= deadline) {
+      throw new Fail(`launchd still has ${label} loaded ${BOOTOUT_TIMEOUT_MS / 1000}s after bootout; check \`launchctl print ${domain(ctx)}/${label}\`, then re-run`);
+    }
+    sleepMs(200);
   }
 }
 

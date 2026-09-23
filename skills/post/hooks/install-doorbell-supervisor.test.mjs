@@ -143,14 +143,23 @@ if (path.basename(process.argv[1]) === "systemctl") {
 } else {
   const [verb, target, file] = args;
   const label = (target ?? "").split("/").slice(2).join("/");
-  if (verb === "print") process.exit(state.loaded.includes(label) ? 0 : 113);
+  // Real launchd finishes tearing a job down after bootout returns: until
+  // then print still finds it and bootstrap fails with 5. FAKE_SM_SLOW_BOOTOUT_MS
+  // holds that window open.
+  state.tearing ??= {};
+  for (const [name, until] of Object.entries(state.tearing)) if (Date.now() >= until) { drop("loaded", name); delete state.tearing[name]; }
+  if (verb === "print") { save(); process.exit(state.loaded.includes(label) ? 0 : 113); }
   else if (verb === "enable") { add("enabled", label); drop("disabled", label); }
   else if (verb === "disable") { drop("enabled", label); add("disabled", label); }
   else if (verb === "bootout") {
-    if (!state.loaded.includes(label)) { process.stderr.write("Boot-out failed: 3: No such process\\n"); save(); process.exit(3); }
-    drop("loaded", label); stop(label);
+    if (!state.loaded.includes(label) || state.tearing[label]) { process.stderr.write("Boot-out failed: 3: No such process\\n"); save(); process.exit(3); }
+    stop(label);
+    const slow = Number(process.env.FAKE_SM_SLOW_BOOTOUT_MS ?? 0);
+    if (slow > 0) state.tearing[label] = Date.now() + slow;
+    else drop("loaded", label);
   } else if (verb === "bootstrap") {
-    if (state.disabled.includes(path.basename(file, ".plist"))) { process.stderr.write("Bootstrap failed: 5: Input/output error\\n"); save(); process.exit(5); }
+    const loadedLabel = path.basename(file, ".plist");
+    if (state.disabled.includes(loadedLabel) || state.loaded.includes(loadedLabel)) { process.stderr.write("Bootstrap failed: 5: Input/output error\\n"); save(); process.exit(5); }
     const text = fs.readFileSync(file, "utf8");
     const plistLabel = /<key>Label<\\/key>\\s*<string>([^<]*)<\\/string>/.exec(text)[1];
     if (plistLabel === "dev.post.doorbell-supervisor") {
@@ -337,6 +346,27 @@ for (const platform of ["linux", "darwin"]) {
     });
   });
 }
+
+describe("install: launchd's teardown after bootout (macOS)", () => {
+  test("a restart waits for the old job to leave launchd before bootstrapping it again", () => {
+    const host = makeHost("darwin");
+    host.agent("ada", "ada");
+    ok(host.install());
+    const first = host.sm().running[supervisorUnit(host)];
+    const before = host.smCalls().length;
+    const again = host.install([], { FAKE_SM_SLOW_BOOTOUT_MS: "1500" });
+    ok(again);
+    assert.match(again.stdout, /supervisor healthy \(pid \d+\)/);
+    const pid = host.sm().running[supervisorUnit(host)];
+    assert.ok(pid && pid !== first && host.alive(pid), "a new supervisor is running");
+    const verbs = host.smCalls().slice(before).map((call) => call.args[0]);
+    const bootout = verbs.indexOf("bootout");
+    const bootstrap = verbs.lastIndexOf("bootstrap");
+    assert.ok(bootout >= 0 && bootstrap > bootout, `bootout then bootstrap: ${verbs.join(" ")}`);
+    assert.ok(verbs.slice(bootout + 1, bootstrap).includes("print"), "launchd is asked between bootout and bootstrap");
+    assert.equal(host.receipt().supervisor.state, "healthy");
+  });
+});
 
 describe("install: the name collision", () => {
   test("an old post-doorbell script is moved aside with its hash; the unit template stays", () => {
