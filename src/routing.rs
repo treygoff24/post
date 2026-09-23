@@ -501,15 +501,60 @@ pub(crate) fn route_message_locked(
     if recipients.is_empty() {
         return Ok(None);
     }
-    let (_, routed_at) = crate::mailbox::local_timestamp()?;
     let routed_by = participant::resolve(context)?
         .participant()
         .map(|actor| actor.id.clone())
         .unwrap_or_else(|| "post".to_owned());
+    publish_receipt(
+        context, address, id, &bytes, recipients, excluded, routed_by,
+    )
+    .map(Some)
+}
+
+/// Route an imported letter that `post bridge deliver` admitted to
+/// participant `address`. Admission already decided the route, so the
+/// receipt names exactly that participant and the current rules are not
+/// consulted: a rule added after admission cannot strand the letter, just
+/// as it cannot strand local mail routed at send time. The caller holds the
+/// participants lock.
+pub(crate) fn route_admitted_import_locked(
+    context: &Context,
+    address: &Address,
+    id: &str,
+) -> AppResult<Receipt> {
+    debug_assert_eq!(address.kind, AddressKind::Participant);
+    if let Some(existing) = receipt(context, address, id)? {
+        return Ok(existing);
+    }
+    let message_path = inbox_path(context, address).join(format!("{id}.mail"));
+    let bytes = fs::read(&message_path)
+        .map_err(|error| AppError::io("read canonical mail for routing", &message_path, error))?;
+    parse_mail(&message_path)?;
+    publish_receipt(
+        context,
+        address,
+        id,
+        &bytes,
+        vec![address.name.clone()],
+        Vec::new(),
+        "post".to_owned(),
+    )
+}
+
+fn publish_receipt(
+    context: &Context,
+    address: &Address,
+    id: &str,
+    bytes: &[u8],
+    recipients: Vec<String>,
+    excluded: Vec<ExcludedRecipient>,
+    routed_by: String,
+) -> AppResult<Receipt> {
+    let (_, routed_at) = crate::mailbox::local_timestamp()?;
     let receipt = Receipt {
         version: RECEIPT_VERSION,
         message: id.to_owned(),
-        digest: hex_sha256(&bytes),
+        digest: hex_sha256(bytes),
         address: address.clone(),
         recipients,
         excluded,
@@ -526,7 +571,7 @@ pub(crate) fn route_message_locked(
     encoded.push(b'\n');
     atomic_replace(&path, &encoded)
         .map_err(|error| AppError::io("publish routing receipt", &path, error))?;
-    Ok(Some(receipt))
+    Ok(receipt)
 }
 
 fn filtered_recipients(

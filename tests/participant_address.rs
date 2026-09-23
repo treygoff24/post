@@ -585,6 +585,9 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     let future = now + Duration::from_secs(3600);
     rig.write_health(&both, future, 30);
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
+    // A future stamp gets at most 5 s of clock skew, not a second window.
+    rig.write_health(&both, now + Duration::from_secs(90), 30);
+    assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     for broken in [
         "{not json".to_owned(),
         json!({"capabilities": both, "interval_s": 30}).to_string(),
@@ -600,6 +603,9 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     // Fresh within three intervals, with both capabilities: queued.
     rig.write_health(&both, now - Duration::from_secs(80), 30);
+    assert_queued(&rig, &to, REMOTE_ID, PEER);
+    // A stamp 4 s ahead is inside the skew allowance.
+    rig.write_health(&both, now + Duration::from_secs(4), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
 }
 

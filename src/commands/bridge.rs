@@ -48,7 +48,7 @@ struct DeliverOutput {
 
 /// One decision. `Delivered` carries the record's `admitted_at`.
 enum Decision {
-    Delivered { admitted_at: String, replay: bool },
+    Delivered { admitted_at: String },
     Rejected(&'static str, String),
     Retry(&'static str, String),
 }
@@ -114,6 +114,7 @@ fn deliver(context: &Context, args: BridgeDeliverArgs, pretty: bool) -> AppResul
                 &args,
                 &digest,
                 Decision::Retry(reason, error.message),
+                false,
                 None,
                 pretty,
             );
@@ -127,13 +128,14 @@ fn deliver(context: &Context, args: BridgeDeliverArgs, pretty: bool) -> AppResul
                 "topology_unavailable",
                 "this host has no bridge/config.json".to_owned(),
             );
-            return finish(&args, &digest, decision, admission, pretty);
+            return finish(&args, &digest, decision, false, admission, pretty);
         }
         Err(reason) => {
             return finish(
                 &args,
                 &digest,
                 Decision::Retry("topology_unavailable", reason),
+                false,
                 admission,
                 pretty,
             )
@@ -148,8 +150,9 @@ fn deliver(context: &Context, args: BridgeDeliverArgs, pretty: bool) -> AppResul
         .reason("source host is this host"));
     }
 
-    let decision = decide(context, &args, &own_host, &bytes, &digest);
-    finish(&args, &digest, decision, admission, pretty)
+    let mut replay = false;
+    let decision = decide(context, &args, &own_host, &bytes, &digest, &mut replay);
+    finish(&args, &digest, decision, replay, admission, pretty)
 }
 
 fn decide(
@@ -158,6 +161,7 @@ fn decide(
     own_host: &str,
     bytes: &[u8],
     digest: &str,
+    replay: &mut bool,
 ) -> Decision {
     if digest != args.sha256 {
         return Decision::Retry(
@@ -176,9 +180,12 @@ fn decide(
         Err(error) => return Decision::Retry("io_error", error.message),
     };
 
-    let (record, replay) = match load_record(context, &args.participant, &args.mail_id) {
+    // `replay` reports that the admission record already existed, whatever
+    // the outcome.
+    let record = match load_record(context, &args.participant, &args.mail_id) {
         Err(reason) => return Decision::Retry("import_record_unreadable", reason),
         Ok(Some(record)) => {
+            *replay = true;
             if record.source_host != args.source_host || record.sha256 != digest {
                 return Decision::Rejected(
                     "id_collision",
@@ -190,7 +197,7 @@ fn decide(
             }
             // A valid, matching record is proof the admission checks passed;
             // they are not re-run (rev 3.1 correction 2).
-            (record, true)
+            record
         }
         Ok(None) => {
             let inbox = inbox_file(context, &args.participant, &args.mail_id);
@@ -216,7 +223,7 @@ fn decide(
                 return refusal;
             }
             match write_record(context, args, digest, &from_participant) {
-                Ok(record) => (record, false),
+                Ok(record) => record,
                 Err(decision) => return decision,
             }
         }
@@ -229,24 +236,25 @@ fn decide(
     }
     fault("d2");
 
-    // The canonical file and its record exist: the letter is delivered. A
-    // routing receipt failure leaves it pending for the next reader to route,
-    // exactly as `post send` does.
+    // The record and the canonical file exist. Route from the admission
+    // decision, never the current rules, on first delivery and replay alike.
+    // Without a receipt the letter is not delivered: a pending letter meets
+    // whatever rules a reader finds, and one blocked there would be held
+    // while the bridge acked it.
     let address = Address {
         kind: AddressKind::Participant,
         name: args.participant.clone(),
     };
     if let Err(error) =
-        crate::cursor_state::routing::route_message_locked(context, &address, &args.mail_id)
+        crate::cursor_state::routing::route_admitted_import_locked(context, &address, &args.mail_id)
     {
-        eprintln!(
-            "post: warning: imported mail {} was delivered but remains pending because routing failed: {}",
-            args.mail_id, error.message
+        return Decision::Retry(
+            "io_error",
+            format!("cannot write the routing receipt: {}", error.message),
         );
     }
     Decision::Delivered {
         admitted_at: record.admitted_at,
-        replay,
     }
 }
 
@@ -441,6 +449,7 @@ fn finish(
     args: &BridgeDeliverArgs,
     digest: &str,
     decision: Decision,
+    replay: bool,
     admission: Option<crate::migration_fence::WriteAdmission>,
     pretty: bool,
 ) -> AppResult<CommandResult> {
@@ -450,13 +459,10 @@ fn finish(
             "rejected reason {reason} is missing from imports::REJECTED_REASONS"
         );
     }
-    let (outcome, reason, admitted_at, replay, detail) = match decision {
-        Decision::Delivered {
-            admitted_at,
-            replay,
-        } => ("delivered", None, Some(admitted_at), replay, None),
-        Decision::Rejected(reason, detail) => ("rejected", Some(reason), None, false, Some(detail)),
-        Decision::Retry(reason, detail) => ("retry", Some(reason), None, false, Some(detail)),
+    let (outcome, reason, admitted_at, detail) = match decision {
+        Decision::Delivered { admitted_at } => ("delivered", None, Some(admitted_at), None),
+        Decision::Rejected(reason, detail) => ("rejected", Some(reason), None, Some(detail)),
+        Decision::Retry(reason, detail) => ("retry", Some(reason), None, Some(detail)),
     };
     let output = DeliverOutput {
         ok: true,
