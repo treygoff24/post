@@ -20,7 +20,7 @@ use crate::mailbox::{exclusive_atomic_write, Context};
 use crate::participant::{self, Address, AddressKind};
 use serde::Serialize;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) const DELIVER_SCHEMA: &str = "post.bridge-deliver.v1";
 const DETAIL_MAX_CHARS: usize = 512;
@@ -502,7 +502,7 @@ fn fault(point: &str) {
             std::process::exit(86);
         }
         if let Some(release) = item.strip_prefix(&format!("pause-after-{point}:")) {
-            let release = PathBuf::from(release);
+            let release = std::path::PathBuf::from(release);
             let mut marker = release.clone().into_os_string();
             marker.push(".paused");
             let _ = fs::write(&marker, b"1\n");
