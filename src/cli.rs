@@ -95,7 +95,7 @@ pub(crate) enum Command {
     Search(SearchArgs),
     /// List or register rooms.
     Rooms(RoomsArgs),
-    /// Show or change this room's display name and emoji pfp (presentation only; identity stays the room id).
+    /// Show or change your participant's display name and emoji pfp (presentation only; identity stays the participant id).
     Profile(ProfileArgs),
     /// Configure or show the signed owner: the trust anchor whose messages carry verification badges.
     Owner(OwnerArgs),
@@ -105,7 +105,7 @@ pub(crate) enum Command {
     Doctor(DoctorArgs),
     /// Stream direct-mail and joined-channel notifications as one event per line; runs until killed (--snapshot scans once and exits).
     Watch(WatchArgs),
-    /// Report which rooms have a live watch and when they were last seen (no PIDs).
+    /// Report participants and their leases, plus each room's watch heartbeat and last seen (no PIDs).
     Who(WhoArgs),
     /// Print build, store, and capability information.
     Version,
@@ -314,11 +314,11 @@ pub(crate) struct SearchArgs {
     #[arg(value_name = "PATTERN", value_parser = nonempty_search_pattern)]
     pub pattern: String,
 
-    /// Restrict the search to direct mail visible to the acting room.
+    /// Restrict the search to direct mail visible to the acting participant.
     #[arg(long, conflicts_with = "channel")]
     pub mail: bool,
 
-    /// Restrict the search to one channel; the acting room must be a member.
+    /// Restrict the search to one channel; the acting participant must be a member.
     #[arg(
         long,
         value_name = "CHANNEL",
@@ -461,7 +461,7 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["peek", "discard", "seen_by"])]
     pub send: bool,
 
-    /// Deliver even when unseen messages from other rooms exist in the channel.
+    /// Deliver even when unseen messages from others exist in the channel.
     #[arg(long, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
     pub anyway: bool,
 
@@ -547,7 +547,7 @@ pub(crate) struct ChatArgs {
     )]
     pub discard_through: Option<String>,
 
-    /// List member rooms whose seen-set contains this message (read-only).
+    /// List member participants whose seen-set contains this message (read-only).
     #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
 
@@ -712,11 +712,11 @@ pub(crate) struct ProfileArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProfileCommand {
-    /// Set your display name and/or pfp; announces the change in your channels.
+    /// Set the acting participant's display name and/or pfp; announces the change in its channels.
     Set(ProfileSetArgs),
-    /// Show a room's profile (defaults to your own room).
+    /// Show a profile: the acting participant's by default, or another participant's.
     Show(ProfileShowArgs),
-    /// Remove your profile; rendering falls back to the bare room id.
+    /// Remove the acting participant's profile; bylines fall back to its lineage, else the bare id.
     Clear,
     /// List every profile with its holder, sigil, and lease (read-only; text, or JSON with --json).
     List,
@@ -724,18 +724,19 @@ pub(crate) enum ProfileCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileSetArgs {
-    /// Display name, <=32 chars; may not imitate 'trey' or another room id.
+    /// Display name, <=32 chars; may not imitate the signed owner or another room id.
     #[arg(long, value_name = "NAME", value_parser = nonempty_without_controls)]
     pub name: Option<String>,
 
-    /// Exactly one emoji (one grapheme cluster), unique across rooms.
+    /// Exactly one emoji (one grapheme cluster), unique among profiles held now (active participants and registered legacy rooms).
     #[arg(long, value_name = "EMOJI", value_parser = nonempty_without_controls)]
     pub pfp: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileShowArgs {
-    /// Room to show; defaults to the room resolved from cwd.
+    /// `participant:<id>` or a participant id; any other name shows that
+    /// workspace's legacy entry (never stamped). Defaults to the acting participant.
     #[arg(value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Option<String>,
 }
