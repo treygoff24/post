@@ -542,6 +542,10 @@ struct RenamePlan {
     writes: Vec<RenameWrite>,
     /// Non-fatal findings folded into the receipt (skipped malformed records).
     warnings: Vec<String>,
+    /// Participant cursor locks held from before a planned `cursors.json` is
+    /// read until the rename commits or rolls back, so no concurrent cursor
+    /// writer can restore a pre-rename snapshot.
+    cursor_locks: Vec<fs::File>,
 }
 
 /// True when `bytes` cannot be proven free of a reference to `old`: the name
@@ -724,6 +728,20 @@ fn plan_live_rewrites(
                     },
                 )?;
                 let cursor_path = dir.join(crate::cursor_state::CURSORS_FILE);
+                // Lock before reading: the planned bytes must still be the
+                // file's bytes when the rewrite lands.
+                let cursor_lock = match fs::symlink_metadata(&cursor_path) {
+                    Ok(_) => Some(crate::cursor_state::lock_participant_cursors(&dir)?),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(AppError::io(
+                            "inspect participant cursors",
+                            &cursor_path,
+                            error,
+                        ))
+                    }
+                };
+                let writes_before = plan.writes.len();
                 let old_key = format!("workspace:{old}");
                 let new_key = format!("workspace:{new}");
                 plan_json_write(
@@ -750,6 +768,11 @@ fn plan_live_rewrites(
                         Ok(())
                     },
                 )?;
+                if let Some(lock) = cursor_lock {
+                    if plan.writes.len() > writes_before {
+                        plan.cursor_locks.push(lock);
+                    }
+                }
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

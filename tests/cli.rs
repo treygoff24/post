@@ -2284,6 +2284,71 @@ fn send_waits_for_the_room_rename_lock() {
     );
 }
 
+/// F8: the rename reads and replaces a participant's cursors.json only under
+/// that participant's `.cursors.lock`, the lock every cursor writer holds, so
+/// a concurrent consuming read cannot write back a pre-rename snapshot. The
+/// test holds the cursor lock: the rename must wait without writing anything.
+#[cfg(unix)]
+#[test]
+fn rooms_rename_waits_for_the_participant_cursor_lock() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let workspace = sandbox.path.join("hq-workspace");
+    fs::create_dir(&workspace).expect("workspace dir");
+    register_room(&sandbox, "hq", &workspace);
+    let participant_dir = write_bound_participant(&sandbox, "test-p1", "hq");
+    let rooms_before = fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms");
+    let cursors_before = fs::read(participant_dir.join("cursors.json")).expect("cursors");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(participant_dir.join(".cursors.lock"))
+        .expect("open cursor lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let mut child = post_command()
+        .args(["rooms", "rename", "hq", "hq-mac", "--json"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", "test-default")
+        .env_remove("POST_FROM")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rename");
+    for _ in 0..20 {
+        if child.try_wait().expect("probe rename").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        fs::read(participant_dir.join("cursors.json")).expect("cursors"),
+        cursors_before,
+        "cursors.json rewritten while its lock was held"
+    );
+    assert_eq!(
+        fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms"),
+        rooms_before,
+        "rooms.json committed while a cursor lock was held"
+    );
+    assert_child_running(&mut child, "rename must wait for the cursor lock");
+
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let output = child.wait_with_output().expect("wait rename");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let cursors: serde_json::Value =
+        serde_json::from_slice(&fs::read(participant_dir.join("cursors.json")).unwrap()).unwrap();
+    assert!(cursors["mail"].get("workspace:hq").is_none());
+}
+
 #[test]
 fn rooms_rename_skips_the_interlock_without_a_bridge_config() {
     let sandbox = Sandbox::new();

@@ -460,7 +460,9 @@ their existing success semantics.
   the participant and rooms locks. It moves `<root>/<old>` to
   `<root>/<new>` with a single rename, rewrites every live reference to the
   name (participant `workspace` fields, participant cursor `workspace:<old>`
-  keys, `channels/*/members.json` keys, bare `profiles.json` keys, and the
+  keys, each read and replaced under that participant's `.cursors.lock`,
+  which is held from before the file is read until the rename commits or
+  rolls back; `channels/*/members.json` keys, bare `profiles.json` keys, and the
   `address.name` of every `routing/<id>.json` receipt bound to
   `workspace:<old>`, written at its moved location exactly as routing would
   write it for `<new>`; when `members.json` or `profiles.json` already has a

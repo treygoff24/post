@@ -470,6 +470,15 @@ fn acquire_exclusive(file: &File, path: &Path, wait: LockWait) -> AppResult<()> 
     }
 }
 
+/// Block on one participant's `.cursors.lock` (the lock every participant
+/// cursor writer holds across reload and replace). `rooms rename` takes it
+/// for each `cursors.json` it rewrites, after its rename, participant, and
+/// rooms locks; no holder of this lock ever takes those, so the order is
+/// rename → participants → rooms → cursors.
+pub(crate) fn lock_participant_cursors(participant_dir: &Path) -> AppResult<File> {
+    lock_cursor_dir(participant_dir, LockWait::Blocking)
+}
+
 fn lock_cursor_dir(directory: &Path, wait: LockWait) -> AppResult<File> {
     let path = directory.join(CURSORS_LOCK_FILE);
     let file = OpenOptions::new()
