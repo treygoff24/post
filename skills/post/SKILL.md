@@ -178,8 +178,15 @@ The bridge (`post-bridge`) relays mail between enrolled hosts.
 - **Workspace mail crosses hosts.** A room on another host appears in
   `post rooms --json` as a placeholder whose path sits under
   `$POST_MAIL_ROOT/remote/<host>/`. Send to it like any workspace.
-- **`lineage:` and `participant:` targets are host-local.** The bridge never
-  relays them. To reach an agent on another host, send to its workspace.
+- **A participant on another host is `participant:<id>@<host>`.** Bind to a
+  real local room first (`post participant bind --workspace <room>`). The send
+  writes nothing unless this host's bridge advertises participant mail
+  (`bridge_unsupported` means the bridge predates it). Its receipt says
+  `queued`, never delivered; `post delivery <mail-id>` tracks it through
+  `published` and `received` (or `rejected`). A bare `participant:<id>` and
+  every `lineage:` target stay on this host. Refusals and states:
+  [`references/commands.md`](references/commands.md) (Participant mail across
+  hosts).
 - **Channels are host-local** unless a host's `bridge/config.json` sets
   `channels`, and then only for the channels it allows. Check that file before
   assuming a channel is shared.
@@ -189,8 +196,9 @@ The bridge (`post-bridge`) relays mail between enrolled hosts.
   the trey cell today. The fix is a source workspace with a unique name:
   register one and bind to it (`post rooms add <unique-name> <dir>`, then
   `post participant bind --workspace <unique-name>`).
-- Reply to remote mail at its `reply_to_shared` workspace; it has no
-  `reply_to_participant`.
+- Reply to remote workspace mail at its `reply_to_shared` workspace; it has
+  no `reply_to_participant`. An imported participant letter's
+  `reply_to_participant` is `participant:<sender>@<host>`.
 - Relay operators can read relayed mail. Keep secrets out of cross-host mail.
 
 Collision details and operating the relay:

@@ -16,9 +16,15 @@ guessing.
   host. A remote room appears locally as a placeholder: `post rooms --json`
   lists it under its own name with a path under
   `$POST_MAIL_ROOT/remote/<host>/`.
-- **`lineage:` and `participant:` mail stays home.** Those addresses are
-  host-local. The bridge never relays them: v2 skips them on the way out and
-  quarantines any that arrive (`unsupported_address_kind`).
+- **Host-qualified participant letters cross** (`participant:<id>@<host>`)
+  on a bridge that advertises `participant-mail-v1` in `bridge/health.json`.
+  The sender's letter waits in `archive/`; the bridge publishes it, the
+  destination bridge imports it through `post bridge deliver`, and a receipt
+  comes back. The sender's evidence lives under `bridge/pmail-*`, which
+  `post delivery <mail-id>` reads. Details: `SPEC-v2.md` (participant mail).
+- **`lineage:` mail and bare `participant:` mail stay home.** v2 skips them
+  on the way out and quarantines any that arrive
+  (`unsupported_address_kind`).
 - **Channels stay home** unless `bridge/config.json` has a `channels` key:
   `{"mode":"all","deny":[...]}` or `{"mode":"allow","allow":[...]}`. Without
   the key, a host neither publishes nor imports channels. The planned v2
@@ -31,8 +37,10 @@ guessing.
   for waking an agent that is not running. Running sessions don't need it:
   their `post watch` already rings on the import. The bridge never deletes
   these files, so a consumer deletes what it has handled.
-- **Replies.** Remote mail carries `reply_to_shared` (the sender's workspace)
-  and no `reply_to_participant`. A remote sender is never treated as a local
+- **Replies.** Remote workspace mail carries `reply_to_shared` (the sender's
+  workspace) and no `reply_to_participant`; an imported participant letter's
+  `reply_to_participant` is `participant:<sender>@<host>`, taken from its
+  admission record. A remote sender is never treated as a local
   participant, even when its participant id matches one, so the message still
   reaches and rings that local participant.
 - Anyone with relay access can read relayed mail. Keep secrets out of it.
