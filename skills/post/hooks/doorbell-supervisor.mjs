@@ -19,7 +19,7 @@
 // subscriptions (the participant ran `post-doorbell enable`) scan and ring (E7).
 //
 // It never writes a participant's mail state. It reads through
-// `POST_PARTICIPANT=<id> post watch --snapshot --json --limit 0 --reason ...`,
+// `POST_PARTICIPANT=<id> post watch --snapshot --json --limit 0` (no reason filter),
 // which returns before post's heartbeat, lease, and routing code; it renews no
 // lease and consumes nothing. File-system events are hints that mark
 // subscriptions dirty; every armed subscription is rescanned every 60 seconds
@@ -392,16 +392,12 @@ export function blindSpots(eligible) {
   return [...spots].map(([where, count]) => ({ where, count }));
 }
 
-// Waiting scan reasons. `post watch --reason mention` drops unreadable channel
-// events (src/cli.rs: an unreadable channel message always has reason
-// `channel`), so every scan also asks for `channel` and filters here; an
-// unreadable channel is never silently invisible (design, B1 check).
-export const SCAN_REASONS = Object.freeze(["mail", "mention", "channel"]);
-
+// The scan passes no `--reason`: post gives an unreadable channel message
+// reason `channel` (never `mention`), so any reason filter narrower than
+// "everything" could hide one, and a reason post adds later would vanish
+// silently. Selection happens here, after parsing (design, B1 check).
 export function snapshotArgs() {
-  const args = ["watch", "--snapshot", "--json", "--limit", "0"];
-  for (const reason of SCAN_REASONS) args.push("--reason", reason);
-  return args;
+  return ["watch", "--snapshot", "--json", "--limit", "0"];
 }
 
 // ------------------------------------------------------------------ notice
@@ -1521,7 +1517,6 @@ export class Supervisor {
         last_success_scan_at: sub?.lastSuccessAt ?? null,
         scan_prefs_version: sub?.scanPrefsVersion ?? null,
         scan_channels: sub?.scanChannels ?? null,
-        scan_reasons: SCAN_REASONS,
         consecutive_failures: sub?.consecutiveFailures ?? 0,
         broken: (sub?.consecutiveFailures ?? 0) >= this.config.brokenAfter,
         last_error: sub?.lastError ?? null,

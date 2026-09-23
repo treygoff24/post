@@ -158,7 +158,10 @@ function makeWorld({ config = {} } = {}) {
         const script = w.snapshots.get(opts.participant);
         if (typeof script === "function") return script();
         if (script && script.result) return script.result;
-        return ok(jsonl(script ?? []));
+        // Like post: --reason (repeatable) keeps only events with a selected reason.
+        const reasons = args.flatMap((arg, index) => (args[index - 1] === "--reason" ? [arg] : []));
+        const events = (script ?? []).filter((event) => reasons.length === 0 || reasons.includes(event.reason));
+        return ok(jsonl(events));
       }
     }
     if (kind === "cmux") {
@@ -273,14 +276,14 @@ describe("selection after parsing (E5)", () => {
     assert.deepEqual(kept.sort(), ["ops:mention", "tax:channel", "tax:mention"]);
   });
 
-  test("mail and unreadable are always kept; channel reason is always requested (B1)", () => {
+  test("mail and unreadable are always kept; the scan passes no reason filter (B1)", () => {
     const kept = selectEligible(samples().watch, []);
     assert.ok(kept.some((e) => e.event === "unreadable" && e.reason === "channel"));
     assert.ok(kept.some((e) => e.event === "unreadable" && e.reason === "mail"));
     assert.ok(!kept.some((e) => e.event === "channel_message" && e.reason === "channel"));
     const args = snapshotArgs();
     assert.deepEqual(args.slice(0, 5), ["watch", "--snapshot", "--json", "--limit", "0"]);
-    for (const reason of ["mail", "mention", "channel"]) assert.ok(args.join(" ").includes(`--reason ${reason}`));
+    assert.deepEqual(args, ["watch", "--snapshot", "--json", "--limit", "0"]);
   });
 });
 
@@ -843,6 +846,9 @@ describe("channel subscriptions (E5)", () => {
     w.sup.writeHealth(true);
     const health = JSON.parse(fs.readFileSync(w.paths.healthFile, "utf8"));
     assert.deepEqual(health.bindings[0].blind_spots, [{ where: "#broken", count: 1 }]);
+    const scans = w.snapshotCalls("codex-aaaaaaaa");
+    assert.ok(scans.length > 0);
+    for (const call of scans) assert.ok(!call.args.includes("--reason"), `scan filtered by reason: ${call.args.join(" ")}`);
   });
 });
 
