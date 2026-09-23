@@ -349,6 +349,32 @@ describe("install: the name collision", () => {
   });
 });
 
+describe("install: an interrupted legacy move", () => {
+  test("a kill between the rename and its receipt heals to moved, and restore moves it back", () => {
+    const host = makeHost("linux");
+    const binDir = path.join(host.dir, ".local", "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const legacy = "#!/usr/bin/env python3\nprint('old doorbell daemon')\n";
+    const shim = path.join(binDir, "post-doorbell");
+    fs.writeFileSync(shim, legacy, { mode: 0o755 });
+    ok(host.install());
+    // What the kill leaves: the script already aside, the receipt still
+    // "moving", and no shim written yet.
+    const receipt = host.receipt();
+    receipt.legacy_script.state = "moving";
+    fs.writeFileSync(path.join(host.doorbell, "install-receipt.json"), JSON.stringify(receipt));
+    fs.unlinkSync(shim);
+    const again = host.install();
+    ok(again);
+    assert.match(again.stdout, /an interrupted move finished/);
+    assert.equal(host.receipt().legacy_script.state, "moved");
+    assert.match(fs.readFileSync(shim, "utf8"), /post-doorbell supervisor shim/);
+    host.install(["--restore-legacy"]);
+    assert.equal(fs.readFileSync(shim, "utf8"), legacy, "the old script is back");
+    assert.equal(host.receipt().legacy_script.state, "restored");
+  });
+});
+
 describe("install: failed starts", () => {
   test("a lock already held by another supervisor refuses before writing anything", async () => {
     const host = makeHost("linux");
@@ -531,6 +557,27 @@ describe("migration: interrupted and resumed", () => {
       assert.match(third.stdout, /already migrated/);
     });
   }
+});
+
+describe("migration: an unhealthy resume after the disable", () => {
+  test("says the timer is already off, never that it stays on", () => {
+    const host = makeHost("linux");
+    host.agent("ada", "ada");
+    host.legacyTimer("ada", { channels: ["ops"] });
+    const first = host.install(["--migrate", "ada", "--health-timeout-seconds", "20"], { POST_DOORBELL_INSTALL_TEST_CRASH_AFTER: "timer_disabled" });
+    assert.equal(first.status, 97, first.stdout + first.stderr);
+    assert.equal(host.timerOn("ada"), false);
+    // Scans now fail, and a changed subscription needs a new scan to prove it.
+    Object.assign(host.control, { watchFails: true });
+    host.save();
+    const prefsFile = path.join(host.doorbell, "prefs", "ada.json");
+    fs.writeFileSync(prefsFile, JSON.stringify({ ...host.prefs("ada"), focused: true }));
+    const second = host.install(["--migrate", "ada", "--health-timeout-seconds", "3"]);
+    assert.notEqual(second.status, 0, second.stdout + second.stderr);
+    assert.match(second.stdout, /The timer is already off/);
+    assert.doesNotMatch(second.stdout, /The timer stays on/);
+    assert.equal(host.timerOn("ada"), false);
+  });
 });
 
 describe("uninstall and restore", () => {

@@ -660,6 +660,36 @@ function preflight(ctx, receipt) {
 
 // The name collision: the old Python daemon at ~/.local/bin/post-doorbell.
 function moveLegacyScript(ctx, receipt) {
+  // A kill between the rename and the "moved" write leaves the receipt at
+  // "moving" with the script already aside. Heal it when the aside copy still
+  // has the recorded hash and the original path is empty or holds our shim,
+  // so --restore-legacy can move it back.
+  const prior = receipt.legacy_script;
+  if (prior?.state === "moving" && prior.path === ctx.shimPath) {
+    const asideHash = (() => {
+      try {
+        return sha256(fs.readFileSync(prior.moved_to));
+      } catch {
+        try {
+          return sha256(fs.readlinkSync(prior.moved_to));
+        } catch {
+          return null;
+        }
+      }
+    })();
+    let occupant = null;
+    try {
+      occupant = fs.readFileSync(ctx.shimPath, "utf8");
+    } catch {
+      occupant = fs.existsSync(ctx.shimPath) ? "" : null;
+    }
+    if (asideHash === prior.sha256 && (occupant === null || occupant.includes(SHIM_MARKER))) {
+      say(ctx, `${prior.moved_to}: an interrupted move finished; recording it as moved`);
+      prior.state = "moved";
+      saveReceipt(ctx, receipt);
+      return;
+    }
+  }
   let stat;
   try {
     stat = fs.lstatSync(ctx.shimPath);
@@ -875,7 +905,13 @@ function migrateOne(ctx, receipt, timer, participants) {
 
   const healthy = waitFor(() => subscriptionHealth(ctx, entry), ctx.opts.healthTimeout);
   if (!healthy.ok) {
-    say(ctx, `${key}: not migrated yet: ${healthy.why}. The timer stays on (both may ring; at-least-once). Re-run --migrate ${timer.agent} to finish.`);
+    // A resume after a kill that followed the disable: the timer is already
+    // off, so saying it "stays on" would promise coverage that is not there.
+    if (enabledBefore && !legacyEnabled(ctx, timer)) {
+      say(ctx, `${key}: not migrated yet: ${healthy.why}. The timer is already off (an earlier run disabled it), so only the supervisor covers it, and that is not proven healthy. Re-run --migrate ${timer.agent} to finish, or --restore-legacy to turn the timer back on.`);
+    } else {
+      say(ctx, `${key}: not migrated yet: ${healthy.why}. The timer stays on (both may ring; at-least-once). Re-run --migrate ${timer.agent} to finish.`);
+    }
     return false;
   }
   if (enabledBefore) disableLegacy(ctx, timer);
