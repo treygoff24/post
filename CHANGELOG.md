@@ -55,7 +55,9 @@
   stands, a send to either name refuses with the resume command rather than
   recreate the old mailbox, and `doctor --fix` skips both rooms. The resume
   refuses, rather than merges, if the old mailbox was recreated anyway.
-  History keeps the old name. On a bridged host it requires a fresh
+  History keeps the old name. It holds `.rename.lock` exclusively, and
+  `send`, `catchup`, and writing `read`/`chat` hold it shared, so they wait
+  for a running rename. On a bridged host it requires a fresh
   `bridge/health.json` with zeroed `local_held` counters and a local-held
   record for every letter to the old name the bridge would export; the
   refusal is the retryable `bridge_guard_unavailable`. Separately, `post rooms add` refusing

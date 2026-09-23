@@ -2338,6 +2338,70 @@ fn send_waits_for_the_room_rename_lock() {
     );
 }
 
+/// G2: a consuming catchup holds the shared rename lock from dispatch through
+/// its after-stdout cursor commit, like read. While a rename holds the lock
+/// exclusively, the catchup waits and records nothing; once released, it
+/// consumes the letter.
+#[cfg(unix)]
+#[test]
+fn catchup_waits_for_the_room_rename_lock() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let recipient = bind_workspace_participant(&sandbox, "catchup-recipient", &alpha, "alpha");
+    let sender = bind_workspace_participant(&sandbox, "catchup-sender", &beta, "beta");
+    let letter = send_mail_as(&sandbox, &sender, &beta, "workspace:alpha", "catch me up");
+    let cursors = sandbox
+        .mail_root
+        .join("participants")
+        .join(&recipient)
+        .join("cursors.json");
+    let cursors_before = fs::read(&cursors).ok();
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(sandbox.mail_root.join(".rename.lock"))
+        .expect("open rename lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let mut child = post_command()
+        .args(["catchup", "--mail", "--json"])
+        .current_dir(&alpha)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &recipient)
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn catchup");
+    for _ in 0..20 {
+        if child.try_wait().expect("probe catchup").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        fs::read(&cursors).ok(),
+        cursors_before,
+        "catchup recorded read state while the rename lock was held"
+    );
+    assert_child_running(&mut child, "catchup must wait for the rename lock");
+
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let output = child.wait_with_output().expect("wait catchup");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains(&letter), "{}", stdout(&output));
+    let (listing, _) = inbox_listing(&sandbox, &recipient, &alpha);
+    assert_eq!(listing["unread_count"], 0, "{listing}");
+}
+
 /// F8: the rename reads and replaces a participant's cursors.json only under
 /// that participant's `.cursors.lock`, the lock every cursor writer holds, so
 /// a concurrent consuming read cannot write back a pre-rename snapshot. The

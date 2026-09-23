@@ -133,7 +133,8 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   exclusively from before it takes any other store lock until `rooms.json`
   commits. Every command that creates or writes a room's mailbox by room name
   holds it shared: `post send`, `post read`, and `post chat` (when they write)
-  from before their body loads `rooms.json` or resolves its actor until their
+  and `post catchup` (whose after-stdout commit records seen ids under the
+  workspace it resolved) from before their body loads `rooms.json` or resolves its actor until their
   after-stdout cursor commit finishes; `post doctor --fix` while it creates
   room directories; and a writing `post watch` through its target setup only
   (the long loop creates no room directory). Read-only commands do not take

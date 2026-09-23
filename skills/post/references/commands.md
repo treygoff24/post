@@ -192,9 +192,10 @@ supply `/dev/null`.
   both zero, and every letter to the old name the bridge would export must
   already have its `bridge/local-held/<id>.json` hold
   (`bridge_guard_unavailable`, retryable: the bridge stamps holds on its next
-  full tick). It holds `.rename.lock` exclusively; `send`, and `read`/`chat`
-  when they write, hold it shared, so a send issued during a rename waits and
-  then resolves the name against the committed registry.
+  full tick). It holds `.rename.lock` exclusively; `send`, `catchup`, and
+  `read`/`chat` when they write, hold it shared, so a send or catchup issued
+  during a rename waits and then resolves the name against the committed
+  registry.
 - **Interrupted renames.** A crash mid-rename leaves
   `<root>/rename-journal.json`. `post doctor` reports it
   (`rooms.rename_interrupted`), and every other rename refuses with the
