@@ -168,6 +168,18 @@ table.where td{color:var(--ink2)} table.where td b{color:var(--ink)}
 </div>
 
 <section>
+  <h2>Since this morning</h2>
+  <p class="sub">Afternoon session, after your approvals. Main is <code>91c211e</code> on Forgejo, installed on both machines.</p>
+  <div class="open">
+    <div class="oitem"><div class="on">The 8 names are unique, and mail routes again</div><p>The devbox kept <code>agent-memory</code>, <code>atlasos</code>, <code>brief-app</code>, <code>cos-crons</code>, <code>deslop-tooling</code>, <code>dwp-portals</code>, and <code>papercuts</code>. The Mac's copies are now <code>&lt;name&gt;-mac</code>, and the devbox's <code>trey</code> is now <code>trey-devbox</code>. Each rename matched its dry run exactly. <b>Both bridges report healthy, with no contested routes.</b> The guard check passes on both machines: 0 faults, 0 unaccounted letters, and 879 and 383 holds, the inventoried counts. One step the procedure was missing: each bridge remembers who owned a name and kept claiming the names its own machine had given up. Deleting those entries cleared the collision. The step is now in the bridge doc.</p></div>
+    <div class="oitem"><div class="on"><code>post rooms rename</code></div><p>A supported rename that keeps a room's mail, cursors, memberships, and receipts. It refuses to run while the bridge is stale or any protected letter lacks a hold, and it resumes cleanly after a crash. It went through three fix rounds reviewed by Grok 4.7 and GLM 5.3. <code>post rooms add</code> also names the machine that already owns a name and offers the suffixed one.</p></div>
+    <div class="oitem"><div class="on">Joining a channel no longer floods you</div><p>A join now starts from the moment you join. Older messages are history: <code>--history</code>, <code>--peek</code>, and search still show them, but they aren't unread and don't ring. <code>--join --backlog</code> brings back the old behavior. On the two Mac sessions I measured, 172 stale mentions became 0.</p></div>
+    <div class="oitem"><div class="on">Doorbells are on by default</div><p>A session the supervisor can match to its herdr pane now rings for direct mail and mentions without running <code>post-doorbell enable</code>. <code>post-doorbell disable</code> opts out, and channel traffic still rings only for channels you subscribe to. After the install, 6 of 6 bindings were armed on the Mac and 5 of 5 on the devbox. This change waited for join-from-now, so the first ring wouldn't replay old mentions.</p></div>
+    <div class="oitem"><div class="on">The phantom participants</div><p>The devbox had thousands of loom participants that were created and never used. I moved the 1,676 older than two hours into a quarantine that can be restored. Pruning them for good is post-276.</p></div>
+  </div>
+</section>
+
+<section>
   <div class="kicker">three things worth knowing first</div>
   <div class="heads" style="margin-top:16px">
     <div class="head b">
@@ -183,23 +195,23 @@ table.where td{color:var(--ink2)} table.where td b{color:var(--ink)}
     <div class="head y">
       <div class="kicker">cross-machine</div>
       <div class="big">DMs work</div>
-      <p><code>participant:&lt;id&gt;@&lt;host&gt;</code> now reaches one agent on the other machine; I proved it live in both directions. Bridge v2 runs on both machines with a new export guard. <b>It runs degraded on purpose</b>: 8 workspace names exist on both machines, so the bridge holds their mail rather than guess where it belongs. Renaming those is your call.</p>
+      <p><code>participant:&lt;id&gt;@&lt;host&gt;</code> now reaches one agent on the other machine; I proved it live in both directions. Bridge v2 runs on both machines with a new export guard. It ran degraded on purpose while 8 workspace names existed on both machines. <b>Those are renamed as you decided, and since 19:36Z both machines report the bridge healthy.</b></p>
     </div>
   </div>
 </section>
 
 <section>
   <h2>What's installed where</h2>
-  <p class="sub">Read from each machine after the last installs (post 09:04–09:06Z, bridge 14:31–14:32Z), not from the plan.</p>
+  <p class="sub">Read from each machine after the last installs (post about 19:40Z, bridge 14:31–14:32Z), not from the plan.</p>
   <div class="tblwrap"><table class="where">
     <thead><tr><th></th><th>Mac</th><th>Devbox (trey-agent)</th></tr></thead>
     <tbody>
-      <tr><th>post</th><td><b><code>6f70511</code></b>, installed 09:06Z. Receipt: skill manifest <b>match</b>, all six smoke checks <b>pass</b></td><td><b><code>6f70511</code></b>, installed 09:04Z. Same receipt</td></tr>
-      <tr><th>Doorbell supervisor</th><td>launchd, pid 62720, 7 bindings (3 armed)</td><td>systemd user service, pid 3819018, 2 bindings (1 armed). Same script on both (<code>2db2c7f9</code>)</td></tr>
+      <tr><th>post</th><td><b><code>91c211e</code></b>. Receipt: skill manifest <b>match</b>, all six smoke checks <b>pass</b></td><td><b><code>91c211e</code></b>. Same receipt</td></tr>
+      <tr><th>Doorbell supervisor</th><td>launchd, pid 29405, 6 bindings (6 armed, default-on)</td><td>systemd user service, pid 3875102, 5 bindings (5 armed). Same script on both</td></tr>
       <tr><th>Old doorbell timers</th><td><code>locus</code> still on (see Still open); <code>tower-astra</code> off</td><td>All 22 off, unit files kept</td></tr>
       <tr><th>Bridge</th><td>claude-space <b><code>967153c</code></b>, launchd every 15 s, system Python 3.9.6</td><td><b><code>967153c</code></b>, systemd timer every 15 s, with 1 s accuracy</td></tr>
       <tr><th>Export guard</th><td>879 holds: the 45 inventoried letters plus 834 observed local deliveries. 0 faults</td><td>383 holds: the 167 inventoried letters plus 216 observed. 0 faults</td></tr>
-      <tr><th>Bridge health</th><td colspan="2">Degraded on both (8 duplicate names). Both advertise participant mail, with a fresh tick time and a 15 s interval</td></tr>
+      <tr><th>Bridge health</th><td colspan="2"><b>Healthy on both</b> since 19:36Z, with no collisions and no contested routes. Both advertise participant mail, with a fresh tick time and a 15 s interval</td></tr>
     </tbody>
   </table></div>
 </section>
@@ -346,7 +358,8 @@ table.where td{color:var(--ink2)} table.where td b{color:var(--ink)}
   <h2>Still open, and why</h2>
   <p class="sub">Nothing here is lost mail or a silent failure. Each item is your decision, work in progress, or a known limit with a bead.</p>
   <div class="open">
-    <div class="oitem"><div class="on">8 duplicate workspace names</div><p><code>agent-memory</code>, <code>atlasos</code>, <code>brief-app</code>, <code>cos-crons</code>, <code>deslop-tooling</code>, <code>dwp-portals</code>, <code>papercuts</code>, and <code>trey</code> exist on both machines. Bridge v2 won't route mail to a name two machines claim, so it holds instead. Renaming one side is your decision (post-aqw.10). The guard it was waiting on is now deployed.</p></div>
+    <div class="oitem"><div class="on">What the renames leave behind</div><p>A session that was already running in one of the renamed repos keeps the room name it picked up at launch. Until it restarts, it sends and reads as the old name, and replies go to the other machine's room. New launches use the new name. On the devbox, owner-signed messages already sent as <code>trey</code> no longer show the signed badge, because the badge matches the current owner room and history isn't rewritten. They show as plain messages, not as forgeries.</p></div>
+    <div class="oitem"><div class="on">Review follow-ups</div><p>The reviewers' minors and nits are filed. post-4kv covers a timing gap in one rename test, a doctor check that misses a dangling symlink, and <code>chat --send</code> reading stdin under the rename lock. post-adx: the backlog hint for an existing member runs a leave and a rejoin, and a doctor sentence overstates what removing a starts file does. post-8pn: one corrupt channel file above a member's start still blocks that channel's read, as it did before.</p></div>
     <div class="oitem"><div class="on">Export guard: fixed, with small follow-ups</div><p>The guard's first review found one gap. If someone deleted the guard's own files, it read as a fresh install, and a rename afterwards could export old letters. Four fix rounds followed, each reviewed by Fable 5.1, Grok 4.7, and GLM 5.3, each closing a narrower way past the last. <b>Round 4 is deployed on both machines</b> (<code>967153c</code>), and all three reviewers found it fit to deploy with no blockers or majors. A wiped, damaged, short, or junk-filled guard store now stops every workspace export until it is restored or someone deliberately overrides it. After the deploy, each machine still held every protected letter (879 on the Mac, 383 on the devbox), with no faults. The guard's files came through unchanged.</p><p>What's left is the reviewers' minors: clearer install messages when an install fails partway, naming the junk file in the fault line, two SPEC sentences, and one crafted-file crash in the log dedupe. Those are in post-aqw.13, and none affects whether mail is held.</p></div>
     <div class="oitem"><div class="on">Porch mouse scrolling</div><p>Scrolling under herdr inside cmux needs your terminal stack to reproduce. Keyboard scrolling is unaffected. The papercut stays open.</p></div>
     <div class="oitem"><div class="on">locus keeps its old timer</div><p>The installer switches an agent's old timer off only after the supervisor has scanned for that agent once. locus's pane stayed focused all night, and the supervisor doesn't scan a focused pane, so the timer stays on. Until <code>install-doorbell-supervisor.mjs --migrate locus</code> reruns, both may ring locus: a duplicate ring, never a missed one.</p></div>
@@ -359,14 +372,14 @@ table.where td{color:var(--ink2)} table.where td b{color:var(--ink)}
 <section>
   <h2>What I need from you</h2>
   <div class="decs">
-    <div class="dec"><div class="kicker">duplicate names</div><div class="q">For each of the 8 names, which machine keeps it?</div><p>The other side gets a new name with <code>post rooms set-path</code> or a re-register. The deployed guard means a rename can't flood the other machine with old letters. Before any rename, I recheck that the guard still holds every inventoried letter.</p><div class="rec">My lean: rename on whichever machine the workspace is least used.</div></div>
-    <div class="dec"><div class="kicker">github</div><div class="q">Review, then push <code>main</code> to GitHub?</div><p>Everything is on Forgejo <code>main</code>, and both machines run it. The last code commit is <code>9cc0032</code>; later commits are docs only. GitHub's <code>main</code> hasn't moved since Sep 16.</p><div class="rec">One push when you say so. No release until you ask for one.</div></div>
+    <div class="dec"><div class="kicker">github</div><div class="q">Review, then push <code>main</code> to GitHub?</div><p>Everything is on Forgejo <code>main</code>, and both machines run it. The last code commit is <code>e2ab46e</code>; <code>91c211e</code> and later are docs only. GitHub's <code>main</code> hasn't moved since Sep 16.</p><div class="rec">One push when you say so. No release until you ask for one.</div></div>
     <div class="dec"><div class="kicker">release</div><div class="q">Cut a release?</div><p>You held this for the morning. The changelog's Unreleased section lists everything above.</p><div class="rec">Your call after review.</div></div>
   </div>
 </section>
 
 <div class="foot">
-  <p>Post: branch <code>overnight-0923</code>, fast-forwarded into <code>main</code>. The last code commit is <code>9cc0032</code>; later commits change only docs. The installed build is <code>6f70511</code>; <code>9cc0032</code> changes only the install smoke and a test, so the binary is the same code. Gates pass on both machines at both commits; at <code>9cc0032</code>, Rust 703/0 on the Mac and 704/0 on the devbox, Node 504/0 on each. Bridge: claude-space branch <code>bridge-v2-ship</code>, deployed at <code>967153c</code> on both machines (guard fix rounds 1–4 and log fix rounds 1–2; 309/309 per post binary on the devbox and under the Mac's Python 3.9.6, install test passing). Plan and brief: <code>docs/plans/overnight-2026-09-23-plan.md</code>, <code>docs/overnight-2026-09-23.md</code>. F2 evidence: <code>docs/evidence/f2-contested-2026-09-23/</code>. Reviewers: GLM 5.3 on nearly every round, Cursor Grok 4.7 on most, Kimi on the doorbell supervisor, a relay fix round, and the skill, Opus on the first bridge v2 round, and Fable 5.1 as the senior seat on the export guard and each of its fix rounds, with Grok and GLM beside it. Three small late fixes were red-proofed and gated on both machines but not re-reviewed: <code>8211a2a</code> (a test's timing margin), <code>1d3272c</code> (the launchd wait), and <code>9cc0032</code> (the smoke's temp path).</p>
+  <p>Post: branch <code>overnight-0923</code>, fast-forwarded into <code>main</code>. The last code commit is <code>9cc0032</code>; later commits change only docs. The morning's installed build was <code>6f70511</code>; <code>9cc0032</code> changes only the install smoke and a test, so the binary is the same code. Gates pass on both machines at both commits; at <code>9cc0032</code>, Rust 703/0 on the Mac and 704/0 on the devbox, Node 504/0 on each. Bridge: claude-space branch <code>bridge-v2-ship</code>, deployed at <code>967153c</code> on both machines (guard fix rounds 1–4 and log fix rounds 1–2; 309/309 per post binary on the devbox and under the Mac's Python 3.9.6, install test passing). Plan and brief: <code>docs/plans/overnight-2026-09-23-plan.md</code>, <code>docs/overnight-2026-09-23.md</code>. F2 evidence: <code>docs/evidence/f2-contested-2026-09-23/</code>. Reviewers: GLM 5.3 on nearly every round, Cursor Grok 4.7 on most, Kimi on the doorbell supervisor, a relay fix round, and the skill, Opus on the first bridge v2 round, and Fable 5.1 as the senior seat on the export guard and each of its fix rounds, with Grok and GLM beside it. Three small late fixes were red-proofed and gated on both machines but not re-reviewed: <code>8211a2a</code> (a test's timing margin), <code>1d3272c</code> (the launchd wait), and <code>9cc0032</code> (the smoke's temp path).</p>
+  <p>Afternoon: <code>main</code> was fast-forwarded to <code>e2ab46e</code>, and <code>91c211e</code> adds the bridge-doc step. The full gate ran on the Mac at <code>e2ab46e</code>: Rust 757 passed, 0 failed, 2 ignored; hooks 477/477; launcher 34/34. Both machines installed <code>91c211e</code> through the install smoke; the full gate was not re-run on the devbox. Devin SWE-2 wrote the rename command, the default-on change, and the join-from-now draft. Opus 5.5 did the rename fix rounds and finished join-from-now. Grok 4.7 and GLM 5.3 reviewed each; Grok re-checked the final fix rounds, and each re-check came back fit to ship. Rulings and their downsides are in the session's final report.</p>
 </div>
 </div>
 </body>
