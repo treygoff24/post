@@ -1,6 +1,6 @@
 # Design: one doorbell supervisor per host (lane E)
 
-Status: revision 2, for Aster's approval. Revision 1 (2f2556e) was reviewed by Aster, who approved the architecture and required E1–E8. Each is folded in below and indexed at the end. No code until Aster approves. Author: Nightjar.
+Status: **approved for implementation** (Aster, GO on revision 2, with seven brief corrections folded in as revision 2.1). Revision 1 (2f2556e) was reviewed by Aster, who approved the architecture and required E1–E8; each is indexed at the end. The builder names its singleton lock mechanism in its report. Author: Nightjar.
 
 ## The problem
 
@@ -22,7 +22,7 @@ Waking an idle agent takes five mechanisms today: the Claude Monitor, per-harnes
 
 It never writes any participant's mail state. It reads through `POST_PARTICIPANT=<id> post watch --snapshot --json` and `post participant list --json`. It renews no lease, claims no presence, routes nothing, and consumes nothing. Post's participant-scoped projection stays the only authority on what a participant can see. The supervisor shares orchestration, not inbox identity: one scan per armed subscription, never an aggregate watch.
 
-**Singleton.** The service takes an exclusive `flock` on `$POST_MAIL_ROOT/doorbell/supervisor.lock` at startup. A second instance (a second installer run, a manual start, a duplicate unit) exits nonzero with `already running (pid N)`, so two supervisors can never double-ring.
+**Singleton.** A second instance (a second installer run, a manual start, a duplicate unit) must exit nonzero with `already running (pid N)`, so two supervisors can never double-ring. Node 26.9 has no `fs.flock` (Aster checked live), so the builder picks a proven mechanism and names it in the report. The recommendation is a kernel lock the operating system releases at process death: a small `python3` child that takes `fcntl.flock(LOCK_EX|LOCK_NB)` on `$POST_MAIL_ROOT/doorbell/supervisor.lock`, reports success, and holds the lock until its stdin closes. The supervisor exits if that child dies. python3 is already a bridge dependency on both hosts. No dependency is added and PID reuse cannot matter. Required tests: simultaneous start, an abrupt crash then restart, and a stale owner with a reused PID. No owner file or receipt is written before ownership is established.
 
 ## Terms
 
@@ -98,7 +98,7 @@ A participant in two channels who subscribes to one gets ordinary events from th
 
 For each armed subscription with fresh eligible events (keys not yet in that subscription's `announced` set):
 
-1. **Recheck, best effort (E3).** `herdr agent get <pane_id>` immediately before prompting:
+1. **Recheck, best effort (E3).** First the participant: `POST_PARTICIPANT=<id> post participant show --json` must report it bound with no `ended_at`. The 60-second list cache can never keep an ended participant armed; an ended participant retires here. Then the pane: `herdr agent get <pane_id>` immediately before prompting:
    - same terminal id and session digest, idle or done, unfocused unless `--focused`: prompt;
    - busy or focused: `deferred`;
    - a different terminal id or session digest, or the pane is gone: `retired` for this subscription;
@@ -112,7 +112,7 @@ For each armed subscription with fresh eligible events (keys not yet in that sub
 
 Degraded states change the words rather than inflating counts (E4):
 
-- A `cursor_unusable` event reads "<N> re-reported (cursor unusable; this is consumed history, not new mail)", never "N new."
+- An event carrying `cursor_unusable: true` (a boolean on the existing event, not a separate variant) reads "<N> re-reported while cursor state is unavailable; may include previously read messages", never "N new."
 - `pending: true` mail reads "<N> waiting to be routed", counted separately from routed mail.
 - `unreadable` events read "<N> unreadable item(s) in #<channel> or the inbox; mentions there are unknown."
 
@@ -122,7 +122,7 @@ Only participant ids, counts, and channel names appear. Ids and channel names ar
 
 Each subscription keeps two independent sets under `$POST_MAIL_ROOT/doorbell/state/<participant>/<sink>-<generation-hash>.json`:
 
-- `announced`: event keys (kind, address kind, address name, source, id) included in an `accepted` agent prompt;
+- `announced`: event keys included in an `accepted` agent prompt. A key is (kind, address kind, address name, source, id, **state class**), where the state class is `routed` or `pending`, and `healthy`, `degraded` (cursor unusable), or `unreadable`. When the same id moves from pending to routed, or from degraded to healthy, the key changes, so the actionable state rings again. Announcing a provisional or degraded item never suppresses a later actionable unread event with the same id (a required test);
 - `notified`: keys included in a desktop notification. This set never suppresses an agent prompt.
 
 | Outcome | Meaning | State written |
@@ -133,7 +133,7 @@ Each subscription keeps two independent sets under `$POST_MAIL_ROOT/doorbell/sta
 | `retired` | The generation ended: a new terminal or session, the pane is gone, or the participant is ended. Logged loudly once. | the subscription's state is frozen and pruned after 7 days |
 | `failed` | herdr or post errored, timed out, or returned malformed or oversize output. Carries the exit code, timeout versus exit, and at most 300 bytes of sanitized stderr. | none |
 
-- Setting `announced` to exactly the current eligible keys prunes consumed keys and never forgets a key that is still unread.
+- Setting `announced` to exactly the current eligible keys prunes consumed keys and never forgets a key that is still unread. A wholly successful scan with no fresh eligible events also prunes `announced` down to the current eligible keys, even though no sink call is made. A `failed` or `deferred` outcome never advances either set.
 - **State never transfers across generations or participants.** A resumed conversation in a new pane is a new generation with an empty `announced` set, so it gets one notice for what is currently unread. A retired generation's state is never read again.
 - **Delivery contract:** at-least-once notification attempts while an armed, healthy subscription exists. It is not a guarantee of agent execution or of every message being read. A crash between herdr accepting a prompt and `announced` being saved rings again on restart: a duplicate metadata notice. Exactly-once is not promised.
 - **Lease expiry.** A binding whose participant's lease expired but whose pane is live and idle still scans and rings, but only for what post actually projects for that participant. The supervisor never bypasses post routing, never adopts held or pending mail, and never renews the lease to make that true. An ended participant (`ended_at` set) retires.
@@ -142,16 +142,17 @@ Each subscription keeps two independent sets under `$POST_MAIL_ROOT/doorbell/sta
 
 ## Health and logs
 
-- `$POST_MAIL_ROOT/doorbell/health.json` is rewritten atomically each tick: supervisor version and pid; herdr and post versions; every binding with its generation, armed state, last outcome and time, consecutive failures, and blind spots (unreadable sources). It never contains mail content.
-- `post-doorbell status` renders it. A subscription that mentions nothing because its channel is unreadable says so; it never reports "no mentions."
+- `$POST_MAIL_ROOT/doorbell/heartbeat.json` is a small file rewritten each tick: pid, start time, tick sequence, and time.
+- `$POST_MAIL_ROOT/doorbell/health.json` is rewritten atomically only when something changes, and at least every 30 seconds. It holds the supervisor version; the herdr and post versions; and every binding with its generation, armed state, last outcome and time, last successful scan, consecutive failures, and blind spots (unreadable sources). It never contains mail content.
+- `post-doorbell status` reports supervisor liveness separately from scan health. Liveness means whether the singleton lock is held and how old the heartbeat is. The status is `running`, `stale` (lock held, heartbeat older than 10 seconds), or `dead` (lock not held). A once-green health file from a dead supervisor never reads as healthy. A subscription that mentions nothing because its channel is unreadable says so; it never reports "no mentions."
 - Logging: one JSON line per non-`deferred` outcome, one per binding or generation change, one per reconciliation that found hint gaps, and nothing per quiet tick.
-- **Measured cost (E6).** Before claiming an improvement, compare an hour of the supervisor's CPU time (systemd CPUAccounting on the devbox, `ps` time on the Mac) with the four Codex timers it replaces over the same kind of hour. The numbers go in the closeout.
+- **Measured cost (E6, bounded per approval item 7).** A representative before/after workload on a fixture store, not an hour of unrelated live traffic, and not a gate to wait on. State the enabled-subscription count, the history size, and the event workload. Report CPU time and scan counts for the supervisor against the equivalent per-participant timers, with reconciliation cost reported separately. Name the limits of the comparison honestly.
 
 ## Migration (E8)
 
 The installer is idempotent and records each step in `$POST_MAIL_ROOT/doorbell/install-receipt.json` as it goes, so an interrupted run resumes correctly.
 
-1. **The name collision.** The devbox has the old Python script at `~/.local/bin/post-doorbell` and a disabled `post-doorbell@.service` template with no instances. The installer moves the script to `~/.local/bin/post-doorbell.legacy-<sha8>` and removes the template only if no instance is enabled. It records both in the receipt, with hashes and a saved copy of the template. The repository copy of the Python daemon (fixed by C1) stays available for use outside herdr.
+1. **The name collision.** The devbox has the old Python script at `~/.local/bin/post-doorbell` and a disabled `post-doorbell@.service` template with no instances. The installer moves the script to `~/.local/bin/post-doorbell.legacy-<sha8>` and records its hash in the receipt. The unused unit template stays in place: deleting it buys nothing and widens what the installer owns. The repository copy of the Python daemon (fixed by C1) stays available for use outside herdr.
 2. Install and start the supervisor, then confirm the singleton lock and a healthy first tick.
 3. **Per old timer** (`post-codex-doorbell@*` on the devbox, `dev.post.codex-doorbell.*` on the Mac):
    - Read the effective settings from the unit and its environment: participant, channels, reasons, focus policy, and sink.
@@ -160,11 +161,11 @@ The installer is idempotent and records each step in `$POST_MAIL_ROOT/doorbell/i
    - Only then, disable that one timer. Record the unit's hash and the state the installer left it in.
    - A timer whose target the supervisor cannot bind, or whose settings it cannot reproduce, stays on its old mechanism and is listed as not migrated.
 4. **Cutover proof before the bulk.** Migrate one target per platform first and prove it with a nonce: a direct message to that idle agent, answered by that agent under its own participant id, matched to the supervisor's `accepted` line. Only then migrate the rest.
-5. **Uninstall.** Stop the supervisor first. Then restore only the units the receipt says it disabled, and only if each unit file still has its recorded hash and is still in the state the installer left it. A timer someone disabled later on purpose stays disabled. Restore the Python script and template only if the current files are the ones the installer wrote.
+5. **Uninstall.** By default it stops and removes only the supervisor, leaves every legacy unit as it is, and prints the exact restoration command. `--restore-legacy` restores the recorded migration set: first it stops the supervisor, then it re-enables each recorded unit only if the unit file still has its recorded hash. (Hash and disabled state cannot distinguish "still disabled by the installer" from "disabled again on purpose," so restoration is an explicit choice, never a default.) The Python script is restored only if the file at the path is still the one the installer wrote.
 6. **Claude Monitor:** the skill tells agents inside herdr to arm the supervisor, and to use the Monitor outside herdr. Live Monitors belong to other sessions and are never killed. A session with both gets both events, which is within the at-least-once contract.
 7. **Out of scope:** Cursor and Grok wrappers (E2); hooks, which stay as next-turn catch-up.
 
-**Installer tests:** failed startup (the lock is held, herdr is missing, post is missing, a first scan fails); interrupted migration (killed between creating a subscription and disabling a timer, then rerun); uninstall with a unit edited after install; uninstall after a timer was re-disabled manually.
+**Installer tests:** failed startup (the lock is held, herdr is missing, post is missing, a first scan fails); interrupted migration (killed between creating a subscription and disabling a timer, then rerun); default uninstall leaving legacy units untouched; `--restore-legacy` with a unit edited after install (refused for that unit).
 
 ## Tests
 
@@ -196,3 +197,4 @@ Unit tests (`node --test`, with fakes for herdr and post; the fake post emits D'
 | E8 carry settings, prove health, nonce first, safe uninstall, singleton, installer tests | Migration; What it is |
 | Location, entry point, name collision | What it is; Migration 1 |
 | Lease-expiry wording; the at-least-once guarantee restated | Outcomes and state |
+| GO corrections: uninstall default, cursor wording, state-class keys and pruning, ended recheck, singleton, liveness, bounded benchmark | Migration 1 and 5; Ring; Outcomes and state; What it is; Health |
