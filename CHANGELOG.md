@@ -6,19 +6,19 @@
 - Channel joins start from now (post-0ku). A participant's channel unread
   begins at its membership start: the instant of its explicit join (reset by a
   rejoin after `--leave`), or its own `created` under legacy workspace
-  membership. Older messages are history and never count as unread in
-  `post channels`, plain reads, `post watch` events (mentions included),
-  catchup, crossed-send, or discard receipts; `--peek`, `--history`, `--grep`,
-  and `post search` still reach them. A new-member join reports
+  membership. Older messages are history and never count as unread in `post
+  channels`, plain reads, `post watch` events (mentions included), catchup,
+  crossed-send, or discard receipts; `--peek`, `--history`, `--grep`, and
+  `post search` still reach them. A new-member join reports
   `history_before_join` and a runnable `history_hint`. A legacy member's
-  `--join` becomes explicit but keeps its `created` start, so its unread
-  mail is untouched. `post chat <ch> --join
-  --backlog` restores the old all-unread join. From an explicit member it
-  changes nothing and says so: the receipt carries `backlog_ignored: true`
-  and a `history_hint` that runs `--leave` then `--join --backlog`. The join instant is stored in
-  a new `participants/<id>/membership-starts.json`; `channels.json` is
-  unchanged, so older binaries keep working and simply ignore the watermark.
-  `post doctor` reports a malformed `membership-starts.json` as
+  `--join` becomes explicit but keeps its `created` start, so its unread mail
+  is untouched. `post chat <ch> --join --backlog` restores the old all-unread
+  join. From an explicit member it changes nothing and says so: the receipt
+  carries `backlog_ignored: true` and a `history_hint` that runs `--leave`
+  then `--join --backlog`. The join instant is stored in a new
+  `participants/<id>/membership-starts.json`; `channels.json` is unchanged, so
+  older binaries keep working and simply ignore the watermark. `post doctor`
+  reports a malformed `membership-starts.json` as
   `participant.<id>.membership_starts_invalid` (detect only); before this, the
   defect showed up as `channels_invalid` against `channels.json`.
 - A real `post rooms rename` is now a migration-fenced write. During an
