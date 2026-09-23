@@ -128,6 +128,12 @@ pub(crate) enum ContractCommand {
         #[arg(long, value_name = "DIR")]
         dir: Option<std::path::PathBuf>,
     },
+    /// Print the sha256 manifest of the skill bundle this binary was built with; --verify checks a served skill path against it.
+    SkillManifest {
+        /// A served skill directory (for example ~/.agents/skill-library/post) to check; exits 1 on drift.
+        #[arg(long, value_name = "PATH")]
+        verify: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]
