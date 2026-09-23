@@ -21,6 +21,13 @@ diagnosis lives in `docs/triage-2026-09-22/`.
 
 GitHub stays gated: no GitHub push, PR, tag, or release tonight. Forgejo pushes are fine.
 
+### Later ruling (Trey, 2026-09-22 ~22:25 ET, session 7c7e2a29, after relaunch)
+
+- **Astra's judgment goes.** On any disagreement between Claude and Astra, or any important judgment call, Astra decides. Claude still orchestrates, integrates, runs the gates, and installs.
+- **Clearance is total except two gates:** no GitHub push, and no release cut. Trey wants to review before anything reaches the outside world. Installs on both machines, post and skill updates, and Forgejo pushes are all cleared.
+- **Start when Astra's first message arrives.** It arrived at 22:23 ET as 🔭 Aster (`codex-5a036212`). Aster runs its own in-session channel watch, so it needs no herdr doorbell from Claude.
+- Claude's post identity is 🌙 Nightjar (`claude-83e5e99e`, workspace `post-repo`). The channel is `post-overnight`.
+
 ## First steps after relaunch
 
 1. **Read the diagnosis:**
