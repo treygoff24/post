@@ -285,3 +285,113 @@ fn silent_open_pipe_past_the_bound_is_input_ambiguous() {
     assert_refused(&fixture, &output, "input_ambiguous", before);
     producer.join().expect("producer");
 }
+
+/// Every file under the store, with its bytes: a refused consuming flag must
+/// leave all of it, cursors included, byte-identical.
+fn store_bytes(fixture: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(path: &std::path::Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).expect("read store dir") {
+            let path = entry.expect("store entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.insert(path.clone(), fs::read(&path).expect("read store file"));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(&fixture.sandbox.mail_root, &mut out);
+    out
+}
+
+fn cursor_files(fixture: &Fixture) -> Vec<PathBuf> {
+    store_bytes(fixture)
+        .into_keys()
+        .filter(|path| path.file_name().is_some_and(|name| name == "cursors.json"))
+        .collect()
+}
+
+/// `--ack <id>` and `--discard-through <id>` consume read state, so they run
+/// the same guard as a read.
+const CONSUMING_FLAGS: [&str; 2] = ["--ack", "--discard-through"];
+
+#[test]
+fn consuming_flags_with_a_queued_byte_are_refused_and_change_nothing() {
+    for flag in CONSUMING_FLAGS {
+        let fixture = fixture();
+        let before_files = message_files(&fixture);
+        let before = store_bytes(&fixture);
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        writer.write_all(b"meant to be sent").expect("write body");
+        drop(writer);
+        let (output, _) = chat_with_stdin(
+            &fixture,
+            &["chat", "tax", flag, UNREAD, "--json"],
+            Stdio::from(reader),
+        );
+        assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
+        let error: Value = serde_json::from_slice(&output.stderr).expect("error JSON");
+        assert_eq!(error["error"]["code"], "invalid_argument", "{flag}: {error}");
+        assert_eq!(
+            store_bytes(&fixture),
+            before,
+            "{flag}: the store, cursors included, is byte-identical"
+        );
+        assert_refused(&fixture, &output, "invalid_argument", before_files);
+    }
+}
+
+#[test]
+fn consuming_flags_with_dev_null_stdin_consume_as_before() {
+    for flag in CONSUMING_FLAGS {
+        let fixture = fixture();
+        let (output, _) = chat_with_stdin(
+            &fixture,
+            &["chat", "tax", flag, UNREAD, "--json"],
+            Stdio::null(),
+        );
+        assert!(output.status.success(), "{flag}: {}", stderr(&output));
+        assert!(
+            !cursor_files(&fixture).is_empty(),
+            "{flag}: the consuming flag wrote a cursor"
+        );
+        assert!(
+            !read_ids(&fixture).contains(&UNREAD.to_owned()),
+            "{flag}: the message was consumed"
+        );
+    }
+}
+
+#[test]
+fn consuming_flags_with_a_silent_open_pipe_are_input_ambiguous() {
+    for flag in CONSUMING_FLAGS {
+        let fixture = fixture();
+        let before_files = message_files(&fixture);
+        let before = store_bytes(&fixture);
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        let (output, _) = chat_with_stdin(
+            &fixture,
+            &["chat", "tax", flag, UNREAD, "--json"],
+            Stdio::from(reader),
+        );
+        drop(writer);
+        assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
+        assert_eq!(
+            store_bytes(&fixture),
+            before,
+            "{flag}: the store, cursors included, is byte-identical"
+        );
+        assert_refused(&fixture, &output, "input_ambiguous", before_files);
+    }
+}
+
+#[test]
+fn the_refusal_names_the_ssh_case() {
+    let fixture = fixture();
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    let (output, _) = chat_with_stdin(&fixture, &["chat", "tax", "--json"], Stdio::from(reader));
+    drop(writer);
+    let error: Value = serde_json::from_slice(&output.stderr).expect("error JSON");
+    let text = error.to_string();
+    assert!(text.contains("ssh -n"), "{text}");
+}

@@ -126,7 +126,12 @@
   `/dev/null` for an intentional read. An interactive terminal, `/dev/null`,
   an empty file, and a pipe at EOF read normally with no wait. A producer slower
   than the wait is refused as ambiguous; no finite wait detects every delayed
-  producer. Nothing is ever sent automatically.
+  producer. Nothing is ever sent automatically. `--ack <id>` and
+  `--discard-through <id>` consume read state too, so they run the same guard
+  and a refusal leaves their cursor untouched; `--seen-by`, `--join`,
+  `--leave`, and `--archive`/`--unarchive` consume nothing and stay unguarded.
+  Over ssh without `-t` the remote stdin is open and silent, so the refusal
+  names `ssh -n` or `< /dev/null`.
 - Own-message and sender-exclusion checks are origin-aware. A message with
   remote-origin evidence (a bridge `sender_provenance`, or a `from` workspace
   registered under `remote/<host>/`) is never a local participant's own, and
