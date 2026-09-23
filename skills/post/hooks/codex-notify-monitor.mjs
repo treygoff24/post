@@ -214,7 +214,7 @@ const SNAPSHOT_TIMEOUT_MS = 4000;
 const STDERR_EXCERPT_CAP = 300;
 
 function stderrExcerpt(raw) {
-  const oneLine = String(raw ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  const oneLine = String(raw ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
   let bytes = 0;
   let excerpt = "";
   for (const character of oneLine) {

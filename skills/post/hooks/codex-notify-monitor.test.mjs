@@ -298,6 +298,18 @@ test("a snapshot stderr excerpt is capped, sanitized, and one line", () => {
   );
 });
 
+test("a snapshot stderr excerpt strips C1 controls and Unicode line separators", () => {
+  const state = path.join(ROOT, "snapshot-c1-stderr.json");
+  // U+0085 (NEL), U+009B (CSI), U+2028 and U+2029 all end or steer a line in
+  // some log viewer, so none of them may survive into the one-line excerpt.
+  setControl({ postExit: 2, postStderr: "a\u0085b\u009b31mc\u2028d\u2029e\n", postStdout: "" });
+  const result = run({ state });
+
+  assert.notEqual(result.status, 0);
+  assert.ok(!/[\u0080-\u009f\u2028\u2029]/.test(result.stderr), JSON.stringify(result.stderr));
+  assert.match(result.stderr, /stderr: a b 31mc d e\)\n$/);
+});
+
 test("a successful snapshot is unchanged by the new failure detail", () => {
   const state = path.join(ROOT, "snapshot-success.json");
   setControl({ postStdout: `${JSON.stringify(MAIL)}\n`, postStderr: "post: warning: noise\n" });
