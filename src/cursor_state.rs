@@ -722,6 +722,7 @@ fn consume_inner(
     let parent = path
         .parent()
         .ok_or_else(|| AppError::invalid_argument("cursor path has no room directory"))?;
+    crate::mailbox::ensure_room_not_mid_rename(context, room)?;
     fs::create_dir_all(parent)
         .map_err(|error| AppError::io("create cursor state directory", parent, error))?;
     let _lock = lock_room_cursors(context, room, wait)?;
@@ -1328,6 +1329,26 @@ mod tests {
     fn write_legacy_v1(root: &Path, room: &str, bytes: &str) {
         fs::create_dir_all(root.join(room)).expect("create room");
         fs::write(root.join(room).join("channel-state.json"), bytes).expect("write legacy");
+    }
+
+    /// G1: a legacy room cursor write never recreates a room an
+    /// interrupted rename names.
+    #[test]
+    fn legacy_room_cursor_write_refuses_a_room_mid_rename() {
+        let (root, context) = context("mid-rename");
+        fs::write(
+            root.join(crate::mailbox::RENAME_JOURNAL_FILE),
+            br#"{"v":1,"old":"alpha","new":"beta","started_at":"x"}"#,
+        )
+        .expect("journal");
+        let error = consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
+            .expect_err("mid-rename room refuses");
+        assert_eq!(
+            error.details.exact_fix.as_deref(),
+            Some("post rooms rename 'alpha' 'beta'")
+        );
+        assert!(!root.join("alpha").exists());
+        trash_test_root(&root);
     }
 
     #[test]

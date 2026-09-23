@@ -2622,6 +2622,77 @@ fn rooms_rename_resumes_an_interrupted_rename_from_its_journal() {
     );
 }
 
+/// G1: after a crash between the move and the rooms.json commit, the
+/// registry still resolves the old name. A real send to it must refuse with
+/// the resume command rather than recreate `<root>/<old>`; doctor names a
+/// recreated old mailbox, and `doctor --fix` does not recreate one.
+#[test]
+fn send_refuses_a_room_an_interrupted_rename_names() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let alpha = sandbox.path.join("alpha");
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&alpha).expect("alpha path");
+    fs::create_dir(&gamma).expect("gamma path");
+    register_room(&sandbox, "gamma", &gamma);
+    register_room(&sandbox, "alpha", &alpha);
+    let sender = bind_workspace_participant(&sandbox, "g1-sender", &gamma, "gamma");
+    send_mail_as(
+        &sandbox,
+        &sender,
+        &gamma,
+        "workspace:alpha",
+        "before the crash",
+    );
+    // The interrupted rename: journal written, mailbox moved, no commit.
+    plant_rename_journal(&sandbox, "alpha", "beta");
+    let old_home = sandbox.mail_root.join("alpha");
+    fs::rename(&old_home, sandbox.mail_root.join("beta")).expect("the interrupted move");
+
+    let output = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:alpha",
+            "--body",
+            "after the crash",
+            "--json",
+        ],
+        &sender,
+        &gamma,
+    );
+
+    assert_ne!(output.status.code(), Some(0), "the send must refuse");
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "config_invalid", "{}", stderr(&output));
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post rooms rename 'alpha' 'beta'")
+    );
+    assert!(!old_home.exists(), "the refused send created nothing");
+
+    // doctor --fix does not recreate the old mailbox either.
+    let fixed = sandbox.run(&["doctor", "--fix"]);
+    assert!(fixed.status.code().is_some(), "{}", stderr(&fixed));
+    assert!(
+        !old_home.exists(),
+        "doctor --fix skipped the mid-rename room"
+    );
+    assert!(!doctor_check_ids(&sandbox).contains(&"rooms.rename_old_recreated".to_owned()));
+
+    // A recreated old mailbox (by hand here) is named by doctor.
+    fs::create_dir_all(old_home.join("inbox")).expect("recreated inbox");
+    let ids = doctor_check_ids(&sandbox);
+    assert!(
+        ids.contains(&"rooms.rename_interrupted".to_owned()),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&"rooms.rename_old_recreated".to_owned()),
+        "{ids:?}"
+    );
+}
+
 /// F6: resume never merges. Mail that recreated `<root>/<old>` after the
 /// interrupted move is listed, and nothing changes.
 #[test]

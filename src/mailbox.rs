@@ -490,12 +490,84 @@ impl Context {
         if read_only_command() {
             return Ok((inbox, read));
         }
+        ensure_room_not_mid_rename(self, room)?;
         fs::create_dir_all(&inbox)
             .map_err(|error| AppError::io("create inbox directory", &inbox, error))?;
         fs::create_dir_all(&read)
             .map_err(|error| AppError::io("create read directory", &read, error))?;
         Ok((inbox, read))
     }
+}
+
+/// `<root>/rename-journal.json`: the intent record a rename writes before its
+/// first store change and removes once rooms.json commits (or a clean
+/// rollback finishes).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct RenameJournal {
+    pub v: u32,
+    pub old: String,
+    pub new: String,
+    pub started_at: String,
+}
+
+pub(crate) fn resume_command(old: &str, new: &str) -> String {
+    format!(
+        "post rooms rename {} {}",
+        shell_quote(old),
+        shell_quote(new)
+    )
+}
+
+/// Read a standing rename journal. Absent is None; unreadable or malformed
+/// refuses, because a rename cannot know whether the store is half-moved.
+pub(crate) fn read_rename_journal(context: &Context) -> AppResult<Option<RenameJournal>> {
+    let path = context.root.join(RENAME_JOURNAL_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io("read rename journal", &path, error)),
+    };
+    let journal: RenameJournal = serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::config(
+            &path,
+            format!("the rename journal is malformed ({error}); inspect the mail root to see which rename was interrupted, finish it by hand, then delete the journal"),
+        )
+    })?;
+    if journal.v != 1 {
+        return Err(AppError::config(
+            &path,
+            format!("the rename journal has unsupported version {}", journal.v),
+        ));
+    }
+    Ok(Some(journal))
+}
+
+/// G1: refuse to create or write a room's mailbox directory while a standing
+/// rename journal names the room as `old` or `new`. After a crash between the
+/// move and the rooms.json commit, the registry still resolves the old name,
+/// so a send would recreate `<root>/<old>` and strand its letter where the
+/// resume refuses to merge. `rooms rename` itself never calls this: its
+/// directory work is a single `fs::rename`.
+pub(crate) fn ensure_room_not_mid_rename(context: &Context, room: &str) -> AppResult<()> {
+    let Some(journal) = read_rename_journal(context)? else {
+        return Ok(());
+    };
+    if journal.old != room && journal.new != room {
+        return Ok(());
+    }
+    let fix = resume_command(&journal.old, &journal.new);
+    Err(AppError::new(
+        ErrorCode::ConfigInvalid,
+        format!(
+            "room '{room}' is in an interrupted rename of '{}' to '{}' (started {}); nothing was written",
+            journal.old, journal.new, journal.started_at
+        ),
+        format!("Finish the rename with `{fix}`, then retry this command under the room's new name."),
+    )
+    .room(room.to_owned())
+    .path(context.root.join(RENAME_JOURNAL_FILE).display().to_string())
+    .exact_fix(fix)
+    .reason("the room's mailbox is mid-rename"))
 }
 
 /// The POST_FROM pin, validated. Set-but-invalid is a loud error, never a
@@ -1866,6 +1938,37 @@ mod tests {
             fs::read_to_string(&destination).expect("read committed mail"),
             "committed mail"
         );
+        trash_test_root(&root);
+    }
+
+    /// G1: a writer's `mailbox_dirs` refuses (creating nothing) for a room
+    /// the rename journal names as old or new, and serves any other room.
+    #[test]
+    fn mailbox_dirs_refuses_a_room_mid_rename() {
+        let root = test_root("mid-rename");
+        let context = super::Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::write(
+            root.join(super::RENAME_JOURNAL_FILE),
+            br#"{"v":1,"old":"alpha","new":"beta","started_at":"x"}"#,
+        )
+        .expect("journal");
+        for room in ["alpha", "beta"] {
+            let error = context
+                .mailbox_dirs(room)
+                .expect_err("mid-rename room refuses");
+            assert_eq!(
+                error.details.exact_fix.as_deref(),
+                Some("post rooms rename 'alpha' 'beta'")
+            );
+            assert!(!root.join(room).exists(), "{room} was not created");
+        }
+        context
+            .mailbox_dirs("gamma")
+            .expect("other rooms are served");
+        assert!(root.join("gamma/inbox").is_dir());
         trash_test_root(&root);
     }
 

@@ -51,8 +51,10 @@
   profile keys, and the address each of the room's routing receipts binds), and `rooms.json` commits last.
   Any failure through that commit rolls back. A crash leaves
   `rename-journal.json`, which `post doctor` reports and which blocks every
-  other rename until the same rename is rerun to finish it. The resume
-  refuses, rather than merges, if mail recreated the old mailbox.
+  other rename until the same rename is rerun to finish it. While it
+  stands, a send to either name refuses with the resume command rather than
+  recreate the old mailbox, and `doctor --fix` skips both rooms. The resume
+  refuses, rather than merges, if the old mailbox was recreated anyway.
   History keeps the old name. On a bridged host it requires a fresh
   `bridge/health.json` with zeroed `local_held` counters and a local-held
   record for every letter to the old name the bridge would export; the

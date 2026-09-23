@@ -1,7 +1,10 @@
 use crate::cli::{RoomsAddArgs, RoomsArgs, RoomsCommand, RoomsRenameArgs, RoomsSetPathArgs};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{shell_quote, validate_new_room_name, Context, RENAME_JOURNAL_FILE};
+use crate::mailbox::{
+    read_rename_journal, resume_command, shell_quote, validate_new_room_name, Context,
+    RenameJournal, RENAME_JOURNAL_FILE,
+};
 use crate::model::{RoomMap, RulesConfig};
 use crate::output::{RoomOutput, RoomsOutput, RoomsRenameOutput, RoomsSetPathOutput};
 use std::collections::BTreeMap;
@@ -525,49 +528,6 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
             Err(error)
         }
     }
-}
-
-/// `<root>/rename-journal.json`: the intent record a rename writes before its
-/// first store change and removes once rooms.json commits (or a clean
-/// rollback finishes).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RenameJournal {
-    pub v: u32,
-    pub old: String,
-    pub new: String,
-    pub started_at: String,
-}
-
-pub(crate) fn resume_command(old: &str, new: &str) -> String {
-    format!(
-        "post rooms rename {} {}",
-        shell_quote(old),
-        shell_quote(new)
-    )
-}
-
-/// Read a standing rename journal. Absent is None; unreadable or malformed
-/// refuses, because a rename cannot know whether the store is half-moved.
-pub(crate) fn read_rename_journal(context: &Context) -> AppResult<Option<RenameJournal>> {
-    let path = context.root.join(RENAME_JOURNAL_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(AppError::io("read rename journal", &path, error)),
-    };
-    let journal: RenameJournal = serde_json::from_slice(&bytes).map_err(|error| {
-        AppError::config(
-            &path,
-            format!("the rename journal is malformed ({error}); inspect the mail root to see which rename was interrupted, finish it by hand, then delete the journal"),
-        )
-    })?;
-    if journal.v != 1 {
-        return Err(AppError::config(
-            &path,
-            format!("the rename journal has unsupported version {}", journal.v),
-        ));
-    }
-    Ok(Some(journal))
 }
 
 fn write_rename_journal(context: &Context, old: &str, new: &str) -> AppResult<()> {

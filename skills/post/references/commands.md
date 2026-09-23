@@ -198,10 +198,14 @@ supply `/dev/null`.
 - **Interrupted renames.** A crash mid-rename leaves
   `<root>/rename-journal.json`. `post doctor` reports it
   (`rooms.rename_interrupted`), and every other rename refuses with the
-  resume command as `exact_fix`. Rerun the same `post rooms rename <old>
-  <new>` to finish it (`resumed: true`). If mail recreated `<root>/<old>`
-  after the crash, the resume refuses and lists those files. Move them into
-  the new mailbox by hand, remove the old directory, and rerun.
+  resume command as `exact_fix`. Until it is resumed, a send to either
+  name refuses (`config_invalid`) with the same `exact_fix` and writes
+  nothing, and `doctor --fix` leaves both rooms alone. Rerun the same `post
+  rooms rename <old> <new>` to finish it (`resumed: true`), then resend. If
+  `<root>/<old>` was recreated anyway, doctor reports
+  `rooms.rename_old_recreated` and the resume refuses and lists those files.
+  Move them into the new mailbox by hand, remove the old directory, and
+  rerun.
 - There is no `rooms remove`.
 
 ## `who`

@@ -306,6 +306,9 @@ where
         let payload = encode_mail(&envelope, &body)?;
         if inbox.is_none() {
             ensure_route_allowed(context, &rooms, &sender, &target)?;
+            if target.kind == crate::participant::AddressKind::Workspace {
+                crate::mailbox::ensure_room_not_mid_rename(context, &target.name)?;
+            }
             fs::create_dir_all(&archive)
                 .map_err(|error| AppError::io("create archive directory", &archive, error))?;
             let target_inbox = target.inbox(context)?;

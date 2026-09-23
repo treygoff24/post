@@ -1178,8 +1178,21 @@ fn apply_fixes(context: &Context, fixed: &mut Vec<String>) -> Result<(), AppErro
         fixed.push(context.root.join("rules.json").display().to_string());
     }
     create_dir(&context.root.join("archive"), fixed)?;
+    // A room an interrupted rename names is skipped, not recreated: its
+    // mailbox may already have moved, and the rename.interrupted check
+    // names the resume command.
+    // An unreadable journal skips every room: it cannot say which one.
+    let journal = crate::mailbox::read_rename_journal(context);
+    let mid_rename = |name: &str| match &journal {
+        Ok(None) => false,
+        Ok(Some(journal)) => journal.old == name || journal.new == name,
+        Err(_) => true,
+    };
     if let Ok(rooms) = context.load_rooms() {
         for name in rooms.keys() {
+            if mid_rename(name) {
+                continue;
+            }
             create_dir(&context.root.join(name).join("inbox"), fixed)?;
             create_dir(&context.root.join(name).join("read"), fixed)?;
         }
@@ -1361,10 +1374,10 @@ fn detect_owner_surface(
 /// the store may be half-moved until the same rename is resumed.
 fn detect_rename_journal(context: &Context, checks: &mut Vec<DoctorCheck>) {
     let path = context.root.join(crate::mailbox::RENAME_JOURNAL_FILE);
-    match super::rooms::read_rename_journal(context) {
+    match crate::mailbox::read_rename_journal(context) {
         Ok(None) => {}
         Ok(Some(journal)) => {
-            let fix = super::rooms::resume_command(&journal.old, &journal.new);
+            let fix = crate::mailbox::resume_command(&journal.old, &journal.new);
             checks.push(check(
                 "rooms.rename_interrupted",
                 DoctorSeverity::Error,
@@ -1376,6 +1389,24 @@ fn detect_rename_journal(context: &Context, checks: &mut Vec<DoctorCheck>) {
                 false,
                 &format!("Resume it with `{fix}`."),
             ));
+            let old_home = context.root.join(&journal.old);
+            if old_home.exists() && context.root.join(&journal.new).exists() {
+                checks.push(check(
+                    "rooms.rename_old_recreated",
+                    DoctorSeverity::Error,
+                    &old_home,
+                    &format!(
+                        "the old mailbox '{}' was recreated after the interrupted move to '{}'; the resume refuses until it is gone",
+                        journal.old, journal.new
+                    ),
+                    false,
+                    &format!(
+                        "Move each file under {} into the matching place under {} by hand (or remove it if it is not mail), remove the old directory, then run `{fix}`.",
+                        old_home.display(),
+                        context.root.join(&journal.new).display()
+                    ),
+                ));
+            }
         }
         Err(error) => checks.push(check(
             "rooms.rename_journal_invalid",
