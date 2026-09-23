@@ -329,12 +329,14 @@ fn produce() -> BTreeMap<&'static str, String> {
             "chat", "tax", "--send", "--anyway", "--body", body, "--json",
         ]));
     }
-    // An unreadable channel message in a channel the reader belongs to.
+    // An unreadable channel message in a channel the reader belongs to. Its
+    // id sorts after the reader's join: a corrupt file below the membership
+    // start is history and never rings (join from now).
     assert_success(&as_reader(&["chat", "broken", "--join", "--json"]));
     fs::write(
         sandbox
             .mail_root
-            .join("channels/broken/messages/20260101-000300-000001-bbbbb3.msg"),
+            .join("channels/broken/messages/20990101-000300-000001-bbbbb3.msg"),
         "not a message",
     )
     .expect("unreadable channel message");
@@ -361,7 +363,7 @@ fn produce() -> BTreeMap<&'static str, String> {
     fs::remove_file(
         sandbox
             .mail_root
-            .join("channels/broken/messages/20260101-000300-000001-bbbbb3.msg"),
+            .join("channels/broken/messages/20990101-000300-000001-bbbbb3.msg"),
     )
     .expect("remove the unreadable channel message");
     fs::remove_file(inbox.join("20260101-000200-bbbbb2.mail")).expect("remove the unreadable mail");

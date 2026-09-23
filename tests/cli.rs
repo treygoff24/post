@@ -13737,3 +13737,50 @@ fn join_from_now_explicit_join_by_a_legacy_member_keeps_its_floor() {
     // A second join is now already_member.
     assert!(jfn_join(&sandbox, &old, &gamma, "legacy", false).already_member);
 }
+
+#[test]
+fn join_from_now_corrupt_history_file_does_not_ring() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta, _beta_participant) = jfn_sixty(&sandbox);
+    let fresh = jfn_bind(&sandbox, "jfn-corrupt", &alpha, "alpha");
+    jfn_join(&sandbox, &fresh, &alpha, "tax", false);
+    let messages = sandbox.mail_root.join("channels/tax/messages");
+    fs::write(
+        messages.join("20250101-000000-000001-00dead.msg"),
+        "not a message",
+    )
+    .expect("corrupt history file");
+    let unreadable = |sandbox: &Sandbox| -> (Vec<String>, String) {
+        let output = sandbox.run_as_participant(
+            &["watch", "--snapshot", "--json", "--limit", "0"],
+            &fresh,
+            &alpha,
+        );
+        // The unreadable case warns on stderr by design; only exit status binds.
+        assert!(output.status.success(), "{}", stderr(&output));
+        let ids = watch_events(&output.stdout)
+            .into_iter()
+            .filter_map(|event| match event {
+                WatchEvent::Unreadable { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        (ids, stderr(&output))
+    };
+    let (ids, warnings) = unreadable(&sandbox);
+    assert!(
+        ids.is_empty(),
+        "a corrupt file below the start is history, not a ring"
+    );
+    assert!(!warnings.contains("unreadable"), "{warnings}");
+    // Corruption at or above the start still rings.
+    fs::write(
+        messages.join("20990101-000000-000001-00beef.msg"),
+        "not a message",
+    )
+    .expect("corrupt unread file");
+    assert_eq!(
+        unreadable(&sandbox).0,
+        vec!["20990101-000000-000001-00beef".to_owned()]
+    );
+}

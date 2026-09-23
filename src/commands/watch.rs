@@ -1755,16 +1755,17 @@ fn scan_unreadable_participant_channel(
         if emitted_channel_ids.contains(&dedupe) {
             continue;
         }
-        // History is never delivered as an event — but it still parses here:
-        // this scan exists to report what is unreadable, and a corrupt
-        // pre-membership file is still corruption worth one event.
-        let history = history_floor
+        // History is decided by the filename id before parsing, like a
+        // consumed id in `unread_channel_skipping_consumed`: a message below
+        // the membership start can never be delivered, so even a corrupt one
+        // is history, not an unreadable ring. `post doctor` still reports it.
+        if history_floor
             .as_deref()
-            .is_some_and(|floor| crate::cursor_state::eligibility::is_channel_history(id, floor));
+            .is_some_and(|floor| crate::cursor_state::eligibility::is_channel_history(id, floor))
+        {
+            continue;
+        }
         match parse_channel_message(&path) {
-            Ok(_) if history => {
-                seen_paths.insert(path);
-            }
             Ok(parsed)
                 if crate::cursor_state::eligibility::message_is_own(
                     context,
