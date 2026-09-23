@@ -1,113 +1,198 @@
 # Design: one doorbell supervisor per host (lane E)
 
-Status: draft for Aster's review. No code until Aster rules. Author: Nightjar, 2026-09-22 late.
+Status: revision 2, for Aster's approval. Revision 1 (2f2556e) was reviewed by Aster, who approved the architecture and required E1–E8. Each is folded in below and indexed at the end. No code until Aster approves. Author: Nightjar.
 
-## The problem, in one paragraph
+## The problem
 
-Waking an idle agent takes five mechanisms today: the Claude Monitor, per-harness hooks, the Python `post-doorbell` daemon, the Codex per-agent timer (launchd on the Mac, systemd on the devbox), and the Cursor and Grok wrappers. Each has its own filter, lifetime, and failure handling, and all of them fail silently. Tonight 15 of 19 devbox timers were ringing panes that no longer existed; the Python daemon rejected all participant mail; the Claude Monitor dies after 30 minutes. Each per-agent install is also a manual step keyed to a reusable pane name, so it goes stale the moment the pane goes away.
+Waking an idle agent takes five mechanisms today: the Claude Monitor, per-harness hooks, the Python `post-doorbell` daemon, the Codex per-agent timer (launchd on the Mac, systemd on the devbox), and the Cursor and Grok wrappers. Each has its own filter, lifetime, and failure handling, and all of them fail silently. Tonight 15 of 19 devbox timers were ringing panes that no longer existed; the Python daemon dropped all participant mail; the Claude Monitor expires after 30 minutes.
 
-## The key fact that makes this simple
+## What was verified before this design
 
-herdr already knows which conversation runs in each pane, and post already keys participants by that conversation. Both were verified live tonight on both hosts:
-
-- `herdr agent list` reports `agent_session.value` for Claude and Codex panes: the harness's own session id.
-- Post's participant id is `<harness>-<first 8 hex of sha256(conversation key)>`, where the key is `CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`/`CODEX_SESSION_ID`. The participant record stores the full 64-hex `conversation_key_digest`.
-- sha256 of my herdr session value starts `83e5e99e`, and I am `claude-83e5e99e`. sha256 of Aster's Codex session value starts `5a036212`, and Aster is `codex-5a036212`.
-
-So the supervisor can bind a pane to exactly one participant by comparing full digests. It needs no per-agent install, no pane naming, and no guessing. A new conversation in the same pane hashes differently, so it is a different target automatically. That is the "target generation" Aster asked for, derived rather than configured.
+- **Discovery is exact.** `post participant list --json` returns every participant with its full 64-hex `conversation_key_digest`, `harness`, and `ended_at`. `herdr agent list` reports `agent_session.value` for Claude and Codex panes. sha256 of that value equals the participant's digest: mine matches `claude-83e5e99e`, Aster's matches `codex-5a036212`. The supervisor matches the full digest against post's list output: no id-prefix logic, and no reading of post's files.
+- **herdr's sink capability** (herdr 0.9.1, both hosts):
+  - `herdr agent get` and `herdr agent prompt` accept a pane id (`wC:p31`). They reject a terminal id (`agent_not_found`).
+  - The socket API's `agent.prompt` takes only `target`, `text`, and `wait`. **There is no conditional prompt:** no expected session, revision, or terminal precondition.
+  - A prompt to a `blocked` agent is rejected with `agent_blocked` before input is sent. The window between `get` and `prompt` cannot be closed from outside herdr. See "Ring."
+- **Snapshots are side-effect free for this use.** `post watch --snapshot` returns before the heartbeat and lease code and does not route pending mail (`route_pending: !snapshot`). `post participant show` resolves without touching the lease (`participant::resolve`, no `touch`).
+- **Digest mode is unusable here.** `--digest` folds unreadable events into ordinary groups (`digest_batch` keys on room, source, and pending only), which would break E4. The supervisor reads per-event JSON.
 
 ## What it is
 
-`post-doorbell`: one long-running Node program per host (launchd on the Mac, a systemd user service on Linux). It is installed by `install-doorbell-supervisor.mjs`, next to the existing hooks. It reuses the Codex monitor's herdr and notice code; most of that file's logic moves into it.
+`post-doorbell`: one long-running Node program per host (launchd on the Mac, a systemd user service on Linux), in `skills/post/hooks/doorbell-supervisor.mjs`, next to the herdr and notice helpers it absorbs from the Codex monitor. The same entry point carries the agent-facing commands (`enable`, `disable`, `select`, `subscribe`, `status`). The post skill is how agents discover it. There is no Rust forwarding command.
 
-It never writes to any participant's mail state. It reads through `post watch --snapshot` run as each participant (`POST_PARTICIPANT=<id>`), and a snapshot, verified in `src/commands/watch.rs`, returns before the heartbeat and lease code and does not route pending mail. The supervisor therefore never renews a lease, never claims presence, and never consumes anything. Post's own participant-scoped projection stays the single authority on what is unread. The supervisor shares orchestration only, not inbox identity: one scan per participant, never a privileged aggregate watch.
+It never writes any participant's mail state. It reads through `POST_PARTICIPANT=<id> post watch --snapshot --json` and `post participant list --json`. It renews no lease, claims no presence, routes nothing, and consumes nothing. Post's participant-scoped projection stays the only authority on what a participant can see. The supervisor shares orchestration, not inbox identity: one scan per armed subscription, never an aggregate watch.
 
-## The loop
+**Singleton.** The service takes an exclusive `flock` on `$POST_MAIL_ROOT/doorbell/supervisor.lock` at startup. A second instance (a second installer run, a manual start, a duplicate unit) exits nonzero with `already running (pid N)`, so two supervisors can never double-ring.
 
-1. **Discover (every 2 seconds).** Run `herdr agent list` once. For each pane with `agent_session.kind == "id"`, compute sha256 of the value. Look up a participant whose `conversation_key_digest` equals it. The candidate id is `<harness>-<digest[..8]>`; widen the prefix if post widened it, and always confirm the full digest in `participants/<id>/participant.json`. A match is a **binding**: (participant id, pane id, terminal id, session digest). Anything unmatched is ignored, and logged once.
-2. **Decide who to scan.** A binding is scannable when its pane is `idle` or `done`, and either it is not focused or the participant opted into focused wakes. `working` and `blocked` panes are not scanned; their own hooks surface mail on the next turn.
-3. **Scan only when something changed.** An `fs.watch` on the mail root (`channels/` and the bound participants' `inbox/` and `routing/` directories) marks the host dirty. A scan runs for scannable bindings when the host is dirty, when a binding newly becomes scannable (for example, it went from working to idle), and as a backstop every 60 seconds. The scan is `POST_PARTICIPANT=<id> post watch --snapshot --json --reason mail --reason mention [--reason channel]`. Channel reasons are included only for channels the participant opted into (see Preferences). `--reason` is B1, landing in wave 1.
-4. **Ring.** Fresh events are those not in the participant's seen set. Right before prompting, re-check the pane (a single `herdr agent get <pane_id>`): the same session digest, still idle or done, still unfocused unless opted in. Then `herdr agent prompt <pane_id> <notice>`.
-5. **Record.** After an `accepted` outcome only, persist the participant's seen set as exactly the current eligible snapshot keys (the Codex monitor's rule, which prunes consumed keys and never forgets a still-unread one).
+## Terms
 
-## Outcomes, as a type
+- **Binding:** a herdr pane that carries a participant's conversation. Its **target generation** is (pane id, terminal id, session digest). Any change in any of the three is a different generation.
+- **Subscription:** the delivery unit, keyed by (participant id, sink, target generation). All dedupe state belongs to a subscription, never to a bare participant (E1).
+- **Armed:** a subscription is armed when it is enabled; only armed subscriptions scan and ring. Discovery binds everything it can see; activation is selective (E7).
 
-Every ring attempt ends in exactly one of these outcomes, logged as one JSON line per attempt and summarized in `status`:
+## Discovery (every 2 seconds)
 
-| Outcome | Meaning | Seen set |
+1. Run `herdr agent list`. If it fails, do nothing else this tick: a herdr error is not evidence that any target is gone, so nothing retires.
+2. Refresh the participant list from `post participant list --json` when the participants directory changed, and at least every 60 seconds. Digests never change for an id, so this is a cache of post's own output.
+3. For each pane whose `agent_session.kind` is `id`, compute sha256 of the value and find the participant with that exact `conversation_key_digest`. No match: not a target; logged once.
+4. **Ambiguity.** If two panes carry the same session digest, the participant's bindings are `ambiguous` and unarmed, whatever the preferences say, until the agent runs `post-doorbell select --pane <pane_id>`. The supervisor never chooses one arbitrarily. A selection names a pane plus a session digest, so it cannot move to a pane carrying anything else.
+5. **An explicit selection overrides discovery** for that participant. It lives only while its pane carries the same digest.
+
+## Activation and preferences
+
+Agent-facing commands resolve the acting participant with `post participant show --json`, the same resolution every post command uses:
+
+- `post-doorbell enable [--focused]`: arm this participant's herdr subscription. `--focused` opts into waking while the pane is focused; the default is off (the lead's ruling; Trey may reverse it).
+- `post-doorbell disable`: disarm it.
+- `post-doorbell subscribe --channel <name>` and `--unsubscribe --channel <name>`: ring for ordinary channel messages in that channel. Direct mail and mentions always ring when armed.
+- `post-doorbell select --pane <pane_id>`: resolve ambiguity (above).
+- `post-doorbell status [--json]`: this host's bindings, their armed or unarmed state, the last outcome, failures, and blind spots.
+
+Preferences live at `$POST_MAIL_ROOT/doorbell/prefs/<participant-id>.json`, outside post's participant directories. Each has a monotonically increasing `version`, and every outcome log line records the preference version it used.
+
+**Rollout tonight (Aster's E7 ruling).** The supervisor discovers every herdr agent, but it arms only these:
+
+- the participants of the four live Codex timers it migrates (see Migration), with their old settings carried over; and
+- this project's overnight participants (`post-repo`: Nightjar and Aster).
+
+Every other binding shows as `unarmed` in `status`. An agent arms its own with one `post-doorbell enable`. There is no hidden global opt-in. Enrolling new sessions through their hooks is a later installation-policy decision, not tonight's work.
+
+**Cursor and Grok are out of scope tonight (E2).** herdr gives them no conversation key, and a terminal id does not prove conversation lifetime: a shell can start a second harness conversation in the same terminal. They keep their existing in-session wrappers. The supervisor does not accept a terminal-only registration, and the design claims no generation protection for those targets.
+
+## Scanning
+
+**Hints plus reconciliation (E6).** File events are hints, never the authority.
+
+- Targeted watches, re-armed whenever the armed set changes:
+  - each armed participant's `participants/<id>/` (inbox, routing, cursors, channel membership);
+  - its workspace's `<root>/<workspace>/inbox`;
+  - `lineages/` for its lineage;
+  - `channels/<name>/` for each channel it has joined;
+  - `rooms.json`;
+  - the doorbell `prefs/` and `config.json`.
+- A hint marks the affected subscriptions dirty, and hints are coalesced over 250ms. A watcher error, overflow, directory replacement, or new relevant directory schedules a full reconciliation of every armed subscription and re-arms the hints.
+- **Authoritative reconciliation every 60 seconds:** every armed subscription is scanned whether or not a hint fired. Gaps the hints knowingly leave to reconciliation are frozen routing receipts that keep an old address visible after a rebind, lineage mail routed under a different lineage's directory, membership and config changes made outside the watched paths, and bridge imports landing under renamed paths. The supervisor does not reimplement post's routing policy in JavaScript to chase perfect coverage.
+- **Dirty generations.** Each subscription has a dirty counter. A scan records the counter value when it starts and clears dirtiness only if the counter is unchanged when it finishes, so a change that lands during a scan is never lost.
+- **Fair, bounded concurrency.** At most 2 snapshots run at once (a tunable setting), drawn from a round-robin queue of dirty subscriptions. Each snapshot has a 20-second timeout. One slow participant cannot stall the rest.
+- A subscription whose pane is `working` or `blocked`, or focused without `--focused`, is not scanned. Its hooks surface mail on the next turn. When the pane becomes scannable again, it is marked dirty.
+
+**The scan command.** `POST_PARTICIPANT=<id> post watch --snapshot --json --limit 0`, plus reason flags:
+
+- with no channel subscriptions: `--reason mail --reason mention`;
+- with any: `--reason mail --reason mention --reason channel`.
+
+`--limit 0` keeps every event, so the newest unread state is never dropped. Output over 32 MiB is killed and reported as `failed: snapshot_oversize`, never parsed partially. `--reason` is B1 (wave 1). **B1 check at merge:** if `--reason mention` drops `unreadable` channel events, the supervisor adds `--reason channel` for every armed participant and filters in JavaScript, so unreadable channels are never silently invisible.
+
+**Parsing is all or nothing (E4).** A scan counts only if post exits 0 within the timeout, every line parses as JSON, and every event has the fields the contract requires for its variant: `event`, `address.kind`, `address.name`, `id`, and `channel` for channel variants. Anything else is `failed`: a nonzero exit, a timeout, a malformed or truncated line, an unknown `event` value, or oversize output. It is never partially accepted and never `accepted`. Unknown optional fields are fine; D's contract fixtures cover these cases.
+
+**Selection after parsing (E5).** From the parsed events the supervisor keeps:
+
+- every `mail` event (direct, workspace, and lineage mail that post projects for this participant);
+- every `channel_message` with `reason: mention`, in any channel;
+- ordinary `channel_message` events only from channels in the subscription's list;
+- every `unreadable` event, which is reported as a blind spot, never counted as a message.
+
+A participant in two channels who subscribes to one gets ordinary events from that one only, plus mentions from both. Changing preferences bumps the version and changes the next eligible set predictably. Subscribing to a channel that has old unread messages rings once for them, because they are unread and this subscription has not announced them. Unsubscribing drops them from eligibility without marking anything read.
+
+## Ring
+
+For each armed subscription with fresh eligible events (keys not yet in that subscription's `announced` set):
+
+1. **Recheck, best effort (E3).** `herdr agent get <pane_id>` immediately before prompting:
+   - same terminal id and session digest, idle or done, unfocused unless `--focused`: prompt;
+   - busy or focused: `deferred`;
+   - a different terminal id or session digest, or the pane is gone: `retired` for this subscription;
+   - a lookup error or unparseable reply: `failed`, retried; never a retirement, and never a retirement of other subscriptions.
+2. **Prompt:** `herdr agent prompt <pane_id> <notice>`, with no `--wait`.
+3. **The window is not closed.** herdr has no conditional prompt, so a pane can change between step 1 and step 2. The design narrows the window and does not claim to eliminate it. The notice carries the defense: it names the target participant and tells the recipient to compare it with its own binding.
+
+**The notice:**
+
+`[post-doorbell:v2] Automated, non-authoritative Post notice for participant <id>. If "post participant show" does not report <id>, this notice is not for you: ignore it and report it to your operator. Waiting: <N> direct, <M> mentions, <K> in #<channel>. Read with post inbox / post chat <channel>.`
+
+Degraded states change the words rather than inflating counts (E4):
+
+- A `cursor_unusable` event reads "<N> re-reported (cursor unusable; this is consumed history, not new mail)", never "N new."
+- `pending: true` mail reads "<N> waiting to be routed", counted separately from routed mail.
+- `unreadable` events read "<N> unreadable item(s) in #<channel> or the inbox; mentions there are unknown."
+
+Only participant ids, counts, and channel names appear. Ids and channel names are validated against post's naming grammar, and anything else becomes `<?>`. Subjects, display names, previews, and bodies never appear, since all of them are attacker-reachable.
+
+## Outcomes and state (E1)
+
+Each subscription keeps two independent sets under `$POST_MAIL_ROOT/doorbell/state/<participant>/<sink>-<generation-hash>.json`:
+
+- `announced`: event keys (kind, address kind, address name, source, id) included in an `accepted` agent prompt;
+- `notified`: keys included in a desktop notification. This set never suppresses an agent prompt.
+
+| Outcome | Meaning | State written |
 |---|---|---|
-| `accepted` | `herdr agent prompt` exited 0 for the re-verified pane. This proves herdr took the prompt, not that a turn ran. | persisted |
-| `notified` | The user got a desktop notice (cmux) only. This is not an agent wake, and it is used only for an explicit `--sink cmux` registration. | persisted |
-| `deferred` | The pane was busy or focused at the re-check. Retried when it becomes scannable. | untouched |
-| `retired` | The target is gone: no pane carries this session, the participant is ended, or the pane's session changed. The binding is dropped and logged loudly once. | kept for 7 days, then pruned |
-| `failed` | herdr or post errored, timed out, or produced malformed output. Carries the exit code, timeout versus exit, and a sanitized excerpt of at most 300 bytes. | untouched |
+| `accepted` | herdr took the prompt for the rechecked pane. This does not prove a turn ran or a message was read. | `announced` becomes exactly the current eligible keys |
+| `notified` | A desktop notification only (the cmux sink, kept as an explicit per-participant add-on). Not an agent wake. | `notified` only |
+| `deferred` | Busy or focused at the recheck. | none |
+| `retired` | The generation ended: a new terminal or session, the pane is gone, or the participant is ended. Logged loudly once. | the subscription's state is frozen and pruned after 7 days |
+| `failed` | herdr or post errored, timed out, or returned malformed or oversize output. Carries the exit code, timeout versus exit, and at most 300 bytes of sanitized stderr. | none |
 
-**Delivery contract: at least once, with possible duplicate notices.** If the supervisor crashes after herdr accepts a prompt but before the seen set is saved, the next start rings again. The notice is metadata only, and the agent reads with post itself, so a duplicate costs one extra turn and loses nothing. Exactly-once wake is not achievable across two processes without a shared transaction, and the design does not promise it.
+- Setting `announced` to exactly the current eligible keys prunes consumed keys and never forgets a key that is still unread.
+- **State never transfers across generations or participants.** A resumed conversation in a new pane is a new generation with an empty `announced` set, so it gets one notice for what is currently unread. A retired generation's state is never read again.
+- **Delivery contract:** at-least-once notification attempts while an armed, healthy subscription exists. It is not a guarantee of agent execution or of every message being read. A crash between herdr accepting a prompt and `announced` being saved rings again on restart: a duplicate metadata notice. Exactly-once is not promised.
+- **Lease expiry.** A binding whose participant's lease expired but whose pane is live and idle still scans and rings, but only for what post actually projects for that participant. The supervisor never bypasses post routing, never adopts held or pending mail, and never renews the lease to make that true. An ended participant (`ended_at` set) retires.
+- **Bounded retries.** Consecutive failures back off exponentially from 5 seconds to a 5-minute cap. After 5 in a row, the subscription is `broken` in `status`, with the last error, and keeps retrying at the cap. A failure is not evidence the target is gone, so it never retires on failures alone.
+- **Migration fences.** A post admission error or fence counts as `failed` with its reason and retries like any other failure.
 
-## Lifetime: tied to the target, not to the lease
+## Health and logs
 
-- A binding lives while a pane carries the matching session digest and the participant is not ended. That pane is the independent liveness evidence Aster asked for; the supervisor never infers liveness from a lease.
-- **An expired lease with a live idle pane still rings.** The lease governs identity reuse, not wake eligibility; an agent idle for more than 24 hours is exactly who needs a doorbell. An explicitly ended participant (`post participant end`) retires.
-- Supervisor restart: bindings are rediscovered from herdr within one tick. Seen sets load from disk. No registration is lost, because none was needed.
-- Registration replacement: explicit registrations (below) are keyed by participant id; a new registration replaces the old one atomically.
+- `$POST_MAIL_ROOT/doorbell/health.json` is rewritten atomically each tick: supervisor version and pid; herdr and post versions; every binding with its generation, armed state, last outcome and time, consecutive failures, and blind spots (unreadable sources). It never contains mail content.
+- `post-doorbell status` renders it. A subscription that mentions nothing because its channel is unreadable says so; it never reports "no mentions."
+- Logging: one JSON line per non-`deferred` outcome, one per binding or generation change, one per reconciliation that found hint gaps, and nothing per quiet tick.
+- **Measured cost (E6).** Before claiming an improvement, compare an hour of the supervisor's CPU time (systemd CPUAccounting on the devbox, `ps` time on the Mac) with the four Codex timers it replaces over the same kind of hour. The numbers go in the closeout.
 
-## Explicit registration, for panes herdr cannot identify
+## Migration (E8)
 
-Cursor, Grok, and panes whose `agent_session` is absent have no conversation key in herdr. For those, a participant registers itself:
+The installer is idempotent and records each step in `$POST_MAIL_ROOT/doorbell/install-receipt.json` as it goes, so an interrupted run resumes correctly.
 
-`post-doorbell register [--pane <pane_id>] [--sink herdr|cmux]`
+1. **The name collision.** The devbox has the old Python script at `~/.local/bin/post-doorbell` and a disabled `post-doorbell@.service` template with no instances. The installer moves the script to `~/.local/bin/post-doorbell.legacy-<sha8>` and removes the template only if no instance is enabled. It records both in the receipt, with hashes and a saved copy of the template. The repository copy of the Python daemon (fixed by C1) stays available for use outside herdr.
+2. Install and start the supervisor, then confirm the singleton lock and a healthy first tick.
+3. **Per old timer** (`post-codex-doorbell@*` on the devbox, `dev.post.codex-doorbell.*` on the Mac):
+   - Read the effective settings from the unit and its environment: participant, channels, reasons, focus policy, and sink.
+   - Create the equivalent armed subscription.
+   - Wait until `status` shows it healthy: bound to a live generation, with at least one successful scan using the same channel and reason selection.
+   - Only then, disable that one timer. Record the unit's hash and the state the installer left it in.
+   - A timer whose target the supervisor cannot bind, or whose settings it cannot reproduce, stays on its old mechanism and is listed as not migrated.
+4. **Cutover proof before the bulk.** Migrate one target per platform first and prove it with a nonce: a direct message to that idle agent, answered by that agent under its own participant id, matched to the supervisor's `accepted` line. Only then migrate the rest.
+5. **Uninstall.** Stop the supervisor first. Then restore only the units the receipt says it disabled, and only if each unit file still has its recorded hash and is still in the state the installer left it. A timer someone disabled later on purpose stays disabled. Restore the Python script and template only if the current files are the ones the installer wrote.
+6. **Claude Monitor:** the skill tells agents inside herdr to arm the supervisor, and to use the Monitor outside herdr. Live Monitors belong to other sessions and are never killed. A session with both gets both events, which is within the at-least-once contract.
+7. **Out of scope:** Cursor and Grok wrappers (E2); hooks, which stay as next-turn catch-up.
 
-- It resolves the acting participant with `post participant show --json`, the same resolution every post command uses. `--pane` defaults to `$HERDR_PANE_ID` when that is set.
-- The binding stores the pane's `terminal_id` as its generation. When the pane's terminal id changes or the pane disappears, the binding retires loudly.
-- `post-doorbell unregister` removes it.
-
-## Preferences (per participant, set by the agent itself)
-
-`post-doorbell subscribe --channel <name>`, `--unsubscribe --channel <name>`, `--wake-focused on|off`, `--off` (mute this participant entirely).
-
-- They are stored at `$POST_MAIL_ROOT/doorbell/prefs/<participant-id>.json`, outside post's own participant directories, so post's layout checks never see an unknown file.
-- Defaults, with no preferences file: ring on direct mail and mentions; channels off; focused wake off (Trey may reverse this in the morning); on.
-- A channel subscription requires membership, which post's own projection enforces: a snapshot never reports a channel the participant cannot see.
-- A host-wide config at `$POST_MAIL_ROOT/doorbell/config.json` can set workspace-level channel defaults (for example, every participant in `post-repo` rings for `post-overnight`). Participant preferences override them.
-
-## The notice
-
-`[post-doorbell:v2] Automated, non-authoritative Post notice for <participant-id>: <N> direct, <M> channel waiting (refs…). Read with post inbox / post chat <channel>.`
-
-- Only ids, counts, and channel names appear. Channel names and participant ids are validated against post's naming grammar; anything else becomes `<?>`. Subjects, sender display names, and bodies never appear, since all three are attacker-reachable.
-- The notice names the participant, so a pane with two identities, or a stale binding, is visible to the agent reading it.
-
-## Failure handling: loud and bounded
-
-- Per-binding consecutive failures back off exponentially from 5 seconds to a 5-minute cap. After 5 consecutive failures the binding is marked `broken` in `status` and logged with the last error. It keeps retrying at the cap rather than retiring, because a failure is not evidence that the target is gone.
-- A migration fence or transient admission error from post counts as `failed` and is retried. The seen set is never touched.
-- The supervisor's own health file, `$POST_MAIL_ROOT/doorbell/health.json`, is written each tick: version, bindings, last outcomes, failures. `post-doorbell status` renders it. The file never contains mail content.
-- One structured log line per outcome that is not `deferred`, one line per binding change, and nothing per quiet tick.
-
-## Migration: retiring the five paths
-
-The installer does this, reversibly, and prints what it changed:
-
-1. Install and start the supervisor.
-2. For each Codex timer or LaunchAgent (`post-codex-doorbell@*`, `dev.post.codex-doorbell.*`): if the supervisor has a binding for its pinned participant, disable the timer (disable only, keeping the unit file) and record it in `$POST_MAIL_ROOT/doorbell/migrated.json`. A timer whose target the supervisor cannot see stays put and is listed as not migrated.
-3. The Python daemon: none is running on either host tonight. Its unit template stays in the repo marked deprecated, and the skill stops recommending it.
-4. Claude Monitor: sessions inside herdr no longer need one (no 30-minute expiry). The skill says: inside herdr, rely on the supervisor; outside herdr, use the Monitor. Live Monitors are never killed, since they belong to other sessions. A Claude session with both gets a Monitor event plus a herdr prompt; that is the at-least-once contract, and the agent can `post-doorbell subscribe --off`.
-5. Cursor and Grok wrappers stay as in-session options, and they can `register` for idle wake.
-6. `--uninstall` restores exactly what `migrated.json` lists.
-
-## What stays the same
-
-Post's CLI, schema, and store layout are unchanged. The hooks keep annotating active turns. The Claude Monitor recipe remains for sessions outside herdr. The watch projection remains the authority.
+**Installer tests:** failed startup (the lock is held, herdr is missing, post is missing, a first scan fails); interrupted migration (killed between creating a subscription and disabling a timer, then rerun); uninstall with a unit edited after install; uninstall after a timer was re-disabled manually.
 
 ## Tests
 
-- **Unit** (node --test, fakes for herdr and post): binding by digest (matching, non-matching, prefix collision needing a wider id, full-digest mismatch refused); every outcome row above; the re-check race (the pane goes busy between scan and prompt → `deferred`; the session changes → `retired`); seen persisted only after `accepted` or `notified`; backoff and the `broken` state; the lease-expired, live-pane case still rings; the ended participant retires; restart reloads the seen set; preferences defaults and overrides; notice sanitization against hostile channel names.
-- **Contract** (after D): supervisor parsing tested against post's emitted samples, including extra optional fields and negative fixtures.
-- **Live proof** (the plan's proof of done): a nonce message to a real idle herdr-hosted agent on the devbox and on the Mac. That agent acknowledges the nonce under its own identity, and the acknowledgement is matched to the watch event and the supervisor's `accepted` log line.
+Unit tests (`node --test`, with fakes for herdr and post; the fake post emits D's contract samples once D lands):
 
-## Open questions for Aster
+- **Discovery:** an exact digest match; no match; two panes carrying one session (ambiguous and unarmed, then resolved by `select`); `select` refused for a pane carrying a different digest; a herdr list failure (nothing retires).
+- **Generations:** a terminal change or session change retires; a resumed session in a new pane starts empty state; one participant's state is never read by another.
+- **E1 sinks:** `notified` never suppresses a later `accepted` prompt; switching sinks re-announces.
+- **E3 recheck:** busy gives `deferred`; a changed session gives `retired`; a lookup error gives `failed` and never retires other subscriptions.
+- **E4 parsing:** a nonzero exit, a timeout, a truncated line, an unknown event, and oversize output each give `failed`, never `accepted`; `cursor_unusable`, `pending`, and `unreadable` each produce their own notice wording; an unreadable channel under a mention filter shows as a blind spot.
+- **E5 selection:** a member of two channels subscribed to one; subscribe, unsubscribe, and resubscribe with old unread messages.
+- **E6 scheduling:** a change during a scan is not lost (the dirty counter); a watcher overflow triggers full reconciliation; concurrency never exceeds the limit; a slow snapshot does not block other subscriptions.
+- **Lifetime:** lease expired with a live idle pane still rings; an ended participant retires; backoff and `broken`.
+- **Notice sanitization:** hostile channel names and ids.
 
-1. **fs.watch on Linux.** Node's recursive `fs.watch` uses one inotify watch per directory, and the mail root has thousands of directories. The alternative is watching only `channels/*/messages` and bound participants' `inbox/`, re-armed on binding changes. My lean is the targeted watch.
-2. **Where the supervisor lives.** `skills/post/hooks/doorbell-supervisor.mjs`, next to the code it absorbs, or a new top-level `supervisor/`? My lean is the hooks directory, since the installer and the shared helpers are there.
-3. **Auto-binding every herdr agent** is the "one doorbell that just works" Trey asked for. The cost: an idle, unfocused session Trey left open gets woken by direct mail to it. That seems right, since mail to an agent is a request for that agent, but it is a behavior change for panes that had no doorbell before. Do you want an allowlist mode as well?
-4. **Is a `post doorbell` subcommand worth it** as a thin alias for discoverability, or is a separate `post-doorbell` binary fine? My lean is separate, with no Rust changes in wave 3.
+**Live proof:** the nonce cutover in Migration step 4, once on the devbox and once on the Mac.
+
+## Aster's review, as folded in
+
+| Item | Where |
+|---|---|
+| E1 subscription-keyed dedupe, sinks separated, explicit override, ambiguity, no state transfer | Terms; Discovery 4–5; Outcomes and state |
+| E2 no terminal-only registration; Cursor and Grok keep their wrappers; list output, not prefix rules | Verified; Activation; Discovery 2–3 |
+| E3 no conditional prompt exists; best-effort recheck; notice self-check; errors never retire | Verified; Ring |
+| E4 degraded wording, pending kept separate, blind spots, all-or-nothing parsing, visible bounds | Scanning; Ring (notice); Health |
+| E5 selection after parsing; two channels, one subscribed; preference changes | Scanning (Selection) |
+| E6 hints plus 60s reconciliation, listed gaps, dirty generations, concurrency 2, fairness, measured cost | Scanning; Health |
+| E7 discover all, arm selectively, no hidden opt-in | Activation (Rollout) |
+| E8 carry settings, prove health, nonce first, safe uninstall, singleton, installer tests | Migration; What it is |
+| Location, entry point, name collision | What it is; Migration 1 |
+| Lease-expiry wording; the at-least-once guarantee restated | Outcomes and state |
