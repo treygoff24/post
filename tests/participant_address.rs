@@ -588,7 +588,10 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     // A future stamp gets at most 5 s of clock skew, not a second window.
     rig.write_health(&both, now + Duration::from_secs(90), 30);
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
-    rig.write_health(&both, now + Duration::from_secs(8), 30);
+    // The boundary stamps come from a fresh clock read: `now` is seconds old
+    // by here, and rfc3339 drops subseconds, so a stale base would drift a
+    // stamp across the 5 s allowance. 7 s ahead stays outside it after both.
+    rig.write_health(&both, SystemTime::now() + Duration::from_secs(7), 30);
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     for broken in [
         "{not json".to_owned(),
@@ -604,10 +607,11 @@ fn the_capability_guard_refuses_before_anything_is_written() {
     fs::remove_file(rig.bridge().join("health.json")).expect("drop health");
     assert_refused_unchanged(&rig, &to, "bridge_status_unavailable", 75, true);
     // Fresh within three intervals, with both capabilities: queued.
-    rig.write_health(&both, now - Duration::from_secs(80), 30);
+    rig.write_health(&both, SystemTime::now() - Duration::from_secs(80), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
-    // A stamp 5 s ahead, the edge of the skew allowance, is inside it.
-    rig.write_health(&both, now + Duration::from_secs(5), 30);
+    // A stamp 4 s ahead is inside the 5 s allowance even after truncation, so
+    // together with the 7 s refusal this pins the allowance between 4 and 6 s.
+    rig.write_health(&both, SystemTime::now() + Duration::from_secs(4), 30);
     assert_queued(&rig, &to, REMOTE_ID, PEER);
 }
 
