@@ -591,6 +591,7 @@ export class Supervisor {
     this.knownRootDirs = null;
     this.prefsCache = new Map();
     this.membership = new Map();
+    this.membershipState = { at: -Infinity, stale: true, running: false };
     this.logged = new Set();
     this.inflight = 0;
     this.rrCursor = null;
@@ -999,21 +1000,24 @@ export class Supervisor {
     this.pump();
   }
 
-  membershipDirty(participant) {
-    const entry = this.membership.get(participant);
-    if (entry) entry.stale = true;
+  membershipDirty() {
+    this.membershipState.stale = true;
   }
 
   // Joined channels for targeted channel watches, from post's own output.
-  async refreshMembership(participant) {
-    const entry = this.membership.get(participant) ?? { channels: new Set(), at: -Infinity, stale: true, running: false };
-    this.membership.set(participant, entry);
-    if (entry.running) return;
-    const due = entry.stale || this.now() - entry.at >= this.config.membershipRefreshMs;
-    if (!due || this.now() - entry.at < 10_000) return;
-    entry.running = true;
+  // `post channels --json` lists every channel with its effective
+  // participants for the whole host, so one call (no POST_PARTICIPANT) serves
+  // every subscription. One call per refresh, never one per participant:
+  // post processes contend on the store, and N concurrent calls outside the
+  // scan concurrency limit multiplied every snapshot's cost.
+  async refreshMembership() {
+    const state = this.membershipState;
+    if (state.running || this.armedSubs().length === 0) return;
+    const due = state.stale || this.now() - state.at >= this.config.membershipRefreshMs;
+    if (!due || this.now() - state.at < 10_000) return;
+    state.running = true;
     try {
-      const result = await this.exec("post", ["channels", "--json"], { participant });
+      const result = await this.exec("post", ["channels", "--json"], {});
       if (!result.ok) return;
       let parsed;
       try {
@@ -1022,18 +1026,23 @@ export class Supervisor {
         return;
       }
       if (!Array.isArray(parsed?.channels)) return;
-      const channels = new Set();
+      const next = new Map();
       for (const row of parsed.channels) {
-        if (typeof row?.name !== "string") continue;
-        if (Array.isArray(row.participants) && row.participants.includes(participant)) channels.add(row.name);
+        if (typeof row?.name !== "string" || !Array.isArray(row.participants)) continue;
+        for (const participant of row.participants) {
+          if (typeof participant !== "string") continue;
+          if (!next.has(participant)) next.set(participant, { channels: new Set() });
+          next.get(participant).channels.add(row.name);
+        }
       }
-      const changed = channels.size !== entry.channels.size || [...channels].some((name) => !entry.channels.has(name));
-      entry.channels = channels;
-      entry.at = this.now();
-      entry.stale = false;
+      const key = (map) => JSON.stringify([...map].map(([id, entry]) => [id, [...entry.channels].sort()]).sort());
+      const changed = key(next) !== key(this.membership);
+      this.membership = next;
+      state.at = this.now();
+      state.stale = false;
       if (changed) this.rearmWatches();
     } finally {
-      entry.running = false;
+      state.running = false;
     }
   }
 
@@ -1094,7 +1103,7 @@ export class Supervisor {
       this.watches.set(key, entry);
     }
     if (this.knownRootDirs === null) this.knownRootDirs = this.listRootDirs();
-    for (const sub of this.armedSubs()) void this.refreshMembership(sub.participant).catch(() => {});
+    void this.refreshMembership().catch(() => {});
   }
 
   // A new or vanished top-level directory (a room, channels/, lineages/) is a
@@ -1127,7 +1136,7 @@ export class Supervisor {
     if (this.rearmTimer || this.halted) return;
     this.rearmTimer = setTimeout(() => {
       this.rearmTimer = null;
-      for (const sub of this.armedSubs()) void this.refreshMembership(sub.participant).catch(() => {});
+      void this.refreshMembership().catch(() => {});
     }, 1000);
     this.rearmTimer.unref?.();
   }
@@ -1163,7 +1172,7 @@ export class Supervisor {
       default:
         if (ignoredHintFile(name)) return;
         if (spec.kind === "participant" && path.basename(name) === "channels.json") {
-          for (const participant of spec.participants) this.membershipDirty(participant);
+          this.membershipDirty();
           this.rearmSoon();
         }
         this.hint([...spec.participants]);

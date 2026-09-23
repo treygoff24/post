@@ -105,6 +105,7 @@ function makeWorld({ config = {} } = {}) {
     promptResult: null,
     cmuxResult: null,
     herdrListFail: false,
+    channelRows: [],
     calls: [],
     prompts: [],
     desktop: [],
@@ -152,7 +153,7 @@ function makeWorld({ config = {} } = {}) {
         const participant = { ...row, ...(w.showPatch.get(row.id) ?? {}) };
         return ok(JSON.stringify({ ok: true, status: "bound", id: row.id, participant, provenance: "explicit-env" }));
       }
-      if (args[0] === "channels") return ok(JSON.stringify({ ok: true, channels: [] }));
+      if (args[0] === "channels") return ok(JSON.stringify({ ok: true, channels: w.channelRows }));
       if (args[0] === "version") return ok(JSON.stringify({ ok: true, version: "0.9.0", build_sha: "test" }));
       if (args[0] === "watch") {
         const script = w.snapshots.get(opts.participant);
@@ -737,6 +738,25 @@ describe("scheduling (E6)", () => {
     await w.sup.idle();
     assert.equal(calls, 2, "rescanned");
     assert.equal(w.prompts.length, 1);
+  });
+
+  test("one host-wide channels call serves every participant's channel watches", async () => {
+    const w = makeWorld();
+    for (const letter of "abcdef") {
+      const id = `codex-${letter.repeat(8)}`;
+      w.addParticipant(id, `session-${letter}`);
+      w.addPane(`wC:p${letter}`, `session-${letter}`);
+      w.enable(id);
+    }
+    w.channelRows = [{ name: "ops", participants: ["codex-aaaaaaaa", "codex-bbbbbbbb"] }];
+    await w.run();
+    const channelCalls = w.calls.filter((c) => c.kind === "post" && c.args[0] === "channels");
+    assert.equal(channelCalls.length, 1, "one call, not one per participant");
+    assert.equal(channelCalls[0].participant, undefined, "host-wide, not as any participant");
+    const ops = w.watches.find((h) => h.target === path.join(w.paths.root, "channels", "ops") && !h.closed);
+    assert.ok(ops, "the joined channel is watched");
+    await w.run();
+    assert.equal(w.calls.filter((c) => c.kind === "post" && c.args[0] === "channels").length, 1, "not re-run every tick");
   });
 
   test("startup scans each armed subscription once; the timer reconcile follows a minute later", async () => {
