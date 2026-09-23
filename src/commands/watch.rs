@@ -1149,8 +1149,9 @@ impl NotifyWake {
 
     fn collect(&self, dirs: &mut BTreeSet<PathBuf>, event: &notify::Event) {
         // Access events are our own scans reading files — ignoring them
-        // keeps the doorbell from ringing itself. Everything else is a hint
-        // worth a look; the full scan dedupes whatever is noise.
+        // keeps the doorbell from ringing itself. Presence writes (below)
+        // are the same story for our own heartbeats. Everything else is a
+        // hint worth a look; the full scan dedupes whatever is noise.
         if matches!(event.kind, notify::EventKind::Access(_)) {
             return;
         }
@@ -1162,6 +1163,9 @@ impl NotifyWake {
             return;
         }
         for path in &event.paths {
+            if is_presence_write(path) {
+                continue;
+            }
             for dir in &self.watched {
                 if path.starts_with(dir) {
                     dirs.insert(dir.clone());
@@ -1171,33 +1175,54 @@ impl NotifyWake {
     }
 }
 
+/// Files a live watch writes for presence, never mail: the heartbeat and the
+/// participant record's activity refresh (written through a
+/// `.participant.json.<pid>.<nonce>.tmp` temp). A participant with no inbox
+/// dir yet anchors its watch on the participant dir itself, where these
+/// files live, so without this filter each heartbeat woke its own watch.
+fn is_presence_write(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "watch.heartbeat"
+        || name == "participant.json"
+        || (name.starts_with(".participant.json.") && name.ends_with(".tmp"))
+}
+
 impl WakeSource for NotifyWake {
     fn wait(&mut self, timeout: Duration) -> Option<Wake> {
-        let mut dirs = BTreeSet::new();
-        match self.receiver.recv_timeout(timeout) {
-            Ok(Ok(event)) => self.collect(&mut dirs, &event),
-            // Watcher overflow or delivery error: rescan unconditionally
-            // (r2) — every watched dir is an affected hint.
-            Ok(Err(_)) => dirs = self.watched.clone(),
-            Err(RecvTimeoutError::Timeout) => return Some(Wake::TimedOut),
-            // Sender dropped: the backend died; the caller falls back to
-            // polling rather than to silence.
-            Err(RecvTimeoutError::Disconnected) => return None,
-        }
-        // Debounce/batch: fold everything already queued into this wake.
-        while let Ok(result) = self.receiver.try_recv() {
-            match result {
-                Ok(event) => self.collect(&mut dirs, &event),
-                Err(_) => dirs = self.watched.clone(),
+        // A wake whose every event was filtered out (our own reads, our own
+        // presence writes) is not a tick: keep waiting out the same
+        // deadline. Returning it early as TimedOut made the loop write a
+        // heartbeat at once, and on inotify, which reports reads, that
+        // heartbeat, the scan's reads, and the next early return chased each
+        // other with no sleep (a watch at 92% CPU on the devbox, 2026-09-23).
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let mut dirs = BTreeSet::new();
+            match self.receiver.recv_timeout(remaining) {
+                Ok(Ok(event)) => self.collect(&mut dirs, &event),
+                // Watcher overflow or delivery error: rescan unconditionally
+                // (r2) — every watched dir is an affected hint.
+                Ok(Err(_)) => dirs = self.watched.clone(),
+                Err(RecvTimeoutError::Timeout) => return Some(Wake::TimedOut),
+                // Sender dropped: the backend died; the caller falls back to
+                // polling rather than to silence.
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+            // Debounce/batch: fold everything already queued into this wake.
+            while let Ok(result) = self.receiver.try_recv() {
+                match result {
+                    Ok(event) => self.collect(&mut dirs, &event),
+                    Err(_) => dirs = self.watched.clone(),
+                }
+            }
+            dirs.retain(|dir| self.watched.contains(dir));
+            if !dirs.is_empty() {
+                return Some(Wake::Events(dirs));
             }
         }
-        dirs.retain(|dir| self.watched.contains(dir));
-        if dirs.is_empty() {
-            // A filtered-out event (e.g. our own reads): behave as a tick so
-            // heartbeat cadence stays uniform.
-            return Some(Wake::TimedOut);
-        }
-        Some(Wake::Events(dirs))
     }
 
     fn reconcile(&mut self, desired: &BTreeSet<PathBuf>) {
@@ -3739,6 +3764,167 @@ body
             Some(Wake::TimedOut) => panic!("backend never woke for the new file"),
             None => panic!("backend died instead of waking"),
         }
+        trash_test_root(&base);
+    }
+
+    /// A NotifyWake fed by hand. Its real watcher watches nothing; the test
+    /// sends events through its own channel, which is the stream inotify
+    /// hands the loop (macOS FSEvents never reports reads, so the real
+    /// backend cannot produce this stream there).
+    fn injected_notify_wake(
+        dir: &Path,
+    ) -> (
+        NotifyWake,
+        mpsc::Sender<Result<notify::Event, notify::Error>>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let watcher = notify::recommended_watcher(|_: notify::Result<notify::Event>| {})
+            .expect("idle watcher");
+        let mut watched = BTreeSet::new();
+        watched.insert(dir.to_path_buf());
+        let backend = NotifyWake {
+            watcher,
+            receiver,
+            watched,
+            identities: HashMap::new(),
+        };
+        (backend, sender)
+    }
+
+    fn file_event(kind: notify::EventKind, path: PathBuf) -> notify::Result<notify::Event> {
+        Ok(notify::Event::new(kind).add_path(path))
+    }
+
+    fn read_events() -> [notify::EventKind; 3] {
+        use notify::event::{AccessKind, AccessMode};
+        [
+            notify::EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            notify::EventKind::Access(AccessKind::Read),
+            notify::EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        ]
+    }
+
+    #[test]
+    fn a_wake_with_only_filtered_events_waits_out_its_deadline() {
+        let dir = PathBuf::from("/post-watch-test/participants/codex-aaaaaaaa");
+        let (mut backend, sender) = injected_notify_wake(&dir);
+        // What inotify reports while a scan reads the anchor dir.
+        for kind in read_events() {
+            sender
+                .send(file_event(kind, dir.join("cursors.json")))
+                .expect("queue read event");
+        }
+        let timeout = Duration::from_millis(400);
+        let started = Instant::now();
+        let wake = backend.wait(timeout);
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(wake, Some(Wake::TimedOut)),
+            "reads alone must not be a wake"
+        );
+        assert!(
+            elapsed >= timeout - Duration::from_millis(50),
+            "a wake of filtered events returned after {elapsed:?}, before its {timeout:?} deadline"
+        );
+    }
+
+    #[test]
+    fn own_presence_writes_do_not_wake_the_watch() {
+        use notify::event::{CreateKind, DataChange, MetadataKind, ModifyKind};
+        let dir = PathBuf::from("/post-watch-test/participants/codex-aaaaaaaa");
+        let (mut backend, sender) = injected_notify_wake(&dir);
+        for (kind, name) in [
+            (
+                notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                "watch.heartbeat",
+            ),
+            (
+                notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+                "participant.json",
+            ),
+            (
+                notify::EventKind::Create(CreateKind::File),
+                ".participant.json.4242.7.tmp",
+            ),
+        ] {
+            sender
+                .send(file_event(kind, dir.join(name)))
+                .expect("queue presence event");
+        }
+        match backend.wait(Duration::from_millis(200)) {
+            Some(Wake::TimedOut) => {}
+            Some(Wake::Events(dirs)) => panic!("our own heartbeat woke the watch: {dirs:?}"),
+            None => panic!("backend died instead of timing out"),
+        }
+    }
+
+    #[test]
+    fn mail_arriving_after_filtered_events_still_wakes() {
+        use notify::event::CreateKind;
+        let dir = PathBuf::from("/post-watch-test/participants/codex-aaaaaaaa");
+        let (mut backend, sender) = injected_notify_wake(&dir);
+        for kind in read_events() {
+            sender
+                .send(file_event(kind, dir.join("cursors.json")))
+                .expect("queue read event");
+        }
+        sender
+            .send(file_event(
+                notify::EventKind::Create(CreateKind::File),
+                dir.join("watch.heartbeat"),
+            ))
+            .expect("queue presence event");
+        let late = sender.clone();
+        let mail = dir.join("inbox");
+        let arrival = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            late.send(file_event(
+                notify::EventKind::Create(CreateKind::Folder),
+                mail,
+            ))
+            .expect("queue mail event");
+        });
+        let started = Instant::now();
+        match backend.wait(Duration::from_secs(5)) {
+            Some(Wake::Events(dirs)) => assert!(dirs.contains(&dir), "wake must name the dir"),
+            Some(Wake::TimedOut) => panic!("filtered events ended the wait before the mail"),
+            None => panic!("backend died instead of waking"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the mail event waited for the deadline"
+        );
+        arrival.join().expect("sender thread");
+    }
+
+    /// The live shape of the 2026-09-23 devbox spin, against real inotify: a
+    /// participant with no inbox dir anchors its watch on the participant
+    /// dir, where one loop turn reads its state and touches its heartbeat.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inotify_reads_and_heartbeat_in_the_anchor_dir_are_not_a_wake() {
+        let base = test_root("watch-notify-presence");
+        let dir = base.join("participants").join("codex-aaaaaaaa");
+        fs::create_dir_all(&dir).expect("create participant dir");
+        fs::write(dir.join("cursors.json"), b"{}").expect("seed cursors");
+        let canonical = fs::canonicalize(&dir).expect("canonicalize");
+        let mut desired = BTreeSet::new();
+        desired.insert(canonical);
+        let mut backend = NotifyWake::register(&desired).expect("register watches");
+        fs::read(dir.join("cursors.json")).expect("read cursors");
+        fs::write(dir.join("watch.heartbeat"), b"1790150000 5000\n").expect("touch heartbeat");
+        let timeout = Duration::from_millis(400);
+        let started = Instant::now();
+        match backend.wait(timeout) {
+            Some(Wake::TimedOut) => {}
+            Some(Wake::Events(dirs)) => panic!("own reads and heartbeat woke the watch: {dirs:?}"),
+            None => panic!("backend died instead of timing out"),
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= timeout - Duration::from_millis(50),
+            "the watch returned after {elapsed:?}, before its {timeout:?} deadline"
+        );
         trash_test_root(&base);
     }
 

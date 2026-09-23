@@ -28,6 +28,7 @@ import {
   snapshotArgs,
   updatePrefs,
   loadPrefs,
+  prefsPath,
   runCommand,
   sha256,
   generationHash,
@@ -852,12 +853,35 @@ describe("scheduling (E6)", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await w.sup.idle();
     assert.equal(w.snapshotCalls().length, scans, "heartbeat is not mail");
+    // A live watch refreshes the participant record every interval.
+    participantWatch.onEvent("change", "participant.json");
+    participantWatch.onEvent("rename", ".participant.json.4242.7.tmp");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await w.sup.idle();
+    assert.equal(w.snapshotCalls().length, scans, "the participant record's activity refresh is not mail");
     participantWatch.onEvent("rename", "routing/20260923-000001-aaaaa2.json");
     await new Promise((resolve) => setTimeout(resolve, 20));
     await w.sup.idle();
     assert.equal(w.snapshotCalls().length, scans + 1);
     const workspaceWatch = w.watches.find((h) => h.target.endsWith(path.join("alpha", "inbox")));
     assert.ok(workspaceWatch, "workspace inbox watched");
+  });
+
+  test("a prefs change is seen even when the rewrite keeps the old mtime", async () => {
+    // Linux stamps file times from a coarse clock: two prefs writes a few ms
+    // apart share one mtime (the 2026-09-23 devbox gate). Pin it exactly.
+    const w = standardWorld();
+    await w.run();
+    const file = prefsPath(w.paths, "codex-aaaaaaaa");
+    const pinned = 1_790_000_000; // whole seconds: exact on every filesystem
+    fs.utimesSync(file, pinned, pinned);
+    assert.equal(w.sup.prefsFor("codex-aaaaaaaa").focused, false);
+    updatePrefs(w.paths, "codex-aaaaaaaa", (p) => {
+      p.focused = true;
+    });
+    fs.utimesSync(file, pinned, pinned);
+    assert.equal(fs.statSync(file).mtimeMs, pinned * 1000, "the rewrite kept the old mtime");
+    assert.equal(w.sup.prefsFor("codex-aaaaaaaa").focused, true);
   });
 
   test("a watcher error triggers a full reconciliation of every armed subscription", async () => {

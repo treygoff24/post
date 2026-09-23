@@ -550,14 +550,18 @@ function defaultWatch(target, { recursive }, onEvent, onError) {
   return { close: () => watcher.close() };
 }
 
-// Writes that are not mail: live `post watch` heartbeats, activation notices,
-// locks, and temps (the rename that follows a temp is its own event).
+// Writes that are not mail: live `post watch` heartbeats and the participant
+// record's activity refresh, activation notices, locks, and temps (the rename
+// that follows a temp is its own event). A live watch refreshes
+// participant.json every interval; hinting on it scanned the participant
+// every time (and, against a spinning watch, several times a second).
 function ignoredHintFile(filename) {
   if (!filename) return false;
   const base = path.basename(String(filename));
   return (
     base === "watch.heartbeat" ||
     base.startsWith("watch.heartbeat") ||
+    base === "participant.json" ||
     base === "activation-notice" ||
     base.endsWith(".lock") ||
     (base.startsWith(".") && base.endsWith(".tmp"))
@@ -657,12 +661,16 @@ export class Supervisor {
     }
   }
 
-  // Cached by file mtime, so a prefs change is seen by the next discovery
-  // tick even when no watch fires.
+  // Cached by file identity, so a prefs change is seen by the next discovery
+  // tick even when no watch fires. mtime alone is not an identity: Linux
+  // stamps file times from a coarse clock, so two writes a few ms apart share
+  // one mtime. Every prefs write is a temp-and-rename, which gives it a new
+  // inode; the key carries that plus size and nanosecond mtime and ctime.
   prefsFor(participant) {
     let mtime = null;
     try {
-      mtime = fs.statSync(prefsPath(this.paths, participant)).mtimeMs;
+      const st = fs.statSync(prefsPath(this.paths, participant), { bigint: true });
+      mtime = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
     } catch {
       mtime = null;
     }
