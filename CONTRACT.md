@@ -516,7 +516,9 @@ their existing success semantics.
   (`address_kind` absent or `"workspace"`, no `to_host` key) whose `to` is
   exactly `<old>` and that has no `bridge/received/<id>`,
   `bridge/published/<id>`, or `bridge/delivered/*/*/<id>` marker must have a
-  `bridge/local-held/<id>.json` record. Any such letter without one refuses
+  `bridge/local-held/<id>.json` record; each marker counts only when its
+  target exists, so a dangling symlink is absent, as it is to the bridge.
+  Any such letter without a present record refuses
   with the same retryable `bridge_guard_unavailable`, naming the count and up
   to 8 ids (`details.matches`); the bridge stamps holds on its next full
   tick. Envelopes that do not parse are skipped, as the bridge skips them. `--dry-run` runs every check and writes nothing.

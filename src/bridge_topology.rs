@@ -232,7 +232,9 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
 /// `"workspace"`, no `to_host` key), whose `to` is exactly `room`, and that
 /// has none of `bridge/received/<id>`, `bridge/published/<id>`, or any
 /// `bridge/delivered/*/*/<id>`. Returns every such letter (sorted) that has
-/// no `bridge/local-held/<id>.json`; existence is enough, because the bridge
+/// no `bridge/local-held/<id>.json`. Every marker counts only when its target
+/// exists (symlinks followed, as the bridge's `Path.exists()` does); existence
+/// is enough, because the bridge
 /// holds any letter with a record and faults an invalid one. A letter whose
 /// envelope does not parse is skipped, as the bridge skips it. Err carries
 /// an operator-facing reason when the store cannot be read.
@@ -260,7 +262,9 @@ pub(crate) fn unheld_room_letters(context: &Context, room: &str) -> Result<Vec<S
         let Some(id) = outbound_candidate_id(&bytes, room) else {
             continue;
         };
-        let exists = |path: PathBuf| fs::symlink_metadata(path).is_ok();
+        // Markers follow symlinks, as the bridge's `Path.exists()` does: a
+        // dangling marker is absent there, so the letter would still export.
+        let exists = |path: PathBuf| marker_exists(&path);
         if exists(bridge.join("received").join(&id)) || exists(bridge.join("published").join(&id)) {
             continue;
         }
@@ -294,12 +298,21 @@ fn outbound_candidate_id(bytes: &[u8], room: &str) -> Option<String> {
         return None;
     }
     let id = envelope.get("id")?.as_str()?;
+    // An invalid id is skipped: the bridge never exports one either (outbound_ignored).
     crate::mailbox::validate_component(id).ok()?;
     Some(id.to_owned())
 }
 
+/// A bridge marker is present only when its target exists (symlinks are
+/// followed). Any error, a dangling link included, reads as absent, which
+/// can only make the rename interlock refuse.
+fn marker_exists(path: &Path) -> bool {
+    fs::metadata(path).is_ok()
+}
+
 /// Every file name at depth two under `bridge/delivered/` (the
-/// `delivered/*/*/<id>` markers). A missing tree has no markers.
+/// `delivered/*/*/<id>` markers) whose target exists. A missing tree has no
+/// markers.
 fn delivered_marker_names(
     root: &Path,
 ) -> Result<std::collections::HashSet<std::ffi::OsString>, String> {
@@ -325,6 +338,9 @@ fn delivered_marker_names(
     for first in list(root)? {
         for second in list(&first)? {
             for marker in list(&second)? {
+                if !marker_exists(&marker) {
+                    continue;
+                }
                 if let Some(name) = marker.file_name() {
                     names.insert(name.to_owned());
                 }
@@ -527,4 +543,67 @@ fn topology_unavailable(raw: &str, detail: String) -> crate::error::AppError {
     )
     .input(raw)
     .reason(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{unheld_room_letters, Context};
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+    use std::path::Path;
+
+    const ID: &str = "20260923-000000-abc123";
+
+    /// G3: every hold marker counts only when its target exists. A dangling
+    /// symlink is absent to the bridge (`Path.exists()`), so the letter
+    /// stays unheld; a link to a real file is present.
+    #[test]
+    fn dangling_marker_symlinks_do_not_hold_a_letter() {
+        let root = test_root("bridge-markers");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        fs::create_dir_all(root.join("archive")).expect("archive");
+        fs::write(
+            root.join("archive").join(format!("{ID}.mail")),
+            format!(
+                "{{\"id\":\"{ID}\",\"from\":\"beta\",\"to\":\"alpha\",\"kind\":\"note\",\"subject\":\"\",\"sent\":\"x\"}}\n---\nbody"
+            ),
+        )
+        .expect("archive letter");
+        let bridge = root.join("bridge");
+        let real = root.join("real-marker");
+        fs::write(&real, "x").expect("real marker target");
+        let markers = [
+            bridge.join("received").join(ID),
+            bridge.join("published").join(ID),
+            bridge.join("delivered/host-b/alpha").join(ID),
+            bridge.join("local-held").join(format!("{ID}.json")),
+        ];
+        let unheld = || unheld_room_letters(&context, "alpha").expect("scan");
+        assert_eq!(unheld(), vec![ID.to_owned()], "no marker: unheld");
+        for marker in &markers {
+            fs::create_dir_all(marker.parent().expect("marker dir")).expect("marker dir");
+            let link = |target: &Path| {
+                let _ = fs::remove_file(marker);
+                std::os::unix::fs::symlink(target, marker).expect("marker symlink");
+            };
+            link(&root.join("missing-target"));
+            assert_eq!(
+                unheld(),
+                vec![ID.to_owned()],
+                "dangling {} must not hold the letter",
+                marker.display()
+            );
+            link(&real);
+            assert!(
+                unheld().is_empty(),
+                "{} linked to a real file holds the letter",
+                marker.display()
+            );
+            fs::remove_file(marker).expect("remove marker");
+        }
+        trash_test_root(&root);
+    }
 }
