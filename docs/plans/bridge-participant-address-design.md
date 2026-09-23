@@ -43,7 +43,7 @@ This amends one SPEC-v2 non-goal ("Session-level addressing"). An explicit host-
 1. **Exact local match first.** If a local participant record named exactly `<id>@<host>` exists, the address is local, using the same resolution as today. This preserves any historical id containing `@`. Post-generated ids never contain `@`.
 2. **Otherwise, split at the last `@`.** `<host>` must match `^[a-z0-9-]{1,32}$`.
 3. **Own host.** If `<host>` equals this host's bridge `host`, resolve `participant:<id>` with the unchanged local resolver.
-4. **Remote host.** `<host>` must be in the effective enrolled set: the bridge's validated persisted registry (`$POST_MAIL_ROOT/bridge/registry/hosts.json`: exact keys, `v == 1`, host grammar, unique entries), minus this host, intersected with `bridge/config.json` `peers` when that list is non-empty. **There is no fallback to config peers alone**, since that could resurrect a revoked or unenrolled host.
+4. **Remote host.** `<host>` must be in the effective enrolled set: the bridge's validated persisted registry (`$POST_MAIL_ROOT/bridge/registry/hosts.json`: exact keys, `v == 1`, host grammar, unique entries), minus this host, intersected with the host keys of `bridge/config.json` `peers` when that map is non-empty. That is the same rule as bridge v2's `effective_peers` (`bridgelib/rooms.py`), except that the bridge falls back to config peers when no registry has ever been persisted, and post does not. **There is no fallback to config peers alone**, since that could resurrect a revoked or unenrolled host.
 5. **Errors, before anything is written:**
    - `topology_unavailable` (retryable) when the registry copy is missing or invalid;
    - `unknown_host`, naming the enrolled hosts;
