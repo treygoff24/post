@@ -742,12 +742,10 @@ impl CatchupRemainderIndex {
                                 super::read::ReadProjection::participant(
                                     context,
                                     address,
-                                    crate::output::authored_locally_by(
+                                    crate::output::mail_authored_locally_by(
                                         context,
                                         &participant.id,
-                                        &item.envelope.from,
-                                        item.envelope.from_participant.as_deref(),
-                                        item.envelope.sender_provenance.as_deref(),
+                                        &item.envelope,
                                     ),
                                     item.envelope.pending,
                                     true,

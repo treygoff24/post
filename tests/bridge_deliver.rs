@@ -1065,3 +1065,230 @@ fn ending_the_participant_concurrently_with_admission_serializes() {
     assert!(rig.sandbox.read_participant(&rig.recipient)["ended_at"].is_string());
     assert_eq!(fs::read(rig.inbox_path()).unwrap(), bytes);
 }
+
+// ---------------------------------------------------------------------------
+// Origin (design "The receiving side"): an imported letter whose
+// `from_participant` equals the reader's own id. After delivery the `from`
+// placeholder is removed or re-homed, so the admission record is the only
+// remote evidence left; every call site must still read the letter as remote
+// with the admitted host, and never as the reader's own.
+
+/// How the topology changes after a colliding letter is admitted.
+#[derive(Clone, Copy, Debug)]
+enum Topology {
+    /// The placeholder is unregistered.
+    Removed,
+    /// The placeholder is re-homed under another host.
+    RehomedRemote,
+    /// A local room now carries the placeholder's name.
+    RehomedLocal,
+}
+
+impl Rig {
+    fn reader(&self, args: &[&str]) -> Output {
+        let output = self.sandbox.run_as_participant(
+            args,
+            &self.recipient,
+            &self.sandbox.home.join("claude-space"),
+        );
+        assert!(
+            output.status.success(),
+            "{args:?}\nstdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        output
+    }
+
+    fn reader_json(&self, args: &[&str]) -> Value {
+        serde_json::from_str(&stdout(&self.reader(args))).expect("reader JSON")
+    }
+
+    /// Admit a letter whose `from_participant` is the recipient's own id,
+    /// then change the topology so R7's placeholder evidence is gone.
+    fn deliver_colliding(&self, topology: Topology) {
+        let mut envelope = self.envelope();
+        envelope.insert("from_participant".into(), json!(self.recipient));
+        let (file, bytes) = self.letter_file(&envelope, "colliding");
+        assert_outcome(&self.deliver(&file, &bytes), "delivered", None);
+        let mut rooms = self.rooms();
+        match topology {
+            Topology::Removed => {
+                rooms.remove(PLACEHOLDER);
+            }
+            Topology::RehomedRemote => {
+                let path = self.root().join("remote").join("other").join(PLACEHOLDER);
+                fs::create_dir_all(&path).expect("re-homed placeholder");
+                rooms.insert(PLACEHOLDER.into(), json!(path));
+            }
+            Topology::RehomedLocal => {
+                let path = self.sandbox.home.join(PLACEHOLDER);
+                fs::create_dir_all(&path).expect("local room");
+                rooms.insert(PLACEHOLDER.into(), json!(path));
+            }
+        }
+        self.set_rooms(Value::Object(rooms));
+    }
+
+    fn admitted_reply(&self) -> String {
+        format!("participant:{}@{PEER}", self.recipient)
+    }
+}
+
+fn unread_item(inbox: &Value) -> Value {
+    let unread = inbox["unread"].as_array().expect("unread array");
+    let item = unread
+        .iter()
+        .find(|item| item["id"] == json!(MAIL_ID))
+        .unwrap_or_else(|| panic!("the colliding import is not unread: {inbox}"));
+    item.clone()
+}
+
+fn assert_admitted_remote(value: &Value, reply: &str) {
+    assert_eq!(value["origin"], json!("remote"), "{value}");
+    assert_eq!(value["reply_to_participant"], json!(reply), "{value}");
+}
+
+#[test]
+fn origin_inbox_lists_a_colliding_import_as_unread_with_the_admitted_reply() {
+    let rig = Rig::new();
+    rig.deliver_colliding(Topology::Removed);
+    let inbox = rig.reader_json(&["inbox", "--json"]);
+    assert_admitted_remote(&unread_item(&inbox), &rig.admitted_reply());
+    let text = stdout(&rig.reader(&["inbox", "--text"]));
+    assert!(
+        text.contains(&format!("reply={}", rig.admitted_reply())),
+        "{text}"
+    );
+}
+
+#[test]
+fn origin_read_of_a_colliding_import_is_not_own_and_consumes_it() {
+    let rig = Rig::new();
+    rig.deliver_colliding(Topology::Removed);
+    let text = stdout(&rig.reader(&["read", MAIL_ID, "--peek"]));
+    assert!(!text.contains("own: true"), "{text}");
+    assert!(
+        text.contains(&format!("reply={}", rig.admitted_reply())),
+        "{text}"
+    );
+    let read = rig.reader_json(&["read", MAIL_ID, "--json"]);
+    assert_ne!(read.get("own"), Some(&json!(true)), "{read}");
+    assert_admitted_remote(&read["envelope"], &rig.admitted_reply());
+    let inbox = rig.reader_json(&["inbox", "--json"]);
+    assert_eq!(inbox["unread_count"], json!(0), "read consumed it: {inbox}");
+}
+
+#[test]
+fn origin_routing_names_the_recipient_of_a_colliding_import_on_reroute() {
+    let rig = Rig::new();
+    rig.deliver_colliding(Topology::Removed);
+    let receipt_path = rig
+        .root()
+        .join("participants")
+        .join(&rig.recipient)
+        .join("routing")
+        .join(format!("{MAIL_ID}.json"));
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("receipt")).expect("receipt json");
+    assert_eq!(receipt["recipients"], json!([rig.recipient]));
+    // Route it again from pending, with only the record left as evidence.
+    fs::remove_file(&receipt_path).expect("drop receipt");
+    let pending = rig.reader_json(&["inbox", "--json"]);
+    assert_eq!(pending["pending"], json!(1), "{pending}");
+    // A consuming read routes pending mail first.
+    let read = rig.reader_json(&["read", MAIL_ID, "--json"]);
+    assert_ne!(read.get("own"), Some(&json!(true)), "{read}");
+    assert_ne!(read.get("pending"), Some(&json!(true)), "{read}");
+    assert_admitted_remote(&read["envelope"], &rig.admitted_reply());
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("re-routed receipt"))
+            .expect("receipt json");
+    assert_eq!(receipt["recipients"], json!([rig.recipient]));
+}
+
+#[test]
+fn origin_watch_snapshot_reports_a_colliding_import_as_remote() {
+    let rig = Rig::new();
+    rig.deliver_colliding(Topology::Removed);
+    let events = stdout(&rig.reader(&["watch", "--snapshot"]));
+    let event = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event json"))
+        .find(|event| event["id"] == json!(MAIL_ID))
+        .unwrap_or_else(|| panic!("watch hid the colliding import: {events}"));
+    assert_admitted_remote(&event, &rig.admitted_reply());
+}
+
+#[test]
+fn origin_search_and_catchup_keep_a_colliding_import_remote() {
+    let rig = Rig::new();
+    rig.deliver_colliding(Topology::Removed);
+    let search = rig.reader_json(&["search", "hello", "--mail", "--json"]);
+    let hit = search["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|hit| hit["id"] == json!(MAIL_ID))
+        .unwrap_or_else(|| panic!("search hid the colliding import: {search}"))
+        .clone();
+    assert_admitted_remote(&hit, &rig.admitted_reply());
+    let catchup = rig.reader_json(&["catchup", "--json"]);
+    let envelope = catchup["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .flat_map(|target| target["messages"].as_array().cloned().unwrap_or_default())
+        .map(|message| message["envelope"].clone())
+        .find(|envelope| envelope["id"] == json!(MAIL_ID))
+        .unwrap_or_else(|| panic!("catchup hid the colliding import: {catchup}"));
+    assert_admitted_remote(&envelope, &rig.admitted_reply());
+}
+
+#[test]
+fn origin_keeps_the_admitted_host_after_the_placeholder_is_removed_or_rehomed() {
+    for topology in [
+        Topology::Removed,
+        Topology::RehomedRemote,
+        Topology::RehomedLocal,
+    ] {
+        let rig = Rig::new();
+        rig.deliver_colliding(topology);
+        let inbox = rig.reader_json(&["inbox", "--json"]);
+        let item = unread_item(&inbox);
+        assert_eq!(item["origin"], json!("remote"), "{topology:?}: {item}");
+        assert_eq!(
+            item["reply_to_participant"],
+            json!(rig.admitted_reply()),
+            "{topology:?}: {item}"
+        );
+    }
+}
+
+#[test]
+fn origin_with_an_unreadable_or_mismatched_record_is_unknown_and_never_own() {
+    for corrupt in ["garbage", "digest"] {
+        let rig = Rig::new();
+        rig.deliver_colliding(Topology::RehomedLocal);
+        let record = rig.record_path();
+        match corrupt {
+            "garbage" => fs::write(&record, b"{not json").expect("corrupt record"),
+            _ => {
+                let mut value: Value =
+                    serde_json::from_slice(&fs::read(&record).expect("record")).expect("json");
+                value["sha256"] = json!("0".repeat(64));
+                fs::write(&record, value.to_string()).expect("mismatched record");
+            }
+        }
+        let inbox = rig.reader_json(&["inbox", "--json"]);
+        let item = unread_item(&inbox);
+        assert_eq!(item["origin"], json!("unknown"), "{corrupt}: {item}");
+        assert!(
+            item.get("reply_to_participant").is_none_or(Value::is_null),
+            "{corrupt}: no participant reply without a valid record: {item}"
+        );
+        let text = stdout(&rig.reader(&["read", MAIL_ID, "--peek"]));
+        assert!(!text.contains("own: true"), "{corrupt}: {text}");
+        assert!(!text.contains("reply=participant:"), "{corrupt}: {text}");
+    }
+}

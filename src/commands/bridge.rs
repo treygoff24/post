@@ -12,113 +12,23 @@ use crate::bridge_topology;
 use crate::cli::{BridgeArgs, BridgeCommand, BridgeDeliverArgs};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::imports::{
+    hex_sha256, inbox_file, load_record, record_path, valid_mail_id, valid_sender_participant,
+    valid_sha256, AdmissionRecord, MAX_IMPORT_BYTES, RECORD_VERSION,
+};
 use crate::mailbox::{exclusive_atomic_write, Context};
 use crate::participant::{self, Address, AddressKind};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) const DELIVER_SCHEMA: &str = "post.bridge-deliver.v1";
-pub(crate) const IMPORTS_DIR: &str = "imports";
-const RECORD_VERSION: u64 = 1;
-const RECORD_MAX_BYTES: u64 = 4096;
-/// Post's cap on one relayed letter. The bridge's default is 1 MiB and it is
-/// configurable, so post accepts a margin above it rather than the bridge's
-/// exact number.
-pub(crate) const MAX_DELIVER_BYTES: u64 = 8 * 1024 * 1024;
 const DETAIL_MAX_CHARS: usize = 512;
 
 pub(super) fn run(context: &Context, args: BridgeArgs, pretty: bool) -> AppResult<CommandResult> {
     match args.command {
         BridgeCommand::Deliver(args) => deliver(context, args, pretty),
     }
-}
-
-/// The admission record: admission point, idempotence ledger, and frozen
-/// origin in one immutable file. Exact keys.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AdmissionRecord {
-    pub v: u64,
-    pub participant: String,
-    pub mail_id: String,
-    pub source_host: String,
-    pub sha256: String,
-    pub from_participant: String,
-    pub admitted_at: String,
-}
-
-pub(crate) fn record_path(context: &Context, participant: &str, mail_id: &str) -> PathBuf {
-    context
-        .root
-        .join(participant::PARTICIPANTS_DIR)
-        .join(participant)
-        .join(IMPORTS_DIR)
-        .join(format!("{mail_id}.json"))
-}
-
-/// Read an admission record. `Ok(None)` only when conclusively absent. Any
-/// unreadable, oversize, or invalid record is `Err`: it never becomes a
-/// terminal answer and never licenses a write.
-pub(crate) fn load_record(
-    context: &Context,
-    participant: &str,
-    mail_id: &str,
-) -> Result<Option<AdmissionRecord>, String> {
-    let path = record_path(context, participant, mail_id);
-    let Some(bytes) = bridge_topology::read_regular(&path, RECORD_MAX_BYTES)? else {
-        return Ok(None);
-    };
-    let record: AdmissionRecord = serde_json::from_slice(&bytes).map_err(|error| {
-        format!(
-            "{} is not a valid admission record: {error}",
-            path.display()
-        )
-    })?;
-    let problem = if record.v != RECORD_VERSION {
-        Some("v must be 1")
-    } else if record.participant != participant {
-        Some("participant does not match its directory")
-    } else if record.mail_id != mail_id {
-        Some("mail_id does not match its file name")
-    } else if !bridge_topology::valid_host(&record.source_host) {
-        Some("source_host is not a valid host")
-    } else if !valid_sha256(&record.sha256) {
-        Some("sha256 must be 64 lowercase hex characters")
-    } else if !valid_sender_participant(&record.from_participant) {
-        Some("from_participant is not a valid remote participant id")
-    } else if participant::parse_rfc3339(&record.admitted_at).is_none() {
-        Some("admitted_at must be an RFC3339 timestamp")
-    } else {
-        None
-    };
-    match problem {
-        Some(problem) => Err(format!("{}: {problem}", path.display())),
-        None => Ok(Some(record)),
-    }
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn valid_mail_id(value: &str) -> bool {
-    let id = value.as_bytes();
-    id.len() == 22
-        && id[..8].iter().all(u8::is_ascii_digit)
-        && id[8] == b'-'
-        && id[9..15].iter().all(u8::is_ascii_digit)
-        && id[15] == b'-'
-        && id[16..].iter().all(u8::is_ascii_hexdigit)
-}
-
-/// A sender id minted on another host: a valid participant id with no `@`.
-fn valid_sender_participant(value: &str) -> bool {
-    participant::validate_participant_id(value).is_ok() && !value.contains('@')
 }
 
 #[derive(Debug, Serialize)]
@@ -170,7 +80,7 @@ fn deliver(context: &Context, args: BridgeDeliverArgs, pretty: bool) -> AppResul
                 .reason("invalid digest"),
         );
     }
-    let bytes = match bridge_topology::read_regular(&args.file, MAX_DELIVER_BYTES) {
+    let bytes = match bridge_topology::read_regular(&args.file, MAX_IMPORT_BYTES) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
             return Err(AppError::invalid_argument(format!(
@@ -181,7 +91,7 @@ fn deliver(context: &Context, args: BridgeDeliverArgs, pretty: bool) -> AppResul
         }
         Err(reason) => {
             return Err(AppError::invalid_argument(format!(
-                "--file must be a regular file of at most {MAX_DELIVER_BYTES} bytes: {reason}"
+                "--file must be a regular file of at most {MAX_IMPORT_BYTES} bytes: {reason}"
             ))
             .reason("invalid file"))
         }
@@ -510,7 +420,7 @@ fn complete_inbox(inbox: &Path, bytes: &[u8]) -> Option<Decision> {
             ))
         }
     }
-    match bridge_topology::read_regular(inbox, MAX_DELIVER_BYTES) {
+    match bridge_topology::read_regular(inbox, MAX_IMPORT_BYTES) {
         Ok(Some(existing)) if existing == bytes => None,
         Ok(Some(_)) => Some(Decision::Rejected(
             "id_collision",
@@ -525,15 +435,6 @@ fn complete_inbox(inbox: &Path, bytes: &[u8]) -> Option<Decision> {
         )),
         Err(reason) => Some(Decision::Retry("io_error", reason)),
     }
-}
-
-fn inbox_file(context: &Context, participant: &str, mail_id: &str) -> PathBuf {
-    context
-        .root
-        .join(participant::PARTICIPANTS_DIR)
-        .join(participant)
-        .join("inbox")
-        .join(format!("{mail_id}.mail"))
 }
 
 fn finish(
@@ -574,13 +475,6 @@ fn finish(
 
 fn truncate(text: &str) -> String {
     text.chars().take(DETAIL_MAX_CHARS).collect()
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 /// Test-only crash and pause points around D1 and D2, compiled out of

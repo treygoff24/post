@@ -170,7 +170,13 @@ pub(crate) fn render_reply_metadata(
     participant: Option<&str>,
     shared: &str,
 ) {
-    let participant = if origin == "local" { participant } else { None };
+    // A remote origin may carry only a host-qualified participant address,
+    // which comes from an admission record (`mail_reply_metadata`).
+    let participant = match origin {
+        "local" => participant,
+        "remote" => participant.filter(|address| address.contains('@')),
+        _ => None,
+    };
     rendered.push_str(&format!(
         "reply={}\n",
         sanitize_text_header(reply_address(participant, shared))
@@ -203,6 +209,63 @@ pub(crate) fn reply_metadata(
         participant: local.then(|| format!("participant:{}", from_participant.unwrap())),
         shared: from.to_owned(),
     }
+}
+
+/// Reply metadata for one mail envelope. An imported participant letter's
+/// origin comes from its admission record (`imports::import_origin`): the
+/// private reply is `participant:<from_participant>@<source_host>`, and an
+/// unavailable origin omits it. Every other letter uses `reply_metadata`.
+pub(crate) fn mail_reply_metadata(
+    context: &crate::mailbox::Context,
+    envelope: &Envelope,
+) -> ReplyMetadata {
+    match crate::imports::import_origin(context, envelope) {
+        Some(crate::imports::ImportOrigin::Remote { host, participant }) => ReplyMetadata {
+            origin: "remote".to_owned(),
+            participant: Some(format!("participant:{participant}@{host}")),
+            shared: envelope.from.clone(),
+        },
+        Some(crate::imports::ImportOrigin::Unavailable) => ReplyMetadata {
+            origin: "unknown".to_owned(),
+            participant: None,
+            shared: envelope.from.clone(),
+        },
+        None => reply_metadata(
+            context,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        ),
+    }
+}
+
+/// `remote_origin` for a mail envelope: import evidence (even unavailable
+/// evidence) is remote, never local.
+pub(crate) fn mail_remote_origin(context: &crate::mailbox::Context, envelope: &Envelope) -> bool {
+    crate::imports::import_origin(context, envelope).is_some()
+        || remote_origin(
+            context,
+            &envelope.from,
+            envelope.sender_provenance.as_deref(),
+        )
+}
+
+/// `authored_locally_by` for a mail envelope. An imported letter is never a
+/// local participant's own, even when a remote host minted the same id.
+pub(crate) fn mail_authored_locally_by(
+    context: &crate::mailbox::Context,
+    participant: &str,
+    envelope: &Envelope,
+) -> bool {
+    envelope.from_participant.as_deref() == Some(participant)
+        && crate::imports::import_origin(context, envelope).is_none()
+        && authored_locally_by(
+            context,
+            participant,
+            &envelope.from,
+            envelope.from_participant.as_deref(),
+            envelope.sender_provenance.as_deref(),
+        )
 }
 
 /// Whether a message carries remote-origin evidence: a bridge provenance
@@ -635,12 +698,7 @@ impl MessageEnvelope {
         pending: bool,
         address: Option<&crate::participant::Address>,
     ) -> Self {
-        let reply = reply_metadata(
-            context,
-            &envelope.from,
-            envelope.from_participant.as_deref(),
-            envelope.sender_provenance.as_deref(),
-        );
+        let reply = mail_reply_metadata(context, &envelope);
         Self {
             envelope,
             origin: reply.origin,
@@ -1101,12 +1159,7 @@ impl InboxItem {
         envelope: Envelope,
         pending: bool,
     ) -> Self {
-        let reply = reply_metadata(
-            context,
-            &envelope.from,
-            envelope.from_participant.as_deref(),
-            envelope.sender_provenance.as_deref(),
-        );
+        let reply = mail_reply_metadata(context, &envelope);
         let mut item = Self::from(envelope);
         item.origin = reply.origin;
         item.reply_to_participant = reply.participant;
