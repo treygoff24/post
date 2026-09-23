@@ -162,7 +162,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "delivery",
             "post delivery <mail-id> [--json]",
             "text; JSON (post.delivery.v1) with --json",
-            "read-only; requires a bound participant and shows only letters that participant sent (anything else, and an id absent from archive/, is not_found, exit 66). Workspace, lineage, and local participant mail is state=unsupported. A participant:<id>@<host> letter is validated against its archive bytes and the bridge's evidence on this host: bridge/pmail-acked/<id>.json (exact keys v, status, origin, host, participant, id, sha256, reason, at; origin = this host, host = to_host, participant and id match, sha256 = archive digest, status delivered with reason null or rejected with a deliver reason) gives received|rejected; else bridge/pmail-published/<id>.json ({v:1, id, host, sha256, commit, at}, written after the push) gives published with commit and age_s; else queued, with blocked_reason/last_error from bridge/pmail-status/<id>.json ({v:1, id, blocked_reason?, last_error?, at?}). A receipt outranks the marker. Any evidence file that exists but does not validate gives state=unknown with evidence_file and evidence_error, never a guess. bridge/pmail-conflicts/<id>.json present sets conflict=true (the first receipt stands)",
+            "read-only; requires a bound participant and shows only letters that participant sent (anything else, and an id absent from archive/, is not_found, exit 66). Workspace, lineage, and local participant mail is state=unsupported. A participant:<id>@<host> letter is validated against its archive bytes and the bridge's evidence on this host: bridge/pmail-acked/<id>.json (exact keys v, status, origin, host, participant, id, sha256, reason, at; origin = this host, host = to_host, participant and id match, sha256 = archive digest, status delivered with reason null or rejected with a terminal reason: malformed, to_mismatch, forged_from, unknown_participant, ended_participant, blocked_route, id_collision, or, decided by the destination bridge before deliver runs, name_collision or unpublished_sender) gives received|rejected; else bridge/pmail-published/<id>.json ({v:1, id, host, sha256, commit, at}, written after the push) gives published with commit and age_s; else queued, with blocked_reason/last_error from bridge/pmail-status/<id>.json ({v:1, id, blocked_reason?, last_error?, at?}). A receipt outranks the marker. Any evidence file that exists but does not validate gives state=unknown with evidence_file and evidence_error, never a guess. bridge/pmail-conflicts/<id>.json present sets conflict=true (the first receipt stands)",
         ),
     ];
     let output_shapes = OutputShapes {
@@ -391,7 +391,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "host? (the letter's to_host)",
             "sha256? (archive digest)",
             "conflict",
-            "reason? (rejected: the deliver reason; unsupported: why)",
+            "reason? (rejected: the terminal reason; unsupported: why)",
             "blocked_reason? (queued)",
             "last_error? (queued)",
             "commit? (published)",

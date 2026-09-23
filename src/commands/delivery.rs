@@ -23,7 +23,7 @@ use crate::bridge_topology::{bridge_dir, load_config, read_regular};
 use crate::cli::DeliveryArgs;
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::imports::{hex_sha256, valid_mail_id, valid_sha256, REJECTED_REASONS};
+use crate::imports::{hex_sha256, valid_mail_id, valid_sha256, ACKED_REJECTED_REASONS};
 use crate::mailbox::Context;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -364,7 +364,7 @@ fn validate_receipt(
     let status = match (string(receipt, "status")?, reason.as_deref()) {
         ("delivered", None) => "delivered",
         ("delivered", Some(_)) => return Err("a delivered receipt carries no reason".to_owned()),
-        ("rejected", Some(reason)) if REJECTED_REASONS.contains(&reason) => "rejected",
+        ("rejected", Some(reason)) if ACKED_REJECTED_REASONS.contains(&reason) => "rejected",
         ("rejected", Some(reason)) => {
             return Err(format!(
                 "rejection reason {reason} is not in the vocabulary"

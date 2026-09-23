@@ -20,8 +20,7 @@ const RECORD_MAX_BYTES: u64 = 4096;
 /// exact number.
 pub(crate) const MAX_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Every terminal reason `post bridge deliver` can decide. A sender-side
-/// `acked` receipt with `status: rejected` must carry one of these.
+/// Every terminal reason `post bridge deliver` can decide.
 pub(crate) const REJECTED_REASONS: [&str; 7] = [
     "malformed",
     "to_mismatch",
@@ -31,6 +30,22 @@ pub(crate) const REJECTED_REASONS: [&str; 7] = [
     "blocked_route",
     "id_collision",
 ];
+
+/// The terminal reasons a sender-side `pmail-acked` receipt with
+/// `status: rejected` may carry: `post bridge deliver`'s seven, plus the two
+/// the destination bridge decides from its own sender binding before deliver
+/// ever runs. Only `post delivery` reads this; deliver never emits the two.
+pub(crate) const ACKED_REJECTED_REASONS: [&str; 9] = {
+    let mut reasons = [""; 9];
+    let mut i = 0;
+    while i < REJECTED_REASONS.len() {
+        reasons[i] = REJECTED_REASONS[i];
+        i += 1;
+    }
+    reasons[7] = "name_collision";
+    reasons[8] = "unpublished_sender";
+    reasons
+};
 
 /// The admission record: admission point, idempotence ledger, and frozen
 /// origin in one immutable file. Exact keys.

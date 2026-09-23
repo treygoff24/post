@@ -748,6 +748,25 @@ fn delivery_reports_each_state_from_its_evidence() {
 }
 
 #[test]
+fn delivery_accepts_the_destination_bridges_own_rejection_reasons() {
+    // The destination bridge refuses name_collision and unpublished_sender
+    // from its own sender binding before `post bridge deliver` runs, so they
+    // reach the sender only through the acked receipt.
+    let rig = Rig::new();
+    let (id, sha) = rig.queue();
+    for reason in ["name_collision", "unpublished_sender"] {
+        rig.write_evidence(
+            "pmail-acked",
+            &id,
+            &receipt(&id, &sha, "rejected", Some(reason)).to_string(),
+        );
+        let rejected = rig.delivery(&id);
+        assert_eq!(rejected["state"], json!("rejected"), "{reason}: {rejected}");
+        assert_eq!(rejected["reason"], json!(reason), "{rejected}");
+    }
+}
+
+#[test]
 fn delivery_reports_corrupt_evidence_as_unknown_never_a_guess() {
     let rig = Rig::new();
     let (id, sha) = rig.queue();
