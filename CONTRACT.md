@@ -430,7 +430,11 @@ their existing success semantics.
   `details.host` and its `exact_fix` adds the room under the estate's
   `<name>-<host-suffix>` convention (learned from this host's own suffixed
   registrations, else the bridge host id); a local duplicate keeps the
-  `set-path` hint.
+  `set-path` hint. A local room `<base>-<s>` teaches suffix `<s>` only when
+  `<base>` is a remote placeholder and the room's registered directory is
+  itself named `<base>` (ASCII case-insensitive), so a checkout like
+  `hq-devbox` at `.../hq` votes and a project like `cos-crons` at
+  `.../cos-crons` does not.
 - `post rooms set-path <name> <path> [--dry-run]` — re-points a local room's
   workspace (discovery) path under the same locks and validation as `add`;
   it never moves mail or history, never rewrites participant records, and

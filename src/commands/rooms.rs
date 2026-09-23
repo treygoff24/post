@@ -1117,20 +1117,31 @@ fn suffixed_room_candidate(
 }
 
 /// The estate's `<base>-<host-suffix>` naming rule, learned from this host's
-/// own registrations: for every local (non-placeholder) room named
-/// `<base>-<s>` whose `<base>` is a remote placeholder, count `s`. The most
+/// own registrations: a local (non-placeholder) room named `<base>-<s>`
+/// votes for `s` only when `<base>` is a remote placeholder AND the room's
+/// own registered directory is named `<base>` (ASCII case-insensitive) — a
+/// checkout of the placeholder's repo under this host's suffix, like the
+/// devbox's `hq-devbox` at `.../hq`. A room whose directory carries the
+/// full hyphenated name (the Mac's `cos-crons` at `.../cos-crons`) is its
+/// own project, not a suffixed checkout, and does not vote. The most
 /// frequent suffix wins; ties go to the lexicographically smallest. `None`
-/// when no local room carries the pattern — the caller then falls back to the
-/// bridge host id.
+/// when no local room votes — the caller then falls back to the bridge host
+/// id.
 fn learned_host_suffix(rooms: &RoomMap, placeholders: &BTreeMap<String, String>) -> Option<String> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for name in rooms.keys() {
+    for (name, stored_path) in rooms {
         if placeholders.contains_key(name) {
             continue;
         }
+        let Some(dir_name) = Path::new(stored_path).file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         for (index, _) in name.match_indices('-') {
             let (base, suffix) = (&name[..index], &name[index + 1..]);
-            if !suffix.is_empty() && placeholders.contains_key(base) {
+            if !suffix.is_empty()
+                && placeholders.contains_key(base)
+                && dir_name.eq_ignore_ascii_case(base)
+            {
                 *counts.entry(suffix.to_owned()).or_default() += 1;
             }
         }
@@ -1147,10 +1158,20 @@ fn learned_host_suffix(rooms: &RoomMap, placeholders: &BTreeMap<String, String>)
 mod tests {
     use super::*;
 
+    /// Rooms at `/workspaces/<name>`: a directory named for the whole room
+    /// name, so no suffix vote comes from these.
     fn room_map(names: &[&str]) -> RoomMap {
         names
             .iter()
             .map(|name| ((*name).to_owned(), format!("/workspaces/{name}")))
+            .collect()
+    }
+
+    /// Rooms at explicit directories: `(name, dir)`.
+    fn room_map_at(entries: &[(&str, &str)]) -> RoomMap {
+        entries
+            .iter()
+            .map(|(name, dir)| ((*name).to_owned(), (*dir).to_owned()))
             .collect()
     }
 
@@ -1165,7 +1186,13 @@ mod tests {
     fn learned_suffix_is_the_majority_marker_on_remote_bases() {
         // The devbox shape: each local checkout carries the remote base plus
         // this host's suffix; one oddball must not outvote the convention.
-        let rooms = room_map(&["hq-devbox", "cos-devbox", "fable-devbox", "hq-mac", "plain"]);
+        let rooms = room_map_at(&[
+            ("hq-devbox", "/home/trey/Code/hq"),
+            ("cos-devbox", "/home/trey/Code/cos"),
+            ("fable-devbox", "~/Code/fable/"),
+            ("hq-mac", "/home/trey/Code/hq"),
+            ("plain", "/home/trey/Code/plain"),
+        ]);
         let placeholders = placeholder_map(&["hq", "cos", "fable"]);
         assert_eq!(
             learned_host_suffix(&rooms, &placeholders).as_deref(),
@@ -1175,7 +1202,7 @@ mod tests {
 
     #[test]
     fn learned_suffix_breaks_ties_on_the_lexicographically_smallest() {
-        let rooms = room_map(&["hq-zed", "cos-aaa"]);
+        let rooms = room_map_at(&[("hq-zed", "/c/hq"), ("cos-aaa", "/c/cos")]);
         let placeholders = placeholder_map(&["hq", "cos"]);
         assert_eq!(
             learned_host_suffix(&rooms, &placeholders).as_deref(),
@@ -1187,20 +1214,53 @@ mod tests {
     fn learned_suffix_ignores_placeholder_names_and_placeholderless_bases() {
         // `hq-mac` is itself a placeholder: it never votes. `other-mac` has a
         // base that is not a placeholder, so it does not vote either.
-        let rooms = room_map(&["hq-mac", "other-mac"]);
+        let rooms = room_map_at(&[("hq-mac", "/c/hq"), ("other-mac", "/c/other")]);
         let placeholders = placeholder_map(&["hq", "hq-mac"]);
         assert_eq!(learned_host_suffix(&rooms, &placeholders), None);
     }
 
     #[test]
+    fn learned_suffix_needs_the_directory_to_be_named_for_the_base() {
+        // The live Mac shape: `cos-crons` is its own project at
+        // `.../cos-crons`, and `cos` is a remote placeholder. It must not
+        // teach "crons"; with no vote the bridge host id supplies the suffix.
+        let rooms = room_map_at(&[
+            ("cos", "/root/remote/devbox/cos"),
+            ("cos-crons", "/Users/trey/Code/cos-crons"),
+        ]);
+        let placeholders = placeholder_map(&["cos"]);
+        assert_eq!(learned_host_suffix(&rooms, &placeholders), None);
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, Some("mac"), "atlasos").as_deref(),
+            Some("atlasos-mac")
+        );
+        // The devbox shape: `hq-devbox` lives at `.../hq` (compared
+        // case-insensitively), so it votes "devbox".
+        let rooms = room_map_at(&[
+            ("hq", "/root/remote/mac/hq"),
+            ("hq-devbox", "/home/trey/Code/HQ"),
+        ]);
+        let placeholders = placeholder_map(&["hq"]);
+        assert_eq!(
+            learned_host_suffix(&rooms, &placeholders).as_deref(),
+            Some("devbox")
+        );
+    }
+
+    #[test]
     fn learned_suffix_reads_every_hyphen_split() {
-        let rooms = room_map(&["a-b-c"]);
+        // The directory decides which split is a checkout: at `.../a` the
+        // base is `a` (suffix `b-c`); at `.../a-b` the base is `a-b`.
         let placeholders = placeholder_map(&["a", "a-b"]);
-        // Both readings hold: base `a` gives `b-c`, base `a-b` gives `c`.
-        // One vote each, and the tie goes to the smaller suffix.
+        let rooms = room_map_at(&[("a-b-c", "/c/a")]);
         assert_eq!(
             learned_host_suffix(&rooms, &placeholders).as_deref(),
             Some("b-c")
+        );
+        let rooms = room_map_at(&[("a-b-c", "/c/a-b")]);
+        assert_eq!(
+            learned_host_suffix(&rooms, &placeholders).as_deref(),
+            Some("c")
         );
     }
 
@@ -1222,7 +1282,7 @@ mod tests {
     #[test]
     fn suffixed_candidate_is_none_when_taken_or_invalid() {
         // Learned "mac" collides with the registered `hq-mac`.
-        let rooms = room_map(&["hq", "hq-mac"]);
+        let rooms = room_map_at(&[("hq", "/r/hq"), ("hq-mac", "/c/hq")]);
         let placeholders = placeholder_map(&["hq"]);
         assert_eq!(
             suffixed_room_candidate(&rooms, &placeholders, None, "hq"),

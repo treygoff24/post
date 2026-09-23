@@ -1272,9 +1272,11 @@ fn rooms_add_remote_placeholder_refusal_names_host_and_offers_runnable_fix() {
     for name in ["hq", "cos", "fable"] {
         register_remote_placeholder(&sandbox, "mac", name);
     }
-    for name in ["cos-devbox", "fable-devbox"] {
-        let dir = sandbox.path.join(name);
-        fs::create_dir(&dir).expect("create workspace dir");
+    // Each checkout's directory is named for its base (`.../cos` for
+    // `cos-devbox`): that is what makes it a suffix vote.
+    for (name, base) in [("cos-devbox", "cos"), ("fable-devbox", "fable")] {
+        let dir = sandbox.path.join("checkouts").join(base);
+        fs::create_dir_all(&dir).expect("create workspace dir");
         register_room(&sandbox, name, &dir);
     }
     let rooms_before = fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms snapshot");
@@ -1361,8 +1363,8 @@ fn rooms_add_remote_placeholder_refusal_omits_fix_when_suggestion_is_taken() {
     register_remote_placeholder(&sandbox, "mac", "hq");
     // This host already claimed `hq-mac`, which teaches the suffix "mac" —
     // and the candidate it would produce is itself registered.
-    let taken = sandbox.path.join("hq-mac");
-    fs::create_dir(&taken).expect("create taken workspace");
+    let taken = sandbox.path.join("checkouts/hq");
+    fs::create_dir_all(&taken).expect("create taken workspace");
     register_room(&sandbox, "hq-mac", &taken);
 
     let checkout = sandbox.path.join("hq-checkout");
