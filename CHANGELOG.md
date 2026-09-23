@@ -24,6 +24,26 @@
   `profile set` after the profile change.
 
 ### Added
+- `post contract samples [--dir <path>]` prints, or writes, the output
+  samples built into the binary: watch snapshots (plain, digest, and with an
+  unusable cursor), inbox, chat, who, profile show and list, channels,
+  participant show and bind, rooms, version, and doctor. The samples come from
+  the real commands run against a temporary store (`tests/contract_samples.rs`;
+  `POST_UPDATE_CONTRACT=1` regenerates them, otherwise drift fails the suite).
+  Consumer tests in the doorbell, the skill hooks, and Porch read them from the
+  binary they will run, via `POST_BIN`.
+- `post contract skill-manifest [--verify <path>]` prints the sha256 of every
+  file in the skill bundle (`SKILL.md`, `references/`, `hooks/`, `agents/`) as
+  built, or checks a served skill path against it. A symlinked path is checked
+  through what it resolves to; a real directory is treated as a rendered copy,
+  where a file with skill-render fence markers may differ without counting as
+  drift. Drift exits 1.
+- `scripts/install-smoke.sh <post-bin>` runs the doorbell parsers, the doorbell
+  contract suite, and Porch's launch check against one binary in a throwaway
+  store. `scripts/install-post.sh <commit>` builds that commit with `--locked`,
+  smokes it before installing, backs up the old binary by build sha, installs
+  atomically, verifies the served skill, and writes
+  `~/.local/share/post/install-receipt.json`. `--dry-run` changes nothing.
 - `POST_WATCH_PROFILE=1` makes `post watch` print one diagnostic stderr line
   per target scan: mail-snapshot time, channel-enumeration time, channel scan
   time, and file counts. Nothing else changes. An ignored bench test,
@@ -92,6 +112,10 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- The claude, codex, cursor, and grok mail hooks refuse a watch event whose
+  `room` differs from its workspace address name, as watch-notice and the Codex
+  notify monitor already did; before, such a line rendered as mail waiting for
+  the other room. Found by the new hook contract tests.
 - A `post chat` read (plain, `--peek`, `--history`/`--since`, `--discard`,
   `--message`) no longer swallows a body piped to it. Stdin that carries input
   (a nonempty file, or a pipe, heredoc, or socket with a queued byte) is refused
