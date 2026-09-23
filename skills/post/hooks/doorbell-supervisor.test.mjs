@@ -739,6 +739,27 @@ describe("scheduling (E6)", () => {
     assert.equal(w.prompts.length, 1);
   });
 
+  test("startup scans each armed subscription once; the timer reconcile follows a minute later", async () => {
+    const w = standardWorld();
+    const first = gate();
+    let calls = 0;
+    w.snapshots.set("codex-aaaaaaaa", async () => {
+      calls += 1;
+      await first.promise;
+      return ok(jsonl([]));
+    });
+    await w.sup.tick();
+    first.release();
+    await w.sup.idle();
+    assert.equal(calls, 1, "one startup scan, not a second for an immediate reconcile");
+    w.clock.t += 59_000;
+    await w.run();
+    assert.equal(calls, 1);
+    w.clock.t += 1_000;
+    await w.run();
+    assert.equal(calls, 2, "the reconcile clock started at the first tick");
+  });
+
   test("hints: participant-dir writes mark dirty; heartbeat writes do not", async () => {
     const w = standardWorld();
     await w.run();

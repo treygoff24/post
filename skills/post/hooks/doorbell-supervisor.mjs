@@ -1594,7 +1594,12 @@ export class Supervisor {
     if (this.halted) return;
     await this.discover();
     if (this.halted) return;
-    if (this.now() - this.lastReconcileAt >= this.config.reconcileMs) this.reconcile("timer");
+    // The first discovery arms every enabled subscription dirty, and those
+    // arming scans are the initial full pass; the reconcile clock starts
+    // there. Reconciling now too would mark the in-flight first scans dirty
+    // and scan every participant twice at startup.
+    if (this.lastReconcileAt === -Infinity) this.lastReconcileAt = this.now();
+    else if (this.now() - this.lastReconcileAt >= this.config.reconcileMs) this.reconcile("timer");
     if (this.lastDiscoveryAt !== null && this.now() - this.lastPruneAt >= 3600_000) this.pruneState();
     this.pump();
   }
