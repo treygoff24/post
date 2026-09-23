@@ -777,10 +777,11 @@ pub(crate) struct ProfileSetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileShowArgs {
-    /// `participant:<id>` or a participant id; any other name shows that
-    /// workspace's legacy entry (never stamped). Defaults to the acting participant.
-    #[arg(value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
-    pub room: Option<String>,
+    /// The participant whose profile to show: `participant:<id>` or a bare
+    /// participant id. Defaults to the acting participant. A name that is not
+    /// a participant shows that room's legacy entry (never stamped).
+    #[arg(value_name = "PARTICIPANT", value_parser = NonEmptyStringValueParser::new())]
+    pub participant: Option<String>,
 }
 
 #[derive(Debug, Args)]

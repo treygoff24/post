@@ -6023,21 +6023,64 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         "watch never admitted its first heartbeat",
         &|| heartbeat.exists(),
     );
-    let started = std::time::Instant::now();
-    assert_success(&watched.run_in_env(
-        &["send", "--to", "dest", "--body", "concurrent admitted send"],
+    // The regression this guards is a watch that holds writer admission for
+    // its lifetime: the exclusive fence lock never comes free, so an ordinary
+    // writer blocks until the watch exits. The observable state: while the
+    // watch is running, a non-blocking exclusive lock on the fence lock file
+    // succeeds between its heartbeats. (The wait's deadline is only the hang
+    // guard every wait here has; the criterion is the lock state.)
+    let fence_lock = watched.mail_root.join(".post-arx.lock");
+    let lock_comes_free = || {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&fence_lock)
+            .expect("open fence lock");
+        let free = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        if free {
+            assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+        }
+        free
+    };
+    wait_for(
+        &mut child,
+        "the fence lock never came free while the watch ran: heartbeat admission is held across ticks",
+        &lock_comes_free,
+    );
+    let sent = watched.run_in_env(
+        &[
+            "send",
+            "--to",
+            "dest",
+            "--body",
+            "concurrent admitted send",
+            "--json",
+        ],
         None,
         &watched.path,
         &[("POST_ARX_GENERATION", "7")],
-    ));
-    // The regression this guards is a watch that holds writer admission for
-    // its lifetime, which blocks this send until the watch exits, not for a
-    // few seconds. The bound is therefore a generous hang guard, so a loaded
-    // machine cannot fail it while a held admission still does.
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(30),
-        "heartbeat admission blocked an ordinary writer"
     );
+    assert_success(&sent);
+    let sent: SendOutput = from_stdout(&sent);
+    let id = &sent.envelope.id;
+    assert!(
+        watched
+            .mail_root
+            .join("archive")
+            .join(format!("{id}.mail"))
+            .is_file(),
+        "the admitted send committed its archive copy"
+    );
+    assert!(
+        watched
+            .mail_root
+            .join("dest/inbox")
+            .join(format!("{id}.mail"))
+            .is_file(),
+        "the admitted send committed its canonical inbox copy"
+    );
+    assert_child_running(&mut child, "watch exited during the admitted send");
     let fence_mtime = fence_under_external_lock(&watched, 7);
     for _ in 0..15 {
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -11293,4 +11336,31 @@ fn read_recognizes_a_channel_message_id_and_names_a_command_that_shows_it() {
     let absent = sandbox.run_in(&["read", "20200101-000000-000000-abcdef"], None, &alpha);
     let error: ErrorEnvelope = from_stderr(&absent);
     assert!(error.error.message.contains("participant-visible mail"));
+}
+
+/// `post profile show` takes a participant, so its help and schema name one.
+#[test]
+fn profile_show_names_its_argument_a_participant() {
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["profile", "show", "--help"]);
+    assert_success(&help);
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    assert!(
+        help.contains("Usage: post profile show [OPTIONS] [PARTICIPANT]"),
+        "{help}"
+    );
+    assert!(!help.contains("[ROOM]"), "{help}");
+    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
+    let profile = schema
+        .commands
+        .iter()
+        .find(|command| command.name == "profile")
+        .expect("profile command");
+    assert!(
+        profile
+            .usage
+            .contains("post profile [show [<participant>]]"),
+        "{}",
+        profile.usage
+    );
 }
