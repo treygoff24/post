@@ -20,6 +20,21 @@ const RECORD_MAX_BYTES: u64 = 4096;
 /// exact number.
 pub(crate) const MAX_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The bridge's per-letter cap. post-bridge's `BRIDGE_MAX_MAIL_BYTES`
+/// defaults to 1 MiB and is clamped to at most 1 MiB
+/// (`DEFAULT_MAX_MAIL_BYTES` and `MAX_MAX_MAIL_BYTES` in
+/// `bridgelib/common.py`); `health.json` does not advertise it. A bigger
+/// letter is held on the sender as `blocked_reason: oversize` forever.
+const BRIDGE_MAX_MAIL_BYTES: u64 = 1024 * 1024;
+
+/// The largest letter a host-qualified send may queue: the smaller of the
+/// bridge's cap and what `post bridge deliver` accepts.
+pub(crate) const REMOTE_MAX_MAIL_BYTES: u64 = if BRIDGE_MAX_MAIL_BYTES < MAX_IMPORT_BYTES {
+    BRIDGE_MAX_MAIL_BYTES
+} else {
+    MAX_IMPORT_BYTES
+};
+
 /// Every terminal reason `post bridge deliver` can decide.
 pub(crate) const REJECTED_REASONS: [&str; 7] = [
     "malformed",
@@ -165,6 +180,10 @@ pub(crate) enum ImportOrigin {
 /// record), and the R7 rule (`output::remote_origin`) decides. The answer
 /// comes from the record, never from the current placeholder table, so a
 /// letter keeps its host after its placeholder is removed or re-homed.
+/// Admission records are never pruned; if a later retention design prunes
+/// them, an imported inbox letter whose record is gone falls back to R7's
+/// placeholder rule, so that design must keep the record as long as the
+/// letter.
 pub(crate) fn import_origin(
     context: &Context,
     envelope: &crate::model::Envelope,

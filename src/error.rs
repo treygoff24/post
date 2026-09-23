@@ -6,6 +6,10 @@ pub(crate) type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ErrorDetails {
+    /// Set only by the migration fence's refusal. Callers that must tell a
+    /// fence refusal from other failures test this, never the message text.
+    #[serde(skip)]
+    pub migration_fence_refused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

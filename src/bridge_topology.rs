@@ -182,8 +182,8 @@ pub(crate) enum BridgeHealth {
 /// older than three times `interval_s`, and not further in the future than
 /// that either (a far-future stamp could vouch forever). Unknown keys are
 /// ignored; the bridge adds counters over time.
-/// How far ahead of this host's clock a health stamp may be.
-const HEALTH_MAX_SKEW: std::time::Duration = std::time::Duration::from_secs(5);
+/// How far ahead of this host's clock a bridge stamp may be.
+pub(crate) const MAX_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> BridgeHealth {
     let path = bridge_dir(context).join("health.json");
@@ -242,13 +242,13 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
         Ok(age) => age <= window,
         // A stamp from the future is clock skew, allowed only briefly; it
         // never earns a second freshness window.
-        Err(ahead) => ahead.duration() <= HEALTH_MAX_SKEW,
+        Err(ahead) => ahead.duration() <= MAX_CLOCK_SKEW,
     };
     if !fresh {
         return BridgeHealth::Unavailable(format!(
             "{} is stale: ticked_at is older than three times interval_s or more than {} s ahead",
             path.display(),
-            HEALTH_MAX_SKEW.as_secs()
+            MAX_CLOCK_SKEW.as_secs()
         ));
     }
     let missing: Vec<String> = REQUIRED_CAPABILITIES

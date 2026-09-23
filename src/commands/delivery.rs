@@ -210,7 +210,17 @@ fn decide(
         }
     }
     let acked = evidence("pmail-acked");
-    if let Some(receipt) = read_object(&acked)? {
+    let receipt = read_object(&acked)?;
+    if output.conflict && receipt.is_none() {
+        // A conflict is recorded against a first receipt; without that
+        // receipt the evidence is lost, not queued or published.
+        return Err(Corrupt {
+            file: conflicts,
+            error: "a receipt conflict is recorded but bridge/pmail-acked has no receipt"
+                .to_owned(),
+        });
+    }
+    if let Some(receipt) = receipt {
         let own_host =
             match load_config(context) {
                 Ok(Some(config)) => config.host,
@@ -247,12 +257,24 @@ fn decide(
             file: marker.clone(),
             error,
         })?;
-        output.state = "published";
-        output.age_s = crate::participant::parse_rfc3339(&at).map(|stamp| {
+        let age = crate::participant::parse_rfc3339(&at).map(|stamp| {
             SystemTime::now()
                 .duration_since(stamp)
-                .map_or(0, |age| age.as_secs())
+                .map(|age| age.as_secs())
+                .map_err(|ahead| ahead.duration())
         });
+        // Allow the same clock skew as the health check; a marker from
+        // further in the future is corrupt, never fresh.
+        if let Some(Err(ahead)) = age {
+            if ahead > crate::bridge_topology::MAX_CLOCK_SKEW {
+                return Err(Corrupt {
+                    file: marker,
+                    error: format!("at is {} s in the future", ahead.as_secs()),
+                });
+            }
+        }
+        output.state = "published";
+        output.age_s = age.map(|age| age.unwrap_or(0));
         output.commit = Some(commit);
         output.published_at = Some(at);
         return Ok(());

@@ -103,9 +103,7 @@ fn deliver(context: &Context, args: BridgeDeliverArgs, pretty: bool) -> AppResul
     let admission = match crate::migration_fence::admit(context, true) {
         Ok(admission) => Some(admission),
         Err(error) => {
-            let reason = if error.details.reason.as_deref()
-                == Some("migration generation is not admitted")
-            {
+            let reason = if error.details.migration_fence_refused {
                 "fenced"
             } else {
                 "io_error"

@@ -540,6 +540,19 @@ where
         };
         validate_envelope(std::path::Path::new("<generated mail>"), &envelope)?;
         let payload = encode_mail(&envelope, &body)?;
+        let cap = crate::imports::REMOTE_MAX_MAIL_BYTES;
+        if payload.len() as u64 > cap {
+            return Err(AppError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "this letter is {} bytes; the bridge carries at most {cap} bytes to another host, even with --oversize",
+                    payload.len()
+                ),
+                "Shorten the body, or send a path the recipient can fetch instead of the content; nothing was written.",
+            )
+            .input("message body")
+            .reason(format!("letter exceeds the {cap}-byte bridge limit")));
+        }
         let archive_path = archive.join(format!("{id}.mail"));
         match exclusive_atomic_write(&archive_path, &payload) {
             Ok(()) => {

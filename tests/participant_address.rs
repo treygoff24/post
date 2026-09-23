@@ -610,6 +610,50 @@ fn the_capability_guard_refuses_before_anything_is_written() {
 }
 
 #[test]
+fn a_remote_letter_larger_than_the_bridge_carries_is_refused_before_writing() {
+    // The bridge caps a letter at 1 MiB (BRIDGE_MAX_MAIL_BYTES, default and
+    // ceiling). A bigger one would sit queued forever, so --oversize cannot
+    // queue it; below the cap, --oversize still works.
+    let rig = Rig::new();
+    let to = format!("participant:{REMOTE_ID}@{PEER}");
+    let send = |bytes: usize| {
+        let body = rig.sandbox.path.join(format!("body-{bytes}.txt"));
+        fs::write(&body, "x".repeat(bytes)).expect("body file");
+        let body = body.to_string_lossy().into_owned();
+        rig.sandbox.run_as_participant(
+            &[
+                "send",
+                "--to",
+                &to,
+                "--body-file",
+                &body,
+                "--oversize",
+                "--json",
+            ],
+            &rig.sender,
+            &rig.cwd(),
+        )
+    };
+    let before = rig.snapshot();
+    let value = assert_refused(&send(1024 * 1024), "invalid_argument", 2, false);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("1048576")),
+        "{value}"
+    );
+    assert_eq!(
+        rig.snapshot(),
+        before,
+        "an undeliverable letter writes nothing"
+    );
+    let output = send(64 * 1024);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let receipt: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+    assert_eq!(receipt["delivery"]["state"], json!("queued"));
+}
+
+#[test]
 fn a_local_wildcard_rule_blocks_a_remote_send_with_nothing_written() {
     let rig = Rig::new();
     let rules_path = rig.root().join("rules.json");
@@ -833,6 +877,12 @@ fn delivery_reports_corrupt_evidence_as_unknown_never_a_guess() {
             value["host"] = json!(OTHER);
             value.to_string()
         }),
+        ("pmail-published", {
+            // A marker from the future is not a fresh one.
+            let mut value = marker(&id, &sha);
+            value["at"] = json!("2099-01-01T00:00:00+00:00");
+            value.to_string()
+        }),
         ("pmail-status", "{not json".to_owned()),
         ("pmail-status", json!({"v": 2, "id": id}).to_string()),
         (
@@ -925,4 +975,21 @@ fn delivery_reports_a_receipt_conflict() {
     let value = rig.delivery(&id);
     assert_eq!(value["state"], json!("received"));
     assert_eq!(value["conflict"], json!(true));
+    // A conflict presupposes a first receipt; without it the evidence is
+    // lost, not queued or published.
+    fs::remove_file(rig.evidence("pmail-acked", &id)).expect("drop receipt");
+    for marker_present in [false, true] {
+        if marker_present {
+            rig.write_evidence("pmail-published", &id, &marker(&id, &sha).to_string());
+        }
+        let value = rig.delivery(&id);
+        assert_eq!(value["state"], json!("unknown"), "{value}");
+        assert_eq!(value["conflict"], json!(true), "{value}");
+        assert!(
+            value["evidence_file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with(&format!("pmail-conflicts/{id}.json"))),
+            "{value}"
+        );
+    }
 }
