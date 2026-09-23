@@ -530,6 +530,53 @@ fn the_real_smoke_fails_a_porch_skip_unless_the_operator_allows_it() {
     assert_eq!(checks[5]["allowed"], true);
 }
 
+/// macOS gives every shell a TMPDIR ending in "/". The smoke must still hand
+/// Porch a room directory with no doubled slash: Porch normalizes the path it
+/// is given, post reports the one it stored, and a `//` made the owner
+/// crosscheck disagree and fail the real install on 2026-09-23. The fake
+/// Porch interpreter here fails on the same precondition.
+#[test]
+fn the_real_smoke_hands_porch_a_clean_room_dir_under_a_trailing_slash_tmpdir() {
+    let sandbox = Sandbox::new_unseeded();
+    let results = sandbox.path.join("results.jsonl");
+    let tmp = sandbox.path.join("tmp");
+    fs::create_dir_all(&tmp).expect("tmp dir");
+    let fake_porch = sandbox.path.join("fake-porch/python");
+    fs::create_dir_all(fake_porch.parent().expect("parent")).expect("fake porch dir");
+    write_exec(
+        &fake_porch,
+        r#"#!/bin/sh
+[ "$1" = -c ] && exit 0
+cat >/dev/null
+case "$3" in
+  *//*) echo "doubled slash in the room dir: $3" >&2; exit 1 ;;
+esac
+exit 0
+"#,
+    );
+    let output = Command::new("bash")
+        .arg(SMOKE)
+        .arg("--results")
+        .arg(&results)
+        .arg(env!("CARGO_BIN_EXE_post"))
+        .env("TMPDIR", format!("{}/", tmp.display()))
+        .env("PORCH_PYTHON", &fake_porch)
+        .env_remove("BASH_ENV")
+        .env_remove("POST_SMOKE_ALLOW_SKIP")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run install-smoke.sh");
+    let checks: Vec<serde_json::Value> = fs::read_to_string(&results)
+        .expect("results")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("result line"))
+        .collect();
+    let porch = checks.last().expect("a porch record");
+    assert_eq!(porch["check"], "porch");
+    assert_eq!(porch["result"], "pass", "{porch}");
+    assert_code(&output, 0);
+}
+
 // ---- 3. roll back a bad install; the receipt has its own exit code ----
 
 #[test]

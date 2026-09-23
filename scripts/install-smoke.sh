@@ -45,7 +45,10 @@ case "$1" in /*) bin="$1" ;; *) bin="$PWD/$1" ;; esac
 [ -x "$bin" ] && [ -f "$bin" ] || { echo "install-smoke: not an executable file: $bin" >&2; exit 2; }
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/post-install-smoke.XXXXXX")
+# macOS TMPDIR ends in "/"; trim it so no path here has a doubled slash, which
+# Porch normalizes and post does not, and the porch check would then fail.
+tmp_root="${TMPDIR:-/tmp}"
+work=$(mktemp -d "${tmp_root%/}/post-install-smoke.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/home" "$work/smoke" "$work/sender"
 ln -s "$bin" "$work/bin/post"
