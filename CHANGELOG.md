@@ -36,14 +36,22 @@
   file in the skill bundle (`SKILL.md`, `references/`, `hooks/`, `agents/`) as
   built, or checks a served skill path against it. A symlinked path is checked
   through what it resolves to; a real directory is treated as a rendered copy,
-  where a file with skill-render fence markers may differ without counting as
-  drift. Drift exits 1.
-- `scripts/install-smoke.sh <post-bin>` runs the doorbell parsers, the doorbell
-  contract suite, and Porch's launch check against one binary in a throwaway
-  store. `scripts/install-post.sh <commit>` builds that commit with `--locked`,
-  smokes it before installing, backs up the old binary by build sha, installs
-  atomically, verifies the served skill, and writes
-  `~/.local/share/post/install-receipt.json`. `--dry-run` changes nothing.
+  where a file with skill-render fence markers that differs is listed as
+  `rendered_unverified` and gives verdict `unverified`: not drift, and not a
+  match. Drift and unverified exit 1.
+- `scripts/install-smoke.sh [--results FILE] <post-bin>` runs the doorbell
+  parsers, the doorbell contract suite, and Porch's launch check against one
+  binary in a throwaway store. A check that cannot run fails the smoke unless
+  the operator allows its skip (`POST_SMOKE_ALLOW_SKIP=porch`), which ends in
+  `PASS_WITH_SKIPS`; `--results` writes one JSON line per check.
+  `scripts/install-post.sh <commit>` builds that commit with `--locked`,
+  smokes it before installing, refuses a symlinked `post`, backs up the old
+  binary by build sha (a copy checked against the live file's sha256; an
+  existing backup of other bytes is never trusted), installs atomically,
+  restores the backup if the installed bytes are wrong, verifies the served
+  skill, and writes `~/.local/share/post/install-receipt.json` with the backup,
+  the smoke verdict (`pass` only when every check ran), and each check's
+  result. Its header lists every exit code. `--dry-run` changes nothing.
 - `POST_WATCH_PROFILE=1` makes `post watch` print one diagnostic stderr line
   per target scan: mail-snapshot time, channel-enumeration time, channel scan
   time, and file counts. Nothing else changes. An ignored bench test,
