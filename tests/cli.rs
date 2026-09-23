@@ -2338,6 +2338,81 @@ fn send_waits_for_the_room_rename_lock() {
     );
 }
 
+/// H2: `send` reads its body before taking the shared rename lock, so a
+/// stdin producer that stalls cannot hold the lock: a rename completes while
+/// the send is still blocked reading stdin, and the send then delivers.
+#[cfg(unix)]
+#[test]
+fn rooms_rename_completes_while_a_send_waits_on_stdin() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let gamma = sandbox.path.join("gamma");
+    fs::create_dir(&gamma).expect("gamma path");
+    register_room(&sandbox, "gamma", &gamma);
+    let _recipient = bind_workspace_participant(&sandbox, "stdin-recipient", &alpha, "alpha");
+    let sender = bind_workspace_participant(&sandbox, "stdin-sender", &beta, "beta");
+
+    let mut send = post_command()
+        .args(["send", "--to", "workspace:alpha", "--json"])
+        .current_dir(&beta)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &sender)
+        .env_remove("POST_FROM")
+        .env_remove("POST_SENDER_ADDRESS")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn send");
+    // Give the send time to reach its stdin read with the pipe open and silent.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_child_running(&mut send, "send must be blocked on its open stdin");
+
+    let mut rename = post_command()
+        .args(["rooms", "rename", "gamma", "gamma2", "--json"])
+        .current_dir(&sandbox.path)
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rename");
+    let mut finished = None;
+    for _ in 0..100 {
+        if let Some(status) = rename.try_wait().expect("probe rename") {
+            finished = Some(status);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let Some(status) = finished else {
+        rename.kill().expect("kill stuck rename");
+        let _ = send.kill();
+        panic!("the rename waited on a send that was still reading stdin");
+    };
+    let rename_output = rename.wait_with_output().expect("rename output");
+    assert!(status.success(), "{}", stderr(&rename_output));
+    assert_child_running(&mut send, "send is still waiting on stdin after the rename");
+
+    send.stdin
+        .take()
+        .expect("send stdin")
+        .write_all(b"finally")
+        .expect("write body");
+    let output = send.wait_with_output().expect("wait send");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let rooms: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.mail_root.join("rooms.json")).unwrap()).unwrap();
+    assert!(
+        rooms.get("gamma2").is_some() && rooms.get("gamma").is_none(),
+        "{rooms}"
+    );
+}
+
 /// G2: a consuming catchup holds the shared rename lock from dispatch through
 /// its after-stdout cursor commit, like read. While a rename holds the lock
 /// exclusively, the catchup waits and records nothing; once released, it

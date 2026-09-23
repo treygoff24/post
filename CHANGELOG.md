@@ -57,7 +57,8 @@
   refuses, rather than merges, if the old mailbox was recreated anyway.
   History keeps the old name. It holds `.rename.lock` exclusively, and
   `send`, `catchup`, and writing `read`/`chat` hold it shared, so they wait
-  for a running rename. On a bridged host it requires a fresh
+  for a running rename. `send` reads its body before taking the lock, so a
+  stalled stdin cannot hold up a rename. On a bridged host it requires a fresh
   `bridge/health.json` with zeroed `local_held` counters and a local-held
   record for every letter to the old name the bridge would export; the
   refusal is the retryable `bridge_guard_unavailable`. Separately, `post rooms add` refusing

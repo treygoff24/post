@@ -14,9 +14,25 @@ use std::io::{self, IsTerminal, Read};
 const MAX_BODY_BYTES: usize = 32 * 1024;
 const MAX_SUBJECT_BYTES: usize = 1024;
 
+/// Read the send body up front, before dispatch takes the shared rename lock
+/// (see `commands::execute`). The oversize and watch-NDJSON checks run here,
+/// with the read; the empty-body check stays after target resolution.
+pub(super) fn read_send_body(args: &mut SendArgs) -> AppResult<String> {
+    let fix_prefix = send_fix_prefix(args);
+    let inline = args.body.take();
+    read_body(BodySource {
+        inline,
+        body_file: args.body_file.as_deref(),
+        file: args.file.as_deref(),
+        fix_prefix,
+        oversize: args.oversize,
+    })
+}
+
 pub(super) fn run(
     context: &Context,
     args: SendArgs,
+    body: String,
     json_output: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
@@ -25,7 +41,11 @@ pub(super) fn run(
     // EnvIdentity::none() so a live launcher pin in the developer's shell
     // can never leak into a parallel test process's shared environment.
     let identity = EnvIdentity::from_env()?;
-    run_with_body(context, args, json_output, pretty, identity, read_body)
+    // The body was already read by `read_send_body`; the in-body read point
+    // hands it over unchanged.
+    run_with_body(context, args, json_output, pretty, identity, move |_| {
+        Ok(body)
+    })
 }
 
 /// Identity resolved from the process environment, injected downward.

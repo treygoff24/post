@@ -27,7 +27,7 @@ use crate::error::{AppError, ErrorCode};
 use crate::mailbox::Context;
 use crate::migration_fence;
 
-pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
+pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     let pretty = cli.pretty;
     let json = cli.json;
     if matches!(&cli.command, Command::Version) {
@@ -126,6 +126,15 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
     // from under them. Lock order: the migration fence admission (above) is
     // the only lock taken before it; every store lock the body takes comes
     // after it. See `mailbox::RENAME_LOCK_FILE`.
+    //
+    // `send` reads its body (stdin, --body-file, or --body, with the oversize
+    // and watch-NDJSON checks) BEFORE taking the lock: a stalled stdin
+    // producer must never hold a shared lock, because flock gives the
+    // exclusive `rooms rename` waiter no priority and it would wait forever.
+    let send_body = match &mut cli.command {
+        Command::Send(args) => Some(send::read_send_body(args)?),
+        _ => None,
+    };
     let rename_lock = if writes
         && matches!(
             &cli.command,
@@ -139,7 +148,13 @@ pub(crate) fn execute(cli: Cli) -> AppResult<CommandResult> {
         Command::Participant(args) => participant::run(&context, args, json, pretty),
         Command::Identity(args) => identity::run(&context, args, json, pretty),
         Command::Doctor(args) => doctor::run(&context, args, pretty),
-        Command::Send(args) => send::run(&context, args, json, pretty),
+        Command::Send(args) => send::run(
+            &context,
+            args,
+            send_body.expect("send body is read before the rename lock"),
+            json,
+            pretty,
+        ),
         Command::Chat(args) => chat::run(&context, args, json, pretty),
         Command::Channels(args) => channels::run(&context, args, pretty),
         Command::Inbox(args) => inbox::run(&context, args, pretty),

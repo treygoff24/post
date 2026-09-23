@@ -135,7 +135,9 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   holds it shared: `post send`, `post read`, and `post chat` (when they write)
   and `post catchup` (whose after-stdout commit records seen ids under the
   workspace it resolved) from before their body loads `rooms.json` or resolves its actor until their
-  after-stdout cursor commit finishes; `post doctor --fix` while it creates
+  after-stdout cursor commit finishes (`post send` reads its body from stdin,
+  `--body-file`, or `--body` before taking the lock, so a stalled stdin
+  producer never holds it); `post doctor --fix` while it creates
   room directories; and a writing `post watch` through its target setup only
   (the long loop creates no room directory). Read-only commands do not take
   it. Lock order is migration-fence admission, then `.rename.lock`, then
