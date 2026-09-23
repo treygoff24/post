@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Changed
+- `post who --text` labels each participant's lease `lease=active|stale|ended`
+  instead of `state=…`, and adds one hint line: a lease is not attention; use
+  `post chat <channel> --seen-by <message-id>` to ask who read a message. The
+  JSON output is unchanged (its `state` key stays, with no alias).
 - Profiles belong to one participant. `profiles.json` entries are keyed
   `participant:<id>`; `profile set`/`clear` act on the acting participant; a
   bare workspace-keyed entry (the old format, shared by everyone bound to the

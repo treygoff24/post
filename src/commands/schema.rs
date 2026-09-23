@@ -138,7 +138,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "who",
             "post who [--room <name>]... [--text]",
             "JSON; text with --text",
-            "read-only participant directory: acting participant/provenance first, then all participants with lineage/workspace/watch presence, then legacy room heartbeat rows under legacy_rooms; provenance never claims to detect subagency and no PID is reported",
+            "read-only participant directory: acting participant/provenance first, then all participants with lineage/workspace/watch presence, then legacy room heartbeat rows under legacy_rooms; --text labels each participant's lease state lease=active|stale|ended|no lease record (JSON keeps the state key) and adds one hint line: a lease is not attention, use post chat <channel> --seen-by <message-id>; provenance never claims to detect subagency and no PID is reported",
         ),
         command(
             "version",

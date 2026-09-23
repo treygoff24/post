@@ -7009,6 +7009,84 @@ fn who_reports_live_watch_without_pids() {
     let _ = child.wait();
 }
 
+/// A3: `who --text` names the lease for what it is and points at the real
+/// attention query once. The JSON keeps its exact key set: no `lease` alias,
+/// since strict consumers already broke on additive keys.
+#[test]
+fn who_text_labels_the_lease_and_json_keeps_its_shape() {
+    let sandbox = Sandbox::new();
+    let (alpha, _) = register_alpha_beta(&sandbox);
+    let participant = sandbox.test_participant("alpha");
+
+    let text = stdout(&sandbox.run_as_participant(&["who", "--text"], &participant, &alpha));
+    let acting = text
+        .lines()
+        .find(|line| line.starts_with("participant: "))
+        .expect("acting line");
+    assert!(acting.contains("  lease=active  "), "{acting}");
+    let row = text
+        .lines()
+        .find(|line| line.starts_with(&format!("participant {participant} ")))
+        .expect("participant row");
+    assert!(row.contains("  lease=active  "), "{row}");
+    assert!(!text.contains("state="), "{text}");
+    let hints: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("hint: "))
+        .collect();
+    assert_eq!(
+        hints,
+        ["hint: lease is not attention; for 'did they read it' use `post chat <channel> --seen-by <message-id>`"],
+        "{text}"
+    );
+
+    fn keys(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+    let json: serde_json::Value =
+        from_stdout(&sandbox.run_as_participant(&["who"], &participant, &alpha));
+    assert_eq!(
+        keys(&json),
+        ["count", "legacy_rooms", "ok", "participant", "participants"]
+    );
+    assert_eq!(
+        keys(&json["participant"]),
+        [
+            "harness",
+            "id",
+            "last_seen",
+            "pending",
+            "provenance",
+            "state",
+            "status",
+            "unread",
+            "workspace"
+        ]
+    );
+    let entry = json["participants"]
+        .as_array()
+        .expect("participants")
+        .iter()
+        .find(|entry| entry["id"] == participant.as_str())
+        .expect("participant entry");
+    assert_eq!(
+        keys(entry),
+        [
+            "harness",
+            "id",
+            "last_seen",
+            "live_watch",
+            "pending",
+            "state",
+            "unread",
+            "workspace"
+        ]
+    );
+    assert_eq!(entry["state"], "active");
+}
+
 #[test]
 fn seen_by_lists_members_past_a_message_read_only() {
     let sandbox = Sandbox::new();

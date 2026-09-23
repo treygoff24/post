@@ -7,6 +7,10 @@ use crate::participant::Resolved;
 use crate::presence;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Text-only footer: `lease=` is liveness of the participant's binding, which
+/// readers kept taking for "they saw my message". JSON keeps its `state` key.
+const LEASE_NOT_ATTENTION_HINT: &str = "lease is not attention; for 'did they read it' use `post chat <channel> --seen-by <message-id>`";
+
 const STALE_DELIVERY_NOTE: &str = "mail already frozen to a stale participant is not reassigned when its lease expires; activity affects new recipient selection only";
 
 pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<CommandResult> {
@@ -138,7 +142,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             rendered.push_str("participant: unbound (run: post participant bind)\n");
         } else {
             rendered.push_str(&format!(
-                "participant: {}  state={}  last-seen={}  harness={}  provenance={}  workspace={}  lineage={}  unread={:?}  pending={:?}\n",
+                "participant: {}  lease={}  last-seen={}  harness={}  provenance={}  workspace={}  lineage={}  unread={:?}  pending={:?}\n",
                 acting.id.as_deref().unwrap_or("unbound"),
                 acting.state.as_deref().unwrap_or("unbound"),
                 acting
@@ -158,7 +162,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             let seen = entry.last_seen.as_deref().unwrap_or("no lease record");
             let watch_seen = entry.watch_last_seen.as_deref().unwrap_or("never");
             rendered.push_str(&format!(
-                "participant {}  state={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}  unread={:?}  pending={:?}\n",
+                "participant {}  lease={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}  unread={:?}  pending={:?}\n",
                 output::sanitize_text_header(&entry.id),
                 entry.state,
                 output::sanitize_text_header(&entry.harness),
@@ -173,6 +177,9 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             .any(|participant| matches!(participant.state.as_str(), "stale" | "no lease record"))
         {
             rendered.push_str(&format!("activity-note: {STALE_DELIVERY_NOTE}\n"));
+        }
+        if acting.status != "unbound" || !participants.is_empty() {
+            rendered.push_str(&format!("hint: {LEASE_NOT_ATTENTION_HINT}\n"));
         }
         for entry in &legacy_rooms {
             let live = if entry.live_watch { "yes" } else { "no" };
