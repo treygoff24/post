@@ -13562,7 +13562,9 @@ fn join_from_now_rejoin_after_leave_treats_the_gap_as_history() {
     let away = jfn_send(&sandbox, &beta_participant, &beta, "tax", "while away");
     let rejoined = jfn_join(&sandbox, &fresh, &alpha, "tax", false);
     assert!(!rejoined.already_member);
-    assert!(rejoined.history_before_join.expect("new member count") >= 62);
+    // 60 fixture messages, fresh's first join event, "while joined", and
+    // "while away". A leave writes no event.
+    assert_eq!(rejoined.history_before_join, Some(63));
 
     assert_eq!(jfn_unread(&sandbox, &fresh, &alpha, "tax"), Some(0));
     let read = jfn_read(&sandbox, &fresh, &alpha, &["chat", "tax", "--json"]);
