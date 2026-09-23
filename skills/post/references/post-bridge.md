@@ -95,9 +95,19 @@ namespace, and label and point `room` at the new name first. Around it:
   timer (`systemctl --user stop post-bridge.timer`, or `launchctl bootout` the
   Mac job) right after a tick, rename inside the freshness window, then start
   it again.
+- **Release the old name in the bridge.** Each bridge records a name's owner
+  in `bridge/rooms/owners.json` and keeps claiming a name its own host
+  vacated, so a peer cannot take over a name that briefly disappears. After
+  the rename, health still reads `room_name_collision` until the host that
+  renamed deletes the `<old>` entry from its own `owners.json`. With the
+  bridge paused, delete that one entry and resume. Leave `owners.last.json`
+  alone; the bridge compares the two files and logs `owner_released`. Within
+  two ticks the home host is the only claimant and health reads `ok`.
 - **Re-arm watchers** armed on the old name, and update any config outside
   post's store that names it (Porch `owner_room`, doorbell configs, CLAUDE.md
-  files). The receipt's `warnings` name these.
+  files). The receipt's `warnings` name these. A session that was already
+  running keeps the `POST_FROM` pin it resolved at launch, so it sends and
+  reads as `<old>` until it restarts. New launches pick up the new name.
 - **After a crash**, `post doctor` reports `rooms.rename_interrupted`; rerun
   the same pair to resume from `$POST_MAIL_ROOT/rename-journal.json`.
 
