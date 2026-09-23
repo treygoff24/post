@@ -1,0 +1,42 @@
+{
+  "archived_hidden": 0,
+  "channels": [
+    {
+      "archived": false,
+      "created": "2026-01-01 00:00:00 +0000",
+      "created_by": "alpha",
+      "members": [
+        "alpha",
+        "beta"
+      ],
+      "messages": 5,
+      "name": "tax",
+      "participants": [
+        "claude-53dbb07b",
+        "claude-dd611847",
+        "codex-37cdb648"
+      ],
+      "room": "alpha",
+      "unread": 4
+    },
+    {
+      "archived": false,
+      "created": "2026-01-01 00:00:00 +0000",
+      "created_by": "alpha",
+      "members": [
+        "alpha"
+      ],
+      "messages": 1,
+      "name": "broken",
+      "participants": [
+        "claude-dd611847"
+      ],
+      "room": "alpha",
+      "unread": 0
+    }
+  ],
+  "count": 2,
+  "ok": true,
+  "participant": "claude-dd611847",
+  "pending": 1
+}

@@ -1,0 +1,42 @@
+{
+  "count": 6,
+  "ok": true,
+  "rooms": [
+    {
+      "blocked": [],
+      "name": "alpha",
+      "path": "/SANDBOX/alpha"
+    },
+    {
+      "blocked": [],
+      "name": "beta",
+      "path": "/SANDBOX/beta"
+    },
+    {
+      "blocked": [],
+      "name": "claude-space",
+      "path": "~/claude-space"
+    },
+    {
+      "blocked": [],
+      "name": "pact",
+      "path": "~/pact"
+    },
+    {
+      "blocked": [],
+      "name": "remote-room",
+      "path": "/SANDBOX/mail/remote/peer-host/remote-room"
+    },
+    {
+      "blocked": [
+        {
+          "from": "*",
+          "reason": "ARMED INSTRUMENT: no contact with the armed room until its closeout exists. Remove this rule only after the closeout is written and the affect check has fired.",
+          "to": "agent-memory"
+        }
+      ],
+      "name": "agent-memory",
+      "path": "~/agent-memory"
+    }
+  ]
+}

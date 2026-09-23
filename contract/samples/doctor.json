@@ -1,0 +1,139 @@
+{
+  "checks": [
+    {
+      "fixable": false,
+      "id": "owner.state",
+      "message": "owner: none configured — verification badges are disabled",
+      "path": "/SANDBOX/mail/owner.json",
+      "severity": "info",
+      "suggested_fix": "Run `post owner init --room <name>` to declare a signed owner."
+    },
+    {
+      "fixable": false,
+      "id": "state.archive_missing",
+      "message": "delivered mail '/SANDBOX/mail/alpha/inbox/20260101-000001-a00001.mail' has no archive copy",
+      "path": "/SANDBOX/mail/archive/20260101-000001-a00001.mail",
+      "severity": "error",
+      "suggested_fix": "Copy the delivered .mail file into archive with an exclusive no-replace write; do not resend it."
+    },
+    {
+      "fixable": true,
+      "id": "room.agent-memory.inbox_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/agent-memory/inbox",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.agent-memory.read_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/agent-memory/read",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.alpha.read_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/alpha/read",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.beta.inbox_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/beta/inbox",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.beta.read_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/beta/read",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.claude-space.inbox_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/claude-space/inbox",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.claude-space.read_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/claude-space/read",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.pact.inbox_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/pact/inbox",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.pact.read_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/pact/read",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.remote-room.inbox_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/remote-room/inbox",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    },
+    {
+      "fixable": true,
+      "id": "room.remote-room.read_missing",
+      "message": "required mailbox directory is missing",
+      "path": "/SANDBOX/mail/remote-room/read",
+      "severity": "error",
+      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
+    }
+  ],
+  "count": 12,
+  "exit_codes": [
+    {
+      "code": 0,
+      "meaning": "healthy"
+    },
+    {
+      "code": 1,
+      "meaning": "findings present"
+    },
+    {
+      "code": 3,
+      "meaning": "--fix failed"
+    }
+  ],
+  "fixed": [],
+  "ok": false,
+  "participant": {
+    "id": "claude-dd611847",
+    "lineage": "ember",
+    "provenance": "explicit-env",
+    "status": "bound",
+    "workspace": "alpha"
+  },
+  "pending": {
+    "lineage:ember": 0,
+    "participant:claude-dd611847": 0,
+    "workspace:alpha": 0
+  },
+  "root": "/SANDBOX/mail",
+  "status": "broken"
+}

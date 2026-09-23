@@ -1,0 +1,173 @@
+{
+  "count": 7,
+  "legacy_rooms": [
+    {
+      "live_watch": false,
+      "room": "agent-memory"
+    },
+    {
+      "live_watch": false,
+      "room": "alpha"
+    },
+    {
+      "live_watch": false,
+      "room": "beta"
+    },
+    {
+      "live_watch": false,
+      "room": "claude-space"
+    },
+    {
+      "live_watch": false,
+      "room": "pact"
+    },
+    {
+      "live_watch": false,
+      "room": "remote-room"
+    }
+  ],
+  "ok": true,
+  "participant": {
+    "harness": "claude",
+    "id": "claude-dd611847",
+    "last_seen": "2026-01-01T00:00:00Z",
+    "lineage": "ember",
+    "pending": {
+      "lineage:ember": 0,
+      "participant:claude-dd611847": 0,
+      "workspace:alpha": 1
+    },
+    "provenance": "explicit-env",
+    "state": "active",
+    "status": "bound",
+    "unread": {
+      "lineage:ember": 1,
+      "participant:claude-dd611847": 1,
+      "workspace:alpha": 1
+    },
+    "workspace": "alpha"
+  },
+  "participants": [
+    {
+      "harness": "claude",
+      "id": "claude-53dbb07b",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "live_watch": false,
+      "pending": {
+        "participant:claude-53dbb07b": 0,
+        "workspace:alpha": 1
+      },
+      "state": "active",
+      "unread": {
+        "participant:claude-53dbb07b": 0,
+        "workspace:alpha": 1
+      },
+      "workspace": "alpha"
+    },
+    {
+      "harness": "claude",
+      "id": "claude-dd611847",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "lineage": "ember",
+      "live_watch": false,
+      "pending": {
+        "lineage:ember": 0,
+        "participant:claude-dd611847": 0,
+        "workspace:alpha": 1
+      },
+      "state": "active",
+      "unread": {
+        "lineage:ember": 1,
+        "participant:claude-dd611847": 1,
+        "workspace:alpha": 1
+      },
+      "workspace": "alpha"
+    },
+    {
+      "harness": "codex",
+      "id": "codex-37cdb648",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "live_watch": false,
+      "pending": {
+        "lineage:ember": 0,
+        "participant:claude-dd611847": 0,
+        "participant:codex-37cdb648": 0,
+        "workspace:alpha": 0,
+        "workspace:beta": 0
+      },
+      "state": "active",
+      "unread": {
+        "lineage:ember": 0,
+        "participant:claude-dd611847": 0,
+        "participant:codex-37cdb648": 0,
+        "workspace:alpha": 0,
+        "workspace:beta": 0
+      },
+      "workspace": "beta"
+    },
+    {
+      "harness": "test",
+      "id": "test-11776abc",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "live_watch": false,
+      "pending": {
+        "participant:test-11776abc": 0,
+        "workspace:beta": 0
+      },
+      "state": "active",
+      "unread": {
+        "participant:test-11776abc": 0,
+        "workspace:beta": 0
+      },
+      "workspace": "beta"
+    },
+    {
+      "harness": "test",
+      "id": "test-603a47cf",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "live_watch": false,
+      "pending": {
+        "participant:test-603a47cf": 0,
+        "workspace:remote-room": 0
+      },
+      "state": "active",
+      "unread": {
+        "participant:test-603a47cf": 0,
+        "workspace:remote-room": 0
+      },
+      "workspace": "remote-room"
+    },
+    {
+      "harness": "test",
+      "id": "test-default",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "live_watch": false,
+      "pending": {
+        "participant:test-default": 0,
+        "workspace:claude-space": 0
+      },
+      "state": "active",
+      "unread": {
+        "participant:test-default": 0,
+        "workspace:claude-space": 0
+      },
+      "workspace": "claude-space"
+    },
+    {
+      "harness": "test",
+      "id": "test-dfee708f",
+      "last_seen": "2026-01-01T00:00:00Z",
+      "live_watch": false,
+      "pending": {
+        "participant:test-dfee708f": 0,
+        "workspace:alpha": 1
+      },
+      "state": "active",
+      "unread": {
+        "participant:test-dfee708f": 0,
+        "workspace:alpha": 1
+      },
+      "workspace": "alpha"
+    }
+  ]
+}

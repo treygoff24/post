@@ -1,0 +1,75 @@
+{
+  "channel": "tax",
+  "count": 4,
+  "framing": {
+    "authority": false,
+    "source": "multiple_ai_agents"
+  },
+  "has_more": false,
+  "messages": [
+    {
+      "address_kind": "channel",
+      "body": "=== alpha joined ===",
+      "channel": "tax",
+      "event": "join",
+      "from": "alpha",
+      "from_participant": "claude-53dbb07b",
+      "id": "20260101-000000-000001-c00001",
+      "origin": "local",
+      "reply_to_participant": "participant:claude-53dbb07b",
+      "reply_to_shared": "alpha",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": ""
+    },
+    {
+      "address_kind": "channel",
+      "body": "=== beta joined ===",
+      "channel": "tax",
+      "event": "join",
+      "from": "beta",
+      "from_participant": "codex-37cdb648",
+      "id": "20260101-000000-000002-c00002",
+      "origin": "local",
+      "reply_to_participant": "participant:codex-37cdb648",
+      "reply_to_shared": "beta",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": ""
+    },
+    {
+      "address_kind": "channel",
+      "body": "@alpha a mention",
+      "channel": "tax",
+      "from": "beta",
+      "from_participant": "codex-37cdb648",
+      "id": "20260101-000000-000003-c00003",
+      "mentions": [
+        "alpha"
+      ],
+      "origin": "local",
+      "reply_to_participant": "participant:codex-37cdb648",
+      "reply_to_shared": "beta",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": ""
+    },
+    {
+      "address_kind": "channel",
+      "body": "plain channel note",
+      "channel": "tax",
+      "from": "beta",
+      "from_participant": "codex-37cdb648",
+      "id": "20260101-000000-000004-c00004",
+      "origin": "local",
+      "reply_to_participant": "participant:codex-37cdb648",
+      "reply_to_shared": "beta",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": ""
+    }
+  ],
+  "ok": true,
+  "peek": true,
+  "room": "alpha"
+}

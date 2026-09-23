@@ -1,0 +1,12 @@
+{
+  "build_sha": "unknown",
+  "capabilities": [
+    "participants",
+    "lineages",
+    "routing-receipts",
+    "cursors-v2"
+  ],
+  "ok": true,
+  "store_version": 2,
+  "version": "0.9.0"
+}

@@ -1,0 +1,53 @@
+{
+  "count": 3,
+  "held": 0,
+  "ok": true,
+  "participant": "claude-dd611847",
+  "pending": 1,
+  "pending_by_address": {
+    "lineage:ember": 0,
+    "participant:claude-dd611847": 0,
+    "workspace:alpha": 1
+  },
+  "room": "alpha",
+  "skipped_unreadable": 0,
+  "unread": [
+    {
+      "from": "beta",
+      "from_participant": "codex-37cdb648",
+      "id": "20260101-000001-a00001",
+      "kind": "note",
+      "origin": "local",
+      "reply_to_participant": "participant:codex-37cdb648",
+      "reply_to_shared": "beta",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": "contract"
+    },
+    {
+      "from": "beta",
+      "from_participant": "codex-37cdb648",
+      "id": "20260101-000002-a00002",
+      "kind": "note",
+      "origin": "local",
+      "reply_to_participant": "participant:codex-37cdb648",
+      "reply_to_shared": "beta",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": "contract"
+    },
+    {
+      "from": "beta",
+      "from_participant": "codex-37cdb648",
+      "id": "20260101-000003-a00003",
+      "kind": "note",
+      "origin": "local",
+      "reply_to_participant": "participant:codex-37cdb648",
+      "reply_to_shared": "beta",
+      "sender_provenance": "participant-binding",
+      "sent": "2026-01-01 00:00:00 +0000",
+      "subject": "contract"
+    }
+  ],
+  "unread_count": 3
+}
