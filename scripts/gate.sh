@@ -24,6 +24,15 @@ step "release"; cargo build --release || err "cargo build --release"
 
 # The launcher and hook suites exercise the release binary built above, so they
 # run after it and not before.
+#
+# The contract suites (skills/post/hooks/contract.test.mjs, doorbell/test_contract.py)
+# take their samples from `post contract samples` of the binary under test, so
+# they are pointed at exactly this release build rather than a guessed path.
+if release_bin=$(node scripts/cargo-release-bin.mjs); then
+  export POST_BIN="$release_bin"
+else
+  err "resolve release binary via cargo metadata"
+fi
 if command -v node >/dev/null 2>&1; then
   step "node: hooks"
   node --test skills/post/hooks/*.test.mjs || err "node hooks tests"
@@ -48,10 +57,10 @@ fi
 # CONTRIBUTING invariant 2: post schema is the contract. A schema that cannot be
 # emitted is a broken contract regardless of what the unit tests say.
 step "schema"
-if release_bin=$(node scripts/cargo-release-bin.mjs); then
-  "$release_bin" schema >/dev/null || err "post schema"
+if [ -n "${POST_BIN:-}" ]; then
+  "$POST_BIN" schema >/dev/null || err "post schema"
 else
-  err "resolve release binary via cargo metadata"
+  err "no release binary to emit the schema"
 fi
 
 rust_ver=$(cargo --version 2>/dev/null | awk '{print $2}')
