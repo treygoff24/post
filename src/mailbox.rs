@@ -1862,40 +1862,61 @@ mod tests {
             .all(|(_, byte)| byte.is_ascii_digit()));
     }
 
+    /// `TZ` is process-wide and lib tests run in parallel, so setting it here
+    /// raced every test that reads the local offset twice (the output header
+    /// test failed on the devbox gate, 2026-09-23). Each fixture instead
+    /// formats in a child run of this test binary that has its own `TZ`.
     #[cfg(unix)]
     #[test]
     fn local_timestamp_matches_exact_positive_and_negative_offset_fixtures() {
-        let previous_tz = std::env::var_os("TZ");
-        std::env::set_var("TZ", "Asia/Kathmandu");
-        unsafe { tzset() };
-        let kathmandu = super::format_local_timestamp(1_700_000_000);
-        std::env::set_var("TZ", "America/New_York");
-        unsafe { tzset() };
-        let new_york = super::format_local_timestamp(1_700_000_000);
-        if let Some(previous_tz) = previous_tz {
-            std::env::set_var("TZ", previous_tz);
-        } else {
-            std::env::remove_var("TZ");
-        }
-        unsafe { tzset() };
+        let format_in = |tz: &str| -> String {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "mailbox::tests::tz_fixture_child",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("TZ", tz)
+                .env("POST_TZ_FIXTURE_CHILD", "1")
+                .output()
+                .expect("spawn the TZ fixture child");
+            assert!(
+                output.status.success(),
+                "TZ fixture child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.split_once("TZFIXTURE=").map(|(_, fixture)| fixture))
+                .expect("the child printed its fixture")
+                .to_owned()
+        };
 
         // The id timestamp is UTC in every timezone (1_700_000_000 =
         // 2023-11-14 22:13:20Z) so IDs keep sorting monotonically when the
         // machine timezone changes; only `sent` carries local wall time.
         assert_eq!(
-            kathmandu.expect("format Kathmandu fixture"),
-            (
-                "20231114-221320".to_owned(),
-                "2023-11-15 03:58:20 +0545".to_owned()
-            )
+            format_in("Asia/Kathmandu"),
+            "20231114-221320|2023-11-15 03:58:20 +0545"
         );
         assert_eq!(
-            new_york.expect("format New York fixture"),
-            (
-                "20231114-221320".to_owned(),
-                "2023-11-14 17:13:20 -0500".to_owned()
-            )
+            format_in("America/New_York"),
+            "20231114-221320|2023-11-14 17:13:20 -0500"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a child of local_timestamp_matches_exact_positive_and_negative_offset_fixtures"]
+    fn tz_fixture_child() {
+        if std::env::var_os("POST_TZ_FIXTURE_CHILD").is_none() {
+            return;
+        }
+        unsafe { tzset() };
+        let (id, sent) = super::format_local_timestamp(1_700_000_000).expect("format the fixture");
+        println!("TZFIXTURE={id}|{sent}");
     }
 }
 
