@@ -1327,6 +1327,66 @@ fn rooms_add_remote_placeholder_refusal_names_host_and_offers_runnable_fix() {
     assert!(listing.rooms.iter().any(|room| room.name == "hq-devbox"));
 }
 
+/// F10: a suggested name must pass every check `add` would run on it. A
+/// learned `hq-devbox` that is also a lineage name falls through to the next
+/// candidate, and the offered fix actually runs.
+#[test]
+fn rooms_add_remote_placeholder_fix_skips_a_candidate_held_by_a_lineage() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    register_remote_placeholder(&sandbox, "mac", "hq");
+    register_remote_placeholder(&sandbox, "mac", "cos");
+    let cos = sandbox.path.join("checkouts/cos");
+    fs::create_dir_all(&cos).expect("cos checkout");
+    register_room(&sandbox, "cos-devbox", &cos);
+    let lineage_dir = sandbox.mail_root.join("lineages/hq-devbox");
+    fs::create_dir_all(&lineage_dir).expect("lineage dir");
+    fs::write(
+        lineage_dir.join("lineage.json"),
+        "{\"name\":\"hq-devbox\",\"founder\":\"x\",\"created\":\"2026-09-20\",\"host\":\"devbox\"}",
+    )
+    .expect("lineage record");
+    let checkout = sandbox.path.join("checkouts/hq");
+    fs::create_dir_all(&checkout).expect("hq checkout");
+    let checkout = checkout.to_string_lossy().into_owned();
+
+    // Only the learned suffix is available, and its candidate is a lineage:
+    // no runnable fix is offered.
+    let output = sandbox.run(&["rooms", "add", "hq", &checkout]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(
+        error.error.details.exact_fix.is_none(),
+        "{:?}",
+        error.error.details.exact_fix
+    );
+
+    // A blocked route to the bridge-host candidate removes it too.
+    write_bridge_config(&sandbox, "trey");
+    let rules_path = sandbox.mail_root.join("rules.json");
+    let rules_before = fs::read(&rules_path).expect("rules snapshot");
+    fs::write(
+        &rules_path,
+        "{\"blocked\":[{\"from\":\"*\",\"to\":\"hq-trey\",\"reason\":\"held\"}]}",
+    )
+    .expect("block hq-trey");
+    let output = sandbox.run(&["rooms", "add", "hq", &checkout]);
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert!(
+        error.error.details.exact_fix.is_none(),
+        "{:?}",
+        error.error.details.exact_fix
+    );
+    fs::write(&rules_path, rules_before).expect("restore rules");
+
+    // With the block gone the bridge-host candidate is offered, and it runs.
+    let output = sandbox.run(&["rooms", "add", "hq", &checkout]);
+    let error: ErrorEnvelope = from_stderr(&output);
+    let fix = error.error.details.exact_fix.expect("the next candidate");
+    assert_eq!(fix, format!("post rooms add 'hq-trey' '{checkout}'"));
+    assert_success(&sandbox.run_fix(&fix, &sandbox.path));
+}
+
 #[test]
 fn rooms_add_remote_placeholder_refusal_falls_back_to_bridge_host() {
     let sandbox = Sandbox::new();

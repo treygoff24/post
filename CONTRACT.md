@@ -434,7 +434,10 @@ their existing success semantics.
   `<base>` is a remote placeholder and the room's registered directory is
   itself named `<base>` (ASCII case-insensitive), so a checkout like
   `hq-devbox` at `.../hq` votes and a project like `cos-crons` at
-  `.../cos-crons` does not.
+  `.../cos-crons` does not. The offered candidate is the first, in order of
+  the learned suffixes by rank and then the bridge host id, that is a valid
+  and untaken room name, names no lineage, and has no blocked route to it;
+  when none survives, no `exact_fix` is offered.
 - `post rooms set-path <name> <path> [--dry-run]` — re-points a local room's
   workspace (discovery) path under the same locks and validation as `add`;
   it never moves mail or history, never rewrites participant records, and

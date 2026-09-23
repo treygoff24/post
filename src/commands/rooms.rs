@@ -480,11 +480,22 @@ fn remote_duplicate_error(dup: RemoteDuplicate) -> AppError {
     // `set-path` refuses placeholders, so the local-duplicate hint can never
     // work here. The estate's naming rule gives the fix instead — this
     // checkout takes a `<name>-<suffix>` of its own.
+    // A suggestion must survive every check `add` and `rename` run on a new
+    // name, or the exact_fix runs and then refuses. A store that cannot be
+    // read proves nothing, so the candidate is not offered.
+    let rules = dup.context.load_rules(dup.rooms).ok();
+    let is_free = |candidate: &str| {
+        matches!(crate::lineage::load(dup.context, candidate), Ok(None))
+            && rules
+                .as_ref()
+                .is_some_and(|rules| !rules.blocked.iter().any(|rule| rule.targets(candidate)))
+    };
     let candidate = suffixed_room_candidate(
         dup.rooms,
         dup.placeholders,
         bridge_host_id(dup.context).as_deref(),
         dup.requested,
+        &is_free,
     );
     let mut error = AppError::new(
         ErrorCode::InvalidArgument,
@@ -1097,23 +1108,34 @@ fn bridge_host_id(context: &Context) -> Option<String> {
         .map(|config| config.host)
 }
 
-/// The estate's `<name>-<host-suffix>` candidate for a refused name, or None
-/// when no suffix is derivable or the candidate is itself taken under ASCII
-/// case folding or not a valid room name.
+/// The estate's `<name>-<host-suffix>` candidate for a refused name: the
+/// first of the learned suffixes (in rank order), then the bridge host id,
+/// whose candidate is a valid room name, is not taken under ASCII case
+/// folding, and passes `is_free` (no lineage of that name, no blocked route
+/// to it). None when no candidate survives.
 fn suffixed_room_candidate(
     rooms: &RoomMap,
     placeholders: &BTreeMap<String, String>,
     bridge_host: Option<&str>,
     name: &str,
+    is_free: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
-    let suffix =
-        learned_host_suffix(rooms, placeholders).or_else(|| bridge_host.map(str::to_owned))?;
-    let candidate = format!("{name}-{suffix}");
-    (validate_new_room_name(&candidate).is_ok()
-        && !rooms
-            .keys()
-            .any(|taken| taken.eq_ignore_ascii_case(&candidate)))
-    .then_some(candidate)
+    let mut suffixes = learned_host_suffixes(rooms, placeholders);
+    if let Some(host) = bridge_host {
+        if !suffixes.iter().any(|suffix| suffix == host) {
+            suffixes.push(host.to_owned());
+        }
+    }
+    suffixes
+        .into_iter()
+        .map(|suffix| format!("{name}-{suffix}"))
+        .find(|candidate| {
+            validate_new_room_name(candidate).is_ok()
+                && !rooms
+                    .keys()
+                    .any(|taken| taken.eq_ignore_ascii_case(candidate))
+                && is_free(candidate)
+        })
 }
 
 /// The estate's `<base>-<host-suffix>` naming rule, learned from this host's
@@ -1127,7 +1149,16 @@ fn suffixed_room_candidate(
 /// frequent suffix wins; ties go to the lexicographically smallest. `None`
 /// when no local room votes — the caller then falls back to the bridge host
 /// id.
+#[cfg(test)]
 fn learned_host_suffix(rooms: &RoomMap, placeholders: &BTreeMap<String, String>) -> Option<String> {
+    learned_host_suffixes(rooms, placeholders)
+        .into_iter()
+        .next()
+}
+
+/// Every learned suffix, best first (most votes, ties to the
+/// lexicographically smallest); see `learned_host_suffix` for the vote.
+fn learned_host_suffixes(rooms: &RoomMap, placeholders: &BTreeMap<String, String>) -> Vec<String> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for (name, stored_path) in rooms {
         if placeholders.contains_key(name) {
@@ -1146,12 +1177,11 @@ fn learned_host_suffix(rooms: &RoomMap, placeholders: &BTreeMap<String, String>)
             }
         }
     }
-    counts
-        .into_iter()
-        .max_by(|(a_suffix, a_count), (b_suffix, b_count)| {
-            a_count.cmp(b_count).then(b_suffix.cmp(a_suffix))
-        })
-        .map(|(suffix, _)| suffix)
+    let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|(a_suffix, a_count), (b_suffix, b_count)| {
+        b_count.cmp(a_count).then(a_suffix.cmp(b_suffix))
+    });
+    ranked.into_iter().map(|(suffix, _)| suffix).collect()
 }
 
 #[cfg(test)]
@@ -1231,7 +1261,8 @@ mod tests {
         let placeholders = placeholder_map(&["cos"]);
         assert_eq!(learned_host_suffix(&rooms, &placeholders), None);
         assert_eq!(
-            suffixed_room_candidate(&rooms, &placeholders, Some("mac"), "atlasos").as_deref(),
+            suffixed_room_candidate(&rooms, &placeholders, Some("mac"), "atlasos", &|_| true)
+                .as_deref(),
             Some("atlasos-mac")
         );
         // The devbox shape: `hq-devbox` lives at `.../hq` (compared
@@ -1269,12 +1300,33 @@ mod tests {
         let rooms = room_map(&["hq"]);
         let placeholders = placeholder_map(&["hq"]);
         assert_eq!(
-            suffixed_room_candidate(&rooms, &placeholders, Some("trey"), "hq").as_deref(),
+            suffixed_room_candidate(&rooms, &placeholders, Some("trey"), "hq", &|_| true)
+                .as_deref(),
             Some("hq-trey")
         );
         // No learned suffix and no bridge config: nothing is derivable.
         assert_eq!(
-            suffixed_room_candidate(&rooms, &placeholders, None, "hq"),
+            suffixed_room_candidate(&rooms, &placeholders, None, "hq", &|_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn suffixed_candidate_skips_a_name_that_is_not_free_for_the_next() {
+        // The learned "devbox" candidate collides (a lineage, say); the
+        // bridge host id supplies the next one.
+        let rooms = room_map_at(&[("hq", "/r/hq"), ("cos-devbox", "/c/cos")]);
+        let placeholders = placeholder_map(&["hq", "cos"]);
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, Some("trey"), "hq", &|c| {
+                c != "hq-devbox"
+            })
+            .as_deref(),
+            Some("hq-trey")
+        );
+        // Nothing free: no suggestion.
+        assert_eq!(
+            suffixed_room_candidate(&rooms, &placeholders, Some("trey"), "hq", &|_| false),
             None
         );
     }
@@ -1285,14 +1337,14 @@ mod tests {
         let rooms = room_map_at(&[("hq", "/r/hq"), ("hq-mac", "/c/hq")]);
         let placeholders = placeholder_map(&["hq"]);
         assert_eq!(
-            suffixed_room_candidate(&rooms, &placeholders, None, "hq"),
+            suffixed_room_candidate(&rooms, &placeholders, None, "hq", &|_| true),
             None
         );
         // A candidate outside the room-name grammar is never suggested
         // (a learned suffix cannot produce this; the check is defensive).
         let rooms = room_map(&["hq", "hq-mac"]);
         assert_eq!(
-            suffixed_room_candidate(&rooms, &placeholders, Some("a:b"), "hq"),
+            suffixed_room_candidate(&rooms, &placeholders, Some("a:b"), "hq", &|_| true),
             None
         );
     }
