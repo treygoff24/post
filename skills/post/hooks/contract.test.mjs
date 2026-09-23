@@ -322,7 +322,10 @@ for (const adapter of MAIL_ADAPTERS) {
       const taxNew = cursorUnusable.filter((e) => e.event === "channel_message" && e.channel === "tax").length;
       assert.ok(taxNew > 0);
       assert.ok(context.includes(`#tax: ${taxNew} new`), context);
-      assert.ok(!context.includes("Reader") && !context.includes("📮"), "display fields stay out");
+      // The sample must carry display fields, or this check proves nothing.
+      assert.ok(cursorUnusable.some((e) => e.display_name === "Reader" && e.pfp === "📮"), "sample lacks display fields");
+      assert.ok(!context.includes("Reader"), "display_name stays out");
+      assert.ok(!context.includes("📮"), "pfp stays out");
     });
 
     test("unknown fields at top level and in nested objects change nothing", async () => {
@@ -487,6 +490,9 @@ describe("watch-notice", { concurrency: true }, () => {
     const taxNew = cursorUnusable.filter((e) => e.event === "channel_message" && e.channel === "tax").length;
     assert.ok(taxNew > 0);
     assert.ok(result.stdout.includes(`#tax: ${taxNew} new`), result.stdout);
+    assert.ok(cursorUnusable.some((e) => e.display_name === "Reader" && e.pfp === "📮"), "sample lacks display fields");
+    assert.ok(!result.stdout.includes("Reader"), "display_name stays out");
+    assert.ok(!result.stdout.includes("📮"), "pfp stays out");
     assert.doesNotMatch(result.stdout, UNKNOWN);
   });
 

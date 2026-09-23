@@ -329,6 +329,18 @@ fn produce() -> BTreeMap<&'static str, String> {
             "chat", "tax", "--send", "--anyway", "--body", body, "--json",
         ]));
     }
+    // A post-join message from the reader, whose profile carries a display
+    // name and pfp: the cursor-unusable sample needs one such event so the
+    // hook tests can prove display fields never reach a notice.
+    assert_success(&as_reader(&[
+        "chat",
+        "tax",
+        "--send",
+        "--anyway",
+        "--body",
+        "reader note",
+        "--json",
+    ]));
     // An unreadable channel message in a channel the reader belongs to. Its
     // id sorts after the reader's join: a corrupt file below the membership
     // start is history and never rings (join from now).
