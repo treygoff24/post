@@ -331,7 +331,10 @@ fn consuming_flags_with_a_queued_byte_are_refused_and_change_nothing() {
         );
         assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
         let error: Value = serde_json::from_slice(&output.stderr).expect("error JSON");
-        assert_eq!(error["error"]["code"], "invalid_argument", "{flag}: {error}");
+        assert_eq!(
+            error["error"]["code"], "invalid_argument",
+            "{flag}: {error}"
+        );
         assert_eq!(
             store_bytes(&fixture),
             before,
