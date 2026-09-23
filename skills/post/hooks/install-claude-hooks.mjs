@@ -31,12 +31,22 @@ const ADAPTER = path.join(
 );
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
 
-const requestedTarget = process.argv[2];
+const USAGE = "usage: node install-claude-hooks.mjs <path-to-settings.json>";
+
+const argv = process.argv.slice(2);
+// `-h`/`--help` anywhere prints usage on stdout and exits 0, before the target
+// is even looked at or the post preflight runs.
+if (argv.includes("-h") || argv.includes("--help")) {
+  process.stdout.write(`${USAGE}\n`);
+  process.exit(0);
+}
+
+const requestedTarget = argv[0];
 // A flag-looking argv is a usage error, not a settings path: without this
 // guard, `install-claude-hooks.mjs --help` silently writes a config file
 // literally named ./--help (caught live, 2026-07-31).
 if (!requestedTarget || requestedTarget.startsWith("-")) {
-  console.error("usage: node install-claude-hooks.mjs <path-to-settings.json>");
+  console.error(USAGE);
   process.exit(2);
 }
 
