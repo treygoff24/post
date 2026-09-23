@@ -2971,6 +2971,116 @@ fn routing_remote_channel_message_with_colliding_sender_id_is_unread_for_the_loc
     assert!(!watched.iter().any(|id| id == local_own), "{watched:?}");
 }
 
+/// R7 across root spellings: the placeholder path in rooms.json and the
+/// POST_MAIL_ROOT the command runs under may name the same directory through
+/// different spellings (macOS `/var` is `/private/var`; a symlinked root or
+/// HOME). `stored_form` is how rooms.json spells the root ("canonical" or
+/// "symlink"); the command runs under the other spelling. The collision mail
+/// must not be own, and `rooms set-path` must refuse. The placeholder
+/// directory is never created.
+fn remote_placeholder_spellings(stored_form: &str) {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let local = bind(&sandbox, "spelling-local", &alpha, "alpha");
+    let real = fs::canonicalize(&sandbox.mail_root).expect("canonical root");
+    let link = sandbox.path.join("root-link");
+    std::os::unix::fs::symlink(&real, &link).expect("root symlink");
+    let (stored, run) = match stored_form {
+        "canonical" => (real.clone(), link.clone()),
+        "symlink" => (link.clone(), real.clone()),
+        other => panic!("unknown stored form {other}"),
+    };
+    let placeholder = stored.join("remote/peer-host/far-room");
+    assert!(!placeholder.exists(), "the placeholder is never created");
+    let rooms_path = sandbox.mail_root.join("rooms.json");
+    let mut rooms: Value =
+        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms.json")).expect("rooms JSON");
+    rooms["far-room"] = json!(placeholder.to_string_lossy());
+    fs::write(&rooms_path, serde_json::to_vec_pretty(&rooms).unwrap()).expect("write rooms");
+
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+    let remote = "20990923-060101-cc0001";
+    write_custom_mail(
+        &inbox,
+        remote,
+        &json!({"id":remote,"from":"far-room","to":"alpha","kind":"note","subject":"remote spelling","sent":"2026-09-23 06:01:01 -0500","from_participant":local,"address_kind":"workspace"}),
+        "remote body",
+    );
+    let local_own = "20990923-060102-cc0002";
+    write_custom_mail(
+        &inbox,
+        local_own,
+        &json!({"id":local_own,"from":"alpha","to":"alpha","kind":"note","subject":"local own","sent":"2026-09-23 06:01:02 -0500","from_participant":local,"address_kind":"workspace","sender_provenance":"participant-binding"}),
+        "local own body",
+    );
+    let run_root = run.to_string_lossy().into_owned();
+    let envs = [
+        ("POST_MAIL_ROOT", run_root.as_str()),
+        ("POST_PARTICIPANT", local.as_str()),
+    ];
+    // A consuming read of a neutral message routes the workspace's pending
+    // mail, as in the collision test above; the inbox then shows what is own.
+    let neutral = "20990923-060100-cc0000";
+    write_custom_mail(
+        &sandbox.mail_root.join("alpha/inbox"),
+        neutral,
+        &json!({"id":neutral,"from":"beta","to":"alpha","kind":"note","subject":"neutral","sent":"2026-09-23 06:01:00 -0500","address_kind":"workspace"}),
+        "neutral body",
+    );
+    assert_success(&sandbox.run_in_env(&["read", neutral, "--json"], None, &alpha, &envs));
+    let inbox = sandbox.run_in_env(&["inbox"], None, &alpha, &envs);
+    assert_success(&inbox);
+    let inbox: Value = from_stdout(&inbox);
+    let unread: Vec<&str> = inbox["unread"]
+        .as_array()
+        .expect("unread")
+        .iter()
+        .map(|message| message["id"].as_str().expect("id"))
+        .collect();
+    assert!(
+        unread.contains(&remote),
+        "stored {} run {}: the placeholder's mail is not own: {unread:?}",
+        stored.display(),
+        run.display()
+    );
+    assert!(!unread.contains(&local_own), "{unread:?}");
+
+    let target = sandbox.path.join("elsewhere");
+    fs::create_dir_all(&target).expect("set-path target");
+    let refused = sandbox.run_in_env(
+        &[
+            "rooms",
+            "set-path",
+            "far-room",
+            target.to_string_lossy().as_ref(),
+        ],
+        None,
+        &alpha,
+        &envs,
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("is a remote placeholder"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+#[test]
+fn routing_remote_placeholder_stored_canonical_run_under_a_symlinked_root() {
+    remote_placeholder_spellings("canonical");
+}
+
+#[test]
+fn routing_remote_placeholder_stored_under_a_symlink_run_under_the_canonical_root() {
+    remote_placeholder_spellings("symlink");
+}
+
 /// B1 fixture: one bound member of `tax` with one direct mail, one plain
 /// channel message, one channel message that mentions its workspace, and one
 /// unreadable channel message. The mention id sorts FIRST among the channel

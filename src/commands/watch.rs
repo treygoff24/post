@@ -3791,7 +3791,8 @@ body
     }
 
     /// B2 bench, not a test: builds synthetic participant stores whose mail and
-    /// channel history grow by 10x while the unread tail stays at 10 each, and
+    /// channel history grow by 10x while the unread tail stays at 10 each (half
+    /// of the read channel history is the acting participant's own), and
     /// prints the cost of each projection watch runs. Never touches a real
     /// store (every root is a temporary test root).
     ///
@@ -3814,7 +3815,19 @@ body
                 root: root.clone(),
                 home: root.clone(),
             };
-            fs::write(root.join("rooms.json"), b"{}\n").expect("write rooms.json");
+            // A registry of realistic size: own-message checks consult it.
+            let rooms: serde_json::Map<String, serde_json::Value> = (0..30)
+                .map(|index| {
+                    let name = format!("room-{index:02}");
+                    let path = root.join("workspaces").join(&name);
+                    (name, serde_json::json!(path.to_string_lossy()))
+                })
+                .collect();
+            fs::write(
+                root.join("rooms.json"),
+                serde_json::to_vec_pretty(&rooms).expect("rooms JSON"),
+            )
+            .expect("write rooms.json");
             fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).expect("write rules");
             let participant = crate::participant::bind_test_actor(&context, "alpha");
             let address = Address {
@@ -3852,10 +3865,16 @@ body
                     crate::mailbox::encode_mail(&envelope, "bench mail body").expect("encode"),
                 )
                 .expect("write mail");
+                // Half of the read history is the acting participant's own:
+                // each own message takes the remote-origin check.
+                let mut message = channel_message(&id, "tax", "beta");
+                if index % 2 == 0 && index < history - UNREAD {
+                    message.from = "alpha".to_owned();
+                    message.from_participant = Some(participant.id.clone());
+                }
                 fs::write(
                     channel_dir.join("messages").join(format!("{id}.msg")),
-                    encode_message(&channel_message(&id, "tax", "beta"), "bench channel body")
-                        .expect("encode"),
+                    encode_message(&message, "bench channel body").expect("encode"),
                 )
                 .expect("write channel message");
                 if index < history - UNREAD {
