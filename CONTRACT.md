@@ -541,13 +541,17 @@ their existing success semantics.
   membership. `--body`/`--body-file` imply `--send`, so the verb is
   optional once a body is named; the deprecated positional FILE still requires
   it. After a successful local write, JSON includes
-  `cross_host:{status:"queued"|"local_only",reason?}`. `queued` means this host's
+  `cross_host:{status:"queued"|"local_only"|"unconfirmed",reason?}`. `queued` means this host's
   fresh bridge advertises channel support, this channel is selected by policy,
   and an enrolled peer exists; it does not promise delivery. `local_only` names
-  the reason and prints one stderr line. A roomless participant (`from ==
+  a lasting reason the post will stay here. `unconfirmed` means bridge health is
+  missing, stale, or incomplete; do not resend, and check `post doctor` or the
+  bridge. Both states print one stderr line. Reserved bridge channel names are
+  always local only. A roomless participant (`from ==
   from_participant`) crosses with bridge v2 r6.3; the relay stamps `from_host`.
   Remote reads render `<id>@<host>` and give
-  `reply_to_participant:participant:<id>@<host>`; a local participant id
+  `reply_to_participant` and `reply_to_shared` as
+  `participant:<id>@<host>`; a local participant id
   collision is quarantined. The same 1 KiB subject limit, 32 KiB body guard, and warn-only watch-event
   detection used by direct mail run before the append-only channel write.
   Bodies are scanned for `@<room>` word-boundary mentions of registered rooms

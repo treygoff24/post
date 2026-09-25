@@ -38,10 +38,12 @@ guessing.
   `from_host` into the relayed copy. The receiving bridge verifies that it
   matches the branch host and refuses import if the sender id already belongs
   to a local participant (`participant_id_collision` in channel quarantine).
-  Post shows `<id>@<host>` and `reply_to_participant` as
-  `participant:<id>@<host>`. A channel send that cannot currently leave this
-  host succeeds locally and reports `cross_host.status=local_only` with a
-  reason in JSON and stderr; `queued` only means eligible for a future tick.
+  Post shows `<id>@<host>` and both reply fields as
+  `participant:<id>@<host>`. A channel send succeeds locally. Its receipt says
+  `queued` when eligible for a future tick, `local_only` for a lasting relay
+  block, or `unconfirmed` when bridge health cannot confirm relay yet. The
+  latter two carry a reason in JSON and stderr; do not resend an `unconfirmed`
+  post, and check `post doctor` or the bridge.
 - **Channel wake files (v2).** Each imported channel message also writes one
   `bridge/events/<channel>/<id>.json` holding `host`, `channel`, `id`,
   `from`, `event`, and `mentions`, never subject or body. It is a hook point

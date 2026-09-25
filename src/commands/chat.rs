@@ -2366,13 +2366,19 @@ fn send(
             signature_tag: args.signature_ref.as_deref(),
         },
     )?;
-    let local_only = crate::bridge_topology::channel_local_only_reason(
+    let relay_status = crate::bridge_topology::channel_relay_status(
         context,
         &message.channel,
         message.from_participant.as_deref() == Some(message.from.as_str()),
     );
-    if let Some(reason) = &local_only {
-        eprintln!("post: #{} sent locally only: {reason}", message.channel);
+    match &relay_status {
+        crate::bridge_topology::ChannelRelayStatus::Queued => {}
+        crate::bridge_topology::ChannelRelayStatus::LocalOnly(reason) => {
+            eprintln!("post: #{} sent locally only: {reason}", message.channel);
+        }
+        crate::bridge_topology::ChannelRelayStatus::Unconfirmed(reason) => {
+            eprintln!("post: #{} relay not confirmed: {reason}", message.channel);
+        }
     }
     // The message is committed; a failed seen-mark must not turn the send
     // into an error, so it degrades to a warning. It is also bounded: a
@@ -2390,13 +2396,19 @@ fn send(
                 ok: true,
                 message,
                 cross_host: output::ChatCrossHost {
-                    status: if local_only.is_some() {
-                        "local_only"
-                    } else {
-                        "queued"
+                    status: match &relay_status {
+                        crate::bridge_topology::ChannelRelayStatus::Queued => "queued",
+                        crate::bridge_topology::ChannelRelayStatus::LocalOnly(_) => "local_only",
+                        crate::bridge_topology::ChannelRelayStatus::Unconfirmed(_) => "unconfirmed",
                     }
                     .to_owned(),
-                    reason: local_only,
+                    reason: match relay_status {
+                        crate::bridge_topology::ChannelRelayStatus::Queued => None,
+                        crate::bridge_topology::ChannelRelayStatus::LocalOnly(reason)
+                        | crate::bridge_topology::ChannelRelayStatus::Unconfirmed(reason) => {
+                            Some(reason)
+                        }
+                    },
                 },
             },
             pretty,

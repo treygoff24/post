@@ -220,10 +220,11 @@ pub(crate) fn channel_reply_metadata(
         message.from_participant.as_deref(),
     ) {
         if message.from == participant && crate::bridge_topology::valid_host(host) {
+            let address = format!("participant:{participant}@{host}");
             return ReplyMetadata {
                 origin: "remote".to_owned(),
-                participant: Some(format!("participant:{participant}@{host}")),
-                shared: message.from.clone(),
+                participant: Some(address.clone()),
+                shared: address,
             };
         }
     }

@@ -188,8 +188,150 @@ fn roomless_channel_send_reports_when_it_stays_local() {
     let receipt: Value = from_stdout(&no_tick);
     assert_eq!(
         receipt["cross_host"]["reason"],
-        "no running bridge reported"
+        "bridge has not reported recently; the post relays on the bridge's next tick if it is running"
     );
+    assert_eq!(receipt["cross_host"]["status"], "unconfirmed");
+    assert!(common::stderr(&no_tick).contains("relay not confirmed:"));
+}
+
+#[test]
+fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let roomless =
+        participant_id(&sandbox.bind_codex("relay-receipt", &sandbox.path, None)).to_owned();
+    let room_sender = sandbox.test_participant("alpha");
+    for (participant, cwd, channel) in [
+        (roomless.as_str(), sandbox.path.as_path(), "relay-state"),
+        (roomless.as_str(), sandbox.path.as_path(), "bridge"),
+        (roomless.as_str(), sandbox.path.as_path(), "archive"),
+        (
+            roomless.as_str(),
+            sandbox.path.as_path(),
+            ".rooms.json.x.tmp",
+        ),
+        (room_sender.as_str(), alpha.as_path(), "relay-state"),
+    ] {
+        let joined =
+            sandbox.run_as_participant(&["chat", channel, "--join", "--json"], participant, cwd);
+        assert!(joined.status.success(), "{}", common::stderr(&joined));
+    }
+    let bridge = sandbox.mail_root.join("bridge");
+    fs::create_dir_all(bridge.join("registry")).expect("bridge registry");
+    fs::write(bridge.join("config.json"), r#"{"host":"mac"}"#).expect("bridge config");
+    fs::write(
+        bridge.join("registry/hosts.json"),
+        r#"{"v":1,"hosts":["mac","trey"]}"#,
+    )
+    .expect("peer registry");
+    let fresh = sandbox.read_participant(&roomless)["last_seen"]
+        .as_str()
+        .expect("fresh participant timestamp")
+        .to_owned();
+    let write_health = |ticked_at: &str, capabilities: &[&str], interval_s: Option<u64>| {
+        let mut health = serde_json::json!({
+            "ticked_at": ticked_at,
+            "capabilities": capabilities,
+            "interval_s": interval_s,
+        });
+        if interval_s.is_none() {
+            health
+                .as_object_mut()
+                .expect("health object")
+                .remove("interval_s");
+        }
+        fs::write(bridge.join("health.json"), health.to_string()).expect("bridge health");
+    };
+    let send = |participant: &str, cwd: &Path, channel: &str| {
+        let output = sandbox.run_as_participant(
+            &[
+                "chat",
+                channel,
+                "--body",
+                "receipt probe",
+                "--anyway",
+                "--json",
+            ],
+            participant,
+            cwd,
+        );
+        assert!(output.status.success(), "{}", common::stderr(&output));
+        let receipt: Value = from_stdout(&output);
+        (receipt, common::stderr(&output))
+    };
+
+    write_health(&fresh, &["roomless-channel-v1"], Some(30));
+    let (queued, stderr) = send(&roomless, &sandbox.path, "relay-state");
+    assert_eq!(queued["cross_host"]["status"], "queued");
+    assert!(queued["cross_host"].get("reason").is_none());
+    assert!(!stderr.contains("relay not confirmed"));
+
+    write_health(&fresh, &[], Some(30));
+    let (unsupported, stderr) = send(&roomless, &sandbox.path, "relay-state");
+    assert_eq!(unsupported["cross_host"]["status"], "local_only");
+    assert_eq!(
+        unsupported["cross_host"]["reason"],
+        "running bridge cannot publish roomless senders"
+    );
+    assert!(stderr.contains("sent locally only: running bridge cannot publish roomless senders"));
+
+    let (room, _) = send(&room_sender, &alpha, "relay-state");
+    assert_eq!(room["cross_host"]["status"], "queued");
+
+    write_health(
+        "2000-01-01T00:00:00+00:00",
+        &["roomless-channel-v1"],
+        Some(30),
+    );
+    let (stale, stderr) = send(&roomless, &sandbox.path, "relay-state");
+    assert_eq!(stale["cross_host"]["status"], "unconfirmed");
+    assert!(stale["cross_host"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not reported recently"));
+    assert!(stderr.contains("relay not confirmed:"));
+
+    write_health(&fresh, &["roomless-channel-v1"], None);
+    let (missing_interval, _) = send(&roomless, &sandbox.path, "relay-state");
+    assert_eq!(missing_interval["cross_host"]["status"], "unconfirmed");
+    assert!(missing_interval["cross_host"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("interval_s"));
+
+    write_health(&fresh, &["roomless-channel-v1"], Some(30));
+    fs::write(
+        bridge.join("registry/hosts.json"),
+        r#"{"v":1,"hosts":["mac"]}"#,
+    )
+    .expect("no peer registry");
+    let (no_peers, _) = send(&roomless, &sandbox.path, "relay-state");
+    assert_eq!(no_peers["cross_host"]["status"], "local_only");
+    assert_eq!(no_peers["cross_host"]["reason"], "no enrolled peer hosts");
+
+    fs::write(
+        bridge.join("registry/hosts.json"),
+        r#"{"v":1,"hosts":["mac","trey"]}"#,
+    )
+    .expect("restore peers");
+    let (reserved, _) = send(&roomless, &sandbox.path, "bridge");
+    assert_eq!(reserved["cross_host"]["status"], "local_only");
+    assert!(reserved["cross_host"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("bridge"));
+    assert!(reserved["cross_host"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("reserved"));
+    for channel in ["archive", ".rooms.json.x.tmp"] {
+        let (reserved, _) = send(&roomless, &sandbox.path, channel);
+        assert_eq!(reserved["cross_host"]["status"], "local_only");
+        assert!(reserved["cross_host"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains(channel));
+    }
 }
 
 #[test]

@@ -292,7 +292,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "history_before_join",
             "history_hint",
         ]),
-        chat_send: fields(&["ok", "message", "cross_host{status,reason?}"]),
+        chat_send: fields(&["ok", "message", "cross_host{status=queued|local_only|unconfirmed,reason?}"]),
         chat_read: fields(&[
             "ok",
             "framing",

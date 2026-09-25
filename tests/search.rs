@@ -242,6 +242,10 @@ fn search_imported_roomless_channel_sender_keeps_host_and_reply_address() {
         result.results[0].reply_to_participant.as_deref(),
         Some("participant:claude-76a2b853@mac")
     );
+    assert_eq!(
+        result.results[0].reply_to_shared,
+        "participant:claude-76a2b853@mac"
+    );
     let text = sandbox.run_as_participant(
         &[
             "search",
