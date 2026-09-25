@@ -4,12 +4,17 @@
 // (approved; its E1-E8 items are cited inline where they bind the code).
 //
 //   post-doorbell run                        the supervisor (launchd / systemd user service)
-//   post-doorbell enable [--focused] [--desktop]
-//   post-doorbell disable
-//   post-doorbell subscribe --channel <name> [--unsubscribe]
-//   post-doorbell unsubscribe --channel <name>
+//   post-doorbell enable [--focused] [--desktop] [--room <room>]
+//   post-doorbell disable [--room <room>]
+//   post-doorbell subscribe --channel <name> [--unsubscribe] [--room <room>]
+//   post-doorbell unsubscribe --channel <name> [--room <room>]
+//   post-doorbell mute --channel <name> [--room <room>]
+//   post-doorbell unmute --channel <name> [--room <room>]
 //   post-doorbell select --pane <pane_id>
-//   post-doorbell status [--json]
+//   post-doorbell status [--json] [--room <room>]
+//   post-doorbell resident add --room <room> -- <argv...>
+//   post-doorbell resident remove --room <room>
+//   post-doorbell resident list
 //
 // What it does. Every 2 seconds it lists herdr panes and matches sha256 of each
 // pane's agent_session value against the exact conversation_key_digest in
@@ -53,6 +58,10 @@ import { fileURLToPath } from "node:url";
 export const SUPERVISOR_VERSION = "1.0.0";
 export const NOTICE_TAG = "[post-doorbell:v2]";
 export const SINK_HERDR = "herdr";
+// A resident ring is a command, not a Herdr prompt. sysexits.h EX_TEMPFAIL.
+export const SINK_COMMAND = "command";
+export const EX_TEMPFAIL = 75;
+export const RESIDENT_RING_TIMEOUT_MS = 30_000;
 
 export const DEFAULTS = Object.freeze({
   discoveryMs: 2000,
@@ -67,6 +76,10 @@ export const DEFAULTS = Object.freeze({
   // safe cap for it or the other host-wide listings.
   participantListCapBytes: 64 * 1024 * 1024,
   commandTimeoutMs: 10_000,
+  residentTimeoutMs: RESIDENT_RING_TIMEOUT_MS,
+  // A resident that answers 75 is usually mid-tick, which can run an hour;
+  // re-asking every discovery cycle would spawn the ring command ~1,800 times.
+  residentBusyRetryMs: 30_000,
   backoffBaseMs: 5_000,
   backoffCapMs: 300_000,
   brokenAfter: 5,
@@ -216,6 +229,7 @@ export function resolvePaths(env = process.env) {
     root,
     doorbell,
     prefsDir: path.join(doorbell, "prefs"),
+    residentsDir: path.join(doorbell, "residents"),
     stateDir: path.join(doorbell, "state"),
     lockFile: path.join(doorbell, "supervisor.lock"),
     heartbeatFile: path.join(doorbell, "heartbeat.json"),
@@ -382,13 +396,33 @@ export function eventKey(event) {
   ]);
 }
 
-export function selectEligible(events, subscribedChannels) {
+export function selectEligible(events, subscribedChannels, mutedChannels) {
   const subscribed = subscribedChannels instanceof Set ? subscribedChannels : new Set(subscribedChannels ?? []);
+  const muted = mutedChannels instanceof Set ? mutedChannels : new Set(mutedChannels ?? []);
   return events.filter((event) => {
+    // Mute beats subscribe: a muted channel rings for nothing, mentions included.
+    if (typeof event.channel === "string" && muted.has(event.channel)) return false;
     if (event.event === "mail" || event.event === "unreadable") return true;
     if (event.reason === "mention") return true;
     return subscribed.has(event.channel);
   });
+}
+
+// The one reason a resident command is told. Mention outranks mail, mail
+// outranks ordinary channel traffic. Nothing else about the batch is passed.
+const REASON_RANK = { mention: 3, mail: 2, channel: 1 };
+
+export function batchReason(events) {
+  let best = null;
+  let rank = 0;
+  for (const event of events) {
+    const next = REASON_RANK[event?.reason] ?? 0;
+    if (next > rank) {
+      rank = next;
+      best = event.reason;
+    }
+  }
+  return best;
 }
 
 export function blindSpots(eligible) {
@@ -405,8 +439,10 @@ export function blindSpots(eligible) {
 // reason `channel` (never `mention`), so any reason filter narrower than
 // "everything" could hide one, and a reason post adds later would vanish
 // silently. Selection happens here, after parsing (design, B1 check).
-export function snapshotArgs() {
-  return ["watch", "--snapshot", "--json", "--limit", "0"];
+export function snapshotArgs(room) {
+  const args = ["watch", "--snapshot", "--json", "--limit", "0"];
+  if (room) args.push("--room", room);
+  return args;
 }
 
 // ------------------------------------------------------------------ notice
@@ -499,7 +535,7 @@ export function prefsPath(paths, participant) {
 // file with no `enabled` field means enabled; only a stored `enabled: false`,
 // written by `disable`, opts out. `focused` and `desktop` stay opt-in.
 export function defaultPrefs(participant) {
-  return { version: 0, participant, enabled: true, focused: false, desktop: false, channels: [], selection: null };
+  return { version: 0, participant, enabled: true, focused: false, desktop: false, channels: [], muted: [], selection: null };
 }
 
 export function loadPrefs(paths, participant) {
@@ -513,6 +549,9 @@ export function loadPrefs(paths, participant) {
   prefs.focused = raw.focused === true;
   prefs.desktop = raw.desktop === true;
   prefs.channels = Array.isArray(raw.channels) ? [...new Set(raw.channels.filter(validChannelName))].sort() : [];
+  // Absent `muted` is none muted. A present field is the mute list; it never
+  // changes channel membership.
+  prefs.muted = Array.isArray(raw.muted) ? [...new Set(raw.muted.filter(validChannelName))].sort() : [];
   if (
     raw.selection &&
     typeof raw.selection.pane === "string" &&
@@ -537,6 +576,49 @@ export function updatePrefs(paths, participant, mutate) {
   prefs.updated = new Date().toISOString();
   writeFileAtomic(prefsPath(paths, participant), `${JSON.stringify(prefs, null, 2)}\n`);
   return prefs;
+}
+
+// A resident ring target: doorbell/residents/<room>.json holds the room and
+// the argv to exec. The filename is the room. No pane, digest, or session.
+export function residentPath(paths, room) {
+  return path.join(paths.residentsDir, `${room}.json`);
+}
+
+export function loadResident(paths, room) {
+  if (!validStateId(room)) return null;
+  const raw = readJson(residentPath(paths, room));
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (raw.room !== room) return null;
+  if (!Array.isArray(raw.argv) || raw.argv.length === 0 || raw.argv.some((arg) => typeof arg !== "string" || arg.length === 0)) {
+    return null;
+  }
+  return { room, argv: [...raw.argv] };
+}
+
+export function saveResident(paths, room, argv) {
+  if (!validStateId(room)) throw new Error(`invalid room: ${room}`);
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some((arg) => typeof arg !== "string" || arg.length === 0)) {
+    throw new Error("resident argv must be a non-empty list of strings");
+  }
+  const record = { room, argv: [...argv] };
+  writeFileAtomic(residentPath(paths, room), `${JSON.stringify(record, null, 2)}\n`);
+  return record;
+}
+
+export function residentGenerationHash(argv) {
+  return sha256(JSON.stringify(["command", argv])).slice(0, 16);
+}
+
+// Identity of a file for cache keys. mtime alone collides on Linux's coarse
+// clock; a temp-and-rename gets a new inode, and the key carries that plus
+// size and nanosecond mtime and ctime.
+export function fileIdentity(file) {
+  try {
+    const st = fs.statSync(file, { bigint: true });
+    return `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+  } catch {
+    return null;
+  }
 }
 
 // ------------------------------------------------------------------ state
@@ -610,6 +692,7 @@ export class Supervisor {
     this.postListFailLogAt = -Infinity;
     this.knownRootDirs = null;
     this.prefsCache = new Map();
+    this.residentCache = new Map();
     this.membership = new Map();
     this.membershipState = { at: -Infinity, attemptAt: -Infinity, stale: true, running: false };
     this.logged = new Set();
@@ -623,6 +706,10 @@ export class Supervisor {
     this.lastReconcileAt = -Infinity;
     this.reconcileRound = null;
     this.herdrOk = null;
+    // True when no herdr binary exists on this host (spawn ENOENT): a
+    // headless host, such as a resident's cell, has no panes to ring. Any
+    // other herdr failure stays a failure.
+    this.herdrAbsent = false;
     this.postOk = null;
     this.lastDiscoveryAt = null;
     this.lastHealthJson = null;
@@ -635,6 +722,7 @@ export class Supervisor {
   }
 
   defaultExec(kind, args, { participant, timeoutMs, capBytes } = {}) {
+    if (kind === "resident") return this.execResident(args, { timeoutMs });
     const bin = kind === "post" ? this.paths.postBin : kind === "herdr" ? this.paths.herdrBin : this.paths.cmuxBin;
     const env = { ...this.env, POST_MAIL_ROOT: this.paths.root };
     delete env.POST_PARTICIPANT;
@@ -645,6 +733,28 @@ export class Supervisor {
       cwd: this.paths.doorbell,
       timeoutMs: timeoutMs ?? this.config.commandTimeoutMs,
       capBytes,
+      children: this.children,
+    });
+  }
+
+  // The ring contract: argv plus `--reason <r>`, and an env that carries no
+  // mail. Subject, sender, body, and preview are never copied in.
+  residentRingEnv() {
+    const env = {};
+    for (const key of ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT"]) {
+      if (typeof this.env[key] === "string" && this.env[key] !== "") env[key] = this.env[key];
+    }
+    env.POST_MAIL_ROOT = this.paths.root;
+    return env;
+  }
+
+  execResident(args, { timeoutMs } = {}) {
+    const [bin, ...rest] = args;
+    return runCommand(bin, rest, {
+      env: this.residentRingEnv(),
+      cwd: this.paths.doorbell,
+      timeoutMs: timeoutMs ?? this.config.residentTimeoutMs,
+      capBytes: 1 << 16,
       children: this.children,
     });
   }
@@ -683,13 +793,7 @@ export class Supervisor {
   // one mtime. Every prefs write is a temp-and-rename, which gives it a new
   // inode; the key carries that plus size and nanosecond mtime and ctime.
   prefsFor(participant) {
-    let mtime = null;
-    try {
-      const st = fs.statSync(prefsPath(this.paths, participant), { bigint: true });
-      mtime = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
-    } catch {
-      mtime = null;
-    }
+    const mtime = fileIdentity(prefsPath(this.paths, participant));
     const cached = this.prefsCache.get(participant);
     if (cached && cached.mtime === mtime) return cached.prefs;
     const prefs = loadPrefs(this.paths, participant);
@@ -793,6 +897,14 @@ export class Supervisor {
         agents = undefined;
       }
     }
+    if (!Array.isArray(agents) && listed.spawnError === "ENOENT") {
+      // No herdr on this host at all: zero panes, and residents still ring.
+      if (!this.herdrAbsent) this.emit({ type: "discovery", problem: "herdr is not installed; only residents can ring on this host" });
+      this.herdrAbsent = true;
+      agents = [];
+    } else if (Array.isArray(agents)) {
+      this.herdrAbsent = false;
+    }
     if (!Array.isArray(agents)) {
       // A herdr error is not evidence that any target is gone: nothing retires.
       this.herdrOk = false;
@@ -800,7 +912,7 @@ export class Supervisor {
       return;
     }
     this.logged.delete("herdr-list-failed");
-    this.herdrOk = true;
+    this.herdrOk = this.herdrAbsent ? null : true;
     await this.maybeRefreshParticipants();
     if (!this.participantsLoaded) return;
     this.lastDiscoveryAt = this.now();
@@ -913,6 +1025,7 @@ export class Supervisor {
     }
 
     for (const [key, sub] of this.subs) {
+      if (sub.sink === SINK_COMMAND) continue;
       if (seen.has(key)) continue;
       const binding = bindings.get(sub.participant);
       const stillCarried = binding?.state === "ambiguous" && binding.panes.some(
@@ -942,6 +1055,66 @@ export class Supervisor {
     this.pump();
   }
 
+  // Room-keyed command rings. A resident needs no pane, no digest, and no
+  // live participant: the scan is `post watch --snapshot --room <room>`.
+  discoverResidents() {
+    if (this.halted) return;
+    let names = [];
+    try {
+      names = fs.readdirSync(this.paths.residentsDir).filter((name) => name.endsWith(".json"));
+    } catch {
+      names = [];
+    }
+    const seen = new Set();
+    for (const name of names) {
+      const room = name.slice(0, -5);
+      if (!validStateId(room)) continue;
+      const identity = fileIdentity(residentPath(this.paths, room));
+      const cached = this.residentCache.get(room);
+      let record;
+      if (cached && cached.identity === identity) record = cached.record;
+      else {
+        record = loadResident(this.paths, room);
+        this.residentCache.set(room, { identity, record });
+      }
+      if (!record) {
+        this.logOnce(`bad-resident:${room}`, { type: "resident", problem: "resident file is not a room plus argv", room });
+        continue;
+      }
+      const prefs = this.prefsFor(room);
+      const genHash = residentGenerationHash(record.argv);
+      const key = `${room}|${SINK_COMMAND}|${genHash}`;
+      seen.add(key);
+      let sub = this.subs.get(key);
+      if (!sub) {
+        const generation = { pane: null, terminal: null, digest: genHash, argv: record.argv };
+        sub = this.createSub(room, SINK_COMMAND, generation, genHash);
+        sub.room = room;
+        this.emit({ type: "generation", participant: room, sink: SINK_COMMAND, generation: genHash });
+      }
+      sub.room = room;
+      if (sub.prefsVersionSeen !== prefs.version) {
+        if (sub.prefsVersionSeen !== undefined && sub.armed) this.markDirty(sub, "prefs");
+        sub.prefsVersionSeen = prefs.version;
+      }
+      const armed = prefs.enabled === true;
+      if (armed !== sub.armed) {
+        sub.armed = armed;
+        this.emit({ type: "arm", participant: room, sink: SINK_COMMAND, generation: genHash, armed, prefs_version: prefs.version });
+        if (armed) this.markDirty(sub, "armed");
+      }
+      // No pane to be busy or focused. The command itself reports busy with exit 75.
+      const scannable = armed;
+      if (scannable && !sub.scannable && sub.armed) this.markDirty(sub, "scannable");
+      sub.scannable = scannable;
+    }
+    for (const [key, sub] of this.subs) {
+      if (sub.sink !== SINK_COMMAND || seen.has(key)) continue;
+      this.retire(sub, "resident removed");
+    }
+    this.rearmWatches();
+  }
+
   createSub(participant, sink, generation, genHash) {
     const sub = {
       key: `${participant}|${sink}|${genHash}`,
@@ -966,6 +1139,9 @@ export class Supervisor {
       lastSuccessAt: null,
       lastError: null,
       blindSpots: [],
+      pendingCount: 0,
+      lastExit: null,
+      lastRingAt: null,
       scanPrefsVersion: null,
       scanChannels: null,
       knownChannels: new Set(),
@@ -1132,7 +1308,16 @@ export class Supervisor {
     add(this.paths.root, false, "root");
     add(this.paths.prefsDir, false, "prefs");
     add(this.paths.doorbell, false, "doorbell");
+    add(this.paths.residentsDir, false, "residents");
     for (const sub of this.armedSubs()) {
+      if (sub.sink === SINK_COMMAND) {
+        if (validStateId(sub.room)) add(path.join(this.paths.root, sub.room), true, "room", sub.room);
+        const channels = new Set([...sub.knownChannels, ...this.prefsFor(sub.room).channels]);
+        for (const channel of channels) {
+          if (validStateId(channel)) add(path.join(this.paths.root, "channels", channel), true, "channel", sub.room);
+        }
+        continue;
+      }
       const row = this.participants.get(sub.participant);
       add(path.join(this.paths.root, "participants", sub.participant), true, "participant", sub.participant);
       if (typeof row?.workspace === "string" && validStateId(row.workspace)) {
@@ -1259,6 +1444,14 @@ export class Supervisor {
           this.hint(["#reconcile"]);
         }
         return;
+      case "residents": {
+        const room = name.endsWith(".json") ? name.slice(0, -5) : "";
+        if (room && validStateId(room)) {
+          this.residentCache.delete(room);
+          this.hint([room]);
+        }
+        return;
+      }
       default:
         if (ignoredHintFile(name)) return;
         if (spec.kind === "participant" && path.basename(name) === "channels.json") {
@@ -1379,8 +1572,10 @@ export class Supervisor {
     this.stats.snapshots += 1;
     if (hinted) this.stats.hintScans += 1;
     else this.stats.reconcileScans += 1;
-    const result = await this.exec("post", snapshotArgs(), {
-      participant: sub.participant,
+    const commandSink = sub.sink === SINK_COMMAND;
+    const result = await this.exec("post", commandSink ? snapshotArgs(sub.room) : snapshotArgs(), {
+      participant: commandSink ? undefined : sub.participant,
+      room: commandSink ? sub.room : undefined,
       timeoutMs: this.config.snapshotTimeoutMs,
       capBytes: this.config.snapshotCapBytes,
     });
@@ -1390,7 +1585,7 @@ export class Supervisor {
       this.recordFailure(sub, stage, failureDetail(result));
       return;
     }
-    if (/participant: unbound/.test(String(result.stderr ?? ""))) {
+    if (!commandSink && /participant: unbound/.test(String(result.stderr ?? ""))) {
       this.recordFailure(sub, "snapshot_unbound", failureDetail(result));
       return;
     }
@@ -1402,7 +1597,7 @@ export class Supervisor {
     for (const event of parsed.events) {
       if (event.event !== "mail" && typeof event.channel === "string") sub.knownChannels.add(event.channel);
     }
-    const eligible = selectEligible(parsed.events, prefs.channels);
+    const eligible = selectEligible(parsed.events, prefs.channels, prefs.muted);
     const keys = [...new Set(eligible.map(eventKey))];
     const state = this.loadSubState(sub);
     const announced = new Set(state.announced);
@@ -1420,45 +1615,77 @@ export class Supervisor {
     let next = { announced: [...announced].filter((key) => keys.includes(key)), notified: [...notified].filter((key) => keys.includes(key)) };
     let failed = null;
     let deferred = false;
-    if (freshAgent.length > 0 || freshDesktop.length > 0) {
-      const check = await this.recheckParticipant(sub);
-      if (this.halted || sub.retired) return;
-      if (check.retired) {
-        this.retire(sub, check.retired);
-        return;
-      }
-      if (check.failed) {
-        this.recordFailure(sub, "participant_recheck", check.failed);
-        return;
-      }
-      if (freshAgent.length > 0) {
-        const ring = await this.ring(sub, prefs, eligible);
-        if (this.halted) return;
+    let busy = false;
+    sub.pendingCount = freshAgent.length;
+    if (freshAgent.length > 0 || (!commandSink && freshDesktop.length > 0)) {
+      if (commandSink) {
+        const ring = await this.ringResident(sub, freshAgent);
+        if (this.halted || sub.retired) return;
         if (ring.outcome === "retired") {
           this.retire(sub, ring.reason);
           return;
         }
         if (ring.outcome === "failed") failed = ring;
-        else if (ring.outcome === "deferred") deferred = true;
-        else next.announced = keys;
-        this.outcome(sub, ring.outcome, prefs, eligible, ring);
-      }
-      if (freshDesktop.length > 0) {
-        const desk = await this.desktopNotify(sub, eligible);
-        if (this.halted) return;
-        if (desk.ok) {
-          next.notified = keys;
-          this.outcome(sub, "notified", prefs, eligible, {});
-        } else {
-          failed = failed ?? { outcome: "failed", stage: "desktop", detail: desk.detail };
-          this.outcome(sub, "failed", prefs, eligible, { stage: "desktop", detail: desk.detail });
+        else if (ring.outcome === "busy") busy = true;
+        else {
+          next.announced = keys;
+          sub.pendingCount = 0;
+        }
+        this.outcome(sub, ring.outcome === "busy" ? "deferred" : ring.outcome, prefs, eligible, ring);
+      } else {
+        const check = await this.recheckParticipant(sub);
+        if (this.halted || sub.retired) return;
+        if (check.retired) {
+          this.retire(sub, check.retired);
+          return;
+        }
+        if (check.failed) {
+          this.recordFailure(sub, "participant_recheck", check.failed);
+          return;
+        }
+        if (freshAgent.length > 0) {
+          const ring = await this.ring(sub, prefs, eligible);
+          if (this.halted) return;
+          if (ring.outcome === "retired") {
+            this.retire(sub, ring.reason);
+            return;
+          }
+          if (ring.outcome === "failed") failed = ring;
+          else if (ring.outcome === "deferred") deferred = true;
+          else {
+            next.announced = keys;
+            sub.pendingCount = 0;
+          }
+          this.outcome(sub, ring.outcome, prefs, eligible, ring);
+        }
+        if (freshDesktop.length > 0) {
+          const desk = await this.desktopNotify(sub, eligible);
+          if (this.halted) return;
+          if (desk.ok) {
+            next.notified = keys;
+            this.outcome(sub, "notified", prefs, eligible, {});
+          } else {
+            failed = failed ?? { outcome: "failed", stage: "desktop", detail: desk.detail };
+            this.outcome(sub, "failed", prefs, eligible, { stage: "desktop", detail: desk.detail });
+          }
         }
       }
+    } else {
+      sub.pendingCount = 0;
     }
 
     if (failed) {
       // A failed outcome never advances either set; the scan stays dirty.
       this.recordFailure(sub, failed.stage, failed.detail, { logged: true });
+      return;
+    }
+    if (busy) {
+      // Exit 75: the resident is busy. Do not ack, do not count a failure,
+      // and retry on a later cycle instead of spinning this one.
+      sub.lastOutcome = "busy";
+      sub.lastOutcomeAt = new Date(this.now()).toISOString();
+      sub.lastExit = EX_TEMPFAIL;
+      sub.nextAttemptAt = this.now() + Math.max(this.config.discoveryMs, this.config.residentBusyRetryMs);
       return;
     }
     this.saveSubState(sub, state, next);
@@ -1507,6 +1734,37 @@ export class Supervisor {
     } catch (error) {
       this.emit({ type: "state", problem: "could not save dedupe state; mail may ring again", participant: sub.participant, error: String(error.code ?? error.message) });
     }
+  }
+
+  // Reread the registration immediately before exec, the way a pane ring
+  // rechecks the pane. Exit 0 acks. Exit 75 is busy: the caller does not ack
+  // and does not count a failure. Any other exit, or the timeout, fails.
+  async ringResident(sub, fresh) {
+    const reason = batchReason(fresh);
+    if (reason !== "mention" && reason !== "mail" && reason !== "channel") {
+      return { outcome: "failed", stage: "resident_command", detail: { detail: "batch had no reason" } };
+    }
+    const record = loadResident(this.paths, sub.room);
+    if (!record) return { outcome: "retired", reason: "resident removed" };
+    if (residentGenerationHash(record.argv) !== sub.genHash) return { outcome: "retired", reason: "resident argv changed" };
+    const args = [...record.argv, "--reason", reason];
+    const result = await this.exec("resident", args, {
+      timeoutMs: this.config.residentTimeoutMs,
+      env: this.residentRingEnv(),
+    });
+    if (this.halted) return { outcome: "failed", stage: "halted", detail: {} };
+    if (result.timedOut) {
+      sub.lastExit = null;
+      return { outcome: "failed", stage: "resident_timeout", detail: failureDetail(result) };
+    }
+    sub.lastExit = typeof result.code === "number" ? result.code : null;
+    if (result.code === EX_TEMPFAIL) return { outcome: "busy" };
+    if (result.ok) {
+      sub.lastRingAt = new Date(this.now()).toISOString();
+      sub.lastExit = 0;
+      return { outcome: "accepted" };
+    }
+    return { outcome: "failed", stage: "resident_command", detail: failureDetail(result) };
   }
 
   async recheckParticipant(sub) {
@@ -1629,6 +1887,7 @@ export class Supervisor {
         enabled: prefs.enabled,
         focused_ok: prefs.focused,
         channels: prefs.channels,
+        muted: prefs.muted,
         prefs_version: prefs.version,
         generation: sub ? { hash: sub.genHash, pane: sub.generation.pane, terminal: sub.generation.terminal } : null,
         pane_status: sub?.paneStatus ?? null,
@@ -1653,12 +1912,14 @@ export class Supervisor {
       herdr_version: this.versions.herdr,
       post_version: this.versions.post,
       herdr_ok: this.herdrOk,
+      herdr_absent: this.herdrAbsent,
       post_ok: this.postOk,
       last_discovery_at: this.lastDiscoveryAt === null ? null : new Date(this.lastDiscoveryAt).toISOString(),
       concurrency: this.config.concurrency,
       // Cumulative since start: snapshots taken, split by what caused them.
       stats: { ...this.stats },
       bindings,
+      residents: this.residentHealth(),
       // Watches in backoff after an error; the reconcile timer covers them.
       watch_failures: [...this.watchFailures.values()].map((f) => ({
         target: f.target,
@@ -1670,6 +1931,29 @@ export class Supervisor {
       })),
       retired_recent: this.retired,
     };
+  }
+
+  residentHealth() {
+    const rows = [];
+    for (const sub of this.subs.values()) {
+      if (sub.sink !== SINK_COMMAND) continue;
+      const prefs = this.prefsFor(sub.room);
+      rows.push({
+        room: sub.room,
+        armed: Boolean(sub.armed),
+        enabled: prefs.enabled,
+        channels: prefs.channels,
+        muted: prefs.muted,
+        last_ring_at: sub.lastRingAt ?? null,
+        last_exit: sub.lastExit ?? null,
+        pending: sub.pendingCount ?? 0,
+        last_outcome: sub.lastOutcome ?? null,
+        consecutive_failures: sub.consecutiveFailures,
+        broken: sub.consecutiveFailures >= this.config.brokenAfter,
+      });
+    }
+    rows.sort((a, b) => a.room.localeCompare(b.room));
+    return rows;
   }
 
   writeHealth(force = false) {
@@ -1727,6 +2011,8 @@ export class Supervisor {
   async tick() {
     if (this.halted) return;
     await this.discover();
+    if (this.halted) return;
+    this.discoverResidents();
     if (this.halted) return;
     // The first discovery arms every enabled subscription dirty, and those
     // arming scans are the initial full pass; the reconcile clock starts
@@ -1929,16 +2215,26 @@ async function runSupervisor(paths) {
 function usageText() {
   return [
     "usage: post-doorbell run",
-    "       post-doorbell enable [--focused] [--desktop]",
-    "       post-doorbell disable",
-    "       post-doorbell subscribe --channel <name> [--unsubscribe]",
-    "       post-doorbell unsubscribe --channel <name>",
+    "       post-doorbell enable [--focused] [--desktop] [--room <room>]",
+    "       post-doorbell disable [--room <room>]",
+    "       post-doorbell subscribe --channel <name> [--unsubscribe] [--room <room>]",
+    "       post-doorbell unsubscribe --channel <name> [--room <room>]",
+    "       post-doorbell mute --channel <name> [--room <room>]",
+    "       post-doorbell unmute --channel <name> [--room <room>]",
     "       post-doorbell select --pane <pane_id>",
-    "       post-doorbell status [--json]",
+    "       post-doorbell status [--json] [--room <room>]",
+    "       post-doorbell resident add --room <room> -- <command> [args...]",
+    "       post-doorbell resident remove --room <room>",
+    "       post-doorbell resident list",
     "",
     "Every bound session is rung for direct mail and mentions by default;",
     "disable opts out until enable runs again. subscribe and select never",
     "change that; --focused and --desktop stay opt-in flags on enable.",
+    "A muted channel rings for nothing, mentions included. --room (or",
+    "--resident) targets a headless resident; with neither, the bound",
+    "participant is used, or the cwd room when that match is unambiguous.",
+    "resident add registers a command ring for a room. The supervisor execs",
+    "that command plus --reason mention|mail|channel and nothing else.",
   ].join("\n");
 }
 
@@ -1946,11 +2242,26 @@ class UsageError extends Error {}
 class CommandError extends Error {}
 
 function parseCommandArgs(argv) {
-  const opts = { command: null, focused: false, desktop: false, unsubscribe: false, channels: [], pane: null, json: false };
-  for (let index = 0; index < argv.length; index++) {
-    const arg = argv[index];
+  const splitAt = argv.indexOf("--");
+  const flags = splitAt === -1 ? argv : argv.slice(0, splitAt);
+  const argvRest = splitAt === -1 ? [] : argv.slice(splitAt + 1);
+  const opts = {
+    command: null,
+    subcommand: null,
+    focused: false,
+    desktop: false,
+    unsubscribe: false,
+    channels: [],
+    pane: null,
+    json: false,
+    room: null,
+    resident: null,
+    argvRest,
+  };
+  for (let index = 0; index < flags.length; index++) {
+    const arg = flags[index];
     const value = () => {
-      const next = argv[index + 1];
+      const next = flags[index + 1];
       if (next === undefined || next.startsWith("-")) throw new UsageError(`${arg} requires a value`);
       index += 1;
       return next;
@@ -1961,7 +2272,10 @@ function parseCommandArgs(argv) {
     else if (arg === "--json") opts.json = true;
     else if (arg === "--channel") opts.channels.push(value());
     else if (arg === "--pane") opts.pane = value();
+    else if (arg === "--room") opts.room = value();
+    else if (arg === "--resident") opts.resident = value();
     else if (!arg.startsWith("-") && opts.command === null) opts.command = arg;
+    else if (!arg.startsWith("-") && opts.command === "resident" && opts.subcommand === null) opts.subcommand = arg;
     else throw new UsageError(`unknown argument: ${arg}`);
   }
   if (opts.command === null && opts.unsubscribe) opts.command = "subscribe";
@@ -1969,13 +2283,19 @@ function parseCommandArgs(argv) {
     opts.command = "subscribe";
     opts.unsubscribe = true;
   }
+  if (opts.command === "unmute") {
+    opts.command = "mute";
+    opts.unsubscribe = true;
+  }
   const allowed = {
     run: [],
-    enable: ["focused", "desktop"],
-    disable: [],
-    subscribe: ["channels", "unsubscribe"],
+    enable: ["focused", "desktop", "room", "resident"],
+    disable: ["room", "resident"],
+    subscribe: ["channels", "unsubscribe", "room", "resident"],
+    mute: ["channels", "unsubscribe", "room", "resident"],
     select: ["pane"],
-    status: ["json"],
+    status: ["json", "room", "resident"],
+    resident: ["room", "resident", "argvRest"],
   };
   if (!(opts.command in allowed)) throw new UsageError(opts.command ? `unknown command: ${opts.command}` : "missing command");
   const used = [];
@@ -1985,16 +2305,33 @@ function parseCommandArgs(argv) {
   if (opts.channels.length) used.push("channels");
   if (opts.pane !== null) used.push("pane");
   if (opts.json) used.push("json");
+  if (opts.room !== null) used.push("room");
+  if (opts.resident !== null) used.push("resident");
+  if (opts.argvRest.length) used.push("argvRest");
   for (const flag of used) {
-    if (!allowed[opts.command].includes(flag)) throw new UsageError(`--${flag === "channels" ? "channel" : flag} is not valid with ${opts.command}`);
+    if (!allowed[opts.command].includes(flag)) throw new UsageError(`--${flag === "channels" ? "channel" : flag === "argvRest" ? "" : flag} is not valid with ${opts.command}`.replace("-- is", "extra arguments are"));
   }
-  if (opts.command === "subscribe" && opts.channels.length === 0) throw new UsageError("subscribe requires --channel <name>");
+  if ((opts.command === "subscribe" || opts.command === "mute") && opts.channels.length === 0) {
+    throw new UsageError(`${opts.unsubscribe && opts.command === "mute" ? "unmute" : opts.command} requires --channel <name>`);
+  }
   for (const channel of opts.channels) {
     if (!validChannelName(channel)) throw new UsageError(`invalid channel name: ${JSON.stringify(channel)}`);
   }
+  if (opts.room !== null && !validStateId(opts.room)) throw new UsageError(`invalid room: ${JSON.stringify(opts.room)}`);
+  if (opts.resident !== null && !validStateId(opts.resident)) throw new UsageError(`invalid resident: ${JSON.stringify(opts.resident)}`);
+  if (opts.room && opts.resident && opts.room !== opts.resident) throw new UsageError("--room and --resident name different targets");
   if (opts.command === "select") {
     if (opts.pane === null) throw new UsageError("select requires --pane <pane_id>");
     if (!PANE_ID.test(opts.pane)) throw new UsageError(`invalid pane id: ${JSON.stringify(opts.pane)}`);
+  }
+  if (opts.command === "resident") {
+    const sub = opts.subcommand;
+    if (sub !== "add" && sub !== "remove" && sub !== "list") throw new UsageError("resident requires add, remove, or list");
+    if (sub === "list" && (opts.room || opts.resident || opts.argvRest.length)) throw new UsageError("resident list takes no arguments");
+    if ((sub === "add" || sub === "remove") && !opts.room && !opts.resident) throw new UsageError(`resident ${sub} requires --room <room>`);
+    if (sub === "add" && opts.argvRest.length === 0) throw new UsageError("resident add requires a command after --");
+    if (sub === "remove" && opts.argvRest.length) throw new UsageError("resident remove does not take a command");
+    if (sub === "add" && opts.argvRest.some((arg) => arg.length === 0)) throw new UsageError("resident command arguments must be non-empty");
   }
   return opts;
 }
@@ -2018,6 +2355,59 @@ function resolveActor(paths) {
   if (!validStateId(parsed.id)) throw new CommandError(`participant id ${JSON.stringify(parsed.id)} is outside the doorbell alphabet`);
   if (parsed.participant.ended_at) throw new CommandError(`participant ${parsed.id} has ended; bind again first`);
   return parsed.participant;
+}
+
+// cwd inside a registered room, the way post resolves a room. Two matches at
+// the same depth are ambiguous and refused. POST_FROM wins over cwd.
+function inferRoom(paths) {
+  const pinned = process.env.POST_FROM;
+  if (typeof pinned === "string" && pinned !== "") {
+    if (!validStateId(pinned)) throw new CommandError(`POST_FROM ${JSON.stringify(pinned)} is outside the doorbell alphabet`);
+    return pinned;
+  }
+  const rooms = readJson(path.join(paths.root, "rooms.json"));
+  if (!rooms || typeof rooms !== "object" || Array.isArray(rooms)) return null;
+  let cwd;
+  try {
+    cwd = fs.realpathSync(process.cwd());
+  } catch {
+    return null;
+  }
+  const matches = [];
+  for (const [name, roomPath] of Object.entries(rooms)) {
+    if (typeof roomPath !== "string" || !validStateId(name)) continue;
+    const expanded = roomPath.startsWith("~/") ? path.join(os.homedir(), roomPath.slice(2)) : roomPath;
+    let real;
+    try {
+      real = fs.realpathSync(expanded);
+    } catch {
+      continue;
+    }
+    if (cwd === real || cwd.startsWith(real.endsWith(path.sep) ? real : real + path.sep)) {
+      matches.push({ name, depth: real.split(path.sep).length });
+    }
+  }
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => a.depth - b.depth);
+  const best = matches[matches.length - 1].depth;
+  const winners = matches.filter((match) => match.depth === best);
+  if (winners.length !== 1) throw new CommandError("cwd matches more than one room; pass --room");
+  return winners[0].name;
+}
+
+// Explicit --room / --resident, else the bound participant, else one cwd room.
+function resolveTarget(paths, opts) {
+  const explicit = opts.room || opts.resident;
+  if (explicit) return { id: explicit, kind: "room" };
+  try {
+    const actor = resolveActor(paths);
+    return { id: actor.id, kind: "participant", actor };
+  } catch (error) {
+    if (!(error instanceof CommandError)) throw error;
+    const room = inferRoom(paths);
+    if (!room) throw error;
+    return { id: room, kind: "room" };
+  }
 }
 
 export function liveness(paths, now = Date.now()) {
@@ -2048,7 +2438,7 @@ function printStatus(report) {
     lines.push("health: none recorded");
   } else {
     if (!report.health_current) lines.push(`health below is from a supervisor that is ${live.state}; it is not current`);
-    lines.push(`herdr: ${health.herdr_ok === false ? "FAILING" : "ok"} ${health.herdr_version ?? ""}; post: ${health.post_ok === false ? "FAILING" : "ok"} ${health.post_version ?? ""}`);
+    lines.push(`herdr: ${health.herdr_absent === true ? "not installed (residents only)" : health.herdr_ok === false ? "FAILING" : "ok"} ${health.herdr_version ?? ""}; post: ${health.post_ok === false ? "FAILING" : "ok"} ${health.post_version ?? ""}`);
     if (!health.bindings?.length) lines.push("bindings: none on this host");
     for (const binding of health.bindings ?? []) {
       const armed = binding.armed ? "armed" : binding.state === "ambiguous" ? "unarmed (ambiguous: run post-doorbell select --pane <id>)" : binding.state === "ended" ? "unarmed (ended)" : binding.enabled === false ? "unarmed (disabled: run post-doorbell enable to re-arm)" : "unarmed";
@@ -2059,7 +2449,22 @@ function printStatus(report) {
       else if (binding.consecutive_failures) line += `; ${binding.consecutive_failures} failure(s)`;
       if (binding.last_error) line += ` (${binding.last_error.stage})`;
       if (binding.channels?.length) line += `; channels ${binding.channels.map((c) => `#${c}`).join(" ")}`;
+      if (binding.muted?.length) line += `; muted ${binding.muted.map((c) => `#${c}`).join(" ")}`;
       for (const spot of binding.blind_spots ?? []) line += `; blind spot: ${spot.count} unreadable in ${spot.where}, mentions there unknown`;
+      lines.push(line);
+    }
+    const residents = health.residents ?? [];
+    if (!residents.length) lines.push("residents: none");
+    else lines.push("residents:");
+    for (const resident of residents) {
+      const armed = resident.armed ? "armed" : resident.enabled === false ? "unarmed (disabled)" : "unarmed";
+      let line = `  ${resident.room} ${armed}`;
+      if (resident.last_ring_at) line += `; last ring ${resident.last_ring_at}`;
+      if (resident.last_exit !== null && resident.last_exit !== undefined) line += `; last exit ${resident.last_exit}`;
+      line += `; pending ${resident.pending ?? 0}`;
+      if (resident.broken) line += `; BROKEN after ${resident.consecutive_failures} failures`;
+      if (resident.channels?.length) line += `; channels ${resident.channels.map((c) => `#${c}`).join(" ")}`;
+      if (resident.muted?.length) line += `; muted ${resident.muted.map((c) => `#${c}`).join(" ")}`;
       lines.push(line);
     }
     for (const retired of health.retired_recent ?? []) lines.push(`  retired ${retired.participant} ${retired.pane} (${retired.reason}) at ${retired.at}`);
@@ -2067,15 +2472,91 @@ function printStatus(report) {
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+function listResidents(paths) {
+  let names = [];
+  try {
+    names = fs.readdirSync(paths.residentsDir).filter((name) => name.endsWith(".json")).sort();
+  } catch {
+    names = [];
+  }
+  if (names.length === 0) {
+    process.stdout.write("post-doorbell: no residents\n");
+    return;
+  }
+  for (const name of names) {
+    const room = name.slice(0, -5);
+    const record = loadResident(paths, room);
+    if (!record) {
+      process.stdout.write(`${room}\t(unreadable)\n`);
+      continue;
+    }
+    process.stdout.write(`${record.room}\t${record.argv.join(" ")}\n`);
+  }
+}
+
 function runCommandLine(opts, paths) {
-  if (opts.command === "status") {
-    const report = statusReport(paths);
-    if (opts.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    else printStatus(report);
+  if (opts.command === "resident" && opts.subcommand === "list") {
+    listResidents(paths);
     return 0;
   }
-  const actor = resolveActor(paths);
-  const id = actor.id;
+  if (opts.command === "resident" && opts.subcommand === "add") {
+    const room = opts.room || opts.resident;
+    saveResident(paths, room, opts.argvRest);
+    process.stdout.write(`post-doorbell: resident ${room} rings via ${opts.argvRest.join(" ")}\n`);
+    return 0;
+  }
+  if (opts.command === "resident" && opts.subcommand === "remove") {
+    const room = opts.room || opts.resident;
+    const file = residentPath(paths, room);
+    try {
+      fs.unlinkSync(file);
+    } catch (error) {
+      if (error.code === "ENOENT") throw new CommandError(`no resident ${room}`);
+      throw error;
+    }
+    process.stdout.write(`post-doorbell: removed resident ${room}\n`);
+    return 0;
+  }
+  if (opts.command === "status") {
+    const report = statusReport(paths);
+    let explicit = opts.room || opts.resident;
+    if (!explicit) {
+      try {
+        explicit = resolveActor(paths).id;
+      } catch (error) {
+        if (!(error instanceof CommandError)) throw error;
+        try {
+          explicit = inferRoom(paths);
+        } catch (inferred) {
+          if (!(inferred instanceof CommandError)) throw inferred;
+          explicit = null;
+        }
+      }
+    }
+    if (explicit) {
+      const prefs = loadPrefs(paths, explicit);
+      report.target = {
+        id: explicit,
+        enabled: prefs.enabled,
+        channels: prefs.channels,
+        muted: prefs.muted,
+        prefs_version: prefs.version,
+      };
+    }
+    if (opts.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    else {
+      printStatus(report);
+      if (report.target) {
+        const muted = report.target.muted.length ? report.target.muted.map((c) => `#${c}`).join(" ") : "none";
+        const channels = report.target.channels.length ? report.target.channels.map((c) => `#${c}`).join(" ") : "none";
+        process.stdout.write(`prefs ${report.target.id}: ${report.target.enabled ? "armed" : "disabled"}; channels ${channels}; muted ${muted}\n`);
+      }
+    }
+    return 0;
+  }
+  const target = resolveTarget(paths, opts);
+  const actor = target.actor ?? null;
+  const id = target.id;
   let prefs;
   if (opts.command === "enable") {
     prefs = updatePrefs(paths, id, (p) => {
@@ -2096,7 +2577,17 @@ function runCommandLine(opts, paths) {
       }
       p.channels = [...set].sort();
     });
+  } else if (opts.command === "mute") {
+    prefs = updatePrefs(paths, id, (p) => {
+      const set = new Set(p.muted);
+      for (const channel of opts.channels) {
+        if (opts.unsubscribe) set.delete(channel);
+        else set.add(channel);
+      }
+      p.muted = [...set].sort();
+    });
   } else if (opts.command === "select") {
+    if (!actor) throw new CommandError("select needs a bound post participant; a resident has no pane");
     const env = { ...process.env };
     const result = spawnSync(paths.herdrBin, ["agent", "get", opts.pane], { encoding: "utf8", env, timeout: 10_000 });
     if (result.error || result.status !== 0) {
@@ -2124,7 +2615,8 @@ function runCommandLine(opts, paths) {
   const summary = {
     enable: `enabled for ${id}${prefs.focused ? " (also while focused)" : ""}${prefs.desktop ? " with desktop notifications" : ""}`,
     disable: `disabled for ${id}`,
-    subscribe: `channels for ${id}: ${prefs.channels.length ? prefs.channels.map((c) => `#${c}`).join(" ") : "none"} (direct mail and mentions ${prefs.enabled ? "always ring" : "stay quiet while disabled"})`,
+    subscribe: `channels for ${id}: ${prefs.channels.length ? prefs.channels.map((c) => `#${c}`).join(" ") : "none"} (direct mail and mentions ${prefs.enabled ? "ring, except muted channels" : "stay quiet while disabled"})`,
+    mute: `muted for ${id}: ${prefs.muted.length ? prefs.muted.map((c) => `#${c}`).join(" ") : "none"}`,
     select: `selected pane ${opts.pane} for ${id}`,
   }[opts.command];
   process.stdout.write(`post-doorbell: ${summary}; prefs version ${prefs.version}. Supervisor ${live.state}.\n`);

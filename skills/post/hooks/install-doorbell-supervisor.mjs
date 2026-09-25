@@ -211,7 +211,15 @@ function resolveTools(ctx, { full }) {
   if (!full) return;
   ctx.nodeBin = stableNodePath();
   ctx.postBin = resolveBin(process.env.POST_DOORBELL_POST_BIN, path.join(ctx.home, ".local", "bin", "post"), "post");
-  ctx.herdrBin = resolveBin(process.env.POST_DOORBELL_HERDR_BIN, path.join(ctx.home, ".local", "bin", "herdr"), "herdr");
+  // herdr is optional: a headless host (a resident's cell) has none. Without
+  // an override the expected path is kept, and preflight and the supervisor
+  // both read the resulting ENOENT as "no herdr on this host".
+  try {
+    ctx.herdrBin = resolveBin(process.env.POST_DOORBELL_HERDR_BIN, path.join(ctx.home, ".local", "bin", "herdr"), "herdr");
+  } catch (error) {
+    if (process.env.POST_DOORBELL_HERDR_BIN || !(error instanceof Fail)) throw error;
+    ctx.herdrBin = path.join(ctx.home, ".local", "bin", "herdr");
+  }
   ctx.postEnv = { ...process.env, POST_MAIL_ROOT: ctx.root };
   delete ctx.postEnv.POST_PARTICIPANT;
 }
@@ -640,7 +648,8 @@ function supervisorHealth(ctx, since) {
   if (live.state !== "running") return { ok: false, why: `supervisor ${live.state} (lock ${live.lock})` };
   const health = readJson(path.join(ctx.doorbell, "health.json"));
   if (!health || Date.parse(health.started_at) < since - 1000) return { ok: false, why: "no health from this start yet" };
-  if (health.herdr_ok !== true) return { ok: false, why: "herdr agent list is failing" };
+  // A host with no herdr binary (a resident's cell) is healthy with zero panes.
+  if (health.herdr_ok !== true && health.herdr_absent !== true) return { ok: false, why: "herdr agent list is failing" };
   if (health.post_ok !== true) return { ok: false, why: "post participant list is failing" };
   if (!health.last_discovery_at) return { ok: false, why: "no discovery yet" };
   // Every armed subscription the supervisor can scan must have finished its
@@ -679,7 +688,9 @@ function preflight(ctx, receipt) {
   const version = run(ctx.postBin, ["version", "--json"], { env: ctx.postEnv });
   if (version.error || version.status !== 0) throw new Fail(`preflight failed: \`post version --json\`: ${detail(version)}`);
   const herdr = run(ctx.herdrBin, ["--version"]);
-  if (herdr.error || herdr.status !== 0) throw new Fail(`preflight failed: \`herdr --version\`: ${detail(herdr)}`);
+  // No herdr at all is a headless host: the supervisor runs for residents only.
+  const herdrMissing = herdr.error?.code === "ENOENT";
+  if (!herdrMissing && (herdr.error || herdr.status !== 0)) throw new Fail(`preflight failed: \`herdr --version\`: ${detail(herdr)}`);
   const python = run(ctx.pythonBin, ["-c", "import fcntl"]);
   if (python.error || python.status !== 0) throw new Fail(`preflight failed: ${ctx.pythonBin} cannot import fcntl: ${detail(python)}`);
   const live = liveness(ctx.paths);

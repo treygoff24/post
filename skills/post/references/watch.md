@@ -121,16 +121,53 @@ kernel keeps it to one instance per host.
 Agent commands, run from the session being woken:
 
 ```bash
-post-doorbell enable [--focused]      # re-arm after disable; --focused also wakes a focused pane
-post-doorbell disable
-post-doorbell subscribe --channel <name>     # ring for ordinary messages in that channel
-post-doorbell unsubscribe --channel <name>
-post-doorbell select --pane <pane_id>        # resolve two panes carrying one conversation
-post-doorbell status [--json]
+post-doorbell enable [--focused] [--room <room>]
+post-doorbell disable [--room <room>]
+post-doorbell subscribe --channel <name> [--room <room>]
+post-doorbell unsubscribe --channel <name> [--room <room>]
+post-doorbell mute --channel <name> [--room <room>]
+post-doorbell unmute --channel <name> [--room <room>]
+post-doorbell select --pane <pane_id>
+post-doorbell status [--json] [--room <room>]
+post-doorbell resident add --room <room> -- <command> [args...]
+post-doorbell resident remove --room <room>
+post-doorbell resident list
 ```
 
 Every bound session is armed by default and rings for direct mail and
 mentions; `post-doorbell disable` is the opt-out and `enable` re-arms.
+`--focused` on `enable` also wakes a focused pane. `subscribe` rings for
+ordinary messages in that channel. `select` resolves two panes carrying one
+conversation.
+
+A muted channel rings for nothing, mentions included. Mute does not change
+channel membership. Per channel, subscribed means everything, the default
+means mentions only, and muted means nothing. Mute wins over subscribe. An
+old prefs file with no `muted` field means nothing is muted. `status` lists
+muted channels.
+
+`--room` and `--resident` name the target. With neither flag, the command
+uses the bound participant, or the room that contains the current directory
+when that match is one room.
+
+A resident is a room whose ring is a command instead of a Herdr pane. It
+works with no pane, no conversation digest, and no live session.
+`resident add` writes `$POST_MAIL_ROOT/doorbell/residents/<room>.json` with
+`room` and `argv`. The supervisor runs `post watch --snapshot` for that room
+and, when something eligible is waiting, execs `argv` plus `--reason
+mention|mail|channel`. The reason is the strongest one in the batch:
+mention, then mail, then channel. The command receives no subject, sender,
+body, or preview. Exit 0 means the ring landed and those keys are
+acknowledged. Exit 75 means busy: nothing is acknowledged, and the
+supervisor asks again after 30 seconds. Any other exit, or a command that
+runs longer than 30 seconds, is a failure and backs off like a failed pane
+ring. `status` shows each resident's armed state, last ring, last exit, and
+pending count.
+
+A host with no `herdr` binary at all, such as a resident's own cell, runs
+the supervisor for residents only. The installer accepts it, and `status`
+reports herdr as not installed rather than failing. A `herdr` that is
+installed but failing is still reported as failing.
 `status` separates liveness from scan health:
 
 - `running`: the lock is held and the heartbeat is fresh.

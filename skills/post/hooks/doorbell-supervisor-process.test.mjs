@@ -60,7 +60,9 @@ else if (args[0] === "participant" && args[1] === "show") {
   const row = find(process.env.POST_PARTICIPANT ?? control.actor);
   out(row ? { ok: true, status: "bound", id: row.id, participant: row } : { ok: true, status: "unbound" });
 } else if (args[0] === "watch") {
-  const events = control.snapshots?.[process.env.POST_PARTICIPANT] ?? [];
+  const roomAt = args.indexOf("--room");
+  const key = roomAt >= 0 ? args[roomAt + 1] : process.env.POST_PARTICIPANT;
+  const events = control.snapshots?.[key] ?? [];
   out(events.map((event) => JSON.stringify(event) + "\\n").join(""));
 } else if (args[0] === "channels") out({ ok: true, channels: [] });
 else if (args[0] === "version") out({ ok: true, version: "0.9.0", build_sha: "fake" });
@@ -369,6 +371,111 @@ describe("agent commands", () => {
     assert.equal(report.liveness.state, "stale");
     assert.equal(report.liveness.lock, "held");
     holder.kill("SIGKILL");
+  });
+
+  test("resident add, list, and remove store a room and argv", () => {
+    const host = makeHost();
+    const added = host.cli(["resident", "add", "--room", "free-claude", "--", "/opt/fc-wake", "--flag"]);
+    assert.equal(added.status, 0, added.stderr);
+    const record = JSON.parse(fs.readFileSync(path.join(host.doorbell, "residents", "free-claude.json"), "utf8"));
+    assert.deepEqual(record, { room: "free-claude", argv: ["/opt/fc-wake", "--flag"] });
+    const listed = host.cli(["resident", "list"]);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /^free-claude\t\/opt\/fc-wake --flag$/m);
+    const removed = host.cli(["resident", "remove", "--resident", "free-claude"]);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(fs.existsSync(path.join(host.doorbell, "residents", "free-claude.json")), false);
+    assert.match(host.cli(["resident", "remove", "--room", "free-claude"]).stderr, /no resident/);
+  });
+
+  test("enable, subscribe, mute, and status target a room with no bound participant", () => {
+    const host = makeHost();
+    const room = path.join(host.dir, "free-claude");
+    fs.mkdirSync(room, { recursive: true });
+    fs.writeFileSync(path.join(host.mail, "rooms.json"), JSON.stringify({ "free-claude": room }));
+    let result = host.cli(["enable"], { POST_FROM: "" });
+    // No participant and no POST_FROM: cwd is the host dir, which is not the room.
+    assert.equal(result.status, 1);
+    result = host.cli(["enable", "--room", "free-claude"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /enabled for free-claude/);
+    assert.equal(host.cli(["subscribe", "--channel", "tax", "--resident", "free-claude"]).status, 0);
+    assert.equal(host.cli(["mute", "--channel", "ops", "--room", "free-claude"]).status, 0);
+    const written = prefs(host, "free-claude");
+    assert.deepEqual(written.channels, ["tax"]);
+    assert.deepEqual(written.muted, ["ops"]);
+    assert.equal(written.enabled, true);
+    assert.equal(host.cli(["unmute", "--channel", "ops", "--room", "free-claude"]).status, 0);
+    assert.deepEqual(prefs(host, "free-claude").muted, []);
+    assert.deepEqual(prefs(host, "free-claude").channels, ["tax"], "unmute does not touch subscriptions");
+    const fromCwd = host.cli(["disable"], { cwd: undefined });
+    // spawnSync cwd is not set above; run from the room directory.
+    const inRoom = spawnSync(process.execPath, [SUPERVISOR, "status", "--json"], {
+      encoding: "utf8",
+      cwd: room,
+      env: { ...host.env, POST_FROM: "" },
+      timeout: 20_000,
+    });
+    assert.equal(inRoom.status, 0, inRoom.stderr);
+    const report = JSON.parse(inRoom.stdout);
+    assert.equal(report.target.id, "free-claude");
+    assert.deepEqual(report.target.muted, []);
+    assert.equal(fromCwd.status, 1);
+    const disabled = spawnSync(process.execPath, [SUPERVISOR, "disable"], {
+      encoding: "utf8",
+      cwd: room,
+      env: { ...host.env, POST_FROM: "" },
+      timeout: 20_000,
+    });
+    assert.equal(disabled.status, 0, disabled.stderr);
+    assert.equal(prefs(host, "free-claude").enabled, false);
+    assert.match(host.cli(["status", "--room", "free-claude"]).stdout, /prefs free-claude: disabled; channels #tax; muted none/);
+  });
+
+  test("a resident command rings for the room and status shows it", async () => {
+    const host = makeHost();
+    const ringLog = path.join(host.dir, "ring.json");
+    const wake = path.join(host.dir, "fc-wake.mjs");
+    fs.writeFileSync(
+      wake,
+      `#!/usr/bin/env node\nimport fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(ringLog)}, JSON.stringify({ argv: process.argv.slice(2), env: process.env }));\n`,
+      { mode: 0o755 }
+    );
+    const mail = { ...sampleMail(), id: "20260923-000001-fc0001", subject: "SECRET-SUBJECT", preview: "SECRET-PREVIEW", from: "SECRET-SENDER" };
+    host.control.snapshots["free-claude"] = [mail];
+    host.save();
+    assert.equal(host.cli(["resident", "add", "--room", "free-claude", "--", process.execPath, wake]).status, 0);
+    const child = host.start();
+    const rung = await until(() => {
+      try {
+        return JSON.parse(fs.readFileSync(ringLog, "utf8"));
+      } catch {
+        return false;
+      }
+    }, "resident ring");
+    assert.deepEqual(rung.argv, ["--reason", "mail"]);
+    const envBlob = JSON.stringify(rung.env);
+    assert.equal(envBlob.includes("SECRET-SUBJECT"), false);
+    assert.equal(envBlob.includes("SECRET-PREVIEW"), false);
+    assert.equal(envBlob.includes("SECRET-SENDER"), false);
+    const health = await until(() => {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(host.doorbell, "health.json"), "utf8"));
+        const row = parsed.residents?.find((r) => r.room === "free-claude");
+        return row?.last_exit === 0 ? parsed : false;
+      } catch {
+        return false;
+      }
+    }, "resident health");
+    assert.equal(health.residents[0].armed, true);
+    assert.equal(health.residents[0].pending, 0);
+    const text = host.cli(["status"]).stdout;
+    assert.match(text, /residents:/);
+    assert.match(text, /free-claude armed/);
+    assert.match(text, /last exit 0/);
+    assert.match(text, /pending 0/);
+    child.kill("SIGTERM");
+    await exitWithin(child.exited);
   });
 
   test("help exits 0; bad usage exits 2", () => {

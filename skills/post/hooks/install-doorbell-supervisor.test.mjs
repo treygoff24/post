@@ -435,6 +435,26 @@ describe("install: failed starts", () => {
     }
   });
 
+  test("a host with no herdr at all installs a residents-only supervisor", () => {
+    const host = makeHost("linux");
+    fs.rmSync(path.join(host.dir, "bin", "herdr"));
+    delete host.env.POST_DOORBELL_HERDR_BIN;
+    // A PATH that cannot find herdr but still has python3 (the lock) and node (the fakes).
+    const pathBin = path.join(host.dir, "pathbin");
+    fs.mkdirSync(pathBin);
+    const python = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
+    fs.symlinkSync(python, path.join(pathBin, "python3"));
+    fs.symlinkSync(process.execPath, path.join(pathBin, "node"));
+    host.env.PATH = `${pathBin}:/usr/bin:/bin`;
+    assert.notEqual(spawnSync("sh", ["-c", "command -v herdr"], { encoding: "utf8", env: host.env }).status, 0, "herdr must be unreachable");
+    const result = host.install();
+    ok(result);
+    const health = JSON.parse(fs.readFileSync(path.join(host.doorbell, "health.json"), "utf8"));
+    assert.equal(health.herdr_absent, true);
+    assert.equal(health.post_ok, true);
+    assert.equal(host.receipt().supervisor.state, "healthy");
+  });
+
   test("a missing herdr or post binary refuses before writing anything", () => {
     for (const key of ["POST_DOORBELL_HERDR_BIN", "POST_DOORBELL_POST_BIN"]) {
       const host = makeHost("linux");

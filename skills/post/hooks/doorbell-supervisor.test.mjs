@@ -21,6 +21,7 @@ import {
   resolvePaths,
   parseSnapshot,
   selectEligible,
+  batchReason,
   eventKey,
   stateClass,
   buildNotice,
@@ -29,6 +30,8 @@ import {
   updatePrefs,
   loadPrefs,
   prefsPath,
+  saveResident,
+  loadResident,
   runCommand,
   sha256,
   generationHash,
@@ -106,9 +109,12 @@ function makeWorld({ config = {} } = {}) {
     promptResult: null,
     cmuxResult: null,
     herdrListFail: false,
+    herdrMissing: false,
     channelRows: [],
     calls: [],
     prompts: [],
+    residentCalls: [],
+    residentResult: null,
     desktop: [],
     logs: [],
     watches: [],
@@ -125,6 +131,7 @@ function makeWorld({ config = {} } = {}) {
   w.exec = async (kind, args, opts = {}) => {
     w.calls.push({ kind, args: [...args], participant: opts.participant });
     if (kind === "herdr") {
+      if (w.herdrMissing) return { ok: false, code: null, spawnError: "ENOENT", stdout: "", stderr: "" };
       if (args[0] === "--version") return ok("herdr 0.9.1\n");
       if (args[1] === "list") {
         if (w.herdrListFail) return { ok: false, code: 1, stdout: "", stderr: "herdr: socket unavailable" };
@@ -161,7 +168,9 @@ function makeWorld({ config = {} } = {}) {
       }
       if (args[0] === "version") return ok(JSON.stringify({ ok: true, version: "0.9.0", build_sha: "test" }));
       if (args[0] === "watch") {
-        const script = w.snapshots.get(opts.participant);
+        const roomIndex = args.indexOf("--room");
+        const room = roomIndex >= 0 ? args[roomIndex + 1] : undefined;
+        const script = w.snapshots.get(opts.participant ?? room);
         if (typeof script === "function") return script();
         if (script && script.result) return script.result;
         // Like post: --reason (repeatable) keeps only events with a selected reason.
@@ -173,6 +182,11 @@ function makeWorld({ config = {} } = {}) {
     if (kind === "cmux") {
       w.desktop.push(args);
       return w.cmuxResult ?? ok("");
+    }
+    if (kind === "resident") {
+      w.residentCalls.push({ args: [...args], env: opts.env ?? null });
+      if (typeof w.residentResult === "function") return w.residentResult(args, opts);
+      return w.residentResult ?? ok("");
     }
     throw new Error(`unexpected exec: ${kind} ${args.join(" ")}`);
   };
@@ -1180,5 +1194,225 @@ describe("health", () => {
     assert.ok(!text.includes(samples().workspaceMail.subject));
     assert.equal(health.stats.snapshots, health.stats.hintScans + health.stats.reconcileScans);
     assert.ok(health.stats.snapshots >= 1 && health.stats.discoveries >= 1);
+  });
+});
+
+// ------------------------------------------------------------------ residents and mute
+
+function residentWorld() {
+  const w = makeWorld({ config: { discoveryMs: 1000 } });
+  saveResident(w.paths, "free-claude", ["/usr/bin/fc-wake"]);
+  const mail = mailWith("20260923-000001-fc0001", {
+    subject: "SECRET-SUBJECT",
+    preview: "SECRET-PREVIEW",
+    from: "SECRET-SENDER",
+  });
+  w.snapshots.set("free-claude", [mail]);
+  w.sup.env = { PATH: "/usr/bin", HOME: "/tmp", SUBJECT: "SECRET-SUBJECT", PREVIEW: "SECRET-PREVIEW", FROM: "SECRET-SENDER" };
+  return w;
+}
+
+describe("resident ring target", () => {
+  test("a room registration rings with no pane and no participant, then acks", async () => {
+    const w = residentWorld();
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.equal(w.residentCalls.length, 1);
+    const watches = w.calls.filter((c) => c.kind === "post" && c.args[0] === "watch");
+    assert.ok(watches.length >= 1);
+    assert.ok(watches.every((c) => c.participant === undefined));
+    assert.ok(watches.every((c) => c.args.includes("--room") && c.args.includes("free-claude")));
+    assert.equal(w.sub("free-claude").armed, true);
+    assert.equal(w.sub("free-claude").lastExit, 0);
+    assert.equal(w.sub("free-claude").pendingCount, 0);
+    assert.ok(w.sub("free-claude").lastRingAt);
+    assert.equal(w.state("free-claude").announced.length, 1);
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(w.residentCalls.length, 1, "acked mail does not ring again");
+  });
+
+  test("the command gets only --reason, and no subject, sender, or preview in argv or env", async () => {
+    const w = residentWorld();
+    await w.run();
+    const call = w.residentCalls[0];
+    assert.deepEqual(call.args, ["/usr/bin/fc-wake", "--reason", "mail"]);
+    const blob = JSON.stringify(call);
+    assert.equal(blob.includes("SECRET-SUBJECT"), false);
+    assert.equal(blob.includes("SECRET-PREVIEW"), false);
+    assert.equal(blob.includes("SECRET-SENDER"), false);
+    assert.equal(call.env.SUBJECT, undefined);
+    assert.equal(call.env.PREVIEW, undefined);
+    assert.equal(call.env.FROM, undefined);
+  });
+
+  test("reason priority is mention, then mail, then channel", async () => {
+    assert.equal(batchReason([{ reason: "channel" }, { reason: "mail" }, { reason: "mention" }]), "mention");
+    assert.equal(batchReason([{ reason: "channel" }, { reason: "mail" }]), "mail");
+    assert.equal(batchReason([{ reason: "channel" }]), "channel");
+    const w = residentWorld();
+    w.snapshots.set("free-claude", [
+      channelWith("ops", "20260923-000000-000010-c00010"),
+      mailWith("20260923-000001-fc0001"),
+      channelWith("ops", "20260923-000000-000011-c00011", { reason: "mention" }),
+    ]);
+    w.enable("free-claude", { channels: ["ops"] });
+    await w.run();
+    assert.equal(w.residentCalls[0].args.at(-1), "mention");
+  });
+
+  test("exit 75 retries without ack and without breaking", async () => {
+    const w = residentWorld();
+    let code = 75;
+    w.residentResult = () => ({ ok: false, code, stdout: "", stderr: "busy" });
+    await w.run();
+    assert.equal(w.sub("free-claude").lastExit, 75);
+    assert.equal(w.sub("free-claude").consecutiveFailures, 0);
+    assert.equal(w.outcomes("failed").length, 0);
+    assert.equal(fs.existsSync(w.sub("free-claude").stateFile), false);
+    assert.equal(w.logs.some((r) => r.type === "broken"), false);
+    // Busy waits residentBusyRetryMs, not one discovery cycle.
+    assert.equal(w.sub("free-claude").nextAttemptAt - w.clock.t, 30_000);
+    const callsWhileBusy = w.residentCalls.length;
+    w.clock.t += 2000;
+    await w.run();
+    assert.equal(w.residentCalls.length, callsWhileBusy);
+    code = 0;
+    w.residentResult = null;
+    w.clock.t = w.sub("free-claude").nextAttemptAt;
+    await w.run();
+    assert.equal(w.sub("free-claude").lastExit, 0);
+    assert.equal(w.state("free-claude").announced.length, 1);
+    assert.equal(w.sub("free-claude").consecutiveFailures, 0);
+  });
+
+  test("any other exit backs off and does not ack", async () => {
+    const w = residentWorld();
+    w.residentResult = () => ({ ok: false, code: 1, stdout: "", stderr: "nope" });
+    await w.run();
+    const sub = w.sub("free-claude");
+    assert.equal(sub.consecutiveFailures, 1);
+    assert.equal(sub.lastError.stage, "resident_command");
+    assert.equal(sub.lastExit, 1);
+    assert.equal(fs.existsSync(sub.stateFile), false);
+    assert.ok(sub.nextAttemptAt > w.clock.t);
+    w.clock.t = sub.nextAttemptAt;
+    await w.run();
+    assert.equal(sub.consecutiveFailures, 2);
+  });
+
+  test("a timeout is a failure and does not ack", async () => {
+    const w = residentWorld();
+    w.residentResult = () => ({ ok: false, code: null, signal: "SIGKILL", timedOut: true, stdout: "", stderr: "" });
+    await w.run();
+    const sub = w.sub("free-claude");
+    assert.equal(sub.lastError.stage, "resident_timeout");
+    assert.equal(sub.consecutiveFailures, 1);
+    assert.equal(fs.existsSync(sub.stateFile), false);
+    assert.equal(sub.lastRingAt, null);
+  });
+
+  test("status lists armed state, last ring, last exit, and pending", async () => {
+    const w = residentWorld();
+    w.residentResult = () => ({ ok: false, code: 75, stdout: "", stderr: "" });
+    await w.run();
+    w.sup.writeHealth(true);
+    const health = JSON.parse(fs.readFileSync(w.paths.healthFile, "utf8"));
+    const row = health.residents.find((r) => r.room === "free-claude");
+    assert.equal(row.armed, true);
+    assert.equal(row.last_exit, 75);
+    assert.equal(row.last_ring_at, null);
+    assert.equal(row.pending, 1);
+    w.residentResult = null;
+    w.clock.t = w.sub("free-claude").nextAttemptAt;
+    await w.run();
+    w.sup.writeHealth(true);
+    const after = JSON.parse(fs.readFileSync(w.paths.healthFile, "utf8"));
+    const rung = after.residents.find((r) => r.room === "free-claude");
+    assert.equal(rung.last_exit, 0);
+    assert.ok(rung.last_ring_at);
+    assert.equal(rung.pending, 0);
+  });
+});
+
+describe("headless host (no herdr)", () => {
+  test("a missing herdr binary is zero panes: residents ring and health says absent, not failing", async () => {
+    const w = residentWorld();
+    w.herdrMissing = true;
+    await w.run();
+    assert.equal(w.residentCalls.length, 1);
+    assert.equal(w.sub("free-claude").lastExit, 0);
+    w.sup.writeHealth(true);
+    const health = JSON.parse(fs.readFileSync(w.paths.healthFile, "utf8"));
+    assert.equal(health.herdr_absent, true);
+    assert.notEqual(health.herdr_ok, false);
+    assert.ok(health.last_discovery_at, "discovery completes without herdr");
+    assert.equal(w.logs.filter((r) => r.problem === "herdr agent list failed").length, 0);
+  });
+
+  test("a herdr that exists but fails is still a failure, not absent", async () => {
+    const w = residentWorld();
+    w.herdrListFail = true;
+    await w.run();
+    w.sup.writeHealth(true);
+    const health = JSON.parse(fs.readFileSync(w.paths.healthFile, "utf8"));
+    assert.equal(health.herdr_ok, false);
+    assert.equal(health.herdr_absent, false);
+  });
+});
+
+describe("per-channel mute", () => {
+  test("mute suppresses mentions and subscribed traffic; unmute restores", async () => {
+    const w = standardWorld();
+    const mention = channelWith("ops", "20260923-000000-000021-c00021", { reason: "mention" });
+    const subscribed = channelWith("tax", "20260923-000000-000022-c00022");
+    w.snapshots.set("codex-aaaaaaaa", [mailWith("20260923-000001-aaaaa1"), mention, subscribed]);
+    w.enable("codex-aaaaaaaa", { channels: ["tax"], muted: ["ops", "tax"] });
+    await w.run();
+    assert.equal(w.prompts.length, 1);
+    assert.match(w.prompts[0].text, /1 direct/);
+    assert.doesNotMatch(w.prompts[0].text, /mention/);
+    assert.doesNotMatch(w.prompts[0].text, /#tax/);
+    w.enable("codex-aaaaaaaa", { channels: ["tax"], muted: ["tax"] });
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(w.prompts.length, 2);
+    assert.match(w.prompts[1].text, /1 mention/);
+    w.enable("codex-aaaaaaaa", { channels: ["tax"], muted: [] });
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(w.prompts.length, 3);
+    assert.match(w.prompts[2].text, /1 in #tax/);
+  });
+
+  test("an absent muted field leaves mentions and subscriptions eligible", () => {
+    const w = makeWorld();
+    fs.mkdirSync(w.paths.prefsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(w.paths.prefsDir, "codex-aaaaaaaa.json"),
+      JSON.stringify({ version: 3, participant: "codex-aaaaaaaa", enabled: true, channels: ["tax"] })
+    );
+    const loaded = loadPrefs(w.paths, "codex-aaaaaaaa");
+    assert.deepEqual(loaded.muted, []);
+    const mention = channelWith("ops", "20260923-000000-000031-c00031", { reason: "mention" });
+    const kept = selectEligible([mention, channelWith("tax", "20260923-000000-000032-c00032")], loaded.channels, loaded.muted);
+    assert.deepEqual(kept.map((event) => event.reason).sort(), ["channel", "mention"]);
+  });
+
+  test("mute beats subscribe for a resident, and mentions in a muted channel do not ring", async () => {
+    const w = residentWorld();
+    w.snapshots.set("free-claude", [
+      channelWith("ops", "20260923-000000-000041-c00041", { reason: "mention", subject: "SECRET-SUBJECT", preview: "SECRET-PREVIEW", from: "SECRET-SENDER" }),
+      channelWith("tax", "20260923-000000-000042-c00042"),
+    ]);
+    w.enable("free-claude", { channels: ["tax"], muted: ["ops", "tax"] });
+    await w.run();
+    assert.equal(w.residentCalls.length, 0);
+    assert.equal(w.sub("free-claude").pendingCount, 0);
+    w.enable("free-claude", { channels: ["tax"], muted: [] });
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(w.residentCalls.length, 1);
+    assert.equal(w.residentCalls[0].args.at(-1), "mention");
   });
 });

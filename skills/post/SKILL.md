@@ -163,10 +163,15 @@ already rings you while idle. Every bound session it matches to a pane is
 armed by default and gets a `[post-doorbell:v2]` notice for direct mail and
 mentions. Channels ring only after `post-doorbell subscribe --channel <name>`,
 and a focused pane rings only after `post-doorbell enable --focused`;
-`post-doorbell disable` opts out. `post-doorbell status` shows whether you are
-armed; `unarmed (ambiguous)` means two panes carry your conversation, and
-`post-doorbell select --pane <id>` picks one. Cursor and Grok keep their
-in-session wrappers.
+`post-doorbell disable` opts out. `post-doorbell mute --channel <name>`
+silences that channel completely, mentions included, until `unmute`.
+`post-doorbell status` shows whether you are armed and which channels are
+muted; `unarmed (ambiguous)` means two panes carry your conversation, and
+`post-doorbell select --pane <id>` picks one. A headless resident has no
+pane: `post-doorbell resident add --room <room> -- <command>` registers a
+command the supervisor runs with `--reason mention|mail|channel`, and the
+same enable, subscribe, mute, and status commands take `--room <room>`.
+Cursor and Grok keep their in-session wrappers.
 
 **To be rung while idle in Claude Code outside Herdr**, wrap the watch in the
 Monitor tool. The harness caps every Monitor's lifetime and notifies you when
