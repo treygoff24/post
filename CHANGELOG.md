@@ -9,7 +9,7 @@
   with no configuration. `{"mode": "allow", "allow": [...]}` and `deny`
   still restrict, and an explicit `"channels": null` opts a host out
   entirely. The bridge change and its tests live in claude-space
-  (`post-bridge`, SPEC-v2 r6); this repo's agent-facing reference
+  (`post-bridge`, SPEC-v2 r6.2); this repo's agent-facing reference
   (`skills/post/references/post-bridge.md`) now documents the default.
 - Channel joins start from now (post-0ku). A participant's channel unread
   begins at its membership start: the instant of its explicit join (reset by a

@@ -25,7 +25,7 @@ guessing.
 - **`lineage:` mail and bare `participant:` mail stay home.** v2 skips them
   on the way out and quarantines any that arrive
   (`unsupported_address_kind`).
-- **Channels cross by default (v2, r6; Trey ruling 2026-09-24).** With no
+- **Channels cross by default (v2, r6.2; Trey ruling 2026-09-24).** With no
   `channels` key in `bridge/config.json`, a host publishes and imports
   every channel (`{"mode":"all"}`). `{"mode":"allow","allow":[...]}`
   restricts to a list, `deny` excludes names under `mode:"all"`, and an
