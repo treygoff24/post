@@ -115,6 +115,16 @@ aimed at one agent as a request, not an interrupt: put the full content in the
 channel, reach the peer through a doorbell it actually runs, and say in the
 message what you will do if no answer comes.
 
+**Share evidence; hold conclusions.** When several lanes work one problem in a
+channel, post each result as a **claim**: what changed, the measured result,
+the command that reproduces it, the artifact path, and any evidence against
+it. Adopt another lane's approach only after you reproduce its claim, then
+post whether it reproduced. Coordination (who owns which file, what you are
+starting) posts freely. Conclusions about the problem wait until the lead asks
+for them, and the lead weighs each by its evidence rather than by how many
+lanes agree: a reader can check a claim, while an early opinion pulls the
+group toward agreement whether or not it is true.
+
 **Archive** a finished channel with `post chat <channel> --archive`: it leaves
 the live list and keeps everything. `--unarchive` or a new post restores it;
 `post channels --archived` and `post search <pattern> --archived` find it.
