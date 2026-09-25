@@ -211,6 +211,31 @@ pub(crate) fn reply_metadata(
     }
 }
 
+pub(crate) fn channel_reply_metadata(
+    context: &crate::mailbox::Context,
+    message: &crate::model::ChannelMessage,
+) -> ReplyMetadata {
+    if let (Some(host), Some(participant)) = (
+        message.from_host.as_deref(),
+        message.from_participant.as_deref(),
+    ) {
+        if message.from == participant && crate::bridge_topology::valid_host(host) {
+            let address = format!("participant:{participant}@{host}");
+            return ReplyMetadata {
+                origin: "remote".to_owned(),
+                participant: Some(address.clone()),
+                shared: address,
+            };
+        }
+    }
+    reply_metadata(
+        context,
+        &message.from,
+        message.from_participant.as_deref(),
+        message.sender_provenance.as_deref(),
+    )
+}
+
 /// Reply metadata for one mail envelope. An imported participant letter's
 /// origin comes from its admission record (`imports::import_origin`): the
 /// private reply is `participant:<from_participant>@<source_host>`, and an
@@ -562,6 +587,14 @@ pub struct ChatJoinOutput {
 pub struct ChatSendOutput {
     pub ok: bool,
     pub message: crate::model::ChannelMessage,
+    pub cross_host: ChatCrossHost,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatCrossHost {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Receipt for `--discard`: the deliberate spelling of "advance my cursor past
@@ -791,12 +824,7 @@ impl ChatMessageItem {
         body: String,
         signed_verified: Option<bool>,
     ) -> Self {
-        let reply = reply_metadata(
-            context,
-            &message.from,
-            message.from_participant.as_deref(),
-            message.sender_provenance.as_deref(),
-        );
+        let reply = channel_reply_metadata(context, &message);
         Self {
             message,
             origin: reply.origin,
@@ -948,6 +976,8 @@ pub struct SearchResult {
     pub from: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_participant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1251,6 +1281,8 @@ pub enum WatchEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_participant: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_host: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         from_lineage: Option<String>,
         #[serde(default)]
         origin: String,
@@ -1441,12 +1473,7 @@ impl WatchEvent {
         } else {
             WatchReason::Channel
         };
-        let reply = reply_metadata(
-            context,
-            &message.from,
-            message.from_participant.as_deref(),
-            message.sender_provenance.as_deref(),
-        );
+        let reply = channel_reply_metadata(context, &message);
         let crate::model::ChannelMessage {
             id,
             from,
@@ -1454,6 +1481,7 @@ impl WatchEvent {
             subject,
             sent,
             from_participant,
+            from_host,
             from_lineage,
             event: _,
             display_name,
@@ -1476,6 +1504,7 @@ impl WatchEvent {
             id,
             from,
             from_participant,
+            from_host,
             from_lineage,
             origin: reply.origin,
             reply_to_participant: reply.participant,
@@ -1514,6 +1543,7 @@ impl WatchEvent {
                 let sender = sender_label_quoted(SenderAttribution {
                     from: &item.from,
                     from_participant: item.from_participant.as_deref(),
+                    from_host: None,
                     from_lineage: item.from_lineage.as_deref(),
                     display_name: item.display_name.as_deref(),
                     pfp: item.pfp.as_deref(),
@@ -1537,6 +1567,7 @@ impl WatchEvent {
                 id,
                 from,
                 from_participant,
+                from_host,
                 from_lineage,
                 subject,
                 display_name,
@@ -1553,6 +1584,7 @@ impl WatchEvent {
                 let sender = sender_label_quoted(SenderAttribution {
                     from,
                     from_participant: from_participant.as_deref(),
+                    from_host: from_host.as_deref(),
                     from_lineage: from_lineage.as_deref(),
                     display_name: display_name.as_deref(),
                     pfp: pfp.as_deref(),
@@ -1957,6 +1989,7 @@ pub(crate) fn json_len<T: Serialize>(value: &T, pretty: bool) -> Result<usize, A
 pub(crate) struct SenderAttribution<'a> {
     pub from: &'a str,
     pub from_participant: Option<&'a str>,
+    pub from_host: Option<&'a str>,
     pub from_lineage: Option<&'a str>,
     pub display_name: Option<&'a str>,
     pub pfp: Option<&'a str>,
@@ -1967,6 +2000,7 @@ impl<'a> From<&'a Envelope> for SenderAttribution<'a> {
         Self {
             from: &envelope.from,
             from_participant: envelope.from_participant.as_deref(),
+            from_host: None,
             from_lineage: envelope.from_lineage.as_deref(),
             display_name: envelope.display_name.as_deref(),
             pfp: envelope.pfp.as_deref(),
@@ -1979,6 +2013,7 @@ impl<'a> From<&'a crate::model::ChannelMessage> for SenderAttribution<'a> {
         Self {
             from: &message.from,
             from_participant: message.from_participant.as_deref(),
+            from_host: message.from_host.as_deref(),
             from_lineage: message.from_lineage.as_deref(),
             display_name: message.display_name.as_deref(),
             pfp: message.pfp.as_deref(),
@@ -1993,8 +2028,14 @@ impl<'a> From<&'a crate::model::ChannelMessage> for SenderAttribution<'a> {
 /// so it is the most specific presentation available and outranks the
 /// lineage; the participant id and reply address stay visible either way.
 fn sender_label_impl(rendered_from: String, sender: SenderAttribution<'_>) -> String {
-    let participant = sender
-        .from_participant
+    let qualified = sender.from_participant.map(|id| match sender.from_host {
+        Some(host) if sender.from == id && crate::bridge_topology::valid_host(host) => {
+            format!("{id}@{host}")
+        }
+        _ => id.to_owned(),
+    });
+    let participant = qualified
+        .as_deref()
         .map(sanitize_text_header)
         .filter(|participant| !participant.is_empty())
         .map_or_else(String::new, |participant| format!(" [{participant}]"));
@@ -2027,6 +2068,9 @@ fn sender_label_impl(rendered_from: String, sender: SenderAttribution<'_>) -> St
     // is stamped (two session-only participants in one workspace must not
     // render identically). Legacy mail without a participant stays the bare
     // reply address, byte-identical to before.
+    if sender.from_host.is_some() && sender.from_participant == Some(sender.from) {
+        return sanitize_text_header(&qualified.unwrap_or(rendered_from));
+    }
     format!("{rendered_from}{participant}")
 }
 
@@ -2131,6 +2175,7 @@ mod tests {
             id: "20260722-013000-000001-aaa111".to_owned(),
             from: "alpha".to_owned(),
             from_participant: None,
+            from_host: None,
             from_lineage: None,
             origin: "unknown".to_owned(),
             reply_to_participant: None,
@@ -2154,6 +2199,7 @@ mod tests {
         SenderAttribution {
             from,
             from_participant: None,
+            from_host: None,
             from_lineage: None,
             display_name,
             pfp,
@@ -2197,6 +2243,7 @@ mod tests {
             sender_label(SenderAttribution {
                 from: "atlas",
                 from_participant: Some("codex-0ea0d6a0\n"),
+                from_host: None,
                 from_lineage: Some("row\nan"),
                 display_name: Some("Cairn"),
                 pfp: Some("🪨"),
@@ -2208,6 +2255,7 @@ mod tests {
             sender_label(SenderAttribution {
                 from: "atlas",
                 from_participant: Some("codex-0ea0d6a0"),
+                from_host: None,
                 from_lineage: Some("rowan"),
                 display_name: None,
                 pfp: None,

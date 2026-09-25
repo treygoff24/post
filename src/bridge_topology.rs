@@ -9,6 +9,7 @@ use crate::mailbox::Context;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 const REGISTRY_MAX_BYTES: u64 = 4096;
@@ -220,6 +221,210 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
     } else {
         BridgeHealth::Unsupported(missing)
     }
+}
+
+pub(crate) enum ChannelRelayStatus {
+    Queued,
+    LocalOnly(String),
+    Unconfirmed(String),
+}
+
+/// Mirror validate_room(name, topology=True) in post-bridge/bridgelib/common.py.
+/// Post accepts a wider channel-name grammar, so a locally valid name can
+/// still be permanently unpublishable by the bridge.
+fn bridge_refuses_channel_name(value: &str) -> bool {
+    let normalized: String = value.nfc().collect();
+    if normalized.is_empty()
+        || matches!(normalized.as_str(), "." | "..")
+        || normalized.contains(['/', '\\'])
+        || normalized
+            .chars()
+            .next()
+            .is_some_and(bridge_name_whitespace)
+        || normalized
+            .chars()
+            .last()
+            .is_some_and(bridge_name_whitespace)
+        || normalized.chars().any(bridge_refused_name_character)
+    {
+        return true;
+    }
+
+    let folded = if normalized.is_ascii() {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized.clone()
+    };
+    let compatibility: String = normalized.nfkc().collect();
+    let reserved_fold = if compatibility.is_ascii() {
+        compatibility.to_ascii_lowercase()
+    } else {
+        compatibility
+    };
+    const TOPOLOGY_DENY: &[&str] = &[
+        "*",
+        "archive",
+        "participants",
+        "lineages",
+        "routing",
+        ".participants.lock",
+        "rooms.json",
+        "rules.json",
+        "profiles.json",
+        "owner.json",
+        ".rooms.lock",
+        ".post-arx.json",
+        ".post-arx.lock",
+        "bridge",
+        "remote",
+        "channels",
+        ".bridge",
+        ".bridge.lock",
+        "bridge.log",
+    ];
+    TOPOLOGY_DENY.contains(&folded.as_str())
+        || TOPOLOGY_DENY.contains(&reserved_fold.as_str())
+        || (folded.starts_with(".rooms.json.") && folded.ends_with(".tmp"))
+        || (folded.starts_with("..post-arx.json.") && folded.ends_with(".tmp"))
+}
+
+fn bridge_name_whitespace(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x0009..=0x000D | 0x001C..=0x0020 | 0x0085 | 0x00A0 | 0x1680
+            | 0x2000..=0x200A | 0x2028..=0x2029 | 0x202F | 0x205F | 0x3000
+    )
+}
+
+fn bridge_refused_name_character(character: char) -> bool {
+    let code = character as u32;
+    // refused_profile_char, Unicode category Cf, and default_ignorable in
+    // bridgelib/common.py. Cf ranges match Python's Unicode data on this host.
+    matches!(
+        code,
+        0..=31 | 127..=159 | 0x202A..=0x202E | 0x2066..=0x2069
+            | 0x200E | 0x200F | 0x061C | 0x2028 | 0x2029
+            | 0x00AD | 0x0600..=0x0605 | 0x06DD | 0x070F | 0x0890..=0x0891
+            | 0x08E2 | 0x180E | 0x200B..=0x200F | 0x2060..=0x206F
+            | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD
+            | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F
+            | 0x034F | 0x115F..=0x1160 | 0x17B4..=0x17B5
+            | 0x180B..=0x180F | 0x3164 | 0xFE00..=0xFE0F | 0xFFA0
+            | 0xFFF0..=0xFFF8 | 0xE0000..=0xE0FFF
+    )
+}
+
+/// A successful channel send is local first. Report durable routing limits
+/// separately from a bridge whose current state cannot be confirmed.
+pub(crate) fn channel_relay_status(
+    context: &Context,
+    channel: &str,
+    roomless: bool,
+) -> ChannelRelayStatus {
+    use ChannelRelayStatus::{LocalOnly, Queued, Unconfirmed};
+    if bridge_refuses_channel_name(channel) {
+        return LocalOnly(format!(
+            "channel name is not relayable by the bridge: {channel}"
+        ));
+    }
+    let config_path = bridge_dir(context).join("config.json");
+    let config_bytes = match read_regular(&config_path, CONFIG_MAX_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        _ => return LocalOnly("no bridge config".to_owned()),
+    };
+    let config: serde_json::Value = match serde_json::from_slice(&config_bytes) {
+        Ok(value) => value,
+        Err(_) => return LocalOnly("invalid bridge config".to_owned()),
+    };
+    let Some(config_object) = config.as_object() else {
+        return LocalOnly("invalid bridge config".to_owned());
+    };
+    let Some(host) = config_object
+        .get("host")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return LocalOnly("invalid bridge host".to_owned());
+    };
+    if !valid_host(host) {
+        return LocalOnly("invalid bridge host".to_owned());
+    }
+    match config_object.get("channels") {
+        Some(serde_json::Value::Null) => return LocalOnly("channel sync is off".to_owned()),
+        Some(serde_json::Value::Object(policy)) => {
+            if policy
+                .keys()
+                .any(|key| !matches!(key.as_str(), "mode" | "allow" | "deny"))
+            {
+                return LocalOnly("invalid channel sync policy".to_owned());
+            }
+            let names = |key: &str| -> Option<Vec<&str>> {
+                policy.get(key).map_or(Some(Vec::new()), |value| {
+                    value.as_array().and_then(|values| {
+                        values
+                            .iter()
+                            .map(serde_json::Value::as_str)
+                            .collect::<Option<Vec<_>>>()
+                    })
+                })
+            };
+            let (Some(allow), Some(deny)) = (names("allow"), names("deny")) else {
+                return LocalOnly("invalid channel sync policy".to_owned());
+            };
+            if allow.iter().chain(&deny).any(|name| {
+                crate::mailbox::validate_component(name).is_err()
+                    || name.chars().any(char::is_control)
+            }) {
+                return LocalOnly("invalid channel sync policy".to_owned());
+            }
+            if deny.contains(&channel) {
+                return LocalOnly("channel is denied by this host".to_owned());
+            }
+            match policy.get("mode").and_then(serde_json::Value::as_str) {
+                Some("allow") if !allow.contains(&channel) => {
+                    return LocalOnly("channel is not allowlisted".to_owned());
+                }
+                Some("all" | "allow") => {}
+                _ => return LocalOnly("invalid channel sync policy".to_owned()),
+            }
+        }
+        Some(_) => return LocalOnly("invalid channel sync policy".to_owned()),
+        None => {}
+    }
+    let Ok(Some(config)) = load_config(context) else {
+        return LocalOnly("invalid bridge config".to_owned());
+    };
+    match enrolled_peers(context, &config) {
+        Ok(peers) if peers.is_empty() => return LocalOnly("no enrolled peer hosts".to_owned()),
+        Err(_) => return Unconfirmed(
+            "bridge peer registry is unavailable; do not resend; check post doctor or the bridge"
+                .to_owned(),
+        ),
+        _ => {}
+    }
+    let health_path = bridge_dir(context).join("health.json");
+    let Ok(health) = read_health_json(&health_path) else {
+        return Unconfirmed("bridge has not reported recently; the post relays on the bridge's next tick if it is running".to_owned());
+    };
+    if health.get("interval_s").is_none() {
+        return Unconfirmed("bridge health has no interval_s; the post relays on the bridge's next tick if it is running".to_owned());
+    }
+    if health_is_fresh(&health, &health_path, std::time::SystemTime::now()).is_err() {
+        return Unconfirmed("bridge has not reported recently; the post relays on the bridge's next tick if it is running".to_owned());
+    }
+    if roomless
+        && !health
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|value| value.as_str() == Some("roomless-channel-v1"))
+            })
+    {
+        return Unconfirmed("this host's bridge predates roomless relay; the post relays after the bridge is upgraded; do not resend".to_owned());
+    }
+    Queued
 }
 
 /// The second half of the room-rename interlock. Health counters are
@@ -547,12 +752,19 @@ fn topology_unavailable(raw: &str, detail: String) -> crate::error::AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{unheld_room_letters, Context};
+    use super::{bridge_refuses_channel_name, unheld_room_letters, Context};
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::path::Path;
 
     const ID: &str = "20260923-000000-abc123";
+
+    #[test]
+    fn bridge_name_rejects_default_ignorable_gap() {
+        // U+2065 is refused by the bridge but the macOS filesystem cannot
+        // create it as a channel directory for an end-to-end receipt test.
+        assert!(bridge_refuses_channel_name("mid\u{2065}gap"));
+    }
 
     /// G3: every hold marker counts only when its target exists. A dangling
     /// symlink is absent to the bridge (`Path.exists()`), so the letter

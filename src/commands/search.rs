@@ -276,6 +276,7 @@ fn collect_mail(
             id: id.clone(),
             from: envelope.from.clone(),
             from_participant: envelope.from_participant.clone(),
+            from_host: None,
             from_lineage: envelope.from_lineage.clone(),
             display_name: envelope.display_name.clone(),
             pfp: envelope.pfp.clone(),
@@ -321,18 +322,14 @@ fn collect_channel(
             continue;
         }
         let id = message.id.clone();
-        let reply = output::reply_metadata(
-            context,
-            &message.from,
-            message.from_participant.as_deref(),
-            message.sender_provenance.as_deref(),
-        );
+        let reply = output::channel_reply_metadata(context, &message);
         let result = SearchResult {
             source: "channel".to_owned(),
             channel: Some(channel_name.to_owned()),
             id: id.clone(),
             from: message.from.clone(),
             from_participant: message.from_participant.clone(),
+            from_host: message.from_host.clone(),
             from_lineage: message.from_lineage.clone(),
             display_name: message.display_name.clone(),
             pfp: message.pfp.clone(),
@@ -462,6 +459,7 @@ fn render_text(
             &output::sender_label(output::SenderAttribution {
                 from: &result.from,
                 from_participant: result.from_participant.as_deref(),
+                from_host: result.from_host.as_deref(),
                 from_lineage: result.from_lineage.as_deref(),
                 display_name: result.display_name.as_deref(),
                 pfp: result.pfp.as_deref(),

@@ -34,6 +34,18 @@ guessing.
   publisher (SPEC-v2 §Channel config). The Mac's separate cell bridge
   still syncs a few channels over ssh. Only v2 relays channels; v1 has
   no channel support.
+- **Roomless channel senders cross with r6.3.** The publishing bridge stamps
+  `from_host` into the relayed copy. The receiving bridge verifies that it
+  matches the branch host and refuses import if the sender id already belongs
+  to a local participant (`participant_id_collision` in channel quarantine).
+  Post shows `<id>@<host>` and both reply fields as
+  `participant:<id>@<host>`. A channel send succeeds locally. Its receipt says
+  `queued` when eligible for a future tick, `local_only` for a lasting relay
+  block, or `unconfirmed` when bridge health cannot confirm relay yet or its
+  fresh capability list shows a pre-roomless bridge. That older bridge's
+  queued roomless posts backfill after upgrade. The latter two states carry a
+  reason in JSON and stderr; do not resend an `unconfirmed` post, and check
+  `post doctor` or the bridge.
 - **Channel wake files (v2).** Each imported channel message also writes one
   `bridge/events/<channel>/<id>.json` holding `host`, `channel`, `id`,
   `from`, `event`, and `mentions`, never subject or body. It is a hook point

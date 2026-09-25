@@ -148,6 +148,7 @@ fn list_bound(
             let sender = output::sender_label_quoted(output::SenderAttribution {
                 from: &mail.from,
                 from_participant: mail.from_participant.as_deref(),
+                from_host: None,
                 from_lineage: mail.from_lineage.as_deref(),
                 display_name: mail.display_name.as_deref(),
                 pfp: mail.pfp.as_deref(),
@@ -303,6 +304,7 @@ mod profile_render_tests {
         SenderAttribution {
             from,
             from_participant: None,
+            from_host: None,
             from_lineage: None,
             display_name,
             pfp,

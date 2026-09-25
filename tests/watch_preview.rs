@@ -142,6 +142,7 @@ fn watch_channel_message_includes_preview() {
         id: "20260831-224243-test04".to_owned(),
         from: "test-sender".to_owned(),
         from_participant: None,
+        from_host: None,
         from_lineage: None,
         origin: "unknown".to_owned(),
         reply_to_participant: None,
