@@ -268,12 +268,12 @@ fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
 
     write_health(&fresh, &[], Some(30));
     let (unsupported, stderr) = send(&roomless, &sandbox.path, "relay-state");
-    assert_eq!(unsupported["cross_host"]["status"], "local_only");
+    assert_eq!(unsupported["cross_host"]["status"], "unconfirmed");
     assert_eq!(
         unsupported["cross_host"]["reason"],
-        "running bridge cannot publish roomless senders"
+        "this host's bridge predates roomless relay; the post relays after the bridge is upgraded; do not resend"
     );
-    assert!(stderr.contains("sent locally only: running bridge cannot publish roomless senders"));
+    assert!(stderr.contains("relay not confirmed: this host's bridge predates roomless relay"));
 
     let (room, _) = send(&room_sender, &alpha, "relay-state");
     assert_eq!(room["cross_host"]["status"], "queued");
@@ -316,14 +316,10 @@ fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
     .expect("restore peers");
     let (reserved, _) = send(&roomless, &sandbox.path, "bridge");
     assert_eq!(reserved["cross_host"]["status"], "local_only");
-    assert!(reserved["cross_host"]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("bridge"));
-    assert!(reserved["cross_host"]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("reserved"));
+    assert_eq!(
+        reserved["cross_host"]["reason"],
+        "channel name is not relayable by the bridge: bridge"
+    );
     for channel in ["archive", ".rooms.json.x.tmp"] {
         let (reserved, _) = send(&roomless, &sandbox.path, channel);
         assert_eq!(reserved["cross_host"]["status"], "local_only");
@@ -331,6 +327,44 @@ fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
             .as_str()
             .unwrap()
             .contains(channel));
+    }
+
+    // Keep this table identical to bridge/post-bridge/tests/test_rooms.py::
+    // test_channel_relay_name_verdicts_match_post_receipts.
+    let cases = [
+        ("☕️-chat", false),
+        ("👩‍💻-devs", false),
+        ("lobby ", false),
+        ("ｂｒｉｄｇｅ", false),
+        (".bridge.locK", false),
+        (".ROOMS.JSON.é.TMP", true),
+        ("bridge", false),
+        ("archive", false),
+        ("café", true),
+        ("☕-chat", true),
+        ("👩-devs", true),
+        ("general", true),
+        ("e\u{0301}", true),
+    ];
+    for (channel, relayable) in cases {
+        let joined = sandbox.run_as_participant(
+            &["chat", channel, "--join", "--json"],
+            &roomless,
+            &sandbox.path,
+        );
+        assert!(joined.status.success(), "{}", common::stderr(&joined));
+        let (receipt, _) = send(&roomless, &sandbox.path, channel);
+        assert_eq!(
+            receipt["cross_host"]["status"],
+            if relayable { "queued" } else { "local_only" },
+            "channel: {channel}"
+        );
+        if !relayable {
+            assert_eq!(
+                receipt["cross_host"]["reason"],
+                format!("channel name is not relayable by the bridge: {channel}")
+            );
+        }
     }
 }
 

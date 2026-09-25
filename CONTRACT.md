@@ -544,10 +544,12 @@ their existing success semantics.
   `cross_host:{status:"queued"|"local_only"|"unconfirmed",reason?}`. `queued` means this host's
   fresh bridge advertises channel support, this channel is selected by policy,
   and an enrolled peer exists; it does not promise delivery. `local_only` names
-  a lasting reason the post will stay here. `unconfirmed` means bridge health is
-  missing, stale, or incomplete; do not resend, and check `post doctor` or the
-  bridge. Both states print one stderr line. Reserved bridge channel names are
-  always local only. A roomless participant (`from ==
+  a lasting reason the post will stay here: no bridge config, disabled or denied
+  sync, a name the bridge refuses, or no peer. `unconfirmed` means bridge health
+  is missing, stale, or incomplete, or a fresh bridge predates roomless relay.
+  A roomless post sent through that older bridge is backfilled after its upgrade;
+  do not resend. Check `post doctor` or the bridge. Both states print one stderr
+  line. A roomless participant (`from ==
   from_participant`) crosses with bridge v2 r6.3; the relay stamps `from_host`.
   Remote reads render `<id>@<host>` and give
   `reply_to_participant` and `reply_to_shared` as

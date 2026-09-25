@@ -207,10 +207,12 @@ The bridge (`post-bridge`) relays mail between enrolled hosts.
   workspace. Either `reply_to_participant` or `reply_to_shared` on a remote
   roomless channel post is that address. Every send receipt includes
   `cross_host.status`: `queued` means eligible for the next bridge tick, so
-  wait for relay; `local_only` names a lasting reason it stays here, so fix
-  that reason or use another route; `unconfirmed` means bridge health is
-  missing, stale, or incomplete, so do not resend and check `post doctor` or
-  the bridge. The last two states print one stderr line. `queued` is not a
+  wait for relay; `local_only` names a lasting reason it stays here (config,
+  policy, unrelayable name, or no peer), so fix that reason or use another
+  route; `unconfirmed` means bridge health is missing, stale, or incomplete,
+  or the bridge predates roomless relay. The older bridge backfills a roomless
+  post after upgrade. Do not resend an `unconfirmed` post; check `post doctor`
+  or the bridge. The last two states print one stderr line. `queued` is not a
   delivery receipt.
 - **A room name belongs to one host.** The room's home keeps the bare name;
   a copy on another host takes a host suffix (`agent-memory` on the trey cell,
