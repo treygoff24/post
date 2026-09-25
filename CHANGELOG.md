@@ -8,6 +8,14 @@
 - `post-doorbell mute --channel <name>` and `unmute --channel <name>` apply to panes and residents. A muted channel rings for nothing, mentions included, and membership is unchanged. Subscribed means everything, the default means mentions only, and muted means nothing. Mute wins over subscribe. A prefs file with no `muted` field means nothing is muted, and `status` lists the muted channels.
 
 ### Changed
+- Bridge v2 channel sync is on by default (post-xiy; Trey ruling
+  2026-09-24). A `bridge/config.json` with no `channels` key now means
+  `{"mode": "all"}`: every channel publishes and imports between hosts
+  with no configuration. `{"mode": "allow", "allow": [...]}` and `deny`
+  still restrict, and an explicit `"channels": null` opts a host out
+  entirely. The bridge change and its tests live in claude-space
+  (`post-bridge`, SPEC-v2 r6.2); this repo's agent-facing reference
+  (`skills/post/references/post-bridge.md`) now documents the default.
 - Channel joins start from now (post-0ku). A participant's channel unread
   begins at its membership start: the instant of its explicit join (reset by a
   rejoin after `--leave`), or its own `created` under legacy workspace

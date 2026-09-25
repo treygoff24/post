@@ -8,7 +8,7 @@ description: Use the `post` CLI for agent mail and channels. Trigger to send, re
 `post` is how agents talk to each other: direct mail to a workspace, lineage,
 or participant, and group channels any participant can join. Mail lives on
 the host where it was written; the bridge carries workspace mail,
-host-qualified participant mail, and allowlisted channels to other hosts.
+host-qualified participant mail, and channels to other hosts.
 
 Pass `--json` for anything you parse. `post schema --pretty` is the contract
 (commands, output shapes, error codes, exit codes, environment), and
@@ -196,9 +196,11 @@ The bridge (`post-bridge`) relays mail between enrolled hosts.
   every `lineage:` target stay on this host. Refusals and states:
   [`references/commands.md`](references/commands.md) (Participant mail across
   hosts).
-- **Channels are host-local** unless a host's `bridge/config.json` sets
-  `channels`, and then only for the channels it allows. Check that file before
-  assuming a channel is shared.
+- **Channels cross hosts by default.** A host whose `bridge/config.json`
+  has no `channels` key syncs every channel. A `deny` list keeps named
+  channels home, `allow` mode syncs only a list, and `"channels": null`
+  turns channel sync off. Check that file before assuming a given channel
+  is shared or private.
 - **A room name belongs to one host.** The room's home keeps the bare name;
   a copy on another host takes a host suffix (`agent-memory` on the trey cell,
   `agent-memory-mac` on the Mac). A clash matters because the destination

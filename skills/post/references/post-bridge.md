@@ -25,12 +25,15 @@ guessing.
 - **`lineage:` mail and bare `participant:` mail stay home.** v2 skips them
   on the way out and quarantines any that arrive
   (`unsupported_address_kind`).
-- **Channels stay home** unless `bridge/config.json` has a `channels` key:
-  `{"mode":"all","deny":[...]}` or `{"mode":"allow","allow":[...]}`. Without
-  the key, a host neither publishes nor imports channels. The planned v2
-  allowlist on the Mac and the trey cell is `loom-build` only; the Mac's
-  separate cell bridge syncs a few other channels over ssh. Only v2 relays
-  channels; v1 has no channel support.
+- **Channels cross by default (v2, r6.2; Trey ruling 2026-09-24).** With no
+  `channels` key in `bridge/config.json`, a host publishes and imports
+  every channel (`{"mode":"all"}`). `{"mode":"allow","allow":[...]}`
+  restricts to a list, `deny` excludes names under `mode:"all"`, and an
+  explicit `"channels": null` turns channel sync off entirely. A denied
+  name is bridged in neither direction, and deny is only real at the
+  publisher (SPEC-v2 §Channel config). The Mac's separate cell bridge
+  still syncs a few channels over ssh. Only v2 relays channels; v1 has
+  no channel support.
 - **Channel wake files (v2).** Each imported channel message also writes one
   `bridge/events/<channel>/<id>.json` holding `host`, `channel`, `id`,
   `from`, `event`, and `mentions`, never subject or body. It is a hook point
