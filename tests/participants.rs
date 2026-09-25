@@ -96,6 +96,103 @@ fn participant_two_keys_mint_distinct_ids_and_rebind_is_idempotent() {
 }
 
 #[test]
+fn roomless_channel_send_reports_when_it_stays_local() {
+    let sandbox = Sandbox::new();
+    let bound = sandbox.bind_codex("roomless-receipt", &sandbox.path, None);
+    let id = participant_id(&bound);
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "local-only", "--join", "--json"],
+        id,
+        &sandbox.path,
+    ));
+    let sent = sandbox.run_as_participant(
+        &["chat", "local-only", "--body", "hello", "--json"],
+        id,
+        &sandbox.path,
+    );
+    assert!(sent.status.success(), "{}", common::stderr(&sent));
+    let receipt: Value = from_stdout(&sent);
+    assert_eq!(receipt["message"]["from"], id);
+    assert_eq!(receipt["cross_host"]["status"], "local_only");
+    assert_eq!(receipt["cross_host"]["reason"], "no bridge config");
+    assert!(common::stderr(&sent).contains("sent locally only: no bridge config"));
+
+    let bridge = sandbox.mail_root.join("bridge");
+    fs::create_dir_all(&bridge).expect("bridge directory");
+    fs::write(
+        bridge.join("config.json"),
+        r#"{"host":"mac","channels":{"mode":"all","deny":["local-only"]}}"#,
+    )
+    .expect("deny config");
+    let denied = sandbox.run_as_participant(
+        &[
+            "chat",
+            "local-only",
+            "--body",
+            "still local",
+            "--anyway",
+            "--json",
+        ],
+        id,
+        &sandbox.path,
+    );
+    assert!(denied.status.success(), "{}", common::stderr(&denied));
+    let receipt: Value = from_stdout(&denied);
+    assert_eq!(
+        receipt["cross_host"]["reason"],
+        "channel is denied by this host"
+    );
+    assert!(common::stderr(&denied).contains("sent locally only: channel is denied by this host"));
+
+    fs::write(
+        bridge.join("config.json"),
+        r#"{"host":"mac","channels":null}"#,
+    )
+    .expect("channels-off config");
+    let off = sandbox.run_as_participant(
+        &[
+            "chat",
+            "local-only",
+            "--body",
+            "sync off",
+            "--anyway",
+            "--json",
+        ],
+        id,
+        &sandbox.path,
+    );
+    assert!(off.status.success(), "{}", common::stderr(&off));
+    let receipt: Value = from_stdout(&off);
+    assert_eq!(receipt["cross_host"]["reason"], "channel sync is off");
+
+    fs::write(bridge.join("config.json"), r#"{"host":"mac"}"#).expect("sync-all config");
+    fs::create_dir_all(bridge.join("registry")).expect("bridge registry");
+    fs::write(
+        bridge.join("registry").join("hosts.json"),
+        r#"{"v":1,"hosts":["mac","trey"]}"#,
+    )
+    .expect("peer registry");
+    let no_tick = sandbox.run_as_participant(
+        &[
+            "chat",
+            "local-only",
+            "--body",
+            "no tick",
+            "--anyway",
+            "--json",
+        ],
+        id,
+        &sandbox.path,
+    );
+    assert!(no_tick.status.success(), "{}", common::stderr(&no_tick));
+    let receipt: Value = from_stdout(&no_tick);
+    assert_eq!(
+        receipt["cross_host"]["reason"],
+        "no running bridge reported"
+    );
+}
+
+#[test]
 fn participant_bind_key_bootstrap_is_idempotent_and_prints_export() {
     let sandbox = Sandbox::new();
     let args = [

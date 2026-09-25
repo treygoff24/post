@@ -462,6 +462,7 @@ fn render_text(
             &output::sender_label(output::SenderAttribution {
                 from: &result.from,
                 from_participant: result.from_participant.as_deref(),
+                from_host: None,
                 from_lineage: result.from_lineage.as_deref(),
                 display_name: result.display_name.as_deref(),
                 pfp: result.pfp.as_deref(),

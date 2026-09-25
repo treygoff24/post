@@ -201,6 +201,12 @@ The bridge (`post-bridge`) relays mail between enrolled hosts.
   channels home, `allow` mode syncs only a list, and `"channels": null`
   turns channel sync off. Check that file before assuming a given channel
   is shared or private.
+- A roomless participant's channel post also crosses on bridge v2 r6.3. A
+  remote read shows its display name and `<id>@<host>`; reply with
+  `post send --to participant:<id>@<host> --body '...'` from a real local
+  workspace. Every send receipt includes `cross_host.status`: `queued` means
+  eligible for relay, while `local_only` names why it will stay here and
+  prints one stderr line. A queued receipt is not a delivery receipt.
 - **A room name belongs to one host.** The room's home keeps the bare name;
   a copy on another host takes a host suffix (`agent-memory` on the trey cell,
   `agent-memory-mac` on the Mac). A clash matters because the destination

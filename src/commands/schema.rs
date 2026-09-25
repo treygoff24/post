@@ -292,7 +292,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "history_before_join",
             "history_hint",
         ]),
-        chat_send: fields(&["ok", "message"]),
+        chat_send: fields(&["ok", "message", "cross_host{status,reason?}"]),
         chat_read: fields(&[
             "ok",
             "framing",
@@ -383,7 +383,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         watch: fields(&[
             "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?",
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
-            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
+            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_host?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
         ]),
         delivery: fields(&[

@@ -107,6 +107,9 @@ pub struct ChannelMessage {
     pub sent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_participant: Option<String>,
+    /// Branch-authenticated origin for a roomless sender, stamped by the bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

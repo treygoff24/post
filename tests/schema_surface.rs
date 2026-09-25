@@ -435,7 +435,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "chat_send",
         &schema.output_shapes.chat_send,
-        ["ok", "message"]
+        ["ok", "message", "cross_host"]
     );
     assert_shape!(
         "chat_read",

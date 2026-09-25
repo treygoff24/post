@@ -420,13 +420,14 @@ pub(crate) fn message_is_own(
     participant: &Participant,
     message: &ChannelMessage,
 ) -> bool {
-    crate::output::authored_locally_by(
-        context,
-        &participant.id,
-        &message.from,
-        message.from_participant.as_deref(),
-        message.sender_provenance.as_deref(),
-    )
+    message.from_host.is_none()
+        && crate::output::authored_locally_by(
+            context,
+            &participant.id,
+            &message.from,
+            message.from_participant.as_deref(),
+            message.sender_provenance.as_deref(),
+        )
 }
 
 fn sha256(bytes: &[u8]) -> String {

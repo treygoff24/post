@@ -222,6 +222,106 @@ pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> Br
     }
 }
 
+/// A successful channel send is local first. Explain when the local bridge
+/// cannot currently publish it, without turning the committed send into an error.
+pub(crate) fn channel_local_only_reason(
+    context: &Context,
+    channel: &str,
+    roomless: bool,
+) -> Option<String> {
+    let config_path = bridge_dir(context).join("config.json");
+    let config_bytes = match read_regular(&config_path, CONFIG_MAX_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        _ => return Some("no bridge config".to_owned()),
+    };
+    let config: serde_json::Value = match serde_json::from_slice(&config_bytes) {
+        Ok(value) => value,
+        Err(_) => return Some("invalid bridge config".to_owned()),
+    };
+    let Some(config_object) = config.as_object() else {
+        return Some("invalid bridge config".to_owned());
+    };
+    let Some(host) = config_object
+        .get("host")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Some("invalid bridge host".to_owned());
+    };
+    if !valid_host(host) {
+        return Some("invalid bridge host".to_owned());
+    }
+    match config_object.get("channels") {
+        Some(serde_json::Value::Null) => return Some("channel sync is off".to_owned()),
+        Some(serde_json::Value::Object(policy)) => {
+            if policy
+                .keys()
+                .any(|key| !matches!(key.as_str(), "mode" | "allow" | "deny"))
+            {
+                return Some("invalid channel sync policy".to_owned());
+            }
+            let names = |key: &str| -> Option<Vec<&str>> {
+                policy.get(key).map_or(Some(Vec::new()), |value| {
+                    value.as_array().and_then(|values| {
+                        values
+                            .iter()
+                            .map(serde_json::Value::as_str)
+                            .collect::<Option<Vec<_>>>()
+                    })
+                })
+            };
+            let (Some(allow), Some(deny)) = (names("allow"), names("deny")) else {
+                return Some("invalid channel sync policy".to_owned());
+            };
+            if allow.iter().chain(&deny).any(|name| {
+                crate::mailbox::validate_component(name).is_err()
+                    || name.chars().any(char::is_control)
+            }) {
+                return Some("invalid channel sync policy".to_owned());
+            }
+            if deny.contains(&channel) {
+                return Some("channel is denied by this host".to_owned());
+            }
+            match policy.get("mode").and_then(serde_json::Value::as_str) {
+                Some("allow") if !allow.contains(&channel) => {
+                    return Some("channel is not allowlisted".to_owned());
+                }
+                Some("all" | "allow") => {}
+                _ => return Some("invalid channel sync policy".to_owned()),
+            }
+        }
+        Some(_) => return Some("invalid channel sync policy".to_owned()),
+        None => {}
+    }
+    let Ok(Some(config)) = load_config(context) else {
+        return Some("invalid bridge config".to_owned());
+    };
+    match enrolled_peers(context, &config) {
+        Ok(peers) if peers.is_empty() => return Some("no enrolled peer hosts".to_owned()),
+        Err(_) => return Some("bridge peer registry is unavailable".to_owned()),
+        _ => {}
+    }
+    let health_path = bridge_dir(context).join("health.json");
+    let Ok(health) = read_health_json(&health_path) else {
+        return Some("no running bridge reported".to_owned());
+    };
+    if health_is_fresh(&health, &health_path, std::time::SystemTime::now()).is_err() {
+        return Some("bridge has not ticked recently".to_owned());
+    }
+    if roomless
+        && !health
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|value| value.as_str() == Some("roomless-channel-v1"))
+            })
+    {
+        return Some("running bridge cannot publish roomless senders".to_owned());
+    }
+    None
+}
+
 /// The second half of the room-rename interlock. Health counters are
 /// carried forward on busy and quiet ticks, so a fresh health file does not
 /// prove the last full tick saw every letter: a letter delivered to `room`

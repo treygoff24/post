@@ -1308,6 +1308,7 @@ mod tests {
             subject: String::new(),
             sent: "2026-08-31 17:12:34 +0000".to_owned(),
             from_participant: None,
+            from_host: None,
             from_lineage: None,
             address_kind: None,
             event: None,
