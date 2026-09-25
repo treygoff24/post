@@ -432,7 +432,9 @@ their existing success semantics.
   ```
 
   Mail results use `source: "mail"`, `channel: null`, and add `kind`; channel
-  results use `source: "channel"`, a channel name, and no `kind`. Reply fields
+  results use `source: "channel"`, a channel name, and no `kind`. Imported
+  roomless channel results carry `from_host`, render `<id>@<host>` in text,
+  and return `reply_to_participant: "participant:<id>@<host>"`. Reply fields
   follow the origin rules, and provisional mail is labeled pending. No-match is
   exit 0 with an empty result array. Search writes no routing receipt, cursor,
   or banner-day state, never moves mail, and does not affect watch.

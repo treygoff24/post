@@ -976,6 +976,8 @@ pub struct SearchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_participant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,

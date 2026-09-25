@@ -360,7 +360,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "room",
             "pattern",
             "match",
-            "results[] (source, channel?, id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, sent, subject, preview, matched, own?, pending?, already_read?, kind? for mail)",
+            "results[] (source, channel?, id, from, from_participant?, from_host? for channel, from_lineage?, origin, reply_to_participant?, reply_to_shared, sent, subject, preview, matched, own?, pending?, already_read?, kind? for mail)",
             "count",
             "limit",
             "truncated",

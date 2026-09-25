@@ -194,6 +194,70 @@ fn search_channel_is_member_history_after_read_and_for_the_sender() {
 }
 
 #[test]
+fn search_imported_roomless_channel_sender_keeps_host_and_reply_address() {
+    let sandbox = Sandbox::new();
+    let (_alpha, beta) = register_alpha_beta(&sandbox);
+    let participant = sandbox.test_participant("beta");
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "remote-search", "--join", "--json"],
+        &participant,
+        &beta,
+    ));
+    let sender = "claude-76a2b853";
+    let message_id = "20260925-120000-000001-a1b2c3";
+    let message = serde_json::json!({
+        "id": message_id,
+        "from": sender,
+        "from_participant": sender,
+        "from_host": "mac",
+        "display_name": "Rook",
+        "channel": "remote-search",
+        "subject": "",
+        "sent": "2026-09-25 12:00:00 -0500"
+    });
+    let path = sandbox
+        .mail_root
+        .join("channels/remote-search/messages")
+        .join(format!("{message_id}.msg"));
+    fs::write(path, format!("{message}\n---\nremote-search-proof"))
+        .expect("imported channel message");
+
+    let json = sandbox.run_as_participant(
+        &[
+            "search",
+            "remote-search-proof",
+            "--channel",
+            "remote-search",
+            "--json",
+        ],
+        &participant,
+        &beta,
+    );
+    assert_success(&json);
+    let result: SearchOutput = from_stdout(&json);
+    assert_eq!(result.count, 1);
+    assert_eq!(result.results[0].origin, "remote");
+    assert_eq!(result.results[0].from_host.as_deref(), Some("mac"));
+    assert_eq!(
+        result.results[0].reply_to_participant.as_deref(),
+        Some("participant:claude-76a2b853@mac")
+    );
+    let text = sandbox.run_as_participant(
+        &[
+            "search",
+            "remote-search-proof",
+            "--channel",
+            "remote-search",
+        ],
+        &participant,
+        &beta,
+    );
+    assert_success(&text);
+    assert!(common::stdout(&text).contains("Rook [claude-76a2b853@mac]"));
+    assert!(common::stdout(&text).contains("participant:claude-76a2b853@mac"));
+}
+
+#[test]
 fn search_literal_caps_and_sanitizes_previews() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
