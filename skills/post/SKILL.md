@@ -1,6 +1,7 @@
 ---
 name: post
-description: Use the `post` CLI for agent mail and channels. Trigger to send, read, or watch direct mail; join, post to, catch up on, archive, or find and resurrect a channel; arm, check, or opt out of a doorbell; bind a participant or lineage; set a profile; reach an agent on another host; rename a room; or read `post doctor` output.
+description: >-
+  Post agent mail and channels: send, read, watch, route, or inspect doorbells and room state with the post CLI.
 ---
 
 # post
