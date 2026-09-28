@@ -271,55 +271,181 @@ pub(crate) fn received_addresses(
     context: &Context,
     participant: &Participant,
 ) -> AppResult<Vec<Address>> {
-    Ok(received_index(context)?
-        .remove(&participant.id)
-        .unwrap_or_default())
+    ReceivedIndex::read(context).received(participant)
 }
 
-/// `received_addresses` for every participant at once, keyed by participant
-/// id, each list in `store_addresses` order.
+/// `received_addresses` for every participant from one read of every store.
 ///
-/// One pass reads each receipt and parses each canonical message once. Asking
-/// per participant reopened every store for every participant, and every
-/// participant is itself a store, so `post who` went quadratic in the host's
-/// participant count (post-gxz: 100 s at 4,139 participants).
-pub(crate) fn received_index(context: &Context) -> AppResult<HashMap<String, Vec<Address>>> {
-    let mut received: HashMap<String, Vec<Address>> = HashMap::new();
-    for address in store_addresses(context) {
-        let mut named = BTreeSet::new();
+/// Asking per participant reopened every store for every participant, and
+/// every participant is itself a store, so `post who` went quadratic in the
+/// host's participant count (post-gxz: 100 s at 4,139 participants).
+///
+/// A participant's answer is still the one its own walk gives. That walk
+/// visits a store's receipts in directory order and stops at the first that
+/// names the participant; only a store that never names it has its inbox
+/// listed for sender history. So a receipt that cannot be read, or an inbox
+/// that cannot be listed, fails the participants whose walk reaches it and
+/// no one else, and a corrupt receipt is warned about only by a walk that
+/// passes it. The index keeps those failures per store instead of raising
+/// them while it reads.
+pub(crate) struct ReceivedIndex {
+    stores: Vec<StoreSenders>,
+    /// Participant id -> stores naming it, by index into `stores`.
+    naming: HashMap<String, Vec<usize>>,
+    /// Stores whose walk can warn or fail for a participant it does not name.
+    irregular: Vec<usize>,
+}
+
+struct StoreSenders {
+    address: Address,
+    /// Participant id -> position of the first receipt naming it, by
+    /// recipient or as the canonical message's local sender.
+    first_named: HashMap<String, usize>,
+    /// Corrupt receipts before any failure: position, path, warning.
+    corrupt: Vec<(usize, PathBuf, String)>,
+    /// The first receipt that could not be read. Nothing after it is read.
+    failed: Option<(usize, AppError)>,
+    /// Local senders in the canonical inbox, or why it could not be listed.
+    /// Not read when a receipt failed: no walk gets that far.
+    senders: Result<HashSet<String>, AppError>,
+}
+
+impl StoreSenders {
+    fn read(context: &Context, address: Address) -> Self {
+        let mut first_named = HashMap::new();
+        let mut corrupt = Vec::new();
+        let mut failed = None;
         let directory = routing_dir(context, &address);
         if let Ok(entries) = fs::read_dir(&directory) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-                    continue;
-                };
-                if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                    continue;
-                }
+            let receipts = entries.flatten().map(|entry| entry.path()).filter(|path| {
+                path.extension().and_then(|value| value.to_str()) == Some("json")
+                    && path.file_stem().and_then(|value| value.to_str()).is_some()
+            });
+            for (position, path) in receipts.enumerate() {
+                let id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .expect("filtered to UTF-8 stems");
                 match receipt(context, &address, id) {
-                    Ok(Some(receipt)) => named.extend(receipt.recipients),
+                    Ok(Some(receipt)) => {
+                        let sender =
+                            parse_mail(&inbox_path(context, &address).join(format!("{id}.mail")))
+                                .ok()
+                                .and_then(|mail| local_author(context, &mail.envelope));
+                        for named in receipt.recipients.into_iter().chain(sender) {
+                            first_named.entry(named).or_insert(position);
+                        }
+                    }
                     Ok(None) => {}
-                    Err(error) if error.code == ErrorCode::ConfigInvalid => warn_once(
-                        path,
+                    Err(error) if error.code == ErrorCode::ConfigInvalid => corrupt.push((
+                        position,
+                        path.clone(),
                         format!("corrupt routing receipt skipped: {}", error.message),
-                    ),
-                    Err(error) => return Err(error),
+                    )),
+                    Err(error) => {
+                        failed = Some((position, error));
+                        break;
+                    }
                 }
             }
         }
-        // Sender history, routed or not: a routed message's sender is found
-        // here too, since its canonical bytes sit in the same inbox.
-        for path in message_files(&inbox_path(context, &address))? {
-            if let Ok(mail) = parse_mail(&path) {
-                named.extend(local_author(context, &mail.envelope));
-            }
-        }
-        for id in named {
-            received.entry(id).or_default().push(address.clone());
+        let senders = if failed.is_some() {
+            Ok(HashSet::new())
+        } else {
+            message_files(&inbox_path(context, &address)).map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|path| parse_mail(path).ok())
+                    .filter_map(|mail| local_author(context, &mail.envelope))
+                    .collect()
+            })
+        };
+        Self {
+            address,
+            first_named,
+            corrupt,
+            failed,
+            senders,
         }
     }
-    Ok(received)
+
+    /// A store whose walk is not simply "named or not".
+    fn irregular(&self) -> bool {
+        !self.corrupt.is_empty() || self.failed.is_some() || self.senders.is_err()
+    }
+
+    /// One participant's walk of this store: whether the store names it.
+    fn names(&self, id: &str) -> AppResult<bool> {
+        let named_at = self.first_named.get(id).copied();
+        let failed_at = self.failed.as_ref().map(|(position, _)| *position);
+        let stop = match (named_at, failed_at) {
+            (Some(named), Some(failed)) => Some(named.min(failed)),
+            (named, failed) => named.or(failed),
+        };
+        for (position, path, warning) in &self.corrupt {
+            if stop.is_none_or(|stop| *position < stop) {
+                warn_once(path.clone(), warning.clone());
+            }
+        }
+        if named_at.is_some() && named_at == stop {
+            return Ok(true);
+        }
+        if let Some((_, error)) = &self.failed {
+            return Err(error.clone());
+        }
+        match &self.senders {
+            Ok(senders) => Ok(senders.contains(id)),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+impl ReceivedIndex {
+    pub(crate) fn read(context: &Context) -> Self {
+        let stores: Vec<StoreSenders> = store_addresses(context)
+            .into_iter()
+            .map(|address| StoreSenders::read(context, address))
+            .collect();
+        let mut naming: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut irregular = Vec::new();
+        for (index, store) in stores.iter().enumerate() {
+            if store.irregular() {
+                irregular.push(index);
+                continue;
+            }
+            let senders = store.senders.iter().flatten();
+            let named: BTreeSet<&String> = store.first_named.keys().chain(senders).collect();
+            for id in named {
+                naming.entry(id.clone()).or_default().push(index);
+            }
+        }
+        Self {
+            stores,
+            naming,
+            irregular,
+        }
+    }
+
+    /// Stores in `store_addresses` order, failing where that participant's
+    /// own walk would.
+    pub(crate) fn received(&self, participant: &Participant) -> AppResult<Vec<Address>> {
+        let mut visit = self
+            .naming
+            .get(&participant.id)
+            .cloned()
+            .unwrap_or_default();
+        visit.extend(&self.irregular);
+        visit.sort_unstable();
+        visit.dedup();
+        let mut received = Vec::new();
+        for index in visit {
+            let store = &self.stores[index];
+            if store.names(&participant.id)? {
+                received.push(store.address.clone());
+            }
+        }
+        Ok(received)
+    }
 }
 
 /// The one local participant for which `eligibility::envelope_is_own` holds,

@@ -213,16 +213,42 @@ fn who_stays_fast_across_thousands_of_participants() {
 fn channels_reads_the_roster_once_not_once_per_channel() {
     let store = wide_store();
     let actor = &store.alpha_ids[0];
+    // Explicit state overrides legacy workspace membership both ways.
+    let leaver = &store.alpha_ids[1];
+    let left = store.sandbox.run_as_participant(
+        &["chat", "scale-00", "--leave", "--json"],
+        leaver,
+        &store.alpha,
+    );
+    assert_success(&left);
+    let joiner = "scale-00002"; // session-only: no workspace membership
+    let joined = store.sandbox.run_as_participant(
+        &["chat", "scale-01", "--join", "--json"],
+        joiner,
+        &store.sandbox.path,
+    );
+    assert_success(&joined);
+
     let channels = timed(&store, &["channels", "--json"], actor, DEADLINE);
     assert_success(&channels);
     let channels: Value = from_stdout(&channels);
     assert_eq!(channels["pending"], UNROUTED);
     let listed = channels["channels"].as_array().expect("channels");
     assert_eq!(listed.len(), CHANNELS);
+    let mut alpha_members = store.alpha_ids.clone();
+    alpha_members.push(store.sandbox.test_participant("alpha"));
+    alpha_members.sort();
     for channel in listed {
-        let participants = channel["participants"].as_array().expect("participants");
-        assert!(participants.iter().any(|id| id == actor.as_str()));
-        assert!(participants.len() >= store.alpha_ids.len());
+        let mut expected = alpha_members.clone();
+        match channel["name"].as_str().expect("name") {
+            "scale-00" => expected.retain(|id| id != leaver),
+            "scale-01" => expected.push(joiner.to_owned()),
+            _ => {}
+        }
+        expected.sort();
+        let participants: Vec<String> =
+            serde_json::from_value(channel["participants"].clone()).expect("participants");
+        assert_eq!(participants, expected, "{}", channel["name"]);
     }
 }
 

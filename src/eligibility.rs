@@ -216,7 +216,7 @@ fn receipt_verdict(
 /// projection there cost 25 ms each at 4,139 participants (post-gxz).
 pub(crate) struct MailCounts<'a> {
     context: &'a Context,
-    received: Option<HashMap<String, Vec<Address>>>,
+    received: Option<routing::ReceivedIndex>,
     stores: HashMap<Address, StoreCounts>,
 }
 
@@ -237,11 +237,9 @@ impl<'a> MailCounts<'a> {
 
     /// `routing::received_addresses` for `participant`.
     pub(crate) fn received(&mut self, participant: &Participant) -> AppResult<Vec<Address>> {
-        let received = match &mut self.received {
-            Some(received) => received,
-            empty => empty.insert(routing::received_index(self.context)?),
-        };
-        Ok(received.get(&participant.id).cloned().unwrap_or_default())
+        self.received
+            .get_or_insert_with(|| routing::ReceivedIndex::read(self.context))
+            .received(participant)
     }
 
     /// `unread_mail(..).len()`, given the participant's loaded cursors.
