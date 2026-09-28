@@ -1,5 +1,7 @@
 use crate::cli::WhoArgs;
 use crate::command_result::CommandResult;
+use crate::cursor_state::eligibility::MailCounts;
+use crate::cursor_state::ParticipantCursors;
 use crate::error::AppResult;
 use crate::mailbox::Context;
 use crate::output::{self, WhoActingParticipant, WhoOutput, WhoParticipant, WhoRoom};
@@ -61,12 +63,13 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         .participant()
         .map(|participant| participant.id.clone());
     let now = std::time::SystemTime::now();
+    let mut counts = MailCounts::new(context);
     let acting = match &resolved {
         Resolved::Bound {
             participant,
             provenance,
         } => {
-            let (unread, pending) = mail_counts(context, participant)?;
+            let (unread, pending) = mail_counts(context, &mut counts, participant)?;
             WhoActingParticipant {
                 status: "bound".to_owned(),
                 state: Some(participant.state_label(now).to_owned()),
@@ -115,7 +118,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 continue;
             }
         }
-        let (unread, pending) = mail_counts(context, &participant)?;
+        let (unread, pending) = mail_counts(context, &mut counts, &participant)?;
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
         let state = participant.state_label(now).to_owned();
         participants.push(WhoParticipant {
@@ -211,21 +214,20 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
 
 fn mail_counts(
     context: &Context,
+    counts: &mut MailCounts,
     participant: &crate::participant::Participant,
 ) -> AppResult<(BTreeMap<String, usize>, BTreeMap<String, usize>)> {
     let mut unread = BTreeMap::new();
     let mut pending = BTreeMap::new();
-    for address in super::inbox::visible_addresses(context, participant)? {
-        let label = format!("{}:{}", address.kind.as_str(), address.name);
+    let cursors = ParticipantCursors::load(context, participant);
+    let received = counts.received(participant)?;
+    for address in super::inbox::visible_addresses_among(participant, received) {
+        let label = super::inbox::address_label(&address);
         unread.insert(
             label.clone(),
-            crate::cursor_state::eligibility::unread_mail(context, participant, &address)?.len(),
+            counts.unread(participant, &cursors, &address)?,
         );
-        pending.insert(
-            label,
-            crate::cursor_state::routing::provisional_pending_for(context, participant, &address)?
-                .len(),
-        );
+        pending.insert(label, counts.pending(participant, &address)?);
     }
     Ok((unread, pending))
 }

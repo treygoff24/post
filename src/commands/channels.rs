@@ -14,6 +14,7 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
     let acting_room = participant.and_then(|actor| actor.workspace.clone());
     let mut channels = Vec::new();
     let mut archived_hidden = 0;
+    let mut roster = crate::channel_state::ChannelRoster::new(context);
     for summary in summaries {
         let archived = summary.archived.is_some();
         let listed = if args.all {
@@ -29,8 +30,7 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
             }
             continue;
         }
-        let effective_members =
-            crate::channel_state::effective_participants(context, &summary.info.name)?;
+        let effective_members = roster.effective_participants(&summary.info.name)?;
         let is_member = participant
             .is_some_and(|actor| effective_members.iter().any(|member| member.id == actor.id));
         let unread = match (participant, is_member) {

@@ -6,7 +6,7 @@ use crate::mailbox::{parse_mail, Context};
 use crate::model::{ChannelMessage, Envelope, ParsedMail};
 use crate::participant::{Address, Participant};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -114,81 +114,183 @@ pub(crate) fn visible_mail_snapshot(
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        let receipt = match routing::receipt(context, address, id) {
-            Ok(receipt) => receipt,
-            Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
-                routing::warn_once(
-                    routing::receipt_path(context, address, id),
-                    format!("corrupt routing receipt skipped: {}", error.message),
-                );
-                skipped_unreadable += 1;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if let Some(receipt) = receipt.as_ref() {
-            match parse_routed_mail(&path, receipt) {
-                Ok(parsed) => {
-                    let own = envelope_is_own(context, participant, &parsed.envelope);
-                    let recipient = receipt.recipients.contains(&participant.id);
-                    if recipient || own {
-                        visible.push(EligibleMail {
-                            path,
-                            envelope: parsed.envelope,
-                            body: parsed.body,
-                            recipient,
-                            own,
-                            pending: false,
-                        });
-                    }
+        match receipt_verdict(context, address, &path, id)? {
+            Routed::Valid(receipt, parsed) => {
+                let own = envelope_is_own(context, participant, &parsed.envelope);
+                let recipient = receipt.recipients.contains(&participant.id);
+                if recipient || own {
+                    visible.push(EligibleMail {
+                        path,
+                        envelope: parsed.envelope,
+                        body: parsed.body,
+                        recipient,
+                        own,
+                        pending: false,
+                    });
                 }
-                Err(error)
-                    if matches!(
-                        error.code,
-                        crate::error::ErrorCode::ConfigInvalid | crate::error::ErrorCode::IoError
-                    ) =>
-                {
-                    routing::warn_once(
-                        path.clone(),
-                        format!(
-                            "routed mail skipped after digest mismatch or parse failure: {}",
-                            error.message
-                        ),
-                    );
+            }
+            Routed::Unreadable => skipped_unreadable += 1,
+            Routed::Unrouted => {
+                // Pending malformed siblings are not visible evidence. An
+                // explicit read still parses its matching path and reports
+                // the corruption rather than turning it into a not-found
+                // result.
+                let Ok(parsed) = parse_mail(&path) else {
                     skipped_unreadable += 1;
+                    continue;
+                };
+                let own = envelope_is_own(context, participant, &parsed.envelope);
+                if !own && !provisional.contains(id) {
+                    continue;
                 }
-                Err(error) => return Err(error),
+                visible.push(EligibleMail {
+                    path,
+                    envelope: parsed.envelope,
+                    body: parsed.body,
+                    recipient: false,
+                    own,
+                    pending: true,
+                });
             }
-            continue;
         }
-        let parsed = match parse_mail(&path) {
-            Ok(parsed) => parsed,
-            // Pending malformed siblings are not visible evidence. An
-            // explicit read still parses its matching path and reports the
-            // corruption rather than turning it into a not-found result.
-            Err(_) if receipt.is_none() => {
-                skipped_unreadable += 1;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let own = envelope_is_own(context, participant, &parsed.envelope);
-        if !own && !provisional.contains(id) {
-            continue;
-        }
-        visible.push(EligibleMail {
-            path,
-            envelope: parsed.envelope,
-            body: parsed.body,
-            recipient: false,
-            own,
-            pending: true,
-        });
     }
     Ok(MailSnapshot {
         items: visible,
         skipped_unreadable,
     })
+}
+
+enum Routed {
+    /// A receipt exists and the message bytes still match it.
+    Valid(routing::Receipt, Box<ParsedMail>),
+    /// No receipt yet: the message is pending.
+    Unrouted,
+    /// A corrupt receipt, or bytes that no longer match theirs. Already warned.
+    Unreadable,
+}
+
+/// The receipt/digest verdict every projection of routed mail shares.
+fn receipt_verdict(
+    context: &Context,
+    address: &Address,
+    path: &std::path::Path,
+    id: &str,
+) -> AppResult<Routed> {
+    let receipt = match routing::receipt(context, address, id) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => return Ok(Routed::Unrouted),
+        Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
+            routing::warn_once(
+                routing::receipt_path(context, address, id),
+                format!("corrupt routing receipt skipped: {}", error.message),
+            );
+            return Ok(Routed::Unreadable);
+        }
+        Err(error) => return Err(error),
+    };
+    match parse_routed_mail(path, &receipt) {
+        Ok(parsed) => Ok(Routed::Valid(receipt, Box::new(parsed))),
+        Err(error)
+            if matches!(
+                error.code,
+                crate::error::ErrorCode::ConfigInvalid | crate::error::ErrorCode::IoError
+            ) =>
+        {
+            routing::warn_once(
+                path.to_path_buf(),
+                format!(
+                    "routed mail skipped after digest mismatch or parse failure: {}",
+                    error.message
+                ),
+            );
+            Ok(Routed::Unreadable)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Unread and pending mail counts for many participants from one read of each
+/// store: the counts `unread_mail` and `provisional_pending_for` give, without
+/// rereading every receipt, digest, and recipient resolution per participant.
+/// `post who` projects every participant on the host; per-participant
+/// projection there cost 25 ms each at 4,139 participants (post-gxz).
+pub(crate) struct MailCounts<'a> {
+    context: &'a Context,
+    received: Option<routing::ReceivedIndex>,
+    stores: HashMap<Address, StoreCounts>,
+}
+
+struct StoreCounts {
+    /// Routed mail whose bytes match its receipt: id and frozen recipients.
+    routed: Vec<(String, HashSet<String>)>,
+    pending: Vec<routing::PendingMail>,
+}
+
+impl<'a> MailCounts<'a> {
+    pub(crate) fn new(context: &'a Context) -> Self {
+        Self {
+            context,
+            received: None,
+            stores: HashMap::new(),
+        }
+    }
+
+    /// `routing::received_addresses` for `participant`.
+    pub(crate) fn received(&mut self, participant: &Participant) -> AppResult<Vec<Address>> {
+        self.received
+            .get_or_insert_with(|| routing::ReceivedIndex::read(self.context))
+            .received(participant)
+    }
+
+    /// `unread_mail(..).len()`, given the participant's loaded cursors.
+    pub(crate) fn unread(
+        &mut self,
+        participant: &Participant,
+        cursors: &ParticipantCursors,
+        address: &Address,
+    ) -> AppResult<usize> {
+        Ok(self
+            .store(address)?
+            .routed
+            .iter()
+            .filter(|(id, recipients)| {
+                recipients.contains(&participant.id) && !cursors.mail_has_seen(address, id)
+            })
+            .count())
+    }
+
+    /// `provisional_pending_for(..).len()`.
+    pub(crate) fn pending(
+        &mut self,
+        participant: &Participant,
+        address: &Address,
+    ) -> AppResult<usize> {
+        Ok(self
+            .store(address)?
+            .pending
+            .iter()
+            .filter(|mail| mail.is_pending_for(participant, address))
+            .count())
+    }
+
+    fn store(&mut self, address: &Address) -> AppResult<&StoreCounts> {
+        if !self.stores.contains_key(address) {
+            let context = self.context;
+            let pending = routing::pending_mail(context, address, true)?;
+            let mut routed = Vec::new();
+            for path in routing::message_files(&routing::inbox_path(context, address))? {
+                let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if let Routed::Valid(receipt, _) = receipt_verdict(context, address, &path, id)? {
+                    routed.push((id.to_owned(), receipt.recipients.into_iter().collect()));
+                }
+            }
+            self.stores
+                .insert(address.clone(), StoreCounts { routed, pending });
+        }
+        Ok(&self.stores[address])
+    }
 }
 
 pub(crate) fn strict_visible_routed_mail(

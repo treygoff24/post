@@ -97,6 +97,19 @@ impl ParticipantChannels {
         participant: &Participant,
         channel: &str,
     ) -> AppResult<bool> {
+        self.effective_among(
+            participant,
+            channel,
+            &mut LegacyMembers::new(context, channel),
+        )
+    }
+
+    fn effective_among(
+        &self,
+        participant: &Participant,
+        channel: &str,
+        members: &mut LegacyMembers,
+    ) -> AppResult<bool> {
         crate::channel::validate_channel_name(channel)?;
         if self.joined.contains(channel) {
             return Ok(true);
@@ -107,9 +120,7 @@ impl ParticipantChannels {
         let Some(workspace) = participant.workspace.as_ref() else {
             return Ok(false);
         };
-        Ok(crate::channel::ChannelPaths::new(context, channel)?
-            .load_members()?
-            .contains_key(workspace))
+        Ok(members.get()?.contains_key(workspace))
     }
 
     pub(crate) fn joined_names(&self) -> &BTreeSet<String> {
@@ -367,6 +378,76 @@ pub(crate) fn participants_for_join_validation(
 }
 
 fn participants_for_channel(context: &Context, channel: &str) -> AppResult<Vec<Participant>> {
+    ChannelRoster::new(context).effective_participants(channel)
+}
+
+/// A channel's legacy workspace membership (`members.json`), read on first
+/// need and reused for every participant asked about that channel.
+struct LegacyMembers<'a> {
+    context: &'a Context,
+    channel: &'a str,
+    members: Option<crate::channel::MemberMap>,
+}
+
+impl<'a> LegacyMembers<'a> {
+    fn new(context: &'a Context, channel: &'a str) -> Self {
+        Self {
+            context,
+            channel,
+            members: None,
+        }
+    }
+
+    fn get(&mut self) -> AppResult<&crate::channel::MemberMap> {
+        Ok(match &mut self.members {
+            Some(members) => members,
+            empty => empty.insert(
+                crate::channel::ChannelPaths::new(self.context, self.channel)?.load_members()?,
+            ),
+        })
+    }
+}
+
+/// Every participant and its channel state, read once (on first use) for a
+/// caller that asks `effective_participants` about many channels. `post
+/// channels` asked per channel, rereading every participant record, its
+/// channel state, and the channel's members.json once per participant: 44
+/// channels at 4,139 participants took 1.6 s (post-gxz).
+pub(crate) struct ChannelRoster<'a> {
+    context: &'a Context,
+    participants: Option<Vec<(Participant, ParticipantChannels)>>,
+}
+
+impl<'a> ChannelRoster<'a> {
+    pub(crate) fn new(context: &'a Context) -> Self {
+        Self {
+            context,
+            participants: None,
+        }
+    }
+
+    pub(crate) fn effective_participants(&mut self, channel: &str) -> AppResult<Vec<Participant>> {
+        let context = self.context;
+        let mut members = LegacyMembers::new(context, channel);
+        let mut effective = Vec::new();
+        for (participant, state) in self.load()? {
+            if state.effective_among(participant, channel, &mut members)? {
+                effective.push(participant.clone());
+            }
+        }
+        effective.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(effective)
+    }
+
+    fn load(&mut self) -> AppResult<&[(Participant, ParticipantChannels)]> {
+        Ok(match &mut self.participants {
+            Some(participants) => participants,
+            empty => empty.insert(roster(self.context)?),
+        })
+    }
+}
+
+fn roster(context: &Context) -> AppResult<Vec<(Participant, ParticipantChannels)>> {
     let mut participants = Vec::new();
     for participant in crate::participant::list(context)? {
         let state = match ParticipantChannels::load(&participant) {
@@ -380,11 +461,8 @@ fn participants_for_channel(context: &Context, channel: &str) -> AppResult<Vec<P
             }
             Err(error) => return Err(error),
         };
-        if state.effective(context, &participant, channel)? {
-            participants.push(participant);
-        }
+        participants.push((participant, state));
     }
-    participants.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(participants)
 }
 
