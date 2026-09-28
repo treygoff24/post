@@ -6,7 +6,7 @@ Prepared for Trey. Nothing has been fixed; this is diagnosis and recommendation 
 
 Most of the pain agents logged over the last ten weeks is already fixed. Almost all of it traces back to one design mistake, identity being a *place* (a directory or room name) instead of a *thing*, and the participants redesign of 09-16 killed that root. What is still hurting is a different set of problems, and they are more structural than any single papercut:
 
-1. **Nobody can say what is actually running.** The Mac runs a build that is on no branch. The devbox runs a different build that is not in the Mac's repo at all. The sitrep names a third. The fix for the 30–38 second `post who` is on `main` but not installed on the Mac.
+1. **The Mac and devbox run different builds, and the sitrep names neither.** The Mac runs a build that is on no branch and predates the fix for the 30–38 second `post who`. The devbox runs current `main` (plus a beads-only commit). The sitrep says both run a third build.
 2. **The tool succeeds silently with a wrong or empty answer** in at least six places. A typo'd identity reads as "no mail." The bridge says `ok: true` with six letters permanently stuck. `post doctor` says `broken` on both hosts forever and is 93–98% noise, so agents learn to ignore it.
 3. **One unknown channel event kind wedges a channel for every reader** (reproduced today). Bridged channels now sync between hosts by default, and the two hosts run different builds, so the first time anyone adds a new event kind this is a live hazard.
 4. **Identity minting has no lifecycle.** 93% of the Mac's 1,796 participant records have never done anything. That population is what made `who` quadratic, and one path on the send/read critical path is still superlinear under a global lock.
@@ -26,10 +26,10 @@ My recommended order is at the end. The short version: fix deployment discipline
 
 ## The root causes, in order of leverage
 
-### 1. Deployment: no one can tell what is running (live now)
+### 1. Deployment: builds drift and nothing notices (live now)
 
 - **Mac** runs build `f784a3b`, labelled "temp gate candidate." That commit is on **no branch**. `main` has six newer commits, including the `who`/`doctor`/`channels` scaling fix.
-- **Devbox** runs `82bfa35`, which does not exist in the Mac repo. The sitrep says both hosts run a third build. The devbox's `who` takes 0.36 s at 4,299 participants; the Mac's takes 30–38 s at 1,794. The fix is real, just uninstalled on the machine you use most.
+- **Devbox** runs `82bfa35`. The analysts could not find it in the Mac repo, but that was because the Mac checkout had not fetched: on Forgejo it is a commit that only changes the beads export, on top of `main`. So the devbox runs current `main` code. The sitrep says both hosts run a third build. The devbox's `who` takes 0.36 s at 4,299 participants; the Mac's takes 30–38 s at 1,794. The fix is real, just uninstalled on the machine you use most.
 - **Stale binaries on PATH.** The Mac has a 0.6.0 build in `~/.cargo/bin`; the devbox has a root-owned August 31 build in `/usr/local/bin` that prints `post 0.9.0` and has no `version` subcommand. `post --version` prints no build ID, so a hook with a minimal PATH runs the old binary and looks current.
 - **The skill is served from the live repo checkout**, while the binary is installed separately. `post contract skill-manifest --verify` currently reports drift on the Mac. The check exists; nothing tells an agent or you when it fails.
 - The scaling bead is still open and the sitrep is five days stale.
@@ -136,13 +136,14 @@ I had an independent Opus pass check the structural claims, and it overturned th
 
 - **The empty room directories are not created by post.** The first analysts named a code path in post; it cannot be reached in production and I could not trigger it. The bridge creates them.
 - **The "about 28 messages ever" figure** in the herd-experiment note counts delegate's own mail across 24 repos, not post. The Mac store shows 1,040 direct letters since mid-July and about 9,000 channel messages, 100–900 a day lately. Channels carry the load, so "post is barely used" is the wrong premise for a deletion argument. What is out of proportion is the identity and wake machinery, not the mail.
+- **"The devbox build is untraceable" was wrong.** The analysts checked the Mac checkout without fetching. After fetching, the devbox build is `main` plus a beads-only commit. (My mistake to pass it on; the shell-footguns rule about fetching before trusting a clone's HEAD applies.)
 - **The doorbell supervisor does not read an unresolved identity as "no mail"** (it scrapes stderr for "unbound"); the four harness hooks do.
 
 ## Recommended changes, ranked by value per unit of risk
 
 | # | Change | What it retires | Risk | Whose call |
 |---|---|---|---|---|
-| 1 | Install `main` on both hosts from a reachable commit; installer refuses unreachable commits; `--version` prints the build ID; doctor checks skill drift and extra PATH binaries; smoke test times `who` | The 30–38 s `who`, the untraceable builds, stale-binary confusion | low | routine |
+| 1 | Install `main` on the Mac (the devbox already runs it); installer refuses unreachable commits; `--version` prints the build ID; doctor checks skill drift and extra PATH binaries; smoke test times `who` | The 30–38 s `who`, the unreachable Mac build, stale-binary confusion | low | routine |
 | 2 | Routing resolves recipients once per pass; add a read/catch-up scaling test | The remaining superlinear path under the global lock | very low | routine |
 | 3 | Unresolved identity becomes a typed error (fix both swallow sites); hooks rebind on that code; drop the stderr scrape | Silent "no mail," open identity bead, the `inbox` variant | low | routine |
 | 4 | Tolerant event kinds in post and the bridge, one test through every reader, shipped fleet-wide before any new kind | The channel-wedge hazard | low | routine |
@@ -168,7 +169,7 @@ I had an independent Opus pass check the structural claims, and it overturned th
 - Four cuts remain unexplained: a watch dying about seven seconds after a rebind, a digest re-emitting an already-read message, a hook-announced mail id "not found" after the redesign, and a channel `--join` that created a second same-named channel across hosts (probably fixed by bridge sync on by default, deployment unchecked).
 - A tiny race where the cursor file is renamed between open and stat (inferred from reading, not testable).
 - The reproductions used the installed build, not `main`; `main`'s scaling fix was checked by its tests and by the devbox timing, not re-run on the Mac.
-- The devbox build `82bfa35` could not be traced from here.
+- The devbox build is inferred to be `main`'s code: its commit changes only the beads export. I did not compare the binary's contents to a fresh build of `main`.
 - Bridge behavior when its channel importer meets an unknown event kind was not traced (whether it stops or quarantines).
 
 ## Detail files
