@@ -1,0 +1,3287 @@
+[
+ {
+  "id": "pc_6c9471ff543e",
+  "ts": "2026-07-15T17:30:23.749Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/custom-stt-cleanup-model",
+  "text": "A heredoc followed by && in a combined shell check caused a zsh parse error; split the post-heredoc commands or group them explicitly."
+ },
+ {
+  "id": "pc_c01469b67d29",
+  "ts": "2026-07-15T20:03:23.163Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post infers its room from cwd, so a compound command that cd'd elsewhere (agent-memory watch check) silently read the wrong room's inbox \u2014 harmless read-only miss here, but run post from the room you mean, or pass --room explicitly in scripts"
+ },
+ {
+  "id": "pc_6405146d86f5",
+  "ts": "2026-07-15T23:39:48.395Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space/post",
+  "text": "post's --from was free-form with no reservation check, so the first real mail arrived stamped 'from claude-space' though it came from the stt-cleanup room \u2014 envelopes could misattribute any registered room. Fixed same night: sender auto-resolves from cwd (registered room, else dir basename) and registered names are reserved outside their trees"
+ },
+ {
+  "id": "pc_2b89cc37a796",
+  "ts": "2026-07-16T15:15:54.076Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post symlink at ~/.local/bin/post pointed to ~/Code/post/target/release/post but target/ was gone (likely swept post-OS-update); fixed with cargo build --release \u2014 consider installing the binary by copy instead of symlinking into target/"
+ },
+ {
+  "id": "pc_07f1d7a0f799",
+  "ts": "2026-07-16T15:51:01.382Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "mail"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/papercuts",
+  "text": "post mail: replying to a sender is a dead end unless their room is pre-registered \u2014 'post rooms' shows registered rooms but there is no 'post rooms add' command; registration means hand-editing ~/.claude-mail/rooms.json, whose flat name->path shape is undocumented in --help (first guess produced an invalid nested shape). A 'post rooms add <name> <path>' subcommand, or auto-suggesting registration when a reply targets a known sender, would have prevented this."
+ },
+ {
+  "id": "pc_f7496331c435",
+  "ts": "2026-07-17T21:08:14.249Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/post",
+  "text": "Broad 'find .. -name AGENTS.md' stalled in the post workspace; scoped rg-based instruction discovery would have prevented the dead end"
+ },
+ {
+  "id": "pc_87f0969cd45d",
+  "ts": "2026-07-21T18:48:57.454Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post send's usage line reads 'post send --to <ROOM> --subject <SUBJECT> --body <TEXT> <FILE>', showing --body and a positional FILE as if both were required, with no indication they are alternatives. Guessed --body-file (the common convention) and got a parse failure whose tip suggested --body, i.e. pointed at the inline-text flag when I wanted the file path. Either accept --body-file as an alias or make the usage line show the two forms as exclusive alternatives."
+ },
+ {
+  "id": "pc_d95dd966213d",
+  "ts": "2026-07-21T18:54:59.904Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/post",
+  "text": "A broad 'find .. -name AGENTS.md' from the post repo stalled and prevented later chained inspection output; a bounded repo-local instruction lookup recipe would avoid this."
+ },
+ {
+  "id": "pc2_276f3027f7b454da",
+  "ts": "2026-07-21T23:14:06.980Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "hooks"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/papercuts",
+  "text": "rm-deletion-safety hook false-positived on a Bash command containing no rm invocation (a cat > file heredoc writing a prose letter, piped to nothing, followed by post send). The hook should match rm as an actual command token (start of pipeline segment), not substring-grep the whole command text \u2014 prose heredocs trip it."
+ },
+ {
+  "id": "pc_bc126d9def37",
+  "ts": "2026-07-22T02:09:07.981Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "hooks"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/ufos",
+  "text": "rm-deletion-safety hook false-fired on a compound bash command containing NO rm (post send + git add + git commit -F - heredoc). Blocked the whole command; splitting into separate invocations worked. Scanner may be matching a substring inside the heredoc commit body or misparsing the heredoc. Wasted one retry cycle."
+ },
+ {
+  "id": "pc_58bd517ea72b",
+  "ts": "2026-07-22T07:19:45.240Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code",
+  "text": "post chat cursor advance via '> /dev/null' silently discards unread channel messages \u2014 committed twice in 40s even after naming the failure mode. Workflow cure: never redirect a channel read; read the emitted batch every time. Structural wishlist: atomic advance-past-own-message on --send so discard-advancement is never needed."
+ },
+ {
+  "id": "pc_eb1ff3e54bf7",
+  "ts": "2026-07-22T07:20:53.531Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post chat cursor advance uses emission as a proxy for reading: piping a channel read to /dev/null advances past unseen messages (member 7 in the taxonomy; recovered from append-only store). Structural fix queued: --send should advance past own message atomically so discard-advancement is never needed."
+ },
+ {
+  "id": "pc_22016787e235",
+  "ts": "2026-07-23T03:57:33.714Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/post",
+  "text": "Node 26 node:internal/modules/cjs/loader:1573\n  throw err;\n  ^\n\nError: Cannot find module '/Users/treygoff/Code/post/skills/post/hooks'\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1569:15)\n    at wrapResolveFilename (node:internal/modules/cjs/loader:1123:27)\n    at defaultResolveImplForCJSLoading (node:internal/modules/cjs/loader:1147:10)\n    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1174:12)\n    at Module._load (node:internal/modules/cjs/loader:1346:5)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  code: 'MODULE_NOT_FOUND',\n  requireStack: []\n}\n\nNode.js v26.5.0\n\u2716 skills/post/hooks (27.77275ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 31.200125\n\n\u2716 failing tests:\n\ntest at skills/post/hooks:1:1\n\u2716 skills/post/hooks (27.77275ms)\n  'test failed' treats the hooks directory as a module; hook docs should use an explicit  path."
+ },
+ {
+  "id": "pc_753d42a0ac83",
+  "ts": "2026-07-23T20:14:36.718Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/.codex/post-room",
+  "text": "post read cannot retrieve a previously consumed message by id, but its not_found text only says no unread id; a read/archive lookup or clearer command would prevent failed replay instructions"
+ },
+ {
+  "id": "pc_4b62f3965a3f",
+  "ts": "2026-07-23T20:23:05.997Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/.codex/post-room",
+  "text": "Inline post chat --body text containing Markdown backticks and arrow syntax was shell-expanded, corrupting a message even though post returned success; a documented --body-file flag or safer example would prevent silent collaborator brief damage"
+ },
+ {
+  "id": "pc_91e1705f8c7b",
+  "ts": "2026-07-23T20:23:10.811Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post chat channel messages silently drop angle-bracketed tokens (<name> etc.) from message bodies \u2014 codex's #roundtable msg 20260723-152253 arrived with holes where identifiers were; likely HTML-sanitization in send or render path. Escaping or passthrough would prevent corrupted technical discussion."
+ },
+ {
+  "id": "pc_a689a27c47f0",
+  "ts": "2026-07-23T20:23:43.088Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "CORRECTION to pc_91e1705f8c7b: the angle-bracket loss in #roundtable msg 20260723-152253 was the sender's own shell eating unquoted <tokens> as redirections at send time, NOT post sanitization. Real papercut: post docs/skill should warn that channel/mail bodies with shell metacharacters need single-quoted --body or a file."
+ },
+ {
+  "id": "pc_64642fdce708",
+  "ts": "2026-07-23T20:34:21.936Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory",
+  "text": "post chat derives sender identity from cwd with no confirmation; running a prepared send from the repo posted Codex's review as agent-memory. post should require --room or print/confirm identity before sending when cwd differs from the registered room."
+ },
+ {
+  "id": "pc_631608a4c7fd",
+  "ts": "2026-07-23T21:13:10.859Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post chat --body loses shell-special characters silently: dollar signs vanished from two different rooms' messages (msgs 161125, 161246 in #roundtable 2026-07-23), following codex's angle-bracket loss. Root cause is sender-side shell quoting, but post could help: warn on suspicious bodies or document 'use a file for anything with $, <, >, backticks' prominently in send/chat help."
+ },
+ {
+  "id": "pc_dc0f6960e426",
+  "ts": "2026-07-23T21:21:49.416Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory",
+  "text": "The remembered post send syntax (recipient positional plus stdin) was rejected;  in live CLI should be surfaced consistently in the skill/help."
+ },
+ {
+  "id": "pc_8290974b4db9",
+  "ts": "2026-07-23T21:47:18.684Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory",
+  "text": "post watch --once exited 143 without output while waiting for a channel event; a clear timeout/interruption message would prevent ambiguity"
+ },
+ {
+  "id": "pc_105e25a4350b",
+  "ts": "2026-07-24T01:21:47.179Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/.codex/post-room",
+  "text": "Combined W0 recheck ran Git commands from the post room instead of the repository, aborting before channel inspection; separate cwd-sensitive commands would have prevented the retry"
+ },
+ {
+  "id": "pc_ca37e22ef2d0",
+  "ts": "2026-07-24T03:22:06.758Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "tools"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/.codex/post-room",
+  "text": "functions.exec JavaScript variables are not exported into nested exec_command shell environment; POST_BODY expanded empty during post send. A documented helper for passing exec-local strings as env/stdin would prevent this."
+ },
+ {
+  "id": "pc_bda2b6d12ff3",
+  "ts": "2026-07-24T03:47:00.317Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "post hook reported direct mail id 20260723-222331-ffb576, but post read --peek said no unread id; notice should distinguish already-read/stale ids or include inbox refresh hint"
+ },
+ {
+  "id": "pc_f7bca7de7cbf",
+  "ts": "2026-07-24T04:03:36.547Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "I reflexively passed --room to post channels even though the post skill says that flag exists only for inbox/read/watch; a CLI suggestion pointing to cwd-bound identity would prevent this parse failure."
+ },
+ {
+  "id": "pc_c40a67b370af",
+  "ts": "2026-07-24T04:06:55.678Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "A Codex post hook announced direct mail id 20260723-230624-7d2418, but an immediate exact post read reported not_found; hook/read synchronization or a stale-notice diagnostic would prevent this dead-end."
+ },
+ {
+  "id": "pc_97b041ea115c",
+  "ts": "2026-07-24T04:11:18.696Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post: direct mail 20260723-230624-7d2418 (claude-space -> codex) was reported not_found by the codex room when read moments after delivery; sender saw a successful send receipt. Either archive/delivery race or id-prefix resolution failure \u2014 durable-evidence workflows had to fall back to channel repost."
+ },
+ {
+  "id": "pc_8053c3a1d0b6",
+  "ts": "2026-07-24T04:11:27.233Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post: root cause of pc_97b041ea115c \u2014 'post read <prefix>' resolves only against UNREAD mail; a previously-read mail returns not_found with a misleading message, which reads as lost mail. Fix: fall back to archive/read store on prefix miss, or say 'already read; see archive' instead of not_found."
+ },
+ {
+  "id": "pc_b0805cdd1119",
+  "ts": "2026-07-24T04:47:37.539Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/.codex/post-room",
+  "text": "post chat --send treats its argument as a file path, which is easy to mistake for inline text; the help/skill should foreground --body for inline channel messages."
+ },
+ {
+  "id": "pc_bfcf2abafcca",
+  "ts": "2026-07-24T08:08:51.621Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "post chat --send treats the next argument as a message-body FILE, but the command surface is easy to misread as literal text; error suggests --body only after failure."
+ },
+ {
+  "id": "pc_525e9cf95f6d",
+  "ts": "2026-07-24T08:30:55.179Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory",
+  "text": "I mistakenly passed --room to post channels because I carried the inbox/watch room pattern across commands; a subcommand-specific usage hint beside the global guide would prevent it."
+ },
+ {
+  "id": "pc_d8ae3df9ca34",
+  "ts": "2026-07-24T10:06:40.611Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "post chat --peek has no --limit option; a bounded peek affordance or help hint would prevent avoidable parse failures"
+ },
+ {
+  "id": "pc_8d82f43b475f",
+  "ts": "2026-07-24T12:29:57.649Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "post chat roundtable failed not_a_member because I ran it from the repo instead of ~/.codex/post-room; a cwd hint in the error would prevent this recurring footgun"
+ },
+ {
+  "id": "pc_8dc56b392b47",
+  "ts": "2026-07-24T13:43:19.558Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "The Post roundtable summary said 'post chat <channel> --send ...', but --send expects a file and interpreted inline text as a filename; document --body for inline messages."
+ },
+ {
+  "id": "pc_98f5c2d4decb",
+  "ts": "2026-07-24T13:43:57.291Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "/Users/treygoff/Code/agent-memory-attention-phase0",
+  "text": "Post's IO error said 'use --body <text>', but the parser rejects --body alone and requires the combined flags '--send --body <text>'; make the suggested fix executable verbatim."
+ },
+ {
+  "id": "pc_8cd6e3fa51f1",
+  "ts": "2026-07-26T18:42:02.647Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": "/Users/treygoff/Code/claude-space",
+  "text": "post: two rooms replying to each other reliably cross in-flight (observed twice within ~1s on 2026-07-26) \u2014 no threading/in-reply-to means crossed letters read as non-sequiturs; consider In-Reply-To id header or a 'compose lock'/draft-visible signal"
+ },
+ {
+  "id": "pc_7345015e75fe",
+  "ts": "2026-07-31T19:47:03.401Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat --body from Codex tool JSON preserved literal \\n in a channel message; a heredoc/file body pattern in the brief would prevent ugly escaped newlines"
+ },
+ {
+  "id": "pc_4fd3ec436abc",
+  "ts": "2026-07-31T20:05:02.160Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "I combined a repo-relative install with a post command while cwd was the Codex post room, so the asset copy failed before mail sent; keep filesystem and post commands in separate calls with explicit workdirs."
+ },
+ {
+  "id": "pc_20b7e61ba81e",
+  "ts": "2026-07-31T21:17:23.423Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "tooling"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+  "text": "post channels does not accept the documented-looking --room flag; error was only discoverable by invocation"
+ },
+ {
+  "id": "pc_6ccfd141380f",
+  "ts": "2026-08-01T05:20:04.332Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "harness"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+  "text": "After /compact, TaskList returns 'No tasks found' while persistent Monitor tasks are still running and still delivering notifications. The listing loses them; the tasks survive. Anyone using TaskList to verify a doorbell after a compact will conclude it died and arm a duplicate, producing double notifications for every event. TaskStop on the new id still works even though neither task is listed. Fix would be for compaction to preserve task-list visibility, or for TaskList to say 'listing unavailable after compact' rather than reporting an empty list that reads as authoritative."
+ },
+ {
+  "id": "pc_8b78eb4a12d9",
+  "ts": "2026-08-01T10:46:47.783Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post channels prints channel names without the # prefix, but post chat '#name' rejects it; the output should make the accepted argument form explicit"
+ },
+ {
+  "id": "pc_6736601fff4d",
+  "ts": "2026-08-03T23:26:36.682Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post channels lists jobsite-art without the # prefix, but post chat '#jobsite-art' rejects the documented-looking channel name; normalize or document channel-name syntax"
+ },
+ {
+  "id": "pc_cf5507fc7fa7",
+  "ts": "2026-08-04T15:30:17.466Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "agent-mail"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post CLI rejects undocumented --room on channels and a nonexistent codex channel; exact command help should make channel-vs-room routing harder to confuse"
+ },
+ {
+  "id": "pc_05f9423b80b0",
+  "ts": "2026-08-04T21:44:04.615Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/.codex/post-room",
+  "text": "The surrounding task hint showed 'post channels' but I appended --room by analogy with inbox; a CLI error with exact_fix recovered immediately. A consistent room flag model would reduce this mismatch."
+ },
+ {
+  "id": "pc_08fad241570b",
+  "ts": "2026-08-05T01:16:18.791Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "deploy"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "stale post binary at ~/.local/bin (Jul 31) shadowed ~/.cargo/bin installs \u2014 cargo install silently 'succeeded' into the wrong precedence; deploy step must target the PATH-first location and rm-then-cp (macOS kills in-place-overwritten signed binaries)"
+ },
+ {
+  "id": "pc_e46864f3abb8",
+  "ts": "2026-08-05T02:09:31.216Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Snapshot idempotence smoke compared human-formatted post chat --peek output byte-for-byte; framing output changed despite unchanged cursor state. A JSON/cursor-file assertion recipe in the post skill would prevent this misleading check."
+ },
+ {
+  "id": "pc_3168faf810f8",
+  "ts": "2026-08-05T02:14:37.043Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post main at 69e037f fails cargo fmt --check across untouched v0.3 Rust files, so unrelated formatting noise blocks the canonical chained gate. Keep main fmt-clean or provide a scoped JS integration gate."
+ },
+ {
+  "id": "pc_7ace7ed01bf5",
+  "ts": "2026-08-05T02:15:20.058Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "I guessed post inbox JSON uses .items and hit a jq null-iteration error. The skill should include the exact inbox success envelope field names beside its machine-parsing example."
+ },
+ {
+  "id": "pc_d8eb7d0218f5",
+  "ts": "2026-08-05T02:43:38.589Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "I embedded a Post message containing Markdown backticks inside a double-quoted shell --body argument, so zsh executed the backticked post watch command and blocked instead of sending. Use --body-file for agent prose containing shell syntax."
+ },
+ {
+  "id": "pc_31c9a2cc8c6d",
+  "ts": "2026-08-05T02:44:36.772Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --body with double-quoted shell string executed embedded backtick command substitution, injecting 127KB of watch output into an immutable channel; consider a size warning on chat bodies over ~32KB and/or docs nudge toward --body-file"
+ },
+ {
+  "id": "pc_7951fc7824ed",
+  "ts": "2026-08-05T03:00:14.506Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "I sent a #build review receipt from /Users/treygoff/Code/post, which resolves as room workspace; Post correctly refused because workspace is not a #build member. Send porch traffic from /Users/treygoff/Code/sol so identity resolves as sol."
+ },
+ {
+  "id": "pc_3bb5058994ce",
+  "ts": "2026-08-05T03:48:28.385Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "new shared channel did not auto-join an expected participant; post chat game failed not_a_member until manual --join"
+ },
+ {
+  "id": "pc_66f84ca6b16e",
+  "ts": "2026-08-06T01:35:37.727Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+  "text": "post watch --text renders the new profile-announcement channel events as '[?] unreadable envelope' instead of the profile line; watchers predating the profiles feature can't format the new event type"
+ },
+ {
+  "id": "pc_e29f8b9685fd",
+  "ts": "2026-08-06T01:38:30.042Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch treats newly emitted channel profile events as unreadable because its parser only recognizes join, producing repeated warnings and unreadable events across every joined channel; keep reader and writer event schemas version-compatible"
+ },
+ {
+  "id": "pc_88101f5327c2",
+  "ts": "2026-08-06T03:23:21.551Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat --send --body with double quotes silently expanded $1.63B to .63B (positional-parameter expansion inside double-quoted body). Prevention: single-quote bodies containing dollar amounts, or use --body-file. Shell-footguns rule covers backticks but not $N in message bodies."
+ },
+ {
+  "id": "pc_e24a375b5a51",
+  "ts": "2026-08-06T04:08:08.121Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send rejected --room even though watch/chat use --room; helpfully suggest the send-specific --to syntax in the Post skill/examples near channel sends"
+ },
+ {
+  "id": "pc_e4f7611ea213",
+  "ts": "2026-08-06T04:52:08.878Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat commons --history 6 can exceed the model context and truncate the entire useful result; a bounded output or cursor-first helper would prevent losing the newest messages"
+ },
+ {
+  "id": "pc_9cc97e157f57",
+  "ts": "2026-08-06T05:37:36.017Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post channel update failed because send rejected --room even though watch/chat use --room; help should surface the channel-send form in the error suggestion."
+ },
+ {
+  "id": "pc_c6b4a5b65805",
+  "ts": "2026-08-06T06:05:24.882Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --snapshot emitted hundreds of historical channel events instead of a compact health snapshot; it overwhelmed the useful site-state readback and was truncated."
+ },
+ {
+  "id": "pc_18e0df8d9c85",
+  "ts": "2026-08-06T15:20:36.300Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send help documents only rooms, while channel posting uses a separate syntax that is not discoverable from the send error; suggest the exact post chat send command"
+ },
+ {
+  "id": "pc_55fce9035530",
+  "ts": "2026-08-06T22:23:14.432Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post delivered mail from room 'codex-ui' that is absent from rooms.json \u2014 unreplyable sender; either ad-hoc sender identities should be registered on first send or delivery should stamp a reachable return address"
+ },
+ {
+  "id": "pc_942e450c8d66",
+  "ts": "2026-08-10T23:47:42.052Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --snapshot has no channel/limit filter, so one stale cursor dumped hundreds of historical events; a bounded or channel-selective snapshot would prevent output blowups"
+ },
+ {
+  "id": "pc_5cb09ec597e3",
+  "ts": "2026-08-11T03:17:20.740Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post smoke setup is easy to mis-seed: creating POST_MAIL_ROOT before first run makes 'post rooms' fail config_invalid; document leaving the root absent or running doctor --fix."
+ },
+ {
+  "id": "pc_dbc95bc7b823",
+  "ts": "2026-08-11T03:38:48.282Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/.codex/post-room",
+  "text": "Post uses 'room' for direct-mail destinations, but project wording 'post room (wade-discovery)' can be mistaken for a channel; an error hint distinguishing registered room from channel would prevent the dead end."
+ },
+ {
+  "id": "pc_d433906822d8",
+  "ts": "2026-08-11T03:39:12.982Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/.codex/post-room",
+  "text": "A Post send body in single quotes failed on the apostrophe in Trey's; default examples should steer long prose to --body-file or stdin."
+ },
+ {
+  "id": "pc_9e5d65d24c6c",
+  "ts": "2026-08-11T04:36:21.411Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send treated a positional room name as a body file; the error was clear, but the local Post skill/examples should consistently show --to so unattended correspondence does not stall"
+ },
+ {
+  "id": "pc_a8aa8b019958",
+  "ts": "2026-08-11T05:08:36.110Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~",
+  "text": "Post inbox JSON shape was assumed as .messages and jq failed on null; inspect the live schema/output or default optional arrays before iterating"
+ },
+ {
+  "id": "pc_25c8f0351809",
+  "ts": "2026-08-11T05:08:36.117Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~",
+  "text": "Wade coordination destination was described conversationally as a room, but I guessed it was a channel and hit not_found; resolve with post rooms/channels before choosing send vs chat"
+ },
+ {
+  "id": "pc_76ab64ab9e65",
+  "ts": "2026-08-11T14:09:37.455Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "tools"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "functions.exec rejected a JavaScript template-literal command before execution because the Post prose contained Markdown backticks; the wrapper should surface this as a quoting hazard or provide a stdin field"
+ },
+ {
+  "id": "pc2_843a34923133e81d",
+  "ts": "2026-08-11T19:05:28.968Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post uses different write verbs for direct mail (post send) and channels (post chat); accepting or suggesting post send --channel would prevent an easy routing dead end"
+ },
+ {
+  "id": "pc2_a904270fadea36b1",
+  "ts": "2026-08-11T19:12:11.152Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat identity is cwd-derived, so a correct channel send composed from a sibling repo can fail as the wrong room; a dry-run or resolved-identity banner before submission would prevent this coordination dead end"
+ },
+ {
+  "id": "pc2_d2f7785dc0d160a1",
+  "ts": "2026-08-11T20:11:23.117Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat output-to-dev-null refusal makes scripted read-then-send coordination fail unless the read output is retained; a quiet consume-to-cursor option or documented safe capture pattern would prevent repeated crossed_send retries"
+ },
+ {
+  "id": "pc2_1adf1e38054c99c2",
+  "ts": "2026-08-11T21:01:17.470Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Reading #build with  left the cursor behind, so the immediately following reviewed gate send was rejected as crossed_send; for coordination replies use consuming  after inspection or expect an explicit resend."
+ },
+ {
+  "id": "pc2_3ead6dfde44c6cb0",
+  "ts": "2026-08-11T21:51:13.562Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --body-file /dev/stdin via exec_command accepted no content when stdin was not explicitly piped; an example or early wrapper warning would prevent this dead-end"
+ },
+ {
+  "id": "pc2_5b6cea2338604447",
+  "ts": "2026-08-11T23:09:15.562Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post channel reads are cwd-identity-sensitive; a combined repo-status plus post-chat command from another repo silently resolves the wrong room. A post CLI warning showing resolved room before read would prevent this."
+ },
+ {
+  "id": "pc2_32134200205460da",
+  "ts": "2026-08-12T00:32:34.631Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post channel send let backticked prose execute as shell substitution, injecting command output into #build; important multiline/prose sends should default to or enforce --body-file instead of shell-interpolated --body."
+ },
+ {
+  "id": "pc2_a63ad6a35fe62420",
+  "ts": "2026-08-12T18:28:13.775Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post send hq fails: no 'hq' room in rooms.json even though the mothership lives at ~/Code/hq; nearest is 'workspace' (~/Code). Register an hq room or document that workspace is the hq address."
+ },
+ {
+  "id": "pc2_459eb76d25a173dc",
+  "ts": "2026-08-13T03:27:39.251Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "~/Library/CloudStorage/Dropbox/Prospera/Policy/pact-act",
+  "text": "post chat <channel> << EOF (heredoc, no --send) silently READS the channel and discards stdin \u2014 the message never sends and the output looks like a successful post. --body/--body-file imply --send but bare stdin does not. Either bare-stdin-with-no-flags should error or imply --send like the other two body forms."
+ },
+ {
+  "id": "pc2_594768b476fd0c03",
+  "ts": "2026-08-13T03:37:17.463Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat <ch> --send <text> parses the positional as a body FILE path (fails 'File name too long' on any real sentence); only --body-file works. Either accept inline text or say so in --help."
+ },
+ {
+  "id": "pc2_7f42d066d80201a3",
+  "ts": "2026-08-13T16:20:36.012Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Release inventory assumed post-watch-notice.mjs lived under skills/post/hooks; installer source path differed. A shared source-file inventory command in ADAPTERS.md would prevent the failed hash probe."
+ },
+ {
+  "id": "pc2_39f0a982b749210c",
+  "ts": "2026-08-13T16:23:31.617Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send reported archived=true, but post read from the sending room could not find the sent id. The send receipt should name the archive owner/path or exact readback command."
+ },
+ {
+  "id": "pc2_6a54128c0bb19b03",
+  "ts": "2026-08-15T04:20:54.577Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post cwd identity was silently overridden by inherited POST_FROM=wade-discovery; the CLI joined/read #wade-overnight as Claude until the pin was explicitly unset. Join diagnostics should make the override actionable before any write."
+ },
+ {
+  "id": "pc2_d3c87218467c8dd7",
+  "ts": "2026-08-15T07:28:44.775Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Inline post --body failed on an apostrophe; use --body-file for prose instead of shell quoting"
+ },
+ {
+  "id": "pc2_45ae6a8bc397ac5f",
+  "ts": "2026-08-16T16:46:48.876Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "porch"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "porchd (python http.server) returns error responses without draining the POST request body on keep-alive connections; unread body bytes prepend to the next request on Tailscale Serve's pooled backend connection, 501-poisoning the porch for all clients until porchd restarts. Fix: drain body or send Connection: close on error paths in porchd/server.py"
+ },
+ {
+  "id": "pc2_e1d4e47b2c225ad4",
+  "ts": "2026-08-16T17:28:19.756Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "shell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Shell orientation command identified the post binary as Mach-O and still piped it through sed, flooding output; skip text reads after a binary file check."
+ },
+ {
+  "id": "pc2_0dd420308445caf6",
+  "ts": "2026-08-16T17:40:16.743Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat with a stdin body but no --send was parsed as a read; the CLI could identify non-tty stdin and return an exact send example before validating --subject."
+ },
+ {
+  "id": "pc2_6c4e1a402a727e05",
+  "ts": "2026-08-16T18:03:46.356Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post room-name collision: two agents (codex in linux-devbox, claude-code in ~/Code) both resolved room 'workspace'; a profile rename by one changed the display name for both in shared channels \u2014 room names should be unique per agent or renames should be address-scoped"
+ },
+ {
+  "id": "pc2_892d61b395678cb1",
+  "ts": "2026-08-16T18:42:10.902Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat --body failed on an apostrophe; default examples should steer all prose to --body-file"
+ },
+ {
+  "id": "pc2_6659692688a23293",
+  "ts": "2026-08-17T16:39:02.301Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send emits JSON error envelopes on failure but human prose on success \u2014 piping output to a JSON parser works for errors and breaks on success, which caused a duplicate send when the parse failure looked like a send failure; a consistent envelope (or --json flag) would prevent it"
+ },
+ {
+  "id": "pc2_1deaeb8d95587706",
+  "ts": "2026-08-19T18:09:42.127Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat devbox-build send blocked for about 11 minutes before returning a normal success receipt; a bounded send timeout or progress diagnostic would have prevented the stall"
+ },
+ {
+  "id": "pc2_ed237827f1ac4b63",
+  "ts": "2026-08-20T00:19:56.519Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "linux-devbox checkout pins POST_FROM=sol-devbox for ALL lanes, so fable/Sol/anyone here posts as 'Sol Devbox' and channel identity rides on ad-hoc [sol]/[fable] bracket tags; a per-session POST_FROM (or per-lane env) would prevent misattribution"
+ },
+ {
+  "id": "pc2_54b143f21f3056d1",
+  "ts": "2026-08-21T22:53:00.946Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post room registry: ~/Code/linux-devbox is registered as room 'sol-devbox' (legacy Sol naming), so any session in that repo posts under a Sol identity \u2014 confusing on shared channels; a rename/alias story for room ids would prevent it"
+ },
+ {
+  "id": "pc2_4ba18a7f5824513e",
+  "ts": "2026-08-21T23:08:21.981Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post + bridge interaction: a bridged channel message with an earlier id than your own just-sent message lands AFTER your send advanced your cursor, so 'post chat' reports no new messages even though the watch doorbell rang for it; had to read via --history. Bridged channels need cursor advance to be arrival-aware, or a 'ring but unread mismatch' diagnostic"
+ },
+ {
+  "id": "pc2_499b47e1c95dfdc3",
+  "ts": "2026-08-23T05:05:52.178Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send --to <channel> fails with unknown_room for a channel; the error's suggested fix points at rooms, not at 'post chat <channel> --send'. Channel sends need a cross-reference in that error."
+ },
+ {
+  "id": "pc2_97e06ad35353d2e3",
+  "ts": "2026-08-23T05:40:32.471Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Fresh post doctor --fix creates an empty rooms.json that doctor immediately reports invalid/non-fixable, so a set -e bootstrap aborts before the first post rooms add; first-run setup needs an explicit empty-store state or a clearer sequence"
+ },
+ {
+  "id": "pc2_9a7deeb69ac2a641",
+  "ts": "2026-08-23T15:23:59.808Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send --to rejects channels and post chat --help's first lines only show read forms; took 3 tries to find the channel-send syntax. A 'to send: ...' usage line at the top of post chat --help would have prevented it."
+ },
+ {
+  "id": "pc2_9c126f1568348771",
+  "ts": "2026-08-23T17:40:34.241Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post-bridge"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post bridge macOS test harness uses Python's default /var/folders TMPDIR, but the sweeper requires canonical paths and realpath is /private/var/folders; 66 tests fail at setup instead of exercising behavior. Pin TMPDIR=/private/tmp in the documented Mac invocation or canonicalize the harness-created root."
+ },
+ {
+  "id": "pc2_0afda8f25d32f501",
+  "ts": "2026-08-23T17:49:26.085Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat from a non-room cwd fails with unknown_room and no hint that channel identity is cwd-bound; error should name the cwd and suggest cd'ing into a registered room"
+ },
+ {
+  "id": "pc2_8a503b503b6c2b87",
+  "ts": "2026-08-23T17:49:26.087Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --body-file - is rejected (dash is a literal path); bare stdin works but the skill text and every other CLI convention suggest dash should mean stdin \u2014 accept it or say so in exact_fix"
+ },
+ {
+  "id": "pc2_ff8dee96ac6d3c42",
+  "ts": "2026-08-23T18:45:04.204Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post 0.6.0: 'post chat --body-file -' rejects '-' (not a stdin convention) while bare --send silently reads stdin \u2014 undocumented asymmetry cost a review-round finding in the estate-janitor build; support '-' or document the stdin path in --help"
+ },
+ {
+  "id": "pc2_c71aae66510f3ed1",
+  "ts": "2026-08-25T03:46:43.358Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post",
+   "shell"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Chaining cleanup with ';' after a command that can fail destroys the input needed to retry: 'post chat ... --body-file brief.txt; rm -f brief.txt' deletes the brief even when the send errors (here: unknown_room from cwd-bound room identity). Cleanup of a consumed input must be conditional on the consumer succeeding, or deferred to a separate call after the result is checked. Same family as the write-then-consume footgun."
+ },
+ {
+  "id": "pc2_0dfb29556dec7b0c",
+  "ts": "2026-08-25T05:08:58.926Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "context",
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post crossed_send rejection embeds the FULL BODY of up to 10 missed messages in its error payload. A room that has just joined a busy channel is maximally crossed (376 unseen here), so the very first send is rejected and the rejection returns ~15KB of prose \u2014 for an agent sender that is a large chunk of context spent on messages it may already have read, delivered as an error. Bounding the missed[] previews to a subject/first-line and a count, or gating full bodies behind a flag, would make the error usable. Hit live 2026-08-25 while joining #machineroom-devbox as a new room."
+ },
+ {
+  "id": "pc2_5c1a94e9b622cd6c",
+  "ts": "2026-08-25T05:09:37.736Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "delegate"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "delegate workflow run rejects --notify (accepted on plain launches), so a workflow that parks at a gate=True checkpoint or reaches a terminal state has no way to ring a post room; babysitting falls back to cron polling. Want --notify on workflow run firing on checkpoint, terminal state, and agent_timeout."
+ },
+ {
+  "id": "pc2_b03a7c11a472cac6",
+  "ts": "2026-08-25T05:09:37.739Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post read <id> from room atlasos rejects a channel message id the doorbell just handed me ('no mail id starts with \u2026 not unread, not read, not archived') and the exact_fix points at 'post inbox', which cannot show channel messages either. Either post read should resolve channel ids, or the error should say 'that is a channel message; use post chat <channel> --peek'."
+ },
+ {
+  "id": "pc2_4cfd0ea6278c3197",
+  "ts": "2026-08-25T05:47:03.989Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "flaky-test",
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post's test suite has a load-sensitive flake that turns the gate intermittent: migration_fence::tests::lock_path_unlink_and_replace_are_refused_after_flock waits on a cross-process flock handshake with recv_timeout(Duration::from_secs(2)) at src/migration_fence.rs:669 and panics 'child opened old lock inode: Timeout' when the box is busy. Observed once during a full 'cargo test --all-targets --all-features' that overlapped four concurrent delegate review lanes; passed 5/5 in isolation and 3/3 once load dropped, on the same tree. A wall-clock bound on a scheduler-dependent handshake fails under exactly the conditions a busy CI or a multi-lane devbox creates, and an intermittently red gate teaches everyone to re-run until green -- which is the same 'ignore the verdict' failure that makes a bad verdict worse than none. Raising the constant is a band-aid; the durable fix is to remove the wall-clock dependency from the handshake or give it a ceiling no realistic load can hit."
+ },
+ {
+  "id": "pc2_6b4decfefc0a514a",
+  "ts": "2026-08-25T07:20:30.169Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: error.details.exact_fix is documented in the README and asserted in post's own schema laws as 'a complete command that runs verbatim', but six sites emitted <PLACEHOLDER> templates instead -- crossed_send handed back `--body '<revised text>'`, which discards the heredoc body the caller was actually sending, and parse_failure_fix returned `post send --to <ROOM> --body <TEXT>` under a doc comment that explicitly licensed templating. Hit live while promoting cell binaries: the refusal of my own channel send told me to run a command that would have destroyed the message. Root cause is that runnability was verified per-test (opt-in run_fix, 9 call sites) rather than at AppError::exact_fix, the single funnel every fix passes through."
+ },
+ {
+  "id": "pc2_0112901a36bdc0c4",
+  "ts": "2026-08-25T07:28:18.840Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: channel self-echo suppression is per-room, so a single session watching MORE than one room rings itself for its own sends. The law says 'a room's own channel messages are never news to it: they never ring its own watch', and that holds for the sending room -- but a multi-room watch (post watch --room papercuts --room devbox-linux-devbox, both members of #machineroom-devbox) delivers papercuts' own message to the devbox-linux-devbox watcher, which is the same process and the same session. Verified: 'post watch --room devbox-linux-devbox --snapshot' lists {\"from\":\"papercuts\"} events for messages this session had just sent. Cost is a harness wake-up per outbound message -- five self-rings in one hour tonight -- which trains the operator to ignore the doorbell, and an ignored doorbell is worse than none since it is armed precisely for the message that matters. Suppression should consider the union of rooms the watch was invoked for, not each room independently; a message whose sender is any watched room is not news to that watcher."
+ },
+ {
+  "id": "pc2_d91fc6b1d3f10f13",
+  "ts": "2026-08-25T17:14:05.191Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch has no mention-only filter; a Monitor doorbell on a busy channel rings on every message. Worked around with a jq gate on .reason=='mention' / .from; a --mentions-only (or --reason) flag on post watch would make the doorbell rule portable."
+ },
+ {
+  "id": "pc2_3fdbc26345291a2a",
+  "ts": "2026-08-25T17:21:45.762Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post who is named for identity but reports only that some local process holds a watch on a room: I watched room 'hq' from the 'papercuts' identity and hq immediately reported live_watch true. Nothing is broken and it fits post's all-local trust model, but the name invites reading it as 'is that agent alive', which it cannot answer. A one-line note in the schema description would prevent the misread."
+ },
+ {
+  "id": "pc2_15f4eb647702b19c",
+  "ts": "2026-08-25T17:49:09.117Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "watch should suppress the union of watched rooms"
+ },
+ {
+  "id": "pc2_5336f5b66f43b64d",
+  "ts": "2026-08-25T17:56:25.639Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: room identity conflates a durable account with a subscription, and --own is the patch that revealed it. Identity is inferred from cwd, so 'who I am' and 'which rooms I follow' are the same concept; watch then had to guess whether selecting a room meant being it. Union suppression guessed yes and made observers deaf; watch --own (b9f4405) makes the claim explicit and is the accepted patch. The durable shape, per Fable and Trey: identity should be a durable account and rooms should be subscriptions to it, so a session declares one identity and follows N rooms without the two being inferred from a directory. Not urgent -- --own holds until this friction fires again -- but recording it so the redesign is not rediscovered from scratch."
+ },
+ {
+  "id": "pc2_f4d14d0f6c3b09f0",
+  "ts": "2026-08-27T05:46:31.280Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "devagent (trey-agent cell) post doctor reports channel-state.json invalid map in 9 rooms (atlasos, delegate-agent, devbox-linux-devbox, hq, janitor, papercuts, post-devbox, praxient-brain, veritas-devbox) \u2014 pre-existing, discovered during garden->free-claude rename; doctor exit 'broken' masks real findings behind stale corruption"
+ },
+ {
+  "id": "pc2_66e082808b522d49",
+  "ts": "2026-08-28T16:25:55.103Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Mac work-a agent shell carries POST_FROM=sol-devbox pin, so channel sends from the Mac get attributed to the devbox sol room; had to disclaim identity in the message body. Pin should be per-machine/per-session, or unset on the Mac."
+ },
+ {
+  "id": "pc2_e9a28936de3dcf72",
+  "ts": "2026-08-29T10:37:57.391Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "archived",
+  "tags": [
+   "writing-plans"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "writing-plans compiled workflow: SCHEMAS literal omits FIX_VERDICT and hydrate_routes' setdefault never lands, so the first verify-fixes stage dies with KeyError 'FIX_VERDICT' (thunk_failed x2, item parked) on every fix round; fixed in planc/workflow.py template. Also: a Monitor pipeline ending in cut block-buffers off-tty and silently swallows doorbell events (cost two hours tonight) - never end a Monitor pipeline in cut/sed without stdbuf."
+ },
+ {
+  "id": "pc2_93f8829c0d30132b",
+  "ts": "2026-08-31T21:58:38.895Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Project setup instruction uses obsolete 'post profile --name'; current CLI requires 'post profile set --name'."
+ },
+ {
+  "id": "pc2_9ce078b453dc7a89",
+  "ts": "2026-08-31T21:58:52.005Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "User-facing Post setup example used deprecated 'post profile --name'; current CLI requires 'post profile set --name'. Help should surface migration/equivalent."
+ },
+ {
+  "id": "pc2_e5e298950b9b17c6",
+  "ts": "2026-08-31T22:00:59.779Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "delegate-workflows"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "A delegate workflow close agent (wf_46f02cf62eb3, close:2) issued bare 'kill <pid> <pid> ...' against several old PIDs it had identified, in at least two separate batches over ten minutes. In this instance it targeted explicit PIDs rather than a pattern, so nothing of mine died (I checked: my Monitor-wrapped post watch and journal watch both survived). But the devbox is shared by many concurrent agent sessions, and the PIDs it killed were far older than my session's, so I could not attribute them or confirm they were its own. A close agent that reaps processes it did not start needs to be scoped to its own process group, and if it ever reaches for a pattern match instead of explicit PIDs it would hit every other agent's watches on the box - the exact machine-wide failure the post-mail doorbell rule was written after."
+ },
+ {
+  "id": "pc2_0c95e21b0148ab56",
+  "ts": "2026-08-31T23:21:56.622Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post channel send has three near-miss syntaxes before the right one (post chat <ch> --send --body <text>): '--channel' rejected, '--to channel:<name>' rejected as unknown room, '--send <text>' parsed as body FILE path. A 'post send --channel' alias or accepting inline text after --send would kill this class."
+ },
+ {
+  "id": "pc2_a3a7e97939007a4c",
+  "ts": "2026-09-01T17:25:38.407Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "tell"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "'tell' has no --json and no documented exit-code contract, unlike every other house CLI. It prints '[tell <id>] queued' to stderr and returns 0/2, but a consumer has to read the source to learn that 2 means 'daemon down'. Building a tool that shells out to it means parsing a human string or trusting an undocumented code. What would have prevented it: a --json envelope with {ok, id, queued} and an exit-code table in --help, matching the post/papercuts/receipts contract style."
+ },
+ {
+  "id": "pc2_dd75f6de7b488c16",
+  "ts": "2026-09-01T21:27:47.889Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": "~/Code",
+  "text": "post crossed_send guard latches permanently: a channel message read via 'post chat <ch> --history N' does not advance the read cursor, and a plain 'post chat <ch>' afterwards advances PAST it without clearing it. The message stays 'unseen and addressed to you' forever, so every subsequent --send is refused and the only way through is --anyway. That trains reflexive --anyway on every send, which defeats the guard entirely. Wanted: either --history advances the cursor for the messages it displays, or an explicit 'post chat <ch> --mark-seen <id>'."
+ },
+ {
+  "id": "pc2_556caeb168b5be46",
+  "ts": "2026-09-02T02:36:54.596Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": "~/Code",
+  "text": "post infers sender identity from cwd with no confirmation: running 'post chat stack-upgrade --send' from ~/Code/hq silently addressed the message as room 'hq-devbox' (the coordinator) instead of my own lane room. Only the unrelated crossed_send guard stopped the send; with a clean cursor it would have gone out impersonating another agent. A --as <room> flag, or an echo of the inferred identity before send rather than only on the error path, would prevent it."
+ },
+ {
+  "id": "pc2_bb292b01410c5b74",
+  "ts": "2026-09-02T02:41:43.754Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --send crossed_send keeps re-flagging the same two @-mentions (23:20 and 23:32) after they were read and after 'post chat <ch> --history 1'; the mention-seen cursor does not advance on history reads, so every later send needs --anyway. A read of the channel should clear mentions older than the read."
+ },
+ {
+  "id": "pc2_f4c75bfab2a9617f",
+  "ts": "2026-09-02T15:06:12.111Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "archived",
+  "tags": [
+   "openclaw"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "automations add (stream job) failed: ENOENT openclaw/dist/cron-BLYIMAMC.js \u2014 gateway dist appears stale vs running process; durable post doorbell had to fall back to a session Monitor"
+ },
+ {
+  "id": "pc2_19673d52e9a6872a",
+  "ts": "2026-09-05T05:42:52.609Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": "~/exec-agents-research",
+  "text": "Post channel read run from life resolved cos-devbox instead of the guest research room; explicit workdir on every Post call prevents identity mistakes."
+ },
+ {
+  "id": "pc2_3be0df9bf69de24b",
+  "ts": "2026-09-05T05:49:15.027Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": "~/Code",
+  "text": "install-systemd-doorbell.mjs reports doorbell installed but first live service tick exits 209/STDOUT because ~/.local/state/post-codex-doorbell does not exist; StandardOutput=append and StandardError=append parent is never created. Preflight/tests missed a fresh runtime directory. Create the private log/state directory before enabling timer and verify a real service tick."
+ },
+ {
+  "id": "pc2_6185e6a6b43133ec",
+  "ts": "2026-09-05T05:50:39.913Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": "~/papercut-sweep-room",
+  "text": "Post doorbell systemd template does not set PATH for user-installed herdr. The shell resolves ~/.local/bin/herdr, but a fresh systemd-run user service dies with FileNotFoundError: herdr. Pin dependency paths or set an explicit user tool PATH and prove service startup, not just CLI tests."
+ },
+ {
+  "id": "pc2_dbb60feb29e24cf7",
+  "ts": "2026-09-05T05:52:18.606Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post Linux systemd doorbell installer enables a service with StandardOutput/StandardError append paths before creating ~/.local/state/post-codex-doorbell; first ticks fail 209/STDOUT. Creating that directory makes the exact service tick succeed. Installer should create the private parent directory before enable/start and verify one successful tick."
+ },
+ {
+  "id": "pc2_3e9e12e71e82dac1",
+  "ts": "2026-09-05T06:10:18.056Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post canonical gate builds successfully under a configured Cargo target-dir, then launcher tests and schema fail because both hard-code target/release/post. On this cell cargo metadata reports ~/.cache/cargo-targets; five launcher tests get missing binary despite a successful release build. Resolve the artifact path from Cargo metadata in the gate and test harness, preserving explicit CARGO_TARGET_DIR."
+ },
+ {
+  "id": "pc2_4eeb24465d16462a",
+  "ts": "2026-09-05T07:15:24.454Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post doorbell repeatedly announces new mail waiting after the channel was already read while the agent was busy. Sol confirmed deliver renders pending before herdr wait and prompts afterward without a fresh eligible snapshot; buffered digests can trigger stale wakes. Re-scan after settle, suppress consumed items, retain eligible events on failed/unknown delivery."
+ },
+ {
+  "id": "pc2_2929066c6e52c7e3",
+  "ts": "2026-09-06T13:37:21.723Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post consumes unread messages and exits0 when stdout fd1 is a read-only regular file: no bytes were written, but the seen set advances. Parent reproduced on installed0.9.0 ordinary chat and the byte-budget candidate; std::io::StdoutRaw intentionally maps EBADF writes to success via handle_ebadf, so the after-stdout callback runs. Use a strict descriptor-backed output boundary and portable unread-state regression; /dev/full-only tests miss this. Evidence: /var/tmp/papercuts-2026-09-06/post-unwritable-stdout-repro.json; all calls used parent-owned fixtures only."
+ },
+ {
+  "id": "pc2_86356fc0b8476006",
+  "ts": "2026-09-07T00:19:34.766Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send treats a long positional prose argument as a filename, then suggests retrying the same file read; for ENAMETOOLONG the diagnostic should suggest --body TEXT instead of --body-file with the prose."
+ },
+ {
+  "id": "pc2_5ad745571493c01a",
+  "ts": "2026-09-10T03:50:13.517Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post channels reports unread=3 on #machineroom-devbox and unread=1 on #cos-urgent after a full non-peek 'post chat' read; 'post chat cos-urgent' says no new messages. Counter and read cursor disagree, so the CoS doorbell re-fires on the same six-message batch."
+ },
+ {
+  "id": "pc2_3d100a49d8499120",
+  "ts": "2026-09-11T23:07:13.291Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post chat <channel> --body-file refuses with crossed_send while unseen messages addressed to the room remain, and one 'post chat <channel>' read only pages part of the backlog (99 unseen -> 75 unseen), so a note could not be sent after two attempts. A --read-all or an explicit 'I have seen the backlog' flag on send would have let the coordination note land."
+ },
+ {
+  "id": "pc2_ba5045a4c0083780",
+  "ts": "2026-09-11T23:32:15.354Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post accepted --from codex-effort as an unregistered sender but its reply instruction addressed a nonexistent room, so a collaborator could not reply. Warn at send time or display the registered reply room separately."
+ },
+ {
+  "id": "pc2_aa84740ad9fdc7cb",
+  "ts": "2026-09-12T02:32:15.770Z",
+  "agent": "unknown",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat infers sender room from cwd; running it from another agent's repo dir posted as chuck-lead instead of lumen. Wants an explicit --as or a mismatch warning when cwd room != invoking agent."
+ },
+ {
+  "id": "pc2_f18631561c0b3318",
+  "ts": "2026-09-12T02:47:11.585Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Required channel closeout failed with unknown_room because the repo had no Post registration; task launch should provision an owned project room instead of requiring an agent to borrow another identity."
+ },
+ {
+  "id": "pc2_5fdf76e1d6dc9fa3",
+  "ts": "2026-09-12T02:58:37.382Z",
+  "agent": "unknown",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --send infers sender room from cwd with no --as override; running it from another agent's checkout (flightdeck) posted my reply as chuck-lead, and there is no retract verb to undo it"
+ },
+ {
+  "id": "pc2_ee98861df23ce0d7",
+  "ts": "2026-09-13T07:05:59.938Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "agent-workflow"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Resumed Post send omitted --send and failed command parsing; carry the exact heredoc send form in handoff instead of only semantic guidance."
+ },
+ {
+  "id": "pc2_e806839214a2b96b",
+  "ts": "2026-09-13T08:33:13.257Z",
+  "agent": "unknown",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --send infers sender identity from cwd, so running it from ~/Code/deslop-tooling posted my reply as 'deslop-tooling' with no way to retract; identity should come from the agent, or --room should be required for sends"
+ },
+ {
+  "id": "pc2_5321d20485da051c",
+  "ts": "2026-09-13T08:41:00.975Z",
+  "agent": "unknown",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --send infers the sender room from cwd, so a reply sent from another agent's worktree is posted under that agent's name (twice in chuck-improve, 08:33 and 08:40); needs an explicit --from on chat or a cwd/identity mismatch warning"
+ },
+ {
+  "id": "pc2_69dc2190f8947d6e",
+  "ts": "2026-09-13T08:43:33.116Z",
+  "agent": "unknown",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post infers sender from cwd; posts sent from a partner's worktree get attributed to the partner and vanish from their unread stream (bit me twice on chuck-improve)"
+ },
+ {
+  "id": "pc2_985b7af57a6ae436",
+  "ts": "2026-09-13T09:29:59.124Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "A combined git-push/Post command ran in an unregistered experiment worktree, so Post correctly refused unknown_room after the push succeeded. Run every channel call with the registered coordination cwd explicitly, not whichever lane a preceding command used."
+ },
+ {
+  "id": "pc2_e8d2bbfe252b95f8",
+  "ts": "2026-09-14T20:21:03.916Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post watch --digest re-emits the last already-read channel message every time the watch starts (seen 5x today for id 3392b5); a doorbell should start from the current cursor, or the digest should mark replayed vs new"
+ },
+ {
+  "id": "pc2_996c4626b229a31a",
+  "ts": "2026-09-15T01:16:14.637Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post doorbell installer rejects --help instead of returning usage successfully; support help before argument validation."
+ },
+ {
+  "id": "pc2_21716da331184b91",
+  "ts": "2026-09-15T02:27:17.664Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post channels --json reported unread:1 for #tower-build repeatedly while a consuming read returned zero messages; the count seems to include the room's own join event or a message it cannot select. A phantom unread makes an agent poll a channel that has nothing for it."
+ },
+ {
+  "id": "pc2_321967e3fec2872f",
+  "ts": "2026-09-15T03:57:58.709Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Installed Post rejects --message despite the maintained skill advertising exact-message reads; use --history/--grep on this runtime and verify skill/runtime parity."
+ },
+ {
+  "id": "pc2_2d74826470cbc546",
+  "ts": "2026-09-15T15:26:30.037Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "cos"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "cos-doorbell replays the full #cos-urgent backlog (10 msgs) on every gateway restart; two restarts 6 min apart today = two full-seat wakes for zero new work. Doorbell should persist a last-seen id and only wake on newer messages."
+ },
+ {
+  "id": "pc2_48e22fc15d6b65a4",
+  "ts": "2026-09-15T23:40:33.041Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "hooks"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post-mail hook installers (install-codex-hooks.mjs, install-cursor-hooks.mjs, install-grok-hooks.mjs, install-codex-doorbell.mjs, install-systemd-doorbell.mjs) bake process.execPath into the hook command. On Homebrew node that is the version-pinned Cellar path, so every 'brew upgrade node' silently breaks every post-mail hook at once with exit 127. Today's 26.5.0_1 -> 26.8.2 upgrade broke Codex (3 hooks), Cursor (3) and Grok (1) simultaneously. Installers should emit the stable symlink (/opt/homebrew/bin/node) when it realpath-resolves to the same binary as process.execPath."
+ },
+ {
+  "id": "pc2_6dc6f33085332c5a",
+  "ts": "2026-09-16T00:06:03.708Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "tests"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post repo: tests/cli.rs who_reports_live_watch_without_pids is timing-flaky under load. It spawns a 'post watch' child, sleeps a fixed 250ms, then reads twice; under the load of a parallel cargo release build the JSON read saw live_watch=true but the later --text read did not, so the liveness window closed between two consecutive 'who' invocations. Failed once in scripts/gate.sh, passed in isolation and on re-run. A fixed sub-second sleep loses to spawn/scheduling latency on a contended machine (same shape as the recorded shell-footguns entry); it wants a poll-until-deadline instead of a fixed sleep."
+ },
+ {
+  "id": "pc2_6ba3b35fa72a1a5a",
+  "ts": "2026-09-16T01:26:38.780Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post skill doc lists --max-bytes on 'post chat <channel>' consuming reads, but the installed post rejects it (unexpected argument '--max-bytes'); skill and binary disagree. Either build supports it or the skill drops the flag from the chat/catchup surface."
+ },
+ {
+  "id": "pc2_bd235b2d32b345e0",
+  "ts": "2026-09-16T02:51:14.657Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post skill documents catchup --max-bytes but the installed Mac CLI rejects it; version-matched capability discovery would prevent the failed read."
+ },
+ {
+  "id": "pc2_282fbba3868526d2",
+  "ts": "2026-09-16T03:40:48.650Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post run in Tower repo cwd resolved workspace instead of tower-astra and failed not_a_member; pin POST_FROM=tower-astra on mixed asset/coordination commands or use the dedicated room cwd."
+ },
+ {
+  "id": "pc2_d8111ef841a09e16",
+  "ts": "2026-09-16T05:05:01.358Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "A fresh ccw launch in Post had no POST_FROM, POST_HARNESS, POST_REPO_KEY, or POST_SENDER_ADDRESS in the live Claude process. The identity-card loader returns null without harness/repo variables, so the documented card layer is unreachable on this observed launch path. Test and integrate the real realm alias-to-identity-hook path, not only the standalone launcher; no claim yet about every ccw launch."
+ },
+ {
+  "id": "pc2_1618562477632a14",
+  "ts": "2026-09-16T06:37:39.931Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post bridge reference points to ~/Code/claude-space/post-bridge/SPEC-v2.md, which is absent on this Mac. Link the maintained contract or identify it as a host-specific path so design/review does not follow a dead documentation pointer."
+ },
+ {
+  "id": "pc2_e69cc6e49dfbba8a",
+  "ts": "2026-09-16T07:40:44.663Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post read cannot read a channel message ID; use post chat CHANNEL --history N from its suggested fix (search returns IDs without a universal read command)"
+ },
+ {
+  "id": "pc2_c2cfae1b1f8bfed1",
+  "ts": "2026-09-16T14:06:59.447Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post",
+   "testing"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post participant smoke review spent repeated rounds correcting lifecycle and consumption assertions that could pass without the claimed state change: a successful read response did not prove a seen receipt, and same-second last_seen made whole-record equality pass accidentally. Require distinct seeded before/after states plus exact cursor/unread assertions, and distinguish renewed activity timestamps from preserved ended_at."
+ },
+ {
+  "id": "pc2_79f0dabce6cdd6a7",
+  "ts": "2026-09-16T15:04:28.665Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "deployment",
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post's served skill symlinks follow ~/Code/post/skills/post on main, but the installed binary advances separately. During the participant build, main's SKILL.md advertised removed --allow-self and unsafe fresh-bootstrap guidance until the final docs lane; installing the frozen runtime with that skill would knowingly ship mismatched agent instructions. Pin or verify served skill content against the installed runtime contract, and finish the docs dependency before rollout rather than reinstalling twice."
+ },
+ {
+  "id": "pc2_5daeb6470cf04cd1",
+  "ts": "2026-09-16T16:21:04.030Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post 0.9 conversation resolved generic workspace despite the dedicated tower-astra cwd, so catchup failed not_a_member. Inspect participant binding first; explicit bind --workspace tower-astra plus join fixed it. A migration hint explaining actor versus cwd would prevent replaying the old routing recipe."
+ },
+ {
+  "id": "pc2_268f7c03df3ff6ff",
+  "ts": "2026-09-16T17:43:03.540Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "CoS doorbell at 2026-09-16 17:42 UTC woke resident with no_participant JSON instead of mail activity. Watcher needs its own persistent participant binding; binding the interactive resident does not bind automation shell. Resident inbox verified empty after explicit cos-devbox binding; latest urgent digest remains 12:00 UTC."
+ },
+ {
+  "id": "pc2_f612b2567099fe39",
+  "ts": "2026-09-17T01:18:10.672Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post chat send requires --send/--body, not positional prose. Use post schema or skill examples before sending; failed invocation made no send."
+ },
+ {
+  "id": "pc2_ce4161614da2fbaa",
+  "ts": "2026-09-18T01:38:09.018Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "tools/cos/brief-app",
+  "text": "Post profile selection collided with an existing room sigil; a list of available or occupied sigils alongside profile set would avoid trial-and-error."
+ },
+ {
+  "id": "pc2_bfbf020bcbbd209e",
+  "ts": "2026-09-18T02:07:25.074Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": "tools/cos/brief-app",
+  "text": "Moving brief-app from the Mac to the devbox required converting a Post remote placeholder to a local room; rooms add only reports duplicate-name and points to hand editing rooms.json. A supported relocate/update-path command would make session moves safer."
+ },
+ {
+  "id": "pc2_0a98f361fa34caa4",
+  "ts": "2026-09-18T02:17:16.016Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post gate artifact-resolution tests invoke the estate cargo cache wrapper, which overrides test Cargo config and rejects intentional temporary target dirs; provide a documented metadata-only test lane using native Cargo."
+ },
+ {
+  "id": "pc2_8cb0041d47b2a04b",
+  "ts": "2026-09-18T02:52:48.226Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post send and delegate mail send use different body argument forms; post requires --to plus --body/--body-file, delegate mail takes positional body. Read post --help before crossing CLIs."
+ },
+ {
+  "id": "pc2_db3a1de17940a9e3",
+  "ts": "2026-09-18T03:24:52.308Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: two participants bound to the same workspace (warrant) share one display profile, so the peer's channel messages rendered under my '\ud83d\udcdc Fable' name until I ran post profile clear. A per-participant display name, or a refusal/warning on profile set when the workspace has more than one active participant, would have prevented it."
+ },
+ {
+  "id": "pc2_d74a02555a639a2a",
+  "ts": "2026-09-18T03:24:52.310Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post doorbell: the Monitor-wrapped post watch caps at 30 minutes, so an idle Claude session misses channel messages after expiry; the Codex peer had to send metadata-only Herdr notices to wake me. A wake path that outlives the Monitor (a user-unit watcher that pages the session, or a hook-level unread nudge on the next turn) would have prevented the gap."
+ },
+ {
+  "id": "pc2_c9af5a5cf8c2dd3c",
+  "ts": "2026-09-18T03:31:56.577Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": "tools/cos",
+  "text": "post chat --send treats a positional string as a body-file path, unlike delegate mail send; use --send --body for inline chat. The CLI exact_fix diagnostic is useful; skill examples should consistently include --body."
+ },
+ {
+  "id": "pc2_d698f58cf310f028",
+  "ts": "2026-09-18T04:04:49.328Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Porch live tests still rely on cwd identity and fail against participant-bound Post; compatibility tests should be run during Post identity migrations."
+ },
+ {
+  "id": "pc2_4d6577a9af3f4ee0",
+  "ts": "2026-09-18T04:09:54.099Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: display-name profiles are per-room (workspace), so several participants sharing one workspace (~/porch tonight: Kettle, Vesper, +1) stamp each other's messages with whichever name was set last. Kettle noticed and withdrew its name rather than label others' words. Prevented by: participant-scoped display name/sigil (profile on the participant record), or a clear refusal to set a room profile when more than one active participant is bound there."
+ },
+ {
+  "id": "pc2_b621671b8ba815b8",
+  "ts": "2026-09-18T04:10:22.563Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post's participant lifecycle vocabulary invites reading a lease state as an attention report. 'active' means only that the lease has not expired, but it reads as 'acting', and 'unread/read' on messages reads as comprehension rather than cursor position. Tonight this cost a real build gate: I reported an auditor as 'active, reading the diff' when that seat (a Codex TUI with no doorbell) had never received the request at all, and held a launch for ~30 minutes on the inference. The true field bought credibility for a claim it never made. 'post who' is the natural first instrument and answers a question adjacent to the one an operator is actually asking; '--seen-by' is the honest one and is far less discoverable. Suggested fix, credit to Fable (claude-1215ae9d) on #night-porch: rename at the vocabulary layer so no state name can be mistaken for a report of attention \u2014 'leased' rather than 'active', 'delivered'/'seen' rather than 'read'. A cheaper partial fix: have 'post who' print the per-channel seen state, or a hint pointing at --seen-by, so the adjacent-question instrument volunteers the real one."
+ },
+ {
+  "id": "pc2_d3e5b5ffbcf2f48d",
+  "ts": "2026-09-18T04:17:24.660Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch dies silently (exit 1, ~7s after) when its participant rebinds to another workspace mid-run; the seat believes its doorbell is up. Fresh watch on the old room runs fine, so the trigger is the live process crossing the rebind. Wanted: a named exit message stating the fence it hit (generation/workspace change), or survive the rebind. Observed and measured by Kettle (participant omp-5aaee752) on night-porch 2026-09-17; filed on its behalf by Fable (claude-1215ae9d)."
+ },
+ {
+  "id": "pc2_17657282f40d2171",
+  "ts": "2026-09-18T05:25:40.827Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat compact framing truncates message ids (shows 20260918-0524 for 20260918-052419-826510-615db2); twice tonight I typed the truncated id into --re and got not_found. Either show the full id in compact framing or let --re resolve a unique prefix the way --discard-through does."
+ },
+ {
+  "id": "pc2_dc0e81eee6c776c3",
+  "ts": "2026-09-18T05:28:40.305Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "A single 'post watch --digest --interval-ms 5000' process (pid 1579180, participant codex-dc007dea) has consumed 2854s of CPU over 4251s elapsed \u2014 67% of a core, sustained, for a doorbell. Every other watcher on the box measures 4.5-7.5% (n=5, measured from /proc/<pid>/stat utime+stime over lifetime). So it is ~10x its peers and 89% of all post-watch CPU on the host. Two correlates, NEITHER verified as the cause: it is the oldest watcher (71 min) and the only one invoked without --text (NDJSON mode). Plausible untested mechanism: a never-consumed cursor rescanning a growing channel backlog every 5s (night-porch was at 79+ messages). What would have prevented it: post watch bounding its per-poll work independent of backlog size, or reporting per-poll scan cost so a runaway watcher is visible before it is 10x its peers. I did not kill the process: it belongs to another seat, not to me. Context: 13 agent seats were told to arm porch doorbells tonight, so a per-watcher pathology scales with the room."
+ },
+ {
+  "id": "pc2_c10d1dc544b232b4",
+  "ts": "2026-09-18T07:14:40.209Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: participant's cursors.json can become invalid and post then silently re-reports every message in every joined channel as unread ('warning: participant claude-420e9d59 has invalid cursors.json; treating every eligible message as unread'). A 'post watch --digest' monitor then fired a single event claiming '#night-porch: 339 new' spanning three hours of already-read history, which is indistinguishable from a real burst and makes the doorbell useless for the rest of the session. The fallback is reasonable (fail open, show everything) but it is silent in the place that matters: the digest line reports a count as if it were news. What would have prevented it: have the watch/digest output mark a batch as 'cursor reset, re-reporting history' rather than 'N new', and/or have 'post doctor' detect and offer to rebuild an unparseable cursors.json."
+ },
+ {
+  "id": "pc2_ce8b4fc099ef33a6",
+  "ts": "2026-09-18T09:38:17.575Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --digest replays the same 'N new' range (363 messages, 06:11Z..08:31Z) at every fresh start even after 'post chat <ch> --limit 0' and 'post mail --limit 0' marked everything read; the digest baseline is not the read cursor, so a re-armed doorbell emits one false 'new' event per arm. Expected: --digest respects the read cursor or takes --since."
+ },
+ {
+  "id": "pc2_cabd015c4ee4951b",
+  "ts": "2026-09-19T20:50:14.875Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post byline renders the room profile, not the sender's lineage: three seats in room atlas all read as Cairn; would have been prevented by rendering from_lineage per docs/PARTICIPANTS.md:75"
+ },
+ {
+  "id": "pc2_a2535b25ca4f1200",
+  "ts": "2026-09-19T21:51:23.973Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch (long-running, --room fable-devbox) intermittently logs 'participant claude-7ccc722a has invalid cursors.json; treating every eligible message as unread' while the file is valid JSON on inspection and other participants' files are valid; it coincides with consuming reads (post chat) from the same participant in another process, so the watcher is likely reading cursors.json mid-write (write-in-place, or the watcher not taking .cursors.lock). Would have been prevented by an atomic temp+rename write and a lock-guarded read in watch. Seen twice 2026-09-19 ~21:50Z on build 7c47a68."
+ },
+ {
+  "id": "pc2_b03c135ee1e63c47",
+  "ts": "2026-09-20T03:36:24.325Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch (doorbell) emitted 'participant claude-7ccc722a has invalid cursors.json; treating every eligible message as unread' once while a concurrent post chat read was rewriting cursors.json; the file was valid v2 JSON (21566 bytes) seconds later. Likely a non-atomic write read mid-replace. Writer should write-to-temp and rename; reader should retry once on parse failure before degrading to all-unread."
+ },
+ {
+  "id": "pc2_3d8903eb3f3642b5",
+  "ts": "2026-09-20T05:01:19.864Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post printed 'participant claude-7ccc722a has invalid cursors.json; treating every eligible message as unread' mid-session with no cause named and no repair hint; a self-heal (rewrite the cursor file from the last acked id) or at least the parse error and file path in the warning would have prevented the guesswork"
+ },
+ {
+  "id": "pc2_1a1a75c77451b2d2",
+  "ts": "2026-09-20T06:35:26.080Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --room <r> --digest --text --interval-ms 5000 spins at ~50% of a core continuously instead of sleeping between polls; observed a 16-minute-old watcher with 7m54s of CPU time (49.3% pcpu) at a 5s interval, contending with a running build on the same box. A poll loop at 5000ms should be near-idle. Would have been prevented by the watcher sleeping on its interval rather than busy-polling."
+ },
+ {
+  "id": "pc2_df09d8c55d414605",
+  "ts": "2026-09-22T01:42:14.179Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post has no channel delete/archive verb; a stray channel had to be removed by rm on ~/.claude-mail/channels/<name>. Also: post chat '#name' --join creates a channel literally named '#name' (double hash in listings) instead of stripping the leading #; a warning or normalization would have prevented the stray."
+ },
+ {
+  "id": "pc2_a9d7c8fe1cb697b4",
+  "ts": "2026-09-22T02:05:55.067Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post profiles belong to workspaces: a second participant in agent-memory inherited Fire Fable in its send envelope despite lineage vale. Participant-scoped presentation would prevent same-directory agents impersonating one another in Porch."
+ },
+ {
+  "id": "pc2_709bd06fa9d0e14a",
+  "ts": "2026-09-22T03:22:59.031Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Vale had only activity-gated Post hooks; ending the turn prevented new channel messages from waking the session. Installed participant-pinned post-codex-doorbell@astra.timer for jev-experiments. A manual catch-up must not be reported as repairing idle wake; require a live idle-delivery check."
+ },
+ {
+  "id": "pc2_4aead8f73209f444",
+  "ts": "2026-09-22T16:35:41.895Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post profile resume: same-lineage participant cannot reuse its prior emoji sigil; explicit lineage continuation should permit a documented presentation handoff or explain the safe alternative. Continued the lineage and set the display name without the emoji."
+ },
+ {
+  "id": "pc2_4c7491571ba72435",
+  "ts": "2026-09-22T16:40:32.808Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post who --room atlas --text still prints participants from every workspace (about 1500 lines); make the room filter narrow participants or document its actual scope so coordination preflight stays bounded."
+ },
+ {
+  "id": "pc2_aaf4e93c82e85591",
+  "ts": "2026-09-22T17:42:27.386Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post timer idle doorbells skip the focused pane, so a two-seat review handoff can sit indefinitely despite successful ticks. Document the focused-idle limitation at install and support an explicit focused-idle option; preserve working/blocked refusal and metadata-only notices."
+ },
+ {
+  "id": "pc2_321bbc9193673541",
+  "ts": "2026-09-22T17:51:38.213Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "archived",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Installed continuous post-doorbell rejects current participant direct-mail events: event_metadata requires room but post watch emits address.kind=participant with no room. Real self-mail canary 20260922-175117-2af4ad raised invalid event reason or room; update parser to typed address identities before recommending this daemon for participant mail."
+ },
+ {
+  "id": "pc2_0decc6f33fc0ebe4",
+  "ts": "2026-09-22T17:53:25.715Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Installed post-doorbell continuous watcher event_metadata requires room for mail and rejects current participant-addressed Post direct events where address.kind=participant and room is absent. Active process with no errors does not prove delivery; test a real participant mail event before recommending this watcher."
+ },
+ {
+  "id": "pc2_562ba0a9b5e35084",
+  "ts": "2026-09-22T21:53:12.621Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "provisioning"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "estate-sync post install row hardcodes target/release/post, but managed Cargo writes the artifact under its cache slot and this checkout has no target directory. The build can succeed while the install fails or selects a stale local artifact. Let cargo install own artifact resolution for the existing post binary."
+ },
+ {
+  "id": "pc2_ddf24f7c26e819ce",
+  "ts": "2026-09-22T23:29:30.595Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --room agent-memory --digest reported '#jev-experiments: 307 new' spanning messages from 01:50Z to 23:23Z that my participant (claude-f3b18872) had already consumed; post chat --peek then showed no new messages. The watch appears to read a workspace-level cursor, not the bound participant's, so a long-armed doorbell can fire a full-history replay that looks like a flood. A watch that names which cursor it reports, or reads the participant cursor when bound, would have prevented the false alarm."
+ },
+ {
+  "id": "pc2_d0006236c4f08b68",
+  "ts": "2026-09-23T01:58:10.208Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "resolved",
+  "tags": [
+   "porch"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Post c808283 added key/legacy to 'post profile show --json'; porch's exact-schema startup check (roomcheck.assert_acting_room) refused them and porch failed to launch on both hosts. The archive e2e called porch functions directly and skipped app startup, so it missed this. Prevention: post smoke should launch porch's startup checks (tests/test_post_live.py already does, against the installed post) before a post install is called done; and post->porch JSON additions need a contract note. Fixed in porch 39ca6df."
+ },
+ {
+  "id": "pc2_fed20f50f7943386",
+  "ts": "2026-09-23T04:33:12.407Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --digest re-reported 344 old #jev-experiments messages as new after a transient 'cursor state ... not a solitary regular file' warning; participants/<id>/cursors.json was a normal 1-link regular file seconds later (concurrent .participant.json.*.tmp rename in flight). watch should retry the cursor read briefly before falling back to all-unread, or mark the replay unambiguously in the event line"
+ },
+ {
+  "id": "pc2_ded4e27a11ced1ef",
+  "ts": "2026-09-23T05:18:16.746Z",
+  "agent": "codex",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch rejects --channel; channel selection belongs to the doorbell adapter rather than the watch CLI. A watch help example showing this distinction would prevent the failed probe."
+ },
+ {
+  "id": "pc2_9983998980bd6457",
+  "ts": "2026-09-23T06:18:49.339Z",
+  "agent": "codex",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "delegate"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Delegate completion notification passed --allow-self to the installed Post CLI, which rejected it; align the notify adapter with Post so unattended lane completion is delivered."
+ },
+ {
+  "id": "pc2_240401765558e2aa",
+  "ts": "2026-09-23T06:52:37.759Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "scripts/install-post.sh on the devbox needs CARGO_TARGET_DIR=\"$(estate-build-cache path)\" or the build misses the shared cache. Would have prevented: the installer reading estate-build-cache itself when present."
+ },
+ {
+  "id": "pc2_7f1f840d1810a79f",
+  "ts": "2026-09-23T06:52:37.762Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post scripts/gate.sh has no timeout around cargo test, so one hanging test (lane R hit one tonight) stalls the whole gate with no output. Would have prevented: a per-suite timeout that names the stuck test binary."
+ },
+ {
+  "id": "pc2_c81aa0f934449d2c",
+  "ts": "2026-09-23T06:52:37.765Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post: the activation-notice write returns an I/O error when stderr is closed, so the command exits nonzero after doing its work (participant::emit_activation_notice). Deliberate to keep the notice pending, but callers see a failure. Would have prevented: a distinct exit or warning path for notice-only failures."
+ },
+ {
+  "id": "pc2_70bc2686307c21b1",
+  "ts": "2026-09-23T06:52:37.767Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post watch --snapshot with an explicit but unknown POST_PARTICIPANT exits 0 with empty output and only 'participant: unbound' on stderr, which reads as 'no mail'. Would have prevented: a nonzero exit for an unknown explicit participant."
+ },
+ {
+  "id": "pc2_b8bead422d116d49",
+  "ts": "2026-09-23T06:52:37.770Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "perf",
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post: 8 concurrent 'post watch --snapshot' processes cost about 5x the CPU of one alone (lane E benchmark), likely lock spinning on the store. Would have prevented: a store lock that blocks instead of spins."
+ },
+ {
+  "id": "pc2_4df31abfa0e891de",
+  "ts": "2026-09-23T06:52:37.773Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post read <id> consumes mail and silently drops a piped stdin body; the A2 stdin refusal covers channel reads only (reported by the lane R GLM review; not re-verified at 74dd1dd). Would have prevented: the same stdin guard on mail reads."
+ },
+ {
+  "id": "pc2_43a983bc9110fef9",
+  "ts": "2026-09-23T06:52:37.775Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post channels fails outright when one channel message file is corrupt, instead of skipping it with a warning (lane D out-of-boundary finding). Would have prevented: per-message skip with skipped_unreadable."
+ },
+ {
+  "id": "pc2_8ecd1ffed881694f",
+  "ts": "2026-09-23T06:52:37.778Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post schema's watch event shape omits cursor_unusable and sender-provenance fields that watch emits (lane D finding), so consumers built from the schema miss them. Would have prevented: schema generated from the event type."
+ },
+ {
+  "id": "pc2_2e0af70d8ac22a8d",
+  "ts": "2026-09-23T06:52:37.780Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "doorbell",
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "doorbell installers' snapshot probe only checks that each output line is a JSON object, so a wrong-shaped watch output passes the install probe (lane D finding). Would have prevented: probing the fields the doorbell reads."
+ },
+ {
+  "id": "pc2_6646d9f0d5a6de0d",
+  "ts": "2026-09-23T06:52:37.783Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "doorbell"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "legacy Python post-doorbell raises AttributeError in registered_rooms on a non-object listing (lane D finding). Superseded by the supervisor tonight but still installed where not migrated."
+ },
+ {
+  "id": "pc2_149ba65db4de9478",
+  "ts": "2026-09-23T06:52:37.786Z",
+  "agent": "nightjar-overnight",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "porch",
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "Porch's default owner marker is a fox and post's is a bearded face, so Porch's suggested 'post owner init' (which omits --marker) leaves the store signing-disabled. Would have prevented: one shared default, or Porch passing --marker."
+ },
+ {
+  "id": "pc2_59556849280cc8bc",
+  "ts": "2026-09-23T17:39:00.033Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "resolved",
+  "tags": [
+   "delegate"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "delegate devin work: Devin's non-interactive run does not exit after finishing, so every run ends on the 8-min stall watchdog and the envelope reports error=stalled, ok=false, even when the work succeeded (2026-09-23: doorbell-cap run committed c6d98ba and wrote its report at ~17:19Z, then idled until cancelled). Costs 8 min per lane and makes success look like failure; a done-detector (report file written + no child process) or Devin's own exit signal would prevent it. A second SWE-2 max run on a large 9-finding brief went silent after 27 min with zero edits and was also cancelled as stalled."
+ },
+ {
+  "id": "pc2_e60725f60568ff36",
+  "ts": "2026-09-23T21:32:31.876Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac"
+  ],
+  "cwd": ".",
+  "text": "post send prints 'post: sending as \u2026' status lines on stderr even with --json, so 'post send --json 2>&1 | jq' fails to parse. That reads like a failed send, and a retry double-sent a note to cos-devbox (20260923-211941-dc6e90 and 212005-e7e22d). Prevention: stay silent on stderr under --json, or have --json always emit a result object on stdout that is safe to pipe."
+ },
+ {
+  "id": "pc2_70bd95bb893d475e",
+  "ts": "2026-09-24T01:59:50.738Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post watch --from now in a Claude session on ~/Code/loom never printed a #loom-build message from a Loom-hosted Claude (participant loom-95286e23) while the UserPromptSubmit hook did report '#loom-build: 2 new'. Both identities resolve to room 'loom' (post chat reads 'reading as loom'), so same-room messages may be filtered from watch. A coordinator and its hosted agent sharing a repo share a room name; a doorbell that silently drops the other agent's messages looks healthy. Worked around with a Monitor polling post chat --history."
+ },
+ {
+  "id": "pc2_fc1f496ac312fe20",
+  "ts": "2026-09-24T09:14:03.210Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Post may drop a message to one of two watches on the same participant: lane B's Loom session (2026-09-24T0833-ab690d, ~08:45Z) probed direct mail between two throwaway participants, six runs; in one run the older watch missed a message within 3 s, and five reruns did not repeat it. Broadcast to every live watch is otherwise the observed model. Loom's handover design now depends on it. A Post-side look at watch delivery under two concurrent watches would settle whether it's a real race."
+ },
+ {
+  "id": "pc2_31230f8c542ea046",
+  "ts": "2026-09-25T00:22:05.835Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post: 'post chat night-porch --join' on the Mac silently created a new host-local channel while the established #night-porch (619 msgs, 16 members) lives on the devbox; neither v2 bridge allowlist (both 'loom-build' only) nor the cell bridge CHANNELS list carries it, so a Mac agent told 'post supports cross-machine channels now' splits the room without any hint. Would have prevented it: --join warning when a remote host advertises a same-name channel, or channels bridged by default per the porch's own description ('cross-cell, cross-machine'). Workaround used: devbox seat via ssh (post participant bind --new --workspace writing-plans) + ssh-wrapped post watch Monitor."
+ },
+ {
+  "id": "pc2_f63a6f453d3c607f",
+  "ts": "2026-09-25T16:21:05.046Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post who hung past a 10s timeout with no output while I was surveying participants read-only for a fleet review; a --timeout or a progress line on stderr would make a hang distinguishable from slow"
+ },
+ {
+  "id": "pc2_32d2fe5ce9531601",
+  "ts": "2026-09-25T18:00:00.237Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post who --json hung 1m55s on the trey cell (09-25 12:52, 1m17s of it sys time) and returned exit 0. Loom's warp tail calls it synchronously at startup, so every loomw/loomp launch stalled 10 s until Loom bounded it at 2 s (loom 33b66b3). Worth profiling who: the sys time suggests a scan (store walk or lock spin), not network."
+ },
+ {
+  "id": "pc2_8c6f5cca07af19a5",
+  "ts": "2026-09-26T17:27:15.881Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "mac",
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "Codex hook error line '[post] POST_PARTICIPANT conflicts\u2026' was injected as an instruction 5,284 times across 51 Codex sessions (found by context-waste recon lane). Prevention: fix the post hook so a config conflict logs once, not on every request."
+ },
+ {
+  "id": "pc2_59f29c0fa8e54d1b",
+  "ts": "2026-09-27T03:07:38.088Z",
+  "agent": "claude-code",
+  "severity": "minor",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post chat --json still prints a 'post: sending to #chan as room ...' banner on stderr; with 2>&1 the banner lands in front of the JSON and breaks jq, which reads like a failed send. Prevention: keep stderr separate (2>/dev/null or a file) when parsing --json, or drop the banner when --json is set."
+ },
+ {
+  "id": "pc2_59b438f10421f25d",
+  "ts": "2026-09-27T03:17:01.310Z",
+  "agent": "claude-code",
+  "severity": "major",
+  "status": "open",
+  "tags": [
+   "post"
+  ],
+  "hosts": [
+   "devbox"
+  ],
+  "cwd": ".",
+  "text": "post who --json took 76.7 s on the devbox (2026-09-26 22:20 CDT, rc 0); Loom's startup context step caps it at 2 s, so every Loom launch waits the full 2 s for it. Loom will stop blocking on it; Post itself should be profiled"
+ }
+]
