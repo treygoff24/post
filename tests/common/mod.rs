@@ -41,14 +41,32 @@ pub fn run_under_deadline(
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn post binary");
+    // Drain both pipes while polling: a child whose output outgrows the pipe
+    // buffer otherwise blocks on write and reads as a deadline overrun.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                pipe.read_to_end(&mut bytes).expect("drain post output");
+            }
+            bytes
+        })
+    };
+    let stdout_reader = drain(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let stderr_reader = drain(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+    let collect = |status| Output {
+        status,
+        stdout: stdout_reader.join().expect("stdout reader"),
+        stderr: stderr_reader.join().expect("stderr reader"),
+    };
     let started = std::time::Instant::now();
     loop {
-        if child.try_wait().expect("poll post binary").is_some() {
-            return child.wait_with_output().expect("collect post output");
+        if let Some(status) = child.try_wait().expect("poll post binary") {
+            return collect(status);
         }
         if started.elapsed() >= deadline {
             child.kill().expect("stop the overrunning child only");
-            let output = child.wait_with_output().expect("collect post output");
+            let output = collect(child.wait().expect("reap post binary"));
             panic!(
                 "`post {}` did not exit within {deadline:?}\nstdout: {}\nstderr: {}",
                 args.join(" "),

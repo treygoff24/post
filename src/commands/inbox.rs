@@ -251,6 +251,18 @@ pub(crate) fn visible_addresses(
     context: &Context,
     participant: &Participant,
 ) -> AppResult<Vec<Address>> {
+    Ok(visible_addresses_among(
+        participant,
+        routing::received_addresses(context, participant)?,
+    ))
+}
+
+/// `visible_addresses` from the participant's already-resolved received
+/// addresses (`post who` resolves every participant's in one pass).
+pub(crate) fn visible_addresses_among(
+    participant: &Participant,
+    received: Vec<Address>,
+) -> Vec<Address> {
     let mut addresses = Vec::new();
     if let Some(workspace) = participant.workspace.as_ref() {
         addresses.push(Address {
@@ -268,7 +280,7 @@ pub(crate) fn visible_addresses(
             name: lineage.clone(),
         });
     }
-    addresses.extend(routing::received_addresses(context, participant)?);
+    addresses.extend(received);
     addresses.sort_by(|left, right| {
         left.kind
             .as_str()
@@ -276,7 +288,7 @@ pub(crate) fn visible_addresses(
             .then(left.name.cmp(&right.name))
     });
     addresses.dedup_by(|left, right| left == right);
-    Ok(addresses)
+    addresses
 }
 
 pub(crate) fn address_label(address: &Address) -> String {

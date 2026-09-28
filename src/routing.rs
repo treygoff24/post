@@ -4,7 +4,7 @@ use crate::mailbox::{atomic_replace, parse_mail, Context};
 use crate::participant::{self, Address, AddressKind, Participant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -179,6 +179,7 @@ pub(crate) fn pending_count(context: &Context, address: &Address) -> AppResult<u
 
 pub(crate) fn pending_summary(context: &Context, address: &Address) -> AppResult<PendingSummary> {
     let mut summary = PendingSummary::default();
+    let mut resolved = None;
     for path in message_files(&inbox_path(context, address))? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
@@ -209,7 +210,8 @@ pub(crate) fn pending_summary(context: &Context, address: &Address) -> AppResult
                 continue;
             }
         };
-        match filtered_recipients(context, address, &parsed.envelope) {
+        let candidates = resolved_once(context, address, &mut resolved)?;
+        match filtered_among(context, address, &parsed.envelope, candidates) {
             Err(error) if error.code == ErrorCode::BlockedRoute => {
                 summary.held.push(id.to_owned());
             }
@@ -269,11 +271,23 @@ pub(crate) fn received_addresses(
     context: &Context,
     participant: &Participant,
 ) -> AppResult<Vec<Address>> {
-    let candidates = store_addresses(context);
-    let mut received = Vec::new();
-    for address in candidates {
+    Ok(received_index(context)?
+        .remove(&participant.id)
+        .unwrap_or_default())
+}
+
+/// `received_addresses` for every participant at once, keyed by participant
+/// id, each list in `store_addresses` order.
+///
+/// One pass reads each receipt and parses each canonical message once. Asking
+/// per participant reopened every store for every participant, and every
+/// participant is itself a store, so `post who` went quadratic in the host's
+/// participant count (post-gxz: 100 s at 4,139 participants).
+pub(crate) fn received_index(context: &Context) -> AppResult<HashMap<String, Vec<Address>>> {
+    let mut received: HashMap<String, Vec<Address>> = HashMap::new();
+    for address in store_addresses(context) {
+        let mut named = BTreeSet::new();
         let directory = routing_dir(context, &address);
-        let mut named = false;
         if let Ok(entries) = fs::read_dir(&directory) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -284,14 +298,8 @@ pub(crate) fn received_addresses(
                     continue;
                 }
                 match receipt(context, &address, id) {
-                    Ok(Some(receipt))
-                        if receipt.recipients.contains(&participant.id)
-                            || canonical_sender_is(context, &address, id, &participant.id) =>
-                    {
-                        named = true;
-                        break;
-                    }
-                    Ok(_) => {}
+                    Ok(Some(receipt)) => named.extend(receipt.recipients),
+                    Ok(None) => {}
                     Err(error) if error.code == ErrorCode::ConfigInvalid => warn_once(
                         path,
                         format!("corrupt routing receipt skipped: {}", error.message),
@@ -300,28 +308,28 @@ pub(crate) fn received_addresses(
                 }
             }
         }
-        if !named {
-            for path in message_files(&inbox_path(context, &address))? {
-                if parse_mail(&path).is_ok_and(|mail| {
-                    super::eligibility::envelope_is_own(context, participant, &mail.envelope)
-                }) {
-                    named = true;
-                    break;
-                }
+        // Sender history, routed or not: a routed message's sender is found
+        // here too, since its canonical bytes sit in the same inbox.
+        for path in message_files(&inbox_path(context, &address))? {
+            if let Ok(mail) = parse_mail(&path) {
+                named.extend(local_author(context, &mail.envelope));
             }
         }
-        if named {
-            received.push(address);
+        for id in named {
+            received.entry(id).or_default().push(address.clone());
         }
     }
-    received.sort_by(|left, right| {
-        left.kind
-            .as_str()
-            .cmp(right.kind.as_str())
-            .then(left.name.cmp(&right.name))
-    });
-    received.dedup_by(|left, right| left == right);
     Ok(received)
+}
+
+/// The one local participant for which `eligibility::envelope_is_own` holds,
+/// if any.
+fn local_author(context: &Context, envelope: &crate::model::Envelope) -> Option<String> {
+    envelope
+        .from_participant
+        .as_deref()
+        .filter(|id| crate::output::mail_authored_locally_by(context, id, envelope))
+        .map(str::to_owned)
 }
 
 pub(crate) fn store_addresses(context: &Context) -> Vec<Address> {
@@ -354,13 +362,6 @@ pub(crate) fn store_addresses(context: &Context) -> Vec<Address> {
     candidates
 }
 
-fn canonical_sender_is(context: &Context, address: &Address, id: &str, participant: &str) -> bool {
-    let path = inbox_path(context, address).join(format!("{id}.mail"));
-    parse_mail(&path).is_ok_and(|mail| {
-        crate::output::mail_authored_locally_by(context, participant, &mail.envelope)
-    })
-}
-
 fn collect_nested_addresses(root: &Path, kind: AddressKind, addresses: &mut Vec<Address>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -381,7 +382,37 @@ fn provisional_pending(
     address: &Address,
     warn: bool,
 ) -> AppResult<Vec<String>> {
-    let mut ids = Vec::new();
+    Ok(pending_mail(context, address, warn)?
+        .into_iter()
+        .filter(|mail| mail.is_pending_for(participant, address))
+        .map(|mail| mail.id)
+        .collect())
+}
+
+/// An unrouted message and the recipients it would be routed to now, resolved
+/// once so any number of participants' pending counts can be read from it.
+pub(crate) struct PendingMail {
+    pub id: String,
+    recipients: HashSet<String>,
+    local_author: Option<String>,
+}
+
+impl PendingMail {
+    pub(crate) fn is_pending_for(&self, participant: &Participant, address: &Address) -> bool {
+        self.recipients.contains(&participant.id)
+            && !(address.kind != AddressKind::Participant
+                && self.local_author.as_deref() == Some(participant.id.as_str()))
+    }
+}
+
+/// Every unrouted, readable, unblocked message in `address`'s canonical store.
+pub(crate) fn pending_mail(
+    context: &Context,
+    address: &Address,
+    warn: bool,
+) -> AppResult<Vec<PendingMail>> {
+    let mut pending = Vec::new();
+    let mut resolved = None;
     for path in message_files(&inbox_path(context, address))? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
@@ -416,22 +447,19 @@ fn provisional_pending(
                 continue;
             }
         };
-        let recipients = match filtered_recipients(context, address, &parsed.envelope) {
+        let candidates = resolved_once(context, address, &mut resolved)?;
+        let recipients = match filtered_among(context, address, &parsed.envelope, candidates) {
             Ok((recipients, _)) => recipients,
             Err(error) if error.code == ErrorCode::BlockedRoute => continue,
             Err(error) => return Err(error),
         };
-        if !recipients.iter().any(|id| id == &participant.id) {
-            continue;
-        }
-        if address.kind != AddressKind::Participant
-            && super::eligibility::envelope_is_own(context, participant, &parsed.envelope)
-        {
-            continue;
-        }
-        ids.push(id.to_owned());
+        pending.push(PendingMail {
+            id: id.to_owned(),
+            recipients: recipients.into_iter().collect(),
+            local_author: local_author(context, &parsed.envelope),
+        });
     }
-    Ok(ids)
+    Ok(pending)
 }
 
 pub(crate) fn warn_once(path: PathBuf, message: String) {
@@ -452,6 +480,7 @@ pub(crate) fn held_for(
     address: &Address,
 ) -> AppResult<Vec<String>> {
     let mut held = Vec::new();
+    let mut resolved = None;
     for path in message_files(&inbox_path(context, address))? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
@@ -466,11 +495,12 @@ pub(crate) fn held_for(
             Ok(parsed) => parsed,
             Err(_) => continue,
         };
-        let recipients = candidate_recipients(context, address, &parsed.envelope)?;
+        let candidates = resolved_once(context, address, &mut resolved)?;
+        let recipients = candidates_among(context, address, &parsed.envelope, candidates.clone());
         if !recipients.contains(&participant.id) {
             continue;
         }
-        match filtered_recipients(context, address, &parsed.envelope) {
+        match filtered_among(context, address, &parsed.envelope, candidates) {
             Err(error) if error.code == ErrorCode::BlockedRoute => held.push(id.to_owned()),
             Ok(_) => {}
             Err(error) => return Err(error),
@@ -579,7 +609,39 @@ fn filtered_recipients(
     address: &Address,
     envelope: &crate::model::Envelope,
 ) -> AppResult<(Vec<String>, Vec<ExcludedRecipient>)> {
-    let mut recipients = candidate_recipients(context, address, envelope)?;
+    filtered_among(
+        context,
+        address,
+        envelope,
+        resolved_recipients(context, address)?,
+    )
+}
+
+/// An address's resolved recipients do not depend on the message, and
+/// resolving them lists every participant on the host. A pass over one store
+/// resolves them on first need and reuses them for every message after
+/// (post-gxz: once per legacy unrouted message made `post doctor` take 4 s).
+fn resolved_once(
+    context: &Context,
+    address: &Address,
+    resolved: &mut Option<Vec<String>>,
+) -> AppResult<Vec<String>> {
+    if let Some(recipients) = resolved {
+        return Ok(recipients.clone());
+    }
+    let recipients = resolved_recipients(context, address)?;
+    *resolved = Some(recipients.clone());
+    Ok(recipients)
+}
+
+/// `filtered_recipients` from the address's already-resolved recipients.
+fn filtered_among(
+    context: &Context,
+    address: &Address,
+    envelope: &crate::model::Envelope,
+    resolved: Vec<String>,
+) -> AppResult<(Vec<String>, Vec<ExcludedRecipient>)> {
+    let mut recipients = candidates_among(context, address, envelope, resolved);
     let excluded = if address.kind == AddressKind::Lineage {
         exclude_blocked_lineage_recipients(context, &envelope.from, &mut recipients)?
     } else {
@@ -591,12 +653,12 @@ fn filtered_recipients(
     Ok((recipients, excluded))
 }
 
-fn candidate_recipients(
+fn candidates_among(
     context: &Context,
     address: &Address,
     envelope: &crate::model::Envelope,
-) -> AppResult<Vec<String>> {
-    let mut recipients = resolved_recipients(context, address)?;
+    mut recipients: Vec<String>,
+) -> Vec<String> {
     // The sender is not its own recipient, but only a LOCAL sender: a
     // remote-origin sender's id is host-local to its origin and may equal a
     // local participant's, who must still receive the message.
@@ -607,7 +669,7 @@ fn candidate_recipients(
             }
         }
     }
-    Ok(recipients)
+    recipients
 }
 
 pub(crate) fn resolved_recipients(context: &Context, address: &Address) -> AppResult<Vec<String>> {
@@ -707,7 +769,7 @@ fn exclude_blocked_lineage_recipients(
     Ok(excluded)
 }
 
-fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
+pub(crate) fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

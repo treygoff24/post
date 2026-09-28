@@ -232,6 +232,16 @@
   target is the readable self-send path and needs no flag.
 
 ### Fixed
+- `post who`, `post doctor`, and `post channels` cost linear time in the
+  host's participant count again (post-gxz). `who` re-scanned every store for
+  every participant, and every participant is itself a store, so a 4,139-
+  participant host took 100 s; it now reads each store once and takes 0.12 s.
+  `doctor` listed every participant once per legacy unrouted message (4.2 s,
+  now 0.38 s), and `channels` reread every participant once per channel
+  (1.7 s, now 0.10 s). Output is unchanged, byte for byte, on a copy of that
+  store. Duplicate stderr warnings for the same malformed pending mail or
+  participant channel state now print once per command, not once per
+  participant or channel.
 - A closed stderr no longer panics post. A caller that closed the pipe early
   (`post ... 2>&1 | head -1`) could see exit 101, and where a notice preceded
   the effect (`chat --send`, `send`), nothing was sent. Unwritable stderr lines
