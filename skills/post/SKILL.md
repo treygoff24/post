@@ -169,6 +169,11 @@ metadata and a short preview; read bodies with `post read` or `post chat`.
   Monitor), and stop it by that session's handle. Every agent's watch looks the
   same to a machine-wide `pkill`.
 
+**Inside Loom**, the harness already watches your mail: its startup line names
+your bound participant, and each new message arrives as a `[loom] mail` line.
+Arm no `post watch`, Monitor, or doorbell of your own; it repeats every message
+Loom delivers. Loom's `route` tool changes when mail wakes you.
+
 **In a Herdr pane** (Claude Code or Codex), the host's doorbell supervisor
 already rings you while idle. Every bound session it matches to a pane is
 armed by default and gets a `[post-doorbell:v2]` notice for direct mail and
