@@ -16,16 +16,19 @@ verified badge.
   receipt carries `bound_now`. Read-only commands create nothing: unbound, they
   exit 0 with `"participant": null, "bound": false`, and there is no cwd-room
   fallback. With no session key at all, a write fails `no_participant` and its
-  fix is the bind command.
+  fix is the bind command. A delegated run (`DELEGATE_RUN_ID` set, no
+  `POST_PARTICIPANT`) ignores the harness keys it inherited from its parent:
+  it is unbound until it runs `bind --new` or is handed `POST_PARTICIPANT`.
 - `post participant show --json` is the liveness check for your own identity:
   `status` is `bound`, `unbound`, `missing` (a `participant_missing` field names
   the rebind command; exit 0), or `archived`. An explicit claim
   (`POST_PARTICIPANT`, or an ambient session-index entry) that names a record
   which does not exist fails every other command with `participant_missing`
-  (exit 65), and its `suggested_fix` is the exact rebind command; a claim on a
-  record `post participant gc` collected is brought back instead, as the same
-  participant. Do not use `post who --json` for this; it lists every
-  participant.
+  (exit 65), and its `exact_fix` is the command to run. For a record `post
+  participant gc` collected, a write restores it under the same id (its receipt
+  carries `bound_now`), while a read restores nothing and its `exact_fix` is
+  `post participant restore <id>`; for an id nothing ever held, the fix rebinds.
+  Do not use `post who --json` for this; it lists every participant.
 - Records that stay idle are cleaned by `post participant gc` (an operator
   task: [`operator.md`](operator.md)). A record collected that way comes back
   on the next `bind` for its key, or on demand with `post participant restore

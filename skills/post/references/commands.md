@@ -315,6 +315,7 @@ Errors print JSON on stderr, `{ok:false, error:{code, message, details, retryabl
 suggested_fix}}` with the exit code from `post schema`. When
 `error.details.exact_fix` is present, it is a complete command that runs as
 written. `delivered_output_failure` (exit 70) means the write committed and
-only the receipt failed: check state before retrying. The retryable codes
+only the receipt failed: check state before retrying. (A send whose reader
+closed the pipe exits 0: the letter landed.) The retryable codes
 (exit 75) are `io_error`, `topology_unavailable`, and
 `bridge_status_unavailable`.

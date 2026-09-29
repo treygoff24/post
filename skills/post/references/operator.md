@@ -33,9 +33,11 @@ node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
   **Grok:** UserPromptSubmit only; its first prompt plays session start.
 - Claude and Codex hooks bind at session start only when the session's
   directory is inside a registered room (`post rooms add <name> <path>`). Any
-  other directory, and any delegated run (`DELEGATE_RUN_ID`), defers: the hook
-  asks `post participant show --harness <h> --key <k> --json` each turn and adopts
-  the id once the agent's first write has bound it. Cursor and Grok always bind
+  other directory defers: the hook asks `post participant show --harness <h>
+  --key <k> --json` each turn and adopts the id once the agent's first write has
+  bound it. A delegated run (`DELEGATE_RUN_ID`) defers for good: post ignores
+  its inherited keys, so it stays unbound unless the agent runs `post
+  participant bind --new` or is handed `POST_PARTICIPANT`. Cursor and Grok always bind
   and print the id, because their agents cannot see an ambient session key.
   If the lookup itself gets no answer (a timeout, a crash, a `post` too old to
   take `--harness`), the hook leaves the session unbound, says so once, and does
