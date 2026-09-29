@@ -993,6 +993,45 @@ describe("Claude turn marks (post-bt2)", () => {
     assert.equal(w.prompts.length, 1);
   });
 
+  // The two sides above each spell the mark path themselves (the hook's test
+  // reads what the hook wrote; writeMark hand-writes what the supervisor
+  // expects), so a one-sided rename of the file name or digest keeps both
+  // green. This test owns their agreement: the real hook process writes, the
+  // real supervisor scan reads, and neither path is computed here.
+  test("the marks the real Claude hook writes are the marks the supervisor reads", async () => {
+    const w = claudeWorld();
+    assert.ok(fs.existsSync(w.paths.doorbell), "the hook writes marks only under an existing doorbell directory");
+    const hook = (event, extra = {}) => {
+      const result = spawnSync(process.execPath, [path.join(HOOKS, "claude-mail.mjs")], {
+        input: JSON.stringify({ hook_event_name: event, session_id: "session-c", cwd: w.dir, ...extra }),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          POST_MAIL_ROOT: w.paths.root,
+          POST_CLAUDE_HOOK_BIN: path.join(w.dir, "no-such-post"),
+          POST_CLAUDE_HOOK_STATE_DIR: path.join(w.dir, "hook-state"),
+          DELEGATE_RUN_ID: "",
+          POST_PARTICIPANT: "",
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+    };
+
+    // Herdr says working; the hook's Stop with background work says idle.
+    hook("Stop", { background_tasks: [{ type: "subagent" }] });
+    await w.run();
+    assert.deepEqual(w.prompts.map((p) => p.pane), ["wC:p1"]);
+    assert.equal(w.outcomes("accepted").length, 1);
+
+    // The next turn's UserPromptSubmit replaces the mark: new mail must not ring
+    // the pane that is working again (a stale idle mark would ring it).
+    hook("UserPromptSubmit");
+    w.snapshots.set("claude-aaaaaaaa", [mailWith("20260923-000001-ccccc1"), mailWith("20260923-000001-ccccc2")]);
+    w.mailArrives();
+    await w.run();
+    assert.equal(w.prompts.length, 1, "the busy mark the hook wrote is the one the supervisor read");
+  });
+
   test("mail for a pane that may not ring logs one deferred line per reason", async () => {
     const w = claudeWorld();
     w.mark("busy");
