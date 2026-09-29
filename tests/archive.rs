@@ -196,9 +196,14 @@ fn archive_refuses_a_missing_channel_and_creates_nothing() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
     let output = sandbox.run_in(&["chat", "ghost", "--archive", "--json"], None, &alpha);
+    assert_eq!(output.status.code(), Some(66));
+    let error: Value = common::from_stderr(&output);
+    assert_eq!(error["error"]["code"], "not_found", "{error}");
     assert!(
-        !output.status.success(),
-        "archive of a missing channel succeeded"
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("ghost")),
+        "{error}"
     );
     assert!(!sandbox.mail_root.join("channels/ghost").exists());
 }

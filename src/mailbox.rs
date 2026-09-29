@@ -1853,7 +1853,10 @@ pub(crate) fn signed_age_minutes(ts: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ascii_escape_json, exclusive_atomic_write, exclusive_atomic_write_with};
+    use super::{
+        ascii_escape_json, exclusive_atomic_write, exclusive_atomic_write_with,
+        validate_new_room_name, RESERVED_ROOM_NAMES,
+    };
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::io;
@@ -1863,6 +1866,20 @@ mod tests {
     #[cfg(unix)]
     unsafe extern "C" {
         fn tzset();
+    }
+
+    #[test]
+    fn every_reserved_room_name_is_refused_in_both_cases() {
+        // Iterating the constant proves the validator consults all of it; the
+        // CLI test carries independent literal anchors for the storage names
+        // whose removal from the constant this loop cannot see.
+        assert!(!RESERVED_ROOM_NAMES.is_empty());
+        for name in RESERVED_ROOM_NAMES {
+            for candidate in [name.to_owned(), name.to_ascii_uppercase()] {
+                let error = validate_new_room_name(&candidate).expect_err(&candidate);
+                assert!(error.contains("reserved"), "{candidate}: {error}");
+            }
+        }
     }
 
     #[test]

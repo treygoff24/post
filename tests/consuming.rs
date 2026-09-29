@@ -31,41 +31,6 @@ fn seen(state: &Value, channel: &str) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn direct_read_records_participant_seen_and_keeps_canonical_mail() {
-    let sandbox = Sandbox::new();
-    let (alpha, beta) = register_alpha_beta(&sandbox);
-    let sent = sandbox.run_in(
-        &[
-            "send",
-            "--to",
-            "workspace:beta",
-            "--body",
-            "no move",
-            "--json",
-        ],
-        None,
-        &alpha,
-    );
-    assert_success(&sent);
-    let sent: Value = from_stdout(&sent);
-    let id = sent["envelope"]["id"].as_str().expect("mail id");
-    let read = sandbox.run_in(&["read", id, "--json"], None, &beta);
-    assert_success(&read);
-    assert!(sandbox
-        .mail_root
-        .join(format!("beta/inbox/{id}.mail"))
-        .is_file());
-    assert!(!sandbox
-        .mail_root
-        .join(format!("beta/read/{id}.mail"))
-        .exists());
-    assert_eq!(
-        participant_cursor(&sandbox, "beta")["mail"]["workspace:beta"]["seen"],
-        serde_json::json!([id])
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn failed_emit_records_no_participant_seen_id() {

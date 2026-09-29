@@ -18,6 +18,28 @@ fn channel_fixture(sandbox: &Sandbox, members: &str) {
     );
 }
 
+/// The bound participant's cursor file, or `Null` when nothing was written.
+fn participant_cursors(sandbox: &Sandbox) -> serde_json::Value {
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(sandbox.test_participant("beta"))
+        .join("cursors.json");
+    if !path.exists() {
+        return serde_json::Value::Null;
+    }
+    serde_json::from_slice(&fs::read(path).expect("cursor state")).expect("valid cursor state")
+}
+
+fn seen(section: &serde_json::Value) -> Vec<&str> {
+    section["seen"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect()
+}
+
 #[test]
 fn channel_catchup_returns_full_slice_then_fresh_invocation_is_empty() {
     let sandbox = Sandbox::new();
@@ -91,7 +113,7 @@ fn fresh_text_catchup_reports_caught_up_without_creating_mailbox_dirs() {
 
     let output = sandbox.run_in(&["catchup", "--mail"], None, &beta);
     assert_success(&output);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("caught up"));
+    assert_eq!(common::stdout(&output), "post: caught up (0 unread)\n");
     assert!(!sandbox.mail_root.join("beta/inbox").exists());
     assert!(!sandbox.mail_root.join("beta/read").exists());
 }
@@ -232,61 +254,27 @@ fn all_reports_and_skips_a_joined_channels_malformed_message() {
         .mail_root
         .join(format!("beta/inbox/{mail_id}.mail"))
         .exists());
-    let participant = sandbox.test_participant("beta");
-    let cursor: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            sandbox
-                .mail_root
-                .join("participants")
-                .join(participant)
-                .join("cursors.json"),
-        )
-        .expect("cursor state"),
-    )
-    .expect("valid cursor state");
-    assert_eq!(
-        cursor["mail"]["workspace:beta"]["seen"]
-            .as_array()
-            .expect("mail seen set")
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>(),
-        vec![mail_id]
-    );
-    assert!(cursor["channels"].as_object().expect("channels").is_empty());
-}
 
-#[test]
-fn malformed_channel_entry_is_skipped_and_reported_without_touching_the_file() {
-    let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
-    channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
-    let id = "20260820-120000-000001-aaaaaa";
-    fs::write(
-        sandbox
-            .mail_root
-            .join(format!("channels/tax/messages/{id}.msg")),
-        "not a channel message",
-    )
-    .expect("malformed channel message");
-
-    // This used to fail the whole catch-up (exit 78). A listing never fails on
-    // one bad item: the file is skipped and named on stdout.
-    let output = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    // The positional form reports the same file, consumes nothing, and leaves
+    // the message file where it was.
+    let positional = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
     assert_eq!(
-        output.status.code(),
+        positional.status.code(),
         Some(0),
         "stderr: {}",
-        common::stderr(&output)
+        common::stderr(&positional)
     );
-    let value: serde_json::Value = from_stdout(&output);
+    let value: serde_json::Value = from_stdout(&positional);
     assert_eq!(value["count"], 0, "{value}");
-    assert_eq!(value["skipped"][0]["id"], id, "{value}");
-    assert!(!sandbox.mail_root.join("beta/cursors.json").exists());
+    assert_eq!(value["skipped"][0]["id"], bad_id, "{value}");
     assert!(sandbox
         .mail_root
-        .join(format!("channels/tax/messages/{id}.msg"))
+        .join(format!("channels/tax/messages/{bad_id}.msg"))
         .exists());
+
+    let cursor = participant_cursors(&sandbox);
+    assert_eq!(seen(&cursor["mail"]["workspace:beta"]), vec![mail_id]);
+    assert!(cursor["channels"].as_object().expect("channels").is_empty());
 }
 
 #[test]
@@ -307,7 +295,13 @@ fn nonempty_catchup_to_dev_null_refuses_without_cursor() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(common::stderr(&output).contains("/dev/null"));
-    assert!(!sandbox.mail_root.join("beta/cursors.json").exists());
+    assert!(participant_cursors(&sandbox)["channels"]["tax"].is_null());
+
+    // Nothing was consumed: a real catchup still delivers the message.
+    let retry = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
+    assert_success(&retry);
+    let retry: CatchupOutput = from_stdout(&retry);
+    assert_eq!(retry.count, 1);
 }
 
 #[test]
@@ -340,6 +334,10 @@ fn malformed_mail_warns_and_valid_mail_is_seen_without_moving() {
     assert!(common::stderr(&output).contains("skipped unreadable pending mail"));
     assert!(inbox.join(format!("{valid_id}.mail")).exists());
     assert!(inbox.join(format!("{malformed_id}.mail")).exists());
+    assert_eq!(
+        seen(&participant_cursors(&sandbox)["mail"]["workspace:beta"]),
+        vec![valid_id]
+    );
 }
 
 #[test]

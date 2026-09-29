@@ -238,9 +238,8 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   atomic replacement. The lock is a solitary regular inode checked after
   acquisition and is mode `0600`; concurrent acknowledgements therefore keep
   the whole map instead of losing marks. Seen-sets only grow, so a late id
-  below newer consumed ids still surfaces. Growth is linear in history; a
-  50,000-id warning remains the operational threshold and watermark compaction
-  is unsafe while late backfills can arrive.
+  below newer consumed ids still surfaces. Growth is linear in history, and
+  watermark compaction is unsafe while late backfills can arrive.
 - Missing, malformed, unknown-field, wrong-version, invalid-id, symlinked, or
   non-regular cursor state is advisory-invalid on read-only loads: the whole
   snapshot becomes empty, one sanitized warning goes to stderr, and eligible
@@ -1304,18 +1303,19 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   `agent-session --doctor` checks that seam.
 - Read surfaces render provenance as frozen evidence sentences (ratified
   copy, 2026-08-12; the `inferred-cwd` wording is locked). Every known
-  provenance sentence renders on every full-message text read — mail read
-  and channel reads alike, under every framing mode. The declared-env path
-  can claim a protected room from anywhere, so its evidence is never
-  sacrificed to display economy (M1 review ruling, 2026-08-12). A present
-  `sender_address` renders on both text surfaces as a sanitized line worded
-  as a self-declared instance tag, opaque and non-routable — never as a
-  credential. JSON surfaces always carry the raw fields, including the
-  inbox listing, watch channel-message NDJSON events, and crossed-send
-  bounce payloads (concurrent sends are exactly when instance attribution
-  matters). Unknown provenance values render silence — post never invents
-  copy for evidence it does not recognize. Messages without the fields
-  render byte-identically to before.
+  provenance sentence renders on a mail text read under `--framing full` and
+  `compact`; the quiet default (auto) omits it, and channel text reads carry
+  no evidence lines (Trey ruling, 2026-09-29). The declared-env path can
+  claim a protected room from anywhere, so under the opt-in framings its
+  evidence is never sacrificed to display economy (M1 review ruling,
+  2026-08-12). A present `sender_address` renders on the same framed mail
+  read as a sanitized line worded as a self-declared instance tag, opaque
+  and non-routable — never as a credential. JSON surfaces always carry the
+  raw fields, including the inbox listing, watch channel-message NDJSON
+  events, and crossed-send bounce payloads (concurrent sends are exactly
+  when instance attribution matters). Unknown provenance values render
+  silence — post never invents copy for evidence it does not recognize.
+  Messages without the fields render byte-identically to before.
 
 ## Behavior changes at 0.5.0 (amendment, 2026-08-12)
 

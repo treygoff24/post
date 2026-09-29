@@ -379,7 +379,6 @@ fn routing_crossed_send_uses_the_participants_seen_eligibility_snapshot() {
             "chat",
             "eligibility-crossed",
             "--send",
-            "--anyway",
             "--body",
             "@beta please read",
             "--json",
@@ -391,6 +390,15 @@ fn routing_crossed_send_uses_the_participants_seen_eligibility_snapshot() {
     let consumed =
         sandbox.run_as_participant(&["chat", "eligibility-crossed", "--json"], &b, &beta);
     assert_success(&consumed);
+    let consumed: Value = from_stdout(&consumed);
+    assert!(
+        consumed["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .any(|message| message["body"] == "@beta please read"),
+        "b must have consumed a's message first: {consumed}"
+    );
 
     let reply = sandbox.run_as_participant(
         &[
@@ -405,6 +413,15 @@ fn routing_crossed_send_uses_the_participants_seen_eligibility_snapshot() {
         &beta,
     );
     assert_success(&reply);
+    let reply: Value = from_stdout(&reply);
+    assert!(
+        reply.get("crossed").is_none(),
+        "a message b already consumed does not cross: {reply}"
+    );
+    assert!(
+        reply["warnings"].as_array().is_none_or(|w| w.is_empty()),
+        "no warnings expected: {reply}"
+    );
 }
 
 #[test]
@@ -1273,7 +1290,16 @@ fn routing_send_text_prints_a_runnable_readback_for_routed_and_pending_own_mail(
     let command = printed_readback(&common::stdout(&sent)).to_owned();
     let read = run_printed_readback(&sandbox, &command, &actor, &alpha);
     assert_success(&read);
-    assert!(common::stdout(&read).contains("own: true"));
+    let read_text = common::stdout(&read);
+    assert!(read_text.contains("own: true"), "{read_text}");
+    assert!(read_text.contains("printed routed"), "{read_text}");
+    let routed_text = common::stdout(&sent);
+    assert!(routed_text.contains("canonical message retained at workspace:beta"));
+    assert!(routed_text.contains("sender is not a frozen recipient"));
+    assert!(
+        command.starts_with("post read '") && command.ends_with('\''),
+        "readback must be the single-quoted post read form: {command}"
+    );
 
     let self_sent = sandbox.run_as_participant(
         &[
@@ -2510,8 +2536,12 @@ fn routing_two_participants_consume_independently_and_canonical_file_stays_put()
 
     let read_a = sandbox.run_as_participant(&["read", id, "--json"], &a, &alpha);
     assert_success(&read_a);
-    assert_eq!(inbox_as(&sandbox, &a, &alpha)["unread_count"], 0);
-    assert_eq!(inbox_as(&sandbox, &b, &alpha)["unread_count"], 1);
+    let after_a = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(after_a["unread_count"], 0);
+    assert_eq!(after_a["count"], 0);
+    let still_b = inbox_as(&sandbox, &b, &alpha);
+    assert_eq!(still_b["unread_count"], 1);
+    assert_eq!(still_b["count"], 1);
     assert!(sandbox
         .mail_root
         .join(format!("alpha/inbox/{id}.mail"))
@@ -2538,6 +2568,57 @@ fn routing_two_participants_consume_independently_and_canonical_file_stays_put()
         .mail_root
         .join(format!("alpha/inbox/{sibling}.mail"))
         .is_file());
+}
+
+/// `count` and `unread_count` are the number of inbox ids the participant has
+/// not consumed, not raw inbox files minus the seen set. A consumed letter
+/// whose file has left the inbox (a gc, or a hand removal) leaves a seen id
+/// with no file: raw-files-minus-seen would report 0 here, the per-id
+/// predicate reports the one unconsumed letter. A file duplicate of a consumed
+/// id (a failed unlink) is excluded from the count too, though a raw file
+/// count would include it.
+#[test]
+fn inbox_counts_are_eligible_ids_not_raw_files_minus_seen() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let a = bind(&sandbox, "counts-a", &alpha, "alpha");
+    let c = bind(&sandbox, "counts-c", &beta, "beta");
+    let first = send_as(&sandbox, &c, &beta, "workspace:alpha", "first");
+    let first = first["envelope"]["id"]
+        .as_str()
+        .expect("first id")
+        .to_owned();
+    let second = send_as(&sandbox, &c, &beta, "workspace:alpha", "second");
+    let second = second["envelope"]["id"]
+        .as_str()
+        .expect("second id")
+        .to_owned();
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["unread_count"], 2, "{listed}");
+
+    assert_success(&sandbox.run_as_participant(&["read", &first, "--json"], &a, &alpha));
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+    let first_file = inbox.join(format!("{first}.mail"));
+    let saved = fs::read(&first_file).expect("consumed letter still in the canonical inbox");
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["unread_count"], 1, "{listed}");
+
+    // The consumed letter's file leaves the inbox: one file (second), one
+    // seen id (first), one unconsumed letter.
+    fs::remove_file(&first_file).expect("remove consumed file");
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["unread_count"], 1, "{listed}");
+
+    // A failed unlink: the consumed id's file is back beside the unread one.
+    // Two raw files, still one unconsumed id.
+    fs::write(&first_file, saved).expect("plant duplicate of the consumed letter");
+    assert!(inbox.join(format!("{second}.mail")).is_file());
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["unread_count"], 1, "{listed}");
 }
 
 #[test]
