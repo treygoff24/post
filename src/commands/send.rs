@@ -919,25 +919,6 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
     }
 }
 
-/// The body-bearing flag to append to an `exact_fix`, reproducing the channel
-/// the caller actually used. Returns empty when the body arrived on stdin: no
-/// command can carry it, and inventing a `--body '<text>'` placeholder is how
-/// this field starts lying.
-pub(crate) fn send_body_flag(inline: Option<&str>, body_file: Option<&std::path::Path>) -> String {
-    if let Some(text) = inline {
-        return format!(" --body {}", crate::mailbox::shell_quote(text));
-    }
-    if let Some(path) = body_file {
-        if path.as_os_str() != "-" {
-            return format!(
-                " --body-file {}",
-                crate::mailbox::shell_quote(&path.display().to_string())
-            );
-        }
-    }
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{run_with_body, run_with_body_and_id, EnvIdentity};

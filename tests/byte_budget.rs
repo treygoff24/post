@@ -635,9 +635,16 @@ fn catchup_uses_one_budget_across_targets_and_consumes_only_complete_prefixes() 
         None,
         &beta,
     );
-    assert_eq!(crossed.status.code(), Some(65));
-    let error: Value = common::from_stderr(&crossed);
-    assert_eq!(error["error"]["code"], "crossed_send");
+    // A send always delivers now; what catchup left unread is what crossed it.
+    assert_eq!(
+        crossed.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr(&crossed)
+    );
+    let receipt: Value = from_stdout(&crossed);
+    assert_eq!(receipt["ok"], true);
+    assert_eq!(receipt["crossed"]["unseen"], 2, "{receipt}");
 }
 
 fn seed_pretty_catchup_fixture(sandbox: &Sandbox) -> std::path::PathBuf {
@@ -1231,7 +1238,7 @@ fn count_window_and_byte_omissions_remain_distinct_in_one_result() {
 }
 
 #[test]
-fn malformed_selected_messages_are_not_hidden_by_a_budget() {
+fn malformed_selected_messages_are_reported_not_hidden_by_a_budget() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, "malformed", "beta");
@@ -1251,9 +1258,19 @@ fn malformed_selected_messages_are_not_hidden_by_a_budget() {
         None,
         &beta,
     );
-    assert_eq!(consuming.status.code(), Some(78));
-    assert!(consuming.stdout.is_empty());
-    assert!(seen_ids(&sandbox, "beta", "malformed").is_empty());
+    // The unreadable file used to fail the whole read (exit 78). Consumption is
+    // per emitted id, so skipping it cannot move a cursor past it: the good
+    // message is emitted and consumed, the bad one is reported and stays unseen.
+    assert_eq!(
+        consuming.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr(&consuming)
+    );
+    let consuming_json: Value = from_stdout(&consuming);
+    assert_eq!(consuming_json["messages"][0]["id"], good_id);
+    assert_eq!(consuming_json["skipped_files"][0]["id"], bad_id);
+    assert_eq!(seen_ids(&sandbox, "beta", "malformed"), vec![good_id]);
 
     let history = sandbox.run_in(
         &[
@@ -1272,7 +1289,7 @@ fn malformed_selected_messages_are_not_hidden_by_a_budget() {
     let history_json: Value = from_stdout(&history);
     assert_eq!(history_json["selected_count"], 1);
     assert_eq!(history_json["messages"][0]["id"], good_id);
-    assert!(common::stderr(&history).contains("skipped unreadable"));
+    assert_eq!(history_json["skipped_files"][0]["id"], bad_id);
 }
 
 #[test]

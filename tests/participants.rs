@@ -347,6 +347,22 @@ fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
         ("e\u{0301}", true),
     ];
     for (channel, relayable) in cases {
+        // Peers and older stores hold names a NEW join now normalizes or refuses
+        // (emoji, a trailing space, capitals). The bridge still has to classify
+        // them, and an existing channel is joined exactly as named, so seed the
+        // directory the way a relayed channel arrives and then join it.
+        common::write_bad_channel(
+            &sandbox,
+            channel,
+            Some("{}"),
+            true,
+            &serde_json::json!({
+                "name": channel,
+                "created": "2026-09-22 16:34:23 +0000",
+                "created_by": "peer"
+            })
+            .to_string(),
+        );
         let joined = sandbox.run_as_participant(
             &["chat", channel, "--join", "--json"],
             &roomless,
@@ -1081,11 +1097,8 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
                 }
                 Some("missing_chat") => {
                     let error: ErrorEnvelope = from_stderr(&output);
-                    assert_eq!(
-                        error.error.code,
-                        if bound { "not_a_member" } else { "not_found" },
-                        "{args:?}"
-                    );
+                    // Bound or not, a missing channel is not_found (66).
+                    assert_eq!(error.error.code, "not_found", "{args:?} bound={bound}");
                 }
                 Some(code) => {
                     let error: ErrorEnvelope = from_stderr(&output);
@@ -2073,8 +2086,9 @@ fn participant_round2_workspace_less_actor_gets_rebind_fix_not_room_shadowing() 
     let output =
         sandbox.run_as_participant(&["chat", "any-channel", "--peek", "--json"], &actor, &alpha);
     let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "not_a_member");
-    assert!(error.error.message.contains(&actor));
+    // A channel that does not exist is not_found (66) whoever asks: the read
+    // errors used to disagree (not_a_member for a bound participant).
+    assert_eq!(error.error.code, "not_found");
     assert!(error
         .error
         .suggested_fix
@@ -2415,7 +2429,7 @@ fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
             ],
             None,
         ),
-        (vec!["chat", "missing", "--peek"], Some("not_a_member")),
+        (vec!["chat", "missing", "--peek"], Some("not_found")),
         (vec!["watch", "--snapshot", "--room", "alpha"], None),
         (vec!["profile", "show", "alpha"], None),
         (vec!["owner", "show"], None),

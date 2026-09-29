@@ -653,7 +653,6 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
                 || args.send
                 || args.body.is_some()
                 || args.body_file.is_some()
-                || args.file.is_some()
                 || args.discard
                 || args.discard_through.is_some()
                 || args.ack.is_some()

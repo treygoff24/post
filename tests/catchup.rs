@@ -177,7 +177,7 @@ fn all_skips_corrupt_unjoined_channel_and_delivers_mail() {
 }
 
 #[test]
-fn all_warns_and_zeroes_joined_channel_with_malformed_message() {
+fn all_reports_and_skips_a_joined_channels_malformed_message() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
@@ -209,7 +209,11 @@ fn all_warns_and_zeroes_joined_channel_with_malformed_message() {
 
     let output = sandbox.run_in(&["catchup", "--all", "--json"], None, &beta);
     assert_eq!(output.status.code(), Some(0), "stderr: {:?}", output.stderr);
-    assert!(common::stderr(&output).contains("warning"));
+    // The unreadable file is reported on stdout (it used to be a stderr warning
+    // that zeroed the channel); the mail still arrives.
+    let raw: serde_json::Value = from_stdout(&output);
+    assert_eq!(raw["skipped"][0]["id"], bad_id, "{raw}");
+    assert_eq!(raw["skipped"][0]["channel"], "tax", "{raw}");
     let parsed: CatchupOutput = from_stdout(&output);
     assert_eq!(parsed.count, 1);
     assert!(matches!(
@@ -253,7 +257,7 @@ fn all_warns_and_zeroes_joined_channel_with_malformed_message() {
 }
 
 #[test]
-fn malformed_channel_entry_fails_before_stdout_or_cursor() {
+fn malformed_channel_entry_is_skipped_and_reported_without_touching_the_file() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, r#"{"beta":"2026-08-20 12:00:00 -0500"}"#);
@@ -266,9 +270,18 @@ fn malformed_channel_entry_fails_before_stdout_or_cursor() {
     )
     .expect("malformed channel message");
 
+    // This used to fail the whole catch-up (exit 78). A listing never fails on
+    // one bad item: the file is skipped and named on stdout.
     let output = sandbox.run_in(&["catchup", "tax", "--json"], None, &beta);
-    assert_eq!(output.status.code(), Some(78));
-    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr(&output)
+    );
+    let value: serde_json::Value = from_stdout(&output);
+    assert_eq!(value["count"], 0, "{value}");
+    assert_eq!(value["skipped"][0]["id"], id, "{value}");
     assert!(!sandbox.mail_root.join("beta/cursors.json").exists());
     assert!(sandbox
         .mail_root

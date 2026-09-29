@@ -4857,29 +4857,18 @@ fn channel_two_room_flow_lists_participants_and_advances_each_seen_set() {
     assert!(tax.messages >= 3);
 }
 
+/// `#stray` is how a channel renders, so it names `stray` wherever a channel
+/// name is taken. (This was a refusal with a corrected command until the
+/// 2026-09-28 channels fix: the refusal cost an agent a round trip to be told
+/// what it already knew.) A channel literally named `#legacy` still works: an
+/// older post created those, and there `#legacy` IS the name.
 #[test]
-fn chat_refuses_a_leading_hash_rather_than_renaming_the_channel() {
+fn chat_accepts_a_leading_hash_as_the_rendered_channel_name() {
     let sandbox = Sandbox::new();
     let (alpha, _) = register_alpha_beta(&sandbox);
 
-    // '#stray' names nothing in this store: the identifier is not rewritten for
-    // the caller, and the correction carries the exact bare-name command.
-    // (`--join` is one of the two forms the bare name reproduces whole, so this
-    // is the caller's own invocation minus the sigil -- see
-    // chat_hash_refusal_publishes_no_lossy_correction for the forms that get
-    // prose instead.)
-    let refused = sandbox.run_in(&["chat", "#stray", "--join", "--json"], None, &alpha);
-    assert_eq!(
-        refused.status.code(),
-        Some(2),
-        "stderr: {}",
-        stderr(&refused)
-    );
-    assert!(
-        stderr(&refused).contains("post chat 'stray' --join"),
-        "the refusal must carry the runnable bare-name command: {}",
-        stderr(&refused)
-    );
+    let joined = sandbox.run_in(&["chat", "#stray", "--join", "--json"], None, &alpha);
+    assert_eq!(joined.status.code(), Some(0), "stderr: {}", stderr(&joined));
     let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
     let names: Vec<&str> = listed
         .channels
@@ -4887,12 +4876,12 @@ fn chat_refuses_a_leading_hash_rather_than_renaming_the_channel() {
         .map(|channel| channel.name.as_str())
         .collect();
     assert!(
-        !names.contains(&"stray"),
-        "a refused join must not join the stripped name either: {names:?}"
+        names.contains(&"stray"),
+        "joining '#stray' must join the channel 'stray': {names:?}"
     );
     assert!(
         !names.iter().any(|name| name.starts_with('#')),
-        "a refused join must not create a '#…' channel: {names:?}"
+        "a join must not create a '#...' channel: {names:?}"
     );
 
     // A channel LITERALLY named '#legacy' is a store an older post created, and
@@ -5010,14 +4999,13 @@ fn chat_subject_only_read_is_refused_without_a_command_or_a_store_change() {
     );
 }
 
-/// The sigil refusal is fail-closed, and its correction must be too. A command
-/// that runs but does something else than the caller asked is the one outcome
-/// worse than no command: the first revision advertised `post chat 'name'` for
-/// EVERY form, so a refused `--peek` pasted as a consuming read of the backlog
-/// it had just asked to leave alone, and a refused send came back with no body
-/// and no options.
+/// With `#name` accepted there is no refusal left to correct, so the property
+/// that matters is the one the old lossy-correction test really protected:
+/// the rendered name is exactly the bare name, option for option. A `--peek`
+/// through it must still be a glance that consumes nothing, and a send through
+/// it must land in the channel with its subject and body.
 #[test]
-fn chat_hash_refusal_publishes_no_lossy_correction() {
+fn chat_hash_name_forms_behave_exactly_like_the_bare_name() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "stray", &alpha);
@@ -5025,51 +5013,22 @@ fn chat_hash_refusal_publishes_no_lossy_correction() {
     let unread = "20260922-163423-000001-abcdef";
     write_channel_message(&sandbox, "stray", unread, "beta", "", "unread backlog");
 
-    // `--peek` is the difference between a glance and reading the backlog, so
-    // the bare-name spelling cannot stand in for this invocation at all.
+    // Prove the cursor state rather than the string: the glance shows the
+    // backlog and leaves it unread, the consuming read then consumes it, and the
+    // read after that does not. That last step is what makes the earlier ones
+    // mean something.
     let glanced = sandbox.run_in(&["chat", "#stray", "--peek", "--json"], None, &alpha);
-    assert_eq!(
-        glanced.status.code(),
-        Some(2),
-        "stderr: {}",
-        stderr(&glanced)
-    );
-    let error: ErrorEnvelope = from_stderr(&glanced);
-    assert_eq!(error.error.code, "invalid_argument");
-    assert_eq!(
-        error.error.details.exact_fix, None,
-        "a correction that dropped --peek would consume the backlog: {:?}",
-        error.error.details.exact_fix
-    );
+    assert_eq!(glanced.status.code(), Some(0), "{}", stderr(&glanced));
     assert!(
-        error.error.suggested_fix.contains("'stray'"),
-        "the prose must still name the bare channel: {}",
-        error.error.suggested_fix
+        stdout(&glanced).contains(unread),
+        "a --peek through the rendered name shows the backlog: {}",
+        stdout(&glanced)
     );
-    // The human surface is what an operator pastes from, so it must not
-    // advertise a command either.
-    let plain = sandbox.run_in(&["chat", "#stray", "--peek"], None, &alpha);
-    assert_eq!(plain.status.code(), Some(2));
-    assert!(
-        !stderr(&plain).contains("post chat"),
-        "no runnable command may be advertised for a form it cannot reproduce: {}",
-        stderr(&plain)
-    );
-
-    // Cursor safety is the claim, so prove the state rather than the string:
-    // the refusal left the message unread, a glance behind it still sees it, the
-    // consuming read then consumes it, and the read after that does not. That
-    // last step is what makes the earlier ones mean something.
-    let after_glance = sandbox.run_in(&["chat", "stray", "--peek", "--json"], None, &alpha);
-    assert!(
-        stdout(&after_glance).contains(unread),
-        "a refused --peek must not consume the backlog: {}",
-        stdout(&after_glance)
-    );
-    let consumed = sandbox.run_in(&["chat", "stray", "--json"], None, &alpha);
+    let consumed = sandbox.run_in(&["chat", "#stray", "--json"], None, &alpha);
+    assert_eq!(consumed.status.code(), Some(0), "{}", stderr(&consumed));
     assert!(
         stdout(&consumed).contains(unread),
-        "the backlog must still be unread after the refusal: {}",
+        "the backlog must still be unread after the glance: {}",
         stdout(&consumed)
     );
     let empty = sandbox.run_in(&["chat", "stray", "--json"], None, &alpha);
@@ -5079,9 +5038,8 @@ fn chat_hash_refusal_publishes_no_lossy_correction() {
         stdout(&empty)
     );
 
-    // A send correction must not lose the body or the options, and must not
-    // echo the body into diagnostics.
-    let secret = "SEND-BODY-MUST-NOT-BE-ECHOED";
+    // A send through the rendered name lands in `stray`, subject and body intact.
+    let secret = "SEND-BODY-THROUGH-THE-RENDERED-NAME";
     let sent = sandbox.run_in(
         &[
             "chat",
@@ -5096,111 +5054,45 @@ fn chat_hash_refusal_publishes_no_lossy_correction() {
         None,
         &alpha,
     );
-    assert_eq!(sent.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&sent);
-    assert_eq!(
-        error.error.details.exact_fix, None,
-        "a send correction without its body is not the caller's command: {:?}",
-        error.error.details.exact_fix
-    );
+    assert_eq!(sent.status.code(), Some(0), "{}", stderr(&sent));
+    let receipt: serde_json::Value = from_stdout(&sent);
+    assert_eq!(receipt["message"]["channel"], "stray");
+    assert_eq!(receipt["message"]["subject"], "Status");
     assert!(
-        !stderr(&sent).contains(secret),
-        "diagnostics must never echo a send body: {}",
-        stderr(&sent)
-    );
-    assert!(
-        !stdout(&sandbox.run_in(&["chat", "stray", "--history", "10"], None, &alpha))
+        stdout(&sandbox.run_in(&["chat", "stray", "--history", "10"], None, &alpha))
             .contains(secret),
-        "the refused send must not have landed"
+        "the send must have landed in the bare-name channel"
     );
 
-    // Every other form loses something the bare-name spelling cannot carry.
+    // Every other form carries its options through the rendered name too.
     for args in [
         vec!["chat", "#stray", "--history", "3"],
         vec!["chat", "#stray", "--since", unread],
-        vec!["chat", "#stray", "--message", unread, "--max-bytes", "64"],
-        vec!["chat", "#stray", "--discard"],
-        vec!["chat", "#stray", "--discard-through", unread],
-        vec!["chat", "#stray", "--ack", unread],
-        vec!["chat", "#stray", "--seen-by", unread],
+        vec!["chat", "#stray", "--message", unread, "--max-bytes", "1024"],
         vec!["chat", "#stray", "--framing", "full"],
         vec!["chat", "#stray", "--limit", "1"],
-        vec!["chat", "#stray", "--join", "--description", "norms"],
+        vec!["chat", "#stray", "--discard"],
     ] {
-        let refused = sandbox.run_in(&args, None, &alpha);
+        let output = sandbox.run_in(&args, None, &alpha);
         assert_eq!(
-            refused.status.code(),
-            Some(2),
+            output.status.code(),
+            Some(0),
             "{args:?}: {}",
-            stderr(&refused)
-        );
-        let error: ErrorEnvelope = from_stderr(&refused);
-        assert_eq!(
-            error.error.details.exact_fix, None,
-            "{args:?} must get prose, not a corrected command: {:?}",
-            error.error.details.exact_fix
+            stderr(&output)
         );
     }
 
-    // The two forms the bare name DOES reproduce exactly keep their fix --
-    // including the globals the caller passed -- and it runs as written.
-    let fresh = sandbox.run_in(&["chat", "#fresh", "--join", "--json"], None, &alpha);
-    assert_eq!(fresh.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&fresh);
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post chat 'fresh' --join --json"),
-        "the corrected command is the caller's invocation minus the sigil"
-    );
-    let ran = sandbox.run_fix(
-        error.error.details.exact_fix.as_deref().expect("exact_fix"),
-        &alpha,
-    );
-    assert_success(&ran);
-    let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
-    let joined = listed
-        .channels
-        .iter()
-        .find(|channel| channel.name == "fresh")
-        .expect("running the correction must create and join the bare-name channel");
-    assert!(joined
-        .participants
-        .contains(&sandbox.test_participant("alpha")));
+    // A name with spaces is normalized like any new name, sigil or not.
+    let spaced = sandbox.run_in(&["chat", "#two words", "--join", "--json"], None, &alpha);
+    assert_eq!(spaced.status.code(), Some(0), "{}", stderr(&spaced));
+    assert!(sandbox
+        .mail_root
+        .join("channels/two-words/channel.json")
+        .is_file());
 
-    // Reproduction includes the quoting: a name the shell would otherwise split
-    // has to come back as one argument.
-    let spaced = sandbox.run_in(&["chat", "#two words", "--join"], None, &alpha);
-    assert_eq!(spaced.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&spaced);
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post chat 'two words' --join"),
-        "the bare-name correction must stay one shell argument"
-    );
-
-    // `--pretty` spreads the refusal over several lines, so this one is read
-    // off the text rather than the envelope helper.
-    let pretty = sandbox.run_in(&["chat", "#pretty", "--join", "--pretty"], None, &alpha);
-    assert_eq!(pretty.status.code(), Some(2));
-    assert!(
-        stderr(&pretty).contains("post chat 'pretty' --join --pretty"),
-        "an output global is part of the invocation, not decoration to drop: {}",
-        stderr(&pretty)
-    );
-
-    // `--leave` is the other form with no companions, and its fix must leave.
+    // `--leave` through the rendered name leaves that channel.
     let leaving = sandbox.run_in(&["chat", "#stray", "--leave", "--json"], None, &alpha);
-    assert_eq!(leaving.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&leaving);
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post chat 'stray' --leave --json")
-    );
-    let ran = sandbox.run_fix(
-        error.error.details.exact_fix.as_deref().expect("exact_fix"),
-        &alpha,
-    );
-    assert_success(&ran);
+    assert_eq!(leaving.status.code(), Some(0), "{}", stderr(&leaving));
     let listed: ChannelsOutput = from_stdout(&sandbox.run(&["channels"]));
     let left = listed
         .channels
@@ -5211,7 +5103,7 @@ fn chat_hash_refusal_publishes_no_lossy_correction() {
         !left
             .participants
             .contains(&sandbox.test_participant("alpha")),
-        "running the correction must leave the channel: {:?}",
+        "leaving through the rendered name must leave the channel: {:?}",
         left.participants
     );
 }
@@ -5774,7 +5666,7 @@ fn chat_send_returns_its_receipt_when_the_own_seen_lock_is_held() {
     let waited = started.elapsed();
     drop(holder);
 
-    // Not assert_success: the warning on stderr is the expected outcome here.
+    // Not assert_success: a degraded send is the expected outcome here.
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let sent: ChatSendOutput = from_stdout(&output);
     assert!(sent.ok);
@@ -5783,10 +5675,19 @@ fn chat_send_returns_its_receipt_when_the_own_seen_lock_is_held() {
         messages.join(format!("{}.msg", sent.message.id)).is_file(),
         "the receipt names the committed message"
     );
-    let err = stderr(&output);
+    // Under --json the warning rides in the receipt on stdout (`warnings`) and
+    // stderr stays empty.
+    let receipt: serde_json::Value = from_stdout(&output);
+    let warnings = receipt["warnings"].to_string();
     assert!(
-        err.contains("could not record own message as seen") && err.contains(".cursors.lock"),
-        "stderr must warn and name the lock: {err}"
+        warnings.contains("could not record own message as seen")
+            && warnings.contains(".cursors.lock"),
+        "the receipt must warn and name the lock: {receipt}"
+    );
+    assert!(
+        !stderr(&output).contains("could not record own message"),
+        "the warning is in the receipt, not on stderr: {}",
+        stderr(&output)
     );
     assert!(
         waited < std::time::Duration::from_secs(10),
@@ -5794,8 +5695,12 @@ fn chat_send_returns_its_receipt_when_the_own_seen_lock_is_held() {
     );
 }
 
+/// The deprecated positional FILE is gone. Text typed after the channel used to
+/// be read as a path (and then refused with a fix); it is now refused outright
+/// with a message naming the ways to give a body. No command is published,
+/// because none could carry a body nobody passed as one.
 #[test]
-fn chat_send_with_inline_text_in_the_file_slot_suggests_a_fix_that_runs_verbatim() {
+fn chat_send_with_inline_text_in_the_old_file_slot_is_refused_naming_the_body_forms() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "tax", &alpha);
@@ -5809,29 +5714,23 @@ fn chat_send_with_inline_text_in_the_file_slot_suggests_a_fix_that_runs_verbatim
     assert_eq!(
         output.status.code(),
         Some(2),
-        "inline text in the body FILE slot is a usage error, not a retryable I/O fault"
+        "inline text after the channel is a usage error, not a retryable I/O fault"
     );
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "invalid_argument");
     assert!(!error.error.retryable);
-    let fix = error
-        .error
-        .details
-        .exact_fix
-        .expect("a body-slot mistake must carry an exact fix");
-
-    let repaired = sandbox.run_fix(&fix, &alpha);
+    assert_eq!(error.error.details.exact_fix, None);
     assert!(
-        repaired.status.success(),
-        "the suggested fix must run as written: {fix}\nstderr: {}",
-        stderr(&repaired)
+        error.error.suggested_fix.contains("--body-file"),
+        "the refusal must name the body forms: {}",
+        error.error.suggested_fix
     );
 
     let read: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
     assert!(
-        read.messages.iter().any(|item| item.body == "hello world"),
-        "the repaired command must send the text that was mistaken for a path"
+        !read.messages.iter().any(|item| item.body == "hello world"),
+        "a refused positional must send nothing"
     );
 }
 
@@ -8802,19 +8701,19 @@ fn assert_delivered(output: &std::process::Output) {
 }
 
 #[test]
-fn crossed_send_refuses_only_what_is_addressed_to_you() {
-    // The rule this test pins changed deliberately. It used to refuse any send
-    // while ANY unseen message from anyone existed, which fired hardest where it
-    // protected least: a room that has just joined a busy channel is maximally
-    // crossed by construction and none of that backlog concerns it. The guard
-    // was measuring its own bypass rate.
+fn a_crossed_send_always_delivers_and_reports_what_crossed() {
+    // The rules this test used to pin are gone. The guard first refused any send
+    // while ANY unseen message existed, then only when one was ADDRESSED to the
+    // sender; agents answered it with `--anyway` so routinely that it measured
+    // its own bypass rate. A send now always delivers, and its receipt says what
+    // crossed it, so the sender learns it without paying a retry.
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "cross", &alpha);
     join_channel(&sandbox, "cross", &beta);
     assert_delivered(&sandbox.run_in(&["chat", "cross", "--discard", "--json"], None, &alpha));
 
-    // Unseen, but about nothing to do with alpha: deliver, and say so.
+    // Unseen, but about nothing to do with alpha: delivered, reported, none addressed.
     assert_delivered(&sandbox.run_in(
         &[
             "chat",
@@ -8832,18 +8731,20 @@ fn crossed_send_refuses_only_what_is_addressed_to_you() {
         None,
         &alpha,
     );
+    assert_delivered(&delivered);
     assert!(
-        delivered.status.success(),
-        "an untargeted backlog must not refuse the send: {}",
-        String::from_utf8_lossy(&delivered.stderr)
+        !stderr(&delivered).contains("unseen"),
+        "the crossing rides in the receipt on stdout, not as a stderr warning: {}",
+        stderr(&delivered)
     );
-    let warning = String::from_utf8_lossy(&delivered.stderr);
-    assert!(
-        warning.contains("1 unseen") && warning.contains("none addressed to alpha"),
-        "delivery must still report what was crossed, got: {warning}"
-    );
+    let receipt: serde_json::Value = from_stdout(&delivered);
+    assert_eq!(receipt["ok"], true);
+    assert_eq!(receipt["crossed"]["unseen"], 1, "{receipt}");
+    assert_eq!(receipt["crossed"]["addressed_to_you"], 0, "{receipt}");
+    assert_eq!(receipt["crossed"]["messages"][0]["body"], "just chatter");
+    assert_eq!(receipt["crossed"]["messages"][0]["addressed_to_you"], false);
 
-    // Addressed to alpha: refuse.
+    // Addressed to alpha: delivered as well, with the addressed message called out.
     assert_delivered(&sandbox.run_in(&["chat", "cross", "--discard", "--json"], None, &alpha));
     assert_delivered(&sandbox.run_in(
         &[
@@ -8869,26 +8770,24 @@ fn crossed_send_refuses_only_what_is_addressed_to_you() {
         None,
         &beta,
     ));
-    let bounced = sandbox.run_in(
+    let sent = sandbox.run_in(
         &["chat", "cross", "--send", "--body", "blind reply", "--json"],
         None,
         &alpha,
     );
-    assert_eq!(bounced.status.code(), Some(65));
-    let error: ErrorEnvelope = from_stderr(&bounced);
-    assert_eq!(error.error.code, "crossed_send");
-    let missed = error.error.details.missed.clone().unwrap_or_default();
-    // Only what caused the refusal is previewed. The old bounce returned the
-    // last ten full bodies regardless of relevance (pc2_0dfb29556dec7b0c).
-    assert_eq!(missed.len(), 1, "preview must carry only targeted messages");
-    assert!(missed[0].body.contains("stop and revise"));
-    assert!(
-        error.error.message.contains("out of 2 unseen"),
-        "the message must still report the full unseen count, got: {}",
-        error.error.message
-    );
+    assert_delivered(&sent);
+    let receipt: serde_json::Value = from_stdout(&sent);
+    assert_eq!(receipt["crossed"]["unseen"], 2, "{receipt}");
+    assert_eq!(receipt["crossed"]["addressed_to_you"], 1, "{receipt}");
+    let messages = receipt["crossed"]["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 2, "{receipt}");
+    let addressed = messages
+        .iter()
+        .find(|message| message["body"] == "@alpha stop and revise")
+        .expect("the addressed message is in the receipt in full");
+    assert_eq!(addressed["addressed_to_you"], true);
 
-    // The escape hatch is unchanged.
+    // `--anyway` is a hidden no-op now: habitual commands keep working.
     let anyway = sandbox.run_in(
         &[
             "chat",
@@ -8896,7 +8795,7 @@ fn crossed_send_refuses_only_what_is_addressed_to_you() {
             "--send",
             "--anyway",
             "--body",
-            "blind reply",
+            "still fine",
             "--json",
         ],
         None,
@@ -8906,10 +8805,10 @@ fn crossed_send_refuses_only_what_is_addressed_to_you() {
 }
 
 #[test]
-fn every_crossed_send_decision_is_recorded() {
-    // The whole design argument about this guard happened because it kept no
-    // evidence about itself: a refusal is an error, and errors are written
-    // nowhere, so nobody could say whether it had ever prevented anything.
+fn every_crossed_send_is_recorded() {
+    // The design argument about this guard happened because it kept no evidence
+    // about itself. Sends that cross now deliver and are logged with the
+    // outcome `delivered_crossed`; refusal and override no longer exist.
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "audit", &alpha);
@@ -8921,41 +8820,30 @@ fn every_crossed_send_decision_is_recorded() {
         None,
         &beta,
     ));
-    let refused = sandbox.run_in(
-        &["chat", "audit", "--send", "--body", "x", "--json"],
-        None,
-        &alpha,
-    );
-    assert_eq!(refused.status.code(), Some(65));
     assert_success(&sandbox.run_in(
-        &[
-            "chat", "audit", "--send", "--anyway", "--body", "x", "--json",
-        ],
+        &["chat", "audit", "--send", "--body", "x", "--json"],
         None,
         &alpha,
     ));
 
     let log = std::fs::read_to_string(sandbox.mail_root.join("crossed-send.jsonl"))
-        .expect("every decision must be recorded");
+        .expect("every crossed send must be recorded");
     let events: Vec<serde_json::Value> = log
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .filter(|event: &serde_json::Value| event["channel"] == "audit" && event["room"] == "alpha")
         .collect();
-    let refusal = events
+    let delivered = events
         .iter()
-        .find(|event| event["outcome"] == "refused")
-        .expect("the refusal must be recorded");
-    assert_eq!(refusal["targeted"], 1);
-    assert_eq!(refusal["unseen"], 1);
-    let override_event = events
-        .iter()
-        .find(|event| event["outcome"] == "anyway")
-        .expect("the override must be recorded");
-    // The field that settles whether anyone read what they were shown.
+        .find(|event| event["outcome"] == "delivered_crossed")
+        .expect("the crossed delivery must be recorded");
+    assert_eq!(delivered["targeted"], 1);
+    assert_eq!(delivered["unseen"], 1);
     assert!(
-        override_event["anyway_after_ms"].is_number(),
-        "an --anyway following a refusal must record the gap: {override_event}"
+        !events
+            .iter()
+            .any(|event| event["outcome"] == "refused" || event["outcome"] == "anyway"),
+        "refusals and overrides no longer exist: {log}"
     );
 }
 
@@ -9373,14 +9261,26 @@ fn exact_fix_carries_a_body_full_of_angle_brackets_without_tripping_the_guard() 
 }
 
 #[test]
-fn crossed_send_exact_fix_shell_quotes_channel_metacharacters() {
-    // Channel names may carry spaces/metacharacters; exact_fix runs verbatim
-    // through a shell, so an unquoted name is a command injection.
+fn crossed_send_text_receipt_shell_quotes_channel_metacharacters() {
+    // Channel names may carry spaces/metacharacters (older posts allowed them; a
+    // new join now refuses them, so these stores are seeded directly). The
+    // command the receipt suggests runs verbatim through a shell, so an unquoted
+    // name is a command injection -- and the command must actually work.
     for name in ["ops space", "ops;echo PWNED", "ops'x"] {
         let sandbox = Sandbox::new();
         let (alpha, beta) = register_alpha_beta(&sandbox);
-        join_channel(&sandbox, name, &alpha);
-        join_channel(&sandbox, name, &beta);
+        write_bad_channel(
+            &sandbox,
+            name,
+            Some(r#"{"alpha":"2026-09-22 16:34:23 +0000","beta":"2026-09-22 16:34:23 +0000"}"#),
+            true,
+            &serde_json::json!({
+                "name": name,
+                "created": "2026-09-22 16:34:23 +0000",
+                "created_by": "alpha"
+            })
+            .to_string(),
+        );
         assert_success(&sandbox.run_in(&["chat", name, "--discard", "--json"], None, &alpha));
         assert_success(&sandbox.run_in(
             &[
@@ -9394,41 +9294,40 @@ fn crossed_send_exact_fix_shell_quotes_channel_metacharacters() {
             None,
             &beta,
         ));
-        let bounced = sandbox.run_in(
-            &["chat", name, "--send", "--body", "blind reply", "--json"],
+        let sent = sandbox.run_in(
+            &["chat", name, "--send", "--body", "blind reply"],
             None,
             &alpha,
         );
-        assert_eq!(bounced.status.code(), Some(65), "name={name}");
-        let error: ErrorEnvelope = from_stderr(&bounced);
-        assert_eq!(error.error.code, "crossed_send");
-        let fix = error.error.details.exact_fix.as_deref().expect("exact_fix");
+        assert!(
+            sent.status.success(),
+            "name={name}: a crossed send delivers: {}",
+            stderr(&sent)
+        );
         let quoted = format!("'{}'", name.replace('\'', r"'\''"));
-        // The fix carries the caller's OWN body. It used to say
-        // `--body '<revised text>'`, so a caller who pasted it sent a message
-        // whose text was the placeholder -- and nothing failed, because a mail
-        // with that body delivers perfectly well.
-        assert_eq!(
-            fix,
-            format!("post chat {quoted} --send --anyway --body 'blind reply'"),
-            "exact_fix must shell-quote channel name {name:?} and carry the body"
+        let command = format!("post chat {quoted}");
+        let text = stdout(&sent);
+        assert!(
+            text.contains(&format!("`{command}`")),
+            "the receipt must shell-quote channel name {name:?}: {text}"
         );
         // Semicolon injection must not appear as a bare shell command token.
         assert!(
-            !fix.contains("post chat ops;echo"),
-            "unquoted metacharacters in exact_fix: {fix}"
+            !text.contains("post chat ops;echo"),
+            "unquoted metacharacters in the suggested command: {text}"
         );
-        // Run it. This is the assertion that matters: the refusal's remedy has
-        // to deliver the message the caller was trying to send, through a real
+        // Run it: the suggested command has to work as written, through a real
         // shell, with a channel name full of metacharacters.
-        let applied = sandbox.run_fix(fix, &alpha);
-        assert_success(&applied);
-        let history = sandbox.run_in(&["chat", name, "--history", "5", "--json"], None, &alpha);
-        assert_success(&history);
+        let applied = sandbox.run_fix(&command, &alpha);
         assert!(
-            stdout(&history).contains("blind reply"),
-            "the executed fix must deliver the caller's own body for {name:?}: {}",
-            stdout(&history)
+            applied.status.success(),
+            "the suggested command must run for {name:?}: {}",
+            stderr(&applied)
+        );
+        assert!(
+            stdout(&applied).contains("missed you"),
+            "the suggested command must show the crossed message for {name:?}: {}",
+            stdout(&applied)
         );
     }
 }
@@ -9638,9 +9537,9 @@ fn history_survives_hand_written_non_ascii_re_without_panic() {
         stderr(&history)
     );
     assert!(
-        stderr(&history).contains("skipped unreadable channel message"),
-        "expected skip warning, got: {}",
-        stderr(&history)
+        stdout(&history).contains("skipped 1 unreadable message file(s)"),
+        "expected the skip notice on stdout, got: {}",
+        stdout(&history)
     );
     // A sibling with a well-formed re still renders.
     let parent: ChatSendOutput = from_stdout(&sandbox.run_in(
@@ -9783,7 +9682,11 @@ fn discard_receipt_counts_full_unread_past_catch_up() {
 }
 
 #[test]
-fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
+fn plain_read_skips_and_reports_an_unreadable_file_then_emits_it_after_repair() {
+    // This read used to fail closed (exit 78) so a cursor could not leap past an
+    // unreadable file. Consumption is a seen-set of emitted ids, not a
+    // high-water mark, so skipping M can never consume it: the read emits L,
+    // reports M, and M stays unseen until it is readable again.
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "repair", &alpha);
@@ -9803,28 +9706,27 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
     .expect("plant unreadable M");
     write_channel_message(&sandbox, "repair", id_l, "beta", "", "later readable L");
 
-    let failed = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
-    assert_eq!(
-        failed.status.code(),
-        Some(78),
-        "stderr: {}",
-        stderr(&failed)
+    let first = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
+    assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
+    let read: serde_json::Value = from_stdout(&first);
+    assert_eq!(read["count"], 1, "{read}");
+    assert_eq!(read["messages"][0]["id"], id_l);
+    assert_eq!(read["skipped_files"][0]["id"], id_m, "{read}");
+    assert!(
+        read["skipped_files"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "every skipped file carries its reason: {read}"
     );
-    let error: ErrorEnvelope = from_stderr(&failed);
-    assert_eq!(error.error.code, "config_invalid");
-    // Cursor must be untouched — a second plain read still fails the same way.
-    let still = sandbox.run_in(&["chat", "repair", "--json"], None, &alpha);
-    assert_eq!(still.status.code(), Some(78));
-    let state_path = sandbox.mail_root.join("alpha/cursors.json");
-    if state_path.exists() {
-        let raw = fs::read_to_string(&state_path).expect("state");
-        assert!(
-            !raw.contains(id_l),
-            "cursor must not have advanced to L: {raw}"
-        );
-    }
 
-    // History (cursorless) may still skip the unreadable file.
+    // M was skipped, not consumed: the next read reports it again and emits
+    // nothing new (L was consumed by the first read).
+    let again: serde_json::Value =
+        from_stdout(&sandbox.run_in(&["chat", "repair", "--json"], None, &alpha));
+    assert_eq!(again["count"], 0, "{again}");
+    assert_eq!(again["skipped_files"][0]["id"], id_m, "{again}");
+
+    // History (cursorless) skips and reports it on stdout too.
     let history = sandbox.run_in(&["chat", "repair", "--history", "10"], None, &alpha);
     assert_eq!(
         history.status.code(),
@@ -9833,20 +9735,19 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
         stderr(&history)
     );
     assert!(
-        stderr(&history).contains("skipped unreadable channel message"),
-        "expected history skip warning: {}",
-        stderr(&history)
+        stdout(&history).contains("skipped 1 unreadable message file(s)"),
+        "expected the history skip notice on stdout: {}",
+        stdout(&history)
     );
     assert!(stdout(&history).contains("later readable L"));
 
-    // Repair M → plain read emits both and can advance past them.
+    // Repair M: it is still unseen, so the next plain read emits it, and only it.
     write_channel_message(&sandbox, "repair", id_m, "beta", "", "repaired M");
     let repaired: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "repair", "--json"], None, &alpha));
-    assert_eq!(repaired.count, 2);
+    assert_eq!(repaired.count, 1);
     assert_eq!(repaired.messages[0].message.id, id_m);
     assert_eq!(repaired.messages[0].body, "repaired M");
-    assert_eq!(repaired.messages[1].message.id, id_l);
     let empty: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "repair", "--json"], None, &alpha));
     assert_eq!(
@@ -9856,7 +9757,9 @@ fn plain_read_fails_closed_on_unreadable_past_cursor_then_emits_after_repair() {
 }
 
 #[test]
-fn crossed_send_bounces_on_unreadable_past_cursor() {
+fn send_delivers_and_reports_an_unreadable_unseen_file() {
+    // An unreadable unseen file used to bounce the send as a crossed_send. A
+    // send always delivers now; the receipt names the file it could not parse.
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     join_channel(&sandbox, "xbad", &alpha);
@@ -9873,40 +9776,19 @@ fn crossed_send_bounces_on_unreadable_past_cursor() {
     )
     .expect("plant unreadable past cursor");
 
-    let bounced = sandbox.run_in(
+    let sent = sandbox.run_in(
         &["chat", "xbad", "--send", "--body", "blind reply", "--json"],
         None,
         &alpha,
     );
-    assert_eq!(
-        bounced.status.code(),
-        Some(65),
-        "stderr: {}",
-        stderr(&bounced)
-    );
-    let error: ErrorEnvelope = from_stderr(&bounced);
-    assert_eq!(error.error.code, "crossed_send");
+    assert_eq!(sent.status.code(), Some(0), "stderr: {}", stderr(&sent));
+    let receipt: serde_json::Value = from_stdout(&sent);
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert_eq!(receipt["skipped"][0]["id"], id_m, "{receipt}");
     assert!(
-        error.error.message.contains("unreadable"),
-        "bounce should name unreadable past-cursor: {}",
-        error.error.message
+        receipt.get("crossed").is_none(),
+        "no readable message crossed this send: {receipt}"
     );
-
-    // --anyway remains the escape hatch.
-    let forced: ChatSendOutput = from_stdout(&sandbox.run_in(
-        &[
-            "chat",
-            "xbad",
-            "--send",
-            "--anyway",
-            "--body",
-            "sending anyway",
-            "--json",
-        ],
-        None,
-        &alpha,
-    ));
-    assert!(forced.ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -10721,8 +10603,9 @@ fn a0a_f11_command_matrix_rows_and_crossed_send_draft_preserved() {
         let error: ErrorEnvelope = from_stderr(&output);
         assert_eq!(error.error.code, "config_invalid", "{args:?}");
     }
-    // Crossed-send preview row: refused with the CONFIG error, not
-    // crossed_send; nothing written (draft preserved).
+    // Crossed-send report row: a broken trust anchor stops the report (its
+    // bodies could not carry signature verdicts) but never costs the message.
+    // The send delivers exactly once and the receipt says the check did not run.
     let before: Vec<_> = fs::read_dir(sandbox.mail_root.join("channels/mat/messages"))
         .expect("messages dir")
         .map(|entry| entry.expect("entry").file_name())
@@ -10741,23 +10624,30 @@ fn a0a_f11_command_matrix_rows_and_crossed_send_draft_preserved() {
     );
     assert_eq!(
         crossed.status.code(),
-        Some(78),
+        Some(0),
         "stderr: {}",
         stderr(&crossed)
     );
-    let error: ErrorEnvelope = from_stderr(&crossed);
-    assert_eq!(
-        error.error.code, "config_invalid",
-        "must not be crossed_send"
+    let receipt: serde_json::Value = from_stdout(&crossed);
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert!(
+        receipt.get("crossed").is_none(),
+        "no crossed bodies without a verdict source: {receipt}"
+    );
+    assert!(
+        receipt["warnings"][0]
+            .as_str()
+            .is_some_and(|warning| warning.contains("could not check what crossed")),
+        "the receipt must say the check did not run: {receipt}"
     );
     let after: Vec<_> = fs::read_dir(sandbox.mail_root.join("channels/mat/messages"))
         .expect("messages dir")
         .map(|entry| entry.expect("entry").file_name())
         .collect();
     assert_eq!(
-        before.len(),
+        before.len() + 1,
         after.len(),
-        "a refused send must write no message (draft preserved)"
+        "the send must deliver exactly once"
     );
 
     // profile set row: ConfigInvalid.
@@ -10966,7 +10856,7 @@ fn a0a_r2_crossed_preview_signed_verified_field_contract() {
         None,
         &mara,
     ));
-    let bounced = sandbox.run_in(
+    let sent = sandbox.run_in(
         &[
             "chat",
             "cross",
@@ -10978,21 +10868,25 @@ fn a0a_r2_crossed_preview_signed_verified_field_contract() {
         None,
         &alpha,
     );
+    // The crossing rides in the delivered send's receipt; the verdict badge
+    // that used to ride in the bounce preview now rides here.
     assert_eq!(
-        bounced.status.code(),
-        Some(65),
-        "must bounce crossed_send: {}",
-        stderr(&bounced)
+        sent.status.code(),
+        Some(0),
+        "a crossed send delivers: {}",
+        stderr(&sent)
     );
-    let error: ErrorEnvelope = from_stderr(&bounced);
-    assert_eq!(error.error.code, "crossed_send");
-    let missed = error.error.details.missed.expect("missed messages");
-    let verdict = |id: &str| {
-        missed
+    let receipt: serde_json::Value = from_stdout(&sent);
+    let crossed = receipt["crossed"]["messages"]
+        .as_array()
+        .expect("crossed messages");
+    let verdict = |id: &str| -> Option<bool> {
+        crossed
             .iter()
-            .find(|item| item.id == id)
-            .expect("missed owner message")
-            .signed_verified
+            .find(|item| item["id"] == id)
+            .expect("crossed owner message")
+            .get("signed_verified")
+            .map(|value| value.as_bool().expect("signed_verified is a bool"))
     };
     assert_eq!(
         verdict(&plain.message.id),
@@ -12209,10 +12103,25 @@ fn chat_acting_room_honors_registered_pin_and_refuses_unregistered() {
     let value: serde_json::Value = from_stdout(&send);
     assert_eq!(value["message"]["from"], "pact");
     assert_eq!(value["message"]["sender_provenance"], "declared-env");
-    let stderr = String::from_utf8_lossy(&send.stderr);
+    // --json is pure JSON: the receipt carries the provenance (asserted above),
+    // so there is no identity banner on stderr.
+    assert!(
+        !String::from_utf8_lossy(&send.stderr).contains("sending to"),
+        "--json send must not print an identity banner: {}",
+        String::from_utf8_lossy(&send.stderr)
+    );
+    // Text mode keeps the human line that names the pin.
+    let text_send = sandbox.run_in_env(
+        &["chat", "idm1", "--send", "--body", "pinned text"],
+        None,
+        &sandbox.path,
+        &pin,
+    );
+    assert!(text_send.status.success());
+    let stderr = String::from_utf8_lossy(&text_send.stderr);
     assert!(
         stderr.contains("POST_FROM pin"),
-        "chat stderr names the pin: {stderr}"
+        "text-mode chat stderr names the pin: {stderr}"
     );
 
     // A pin naming an unregistered room refuses with the pin as the named
@@ -12477,7 +12386,7 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
     assert_eq!(item["sender_address"], "codex.pact.f00dfeed");
     assert_eq!(item["sender_provenance"], "declared-env");
 
-    // Crossed-send bounce: the missed message carries attribution — the
+    // Crossed send: the crossed message carries attribution — the
     // concurrent-instance moment is exactly when it matters.
     let join_a = sandbox.run_in_env(&["chat", "xbounce", "--join"], None, &sandbox.path, &envs);
     assert_success(&join_a);
@@ -12502,7 +12411,11 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
         None,
         &home_room,
     );
-    assert!(!bounced.status.success(), "crossed send must bounce");
+    assert!(
+        bounced.status.success(),
+        "a crossed send delivers: {}",
+        String::from_utf8_lossy(&bounced.stderr)
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&bounced.stdout),
@@ -12510,7 +12423,7 @@ fn inbox_watch_and_crossed_send_projections_carry_identity_fields() {
     );
     assert!(
         combined.contains("codex.pact.f00dfeed") && combined.contains("declared-env"),
-        "bounce payload must carry the missed sender's identity fields: {combined}"
+        "the crossed block must carry the crossing sender's identity fields: {combined}"
     );
 
     // Watch NDJSON projection: the channel-message event carries both raw

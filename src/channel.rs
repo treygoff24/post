@@ -30,6 +30,35 @@ pub(crate) const JOIN_EVENT: &str = "join";
 /// Profile-change announcement ("=== pact is now Lantern 🏮 (pact) ===").
 pub(crate) const PROFILE_EVENT: &str = "profile";
 
+/// A system event whose kind this build does not know. It is data, not
+/// conversation: rendered as `[event: <kind>]`, passed through in JSON with its
+/// kind, never unread, never a reason to refuse a read, listing, catch-up or
+/// send. Known kinds (`join`, `profile`) keep their existing behavior.
+pub(crate) fn is_opaque_event(message: &crate::model::ChannelMessage) -> bool {
+    message
+        .event
+        .as_deref()
+        .is_some_and(|kind| kind != JOIN_EVENT && kind != PROFILE_EVENT)
+}
+
+/// The bracketed label a text header shows for an event message. Known kinds
+/// keep their bare name (`[join]`); an unknown kind reads `[event: <kind>]` so
+/// a reader can tell "system event I have no name for" from a known one.
+pub(crate) fn event_label(kind: &str) -> String {
+    if kind == JOIN_EVENT || kind == PROFILE_EVENT {
+        return kind.to_owned();
+    }
+    // The kind comes from a file another program wrote. It is shown on one
+    // header line, so control characters never reach the terminal and a huge
+    // value cannot flood it.
+    let shown: String = kind
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .take(64)
+        .collect();
+    format!("event: {shown}")
+}
+
 pub(crate) type MemberMap = BTreeMap<String, String>;
 
 #[allow(dead_code)] // consumed by the read/cursor + doctor lanes' patches
@@ -120,6 +149,367 @@ pub(crate) fn validate_channel_name(value: &str) -> AppResult<()> {
     })
 }
 
+/// `#ops` as typed is the channel `ops`: `#` is how a channel renders, not part
+/// of its name. The exception is a store that already holds a channel literally
+/// named `#ops` (older posts created those): that channel is the one meant, so
+/// the name is left alone. Every command that takes a channel name goes through
+/// this, so the rendered name works anywhere.
+pub(crate) fn strip_channel_sigil(context: &Context, name: &str) -> String {
+    let bare = name.trim_start_matches('#');
+    if bare.is_empty() || bare.len() == name.len() {
+        return name.to_owned();
+    }
+    if ChannelPaths::new(context, name).is_ok_and(|paths| paths.exists()) {
+        return name.to_owned();
+    }
+    bare.to_owned()
+}
+
+/// The names of every channel directory that holds a `channel.json`, sorted.
+pub(crate) fn existing_channel_names(context: &Context) -> Vec<String> {
+    let dir = context.root.join(CHANNELS_DIR);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("channel.json").is_file())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The spelling a NEW channel gets: lowercase, spaces and underscores as
+/// hyphens, hyphen runs collapsed, no leading or trailing hyphen. Dots are
+/// kept as typed: reserved names such as `.rooms.json.x.tmp` are still channel
+/// names the bridge has to classify, so normalizing must not turn one into another.
+///
+/// The Mac store held both `Night Porch` and `night-porch` because every agent
+/// spelled the name its own way and each spelling silently made a new channel.
+/// Returns the normalized name and the characters it had to drop because a
+/// channel name cannot carry them (anything but letters, digits, `-` and `.`).
+pub(crate) fn normalize_channel_name(given: &str) -> (String, Vec<char>) {
+    let mut out = String::new();
+    let mut dropped = Vec::new();
+    for c in given.trim().chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if c == '.' {
+            out.push('.');
+        } else if c == '-' || c == '_' || c.is_whitespace() {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        } else if !dropped.contains(&c) {
+            dropped.push(c);
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    (trimmed.to_owned(), dropped)
+}
+
+/// A name with everything but letters and digits removed, for "same name,
+/// different punctuation" comparisons.
+fn name_skeleton(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (row, l) in left.chars().enumerate() {
+        let mut current = vec![row + 1];
+        for (column, r) in right.iter().enumerate() {
+            let substitute = previous[column] + usize::from(l != *r);
+            current.push(
+                substitute
+                    .min(previous[column + 1] + 1)
+                    .min(current[column] + 1),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
+/// Whether two channel names are plausibly the same channel spelled twice.
+///
+/// Same letters and digits with different punctuation or case always counts.
+/// Beyond that a single typo counts once the name is long enough to make a
+/// typo likelier than a coincidence. Numbers are identity (`ops-1` is not
+/// `ops-2`), and so are one- or two-letter suffixes (`review-a`, `review-b`):
+/// agents number and letter sibling channels on purpose.
+fn names_look_alike(left: &str, right: &str) -> bool {
+    let (a, b) = (name_skeleton(left), name_skeleton(right));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let digits = |text: &str| {
+        text.chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+    };
+    if digits(&a) != digits(&b) {
+        return false;
+    }
+    let tokens = |name: &str| -> Vec<String> {
+        name.split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let (left_tokens, right_tokens) = (tokens(left), tokens(right));
+    if left_tokens.len() == right_tokens.len() {
+        let differing: Vec<usize> = (0..left_tokens.len())
+            .filter(|&i| left_tokens[i] != right_tokens[i])
+            .collect();
+        if let [i] = differing[..] {
+            if left_tokens[i].chars().count() <= 2 && right_tokens[i].chars().count() <= 2 {
+                return false;
+            }
+        }
+    }
+    let shorter = a.chars().count().min(b.chars().count());
+    let allowed = match shorter {
+        0..=5 => 0,
+        6..=9 => 1,
+        _ => 2,
+    };
+    allowed > 0 && edit_distance(&a, &b) <= allowed
+}
+
+/// The existing channel `wanted` is most likely a second spelling of, if any.
+fn similar_channel(context: &Context, wanted: &str) -> Option<String> {
+    let names = existing_channel_names(context);
+    // An exact skeleton match beats a typo match.
+    names
+        .iter()
+        .find(|name| name_skeleton(name) == name_skeleton(wanted))
+        .or_else(|| names.iter().find(|name| names_look_alike(name, wanted)))
+        .cloned()
+}
+
+/// What the caller asked for alongside `--join`, so a suggested command can
+/// repeat it faithfully.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct JoinIntent {
+    pub create: bool,
+    pub backlog: bool,
+    pub has_description: bool,
+}
+
+impl JoinIntent {
+    /// The join command for `name`, or `None` when this invocation carries
+    /// something (`--description`) a rebuilt command would silently drop.
+    fn command(&self, name: &str, force_create: bool) -> Option<String> {
+        if self.has_description {
+            return None;
+        }
+        let mut command = format!("post chat {} --join", crate::mailbox::shell_quote(name));
+        if self.backlog {
+            command.push_str(" --backlog");
+        }
+        if force_create {
+            command.push_str(" --create");
+        }
+        Some(command)
+    }
+}
+
+/// The channel a join resolves to.
+pub(crate) struct JoinTarget {
+    pub name: String,
+    /// What the caller typed, when the stored name is a normalized form of it.
+    pub normalized_from: Option<String>,
+}
+
+/// Decide which channel `chat <given> --join` means, before anything is
+/// written.
+///
+/// An existing channel is used exactly as named, whatever its spelling: stores
+/// that already hold `Night Porch` keep working. A new name is normalized; if
+/// that lands on an existing channel it joins it, and if it merely looks like
+/// one it is refused with the join that was probably meant and the `--create`
+/// that forces the new channel.
+pub(crate) fn plan_join(
+    context: &Context,
+    given: &str,
+    intent: JoinIntent,
+) -> AppResult<JoinTarget> {
+    // Exact directory names, not `exists()`: on a case-insensitive filesystem
+    // `Night-Porch` would "exist" through `night-porch` and the channel would end
+    // up named two ways.
+    let existing_names = existing_channel_names(context);
+    if existing_names.iter().any(|name| name == given) {
+        return Ok(JoinTarget {
+            name: given.to_owned(),
+            normalized_from: None,
+        });
+    }
+    let (wanted, dropped) = normalize_channel_name(given);
+    let shown = crate::output::sanitize_text_header(given);
+    if wanted.is_empty() {
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!("'{shown}' has no letters or digits to make a channel name from"),
+            "Name the channel with letters, digits and hyphens, for example `post chat 'night-porch' --join`.",
+        )
+        .input(shown)
+        .reason("normalizing the name leaves nothing"));
+    }
+    if !dropped.is_empty() {
+        let listed: String = dropped.iter().collect();
+        let mut error = AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "channel name '{shown}' has characters a channel name cannot carry ({}); the normalized form is '{wanted}'",
+                crate::output::sanitize_text_header(&listed)
+            ),
+            format!(
+                "Channel names use lowercase letters, digits and hyphens. Use the normalized form: {}.",
+                intent
+                    .command(&wanted, false)
+                    .map_or_else(|| format!("'{wanted}'"), |command| format!("`{command}`"))
+            ),
+        )
+        .input(shown)
+        .reason("channel names allow only letters, digits, '-' and '.'");
+        if let Some(command) = intent.command(&wanted, false) {
+            error = error.exact_fix(command);
+        }
+        return Err(error);
+    }
+    validate_channel_name(&wanted)?;
+    if existing_names.contains(&wanted) {
+        // A different spelling of a channel that exists is that channel: two
+        // agents told to join `Night Porch` both land in #night-porch. Nothing
+        // is created, so there is nothing to ask about.
+        return Ok(JoinTarget {
+            name: wanted,
+            normalized_from: Some(given.to_owned()),
+        });
+    }
+    if !intent.create {
+        if let Some(existing) = similar_channel(context, &wanted) {
+            return Err(did_you_mean(&shown, &wanted, &existing, intent));
+        }
+    }
+    let normalized_from = (wanted != given).then(|| given.to_owned());
+    Ok(JoinTarget {
+        name: wanted,
+        normalized_from,
+    })
+}
+
+fn did_you_mean(shown: &str, wanted: &str, existing: &str, intent: JoinIntent) -> AppError {
+    let join = intent.command(existing, false);
+    let mut fix = format!(
+        "Join the existing channel with {}",
+        quote_command(&join, existing)
+    );
+    fix.push_str(&format!(
+        ", or create a new one on purpose with {}",
+        quote_command(&intent.command(wanted, true), wanted)
+    ));
+    fix.push('.');
+    let mut error = AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "channel '{shown}' does not exist; did you mean #{}? Nothing was created",
+            crate::output::sanitize_text_header(existing)
+        ),
+        fix,
+    )
+    .input(shown.to_owned())
+    .reason("a channel with a near-identical name already exists");
+    if let Some(join) = join {
+        error = error.exact_fix(join);
+    }
+    error
+}
+
+fn quote_command(command: &Option<String>, name: &str) -> String {
+    match command {
+        Some(command) => format!("`{command}`"),
+        None => format!(
+            "`post chat {} --join` with the same options",
+            crate::mailbox::shell_quote(name)
+        ),
+    }
+}
+
+/// How the caller was using the channel that turned out not to exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChannelUse {
+    Read,
+    Send,
+}
+
+/// The one error for "no channel by that name", shared by every command.
+///
+/// A registered room is not a channel, and typing `post chat <room>` is the
+/// natural way to try to reach one: say it is a room and give the send that
+/// reaches it, never a hint toward creating a channel of the same name. A name
+/// close to an existing channel gets that channel back. Only a name that is
+/// neither gets the create hint.
+pub(crate) fn channel_not_found(context: &Context, name: &str, usage: ChannelUse) -> AppError {
+    let shown = crate::output::sanitize_text_header(name);
+    let quoted = crate::mailbox::shell_quote(name);
+    if context
+        .load_rooms()
+        .is_ok_and(|rooms| rooms.contains_key(name))
+    {
+        return AppError::new(
+            ErrorCode::NotFound,
+            format!("'{shown}' is a registered room, not a channel"),
+            format!(
+                "Message the room with `post send --to {quoted} --body-file -` (body on stdin, a heredoc works); `post channels` lists the channels that exist."
+            ),
+        )
+        .input(shown)
+        .reason("the name belongs to a registered room and no channel has it");
+    }
+    let then = match usage {
+        ChannelUse::Read => "",
+        ChannelUse::Send => ", then retry the send",
+    };
+    if let Some(existing) = similar_channel(context, &normalize_channel_name(name).0)
+        .or_else(|| similar_channel(context, name))
+    {
+        let join = format!(
+            "post chat {} --join",
+            crate::mailbox::shell_quote(&existing)
+        );
+        return AppError::new(
+            ErrorCode::NotFound,
+            format!(
+                "channel '{shown}' does not exist; did you mean #{}?",
+                crate::output::sanitize_text_header(&existing)
+            ),
+            format!(
+                "Join the channel that does exist with `{join}`{then}, or create this one on purpose with `post chat {quoted} --join --create`."
+            ),
+        )
+        .exact_fix(join)
+        .input(shown)
+        .reason("no channel.json under the channels directory");
+    }
+    AppError::new(
+        ErrorCode::NotFound,
+        format!("channel '{shown}' does not exist"),
+        format!("Create it with `post chat {quoted} --join`{then}."),
+    )
+    .input(shown)
+    .reason("no channel.json under the channels directory")
+}
+
 /// One lock for all membership mutation across every channel: joins are
 /// rare and human-paced, so a global lock is simpler than per-channel
 /// locks and cannot deadlock. Message sends never take it — exclusive
@@ -194,6 +584,20 @@ pub(crate) fn acting_room(
     // required a registered room here, which made session-only participants
     // unable to join despite having durable membership/read state.
     Ok((room, provenance))
+}
+
+/// How the acting room was resolved, in words for a human or an agent. Text
+/// mode prints it as a banner; under `--json` there is no banner, so errors that
+/// depend on who was acting carry it themselves.
+pub(crate) fn acting_source(provenance: SenderProvenance) -> &'static str {
+    match provenance {
+        SenderProvenance::DeclaredEnv => "POST_FROM pin",
+        SenderProvenance::DeclaredFlag => "explicit flag",
+        SenderProvenance::InferredCwd | SenderProvenance::InferredBasename => {
+            "identity inferred from cwd"
+        }
+        SenderProvenance::ParticipantBinding => "participant binding",
+    }
 }
 
 pub(crate) struct JoinOutcome {
@@ -419,44 +823,45 @@ fn write_description(paths: &ChannelPaths, description: &str) -> AppResult<()> {
 pub(crate) struct SendOptions<'a> {
     pub subject: &'a str,
     pub body: &'a str,
-    /// How to re-supply this body on a retry (` --body '...'` / ` --body-file
-    /// '...'`), or empty when it arrived on stdin and no command can carry it.
-    /// crossed_send's exact_fix appends it so the refusal hands back the
-    /// caller's own send, not a send with the message missing.
-    pub body_flag: &'a str,
-    pub anyway: bool,
     pub re: Option<&'a str>,
     /// Signed-v2 sidecar tag; when present the envelope is stamped with the
     /// exact locator `{"version": 2, "tag": <tag>}`. Validated at the CLI.
     pub signature_tag: Option<&'a str>,
 }
 
+/// What a send produced: the message, plus what crossed it on the way out.
+pub(crate) struct SentMessage {
+    pub message: ChannelMessage,
+    /// Present only when someone else's messages were unseen by the sender at
+    /// the moment it sent. Absent (not empty) on a clean send.
+    pub crossed: Option<Crossed>,
+    /// Unseen files that could not be parsed. They never stop a send.
+    pub skipped: Vec<SkippedFile>,
+    /// Things the send degraded on and the caller should say on stdout.
+    pub warnings: Vec<String>,
+}
+
 pub(crate) fn send(
     context: &Context,
     channel: &str,
     options: SendOptions<'_>,
-) -> AppResult<ChannelMessage> {
+) -> AppResult<SentMessage> {
     let rooms = context.load_rooms()?;
     let (room, provenance) = acting_room(context, &rooms)?;
     let actor = context.sender()?;
     let paths = ChannelPaths::new(context, channel)?;
     let quoted = crate::mailbox::shell_quote(channel);
     if !paths.exists() {
-        return Err(AppError::new(
-            ErrorCode::NotFound,
-            format!("channel '{channel}' does not exist"),
-            format!("Create it with `post chat {quoted} --join`, then retry the send."),
-        )
-        .input(channel)
-        .reason("no channel.json under the channels directory"));
+        return Err(channel_not_found(context, channel, ChannelUse::Send));
     }
     let membership = crate::channel_state::ParticipantChannels::load(&actor.participant)?;
     if !membership.effective(context, &actor.participant, channel)? {
         return Err(AppError::new(
             ErrorCode::NotAMember,
             format!(
-                "participant '{}' is not a member of channel '{channel}'",
-                actor.participant.id
+                "participant '{}' is not a member of channel '{channel}' (acting as room '{room}', {})",
+                actor.participant.id,
+                acting_source(provenance)
             ),
             format!("Join first with `post chat {quoted} --join`, then retry the send."),
         )
@@ -470,69 +875,34 @@ pub(crate) fn send(
             ErrorCode::EmptyBody,
             "message body is empty after trimming whitespace",
             format!(
-                "Retry with `post chat {quoted} --send --body '<text>'` or a non-empty FILE/stdin."
+                "Put the message on stdin or in a file: `post chat {quoted} --send --body-file -` reads stdin (a heredoc works), or pass --body 'short text' for a one-liner."
             ),
         )
         .input("message body")
         .reason("empty or whitespace-only"));
     }
 
-    // Crossed-send bounce: humans see incoming while typing; agents get the
-    // equivalent at the send point. Check-then-append has a TOCTOU window
-    // (another room can land a message between check and exclusive create);
-    // that occasional slip is accepted. Corrupting the store is not.
-    let crossed = crossed_send_check(
-        context,
-        &paths,
-        channel,
-        &room,
-        &actor.participant,
-        options.body_flag,
-    )?;
-    let (unseen, targeted) = (crossed.unseen, crossed.targeted);
-    if options.anyway {
-        log_crossed_event(
-            context,
-            channel,
-            &room,
-            unseen,
-            targeted,
-            CrossedOutcome::Anyway,
-        );
-    } else {
-        match crossed.verdict {
-            CrossedVerdict::Refuse(error) => {
-                log_crossed_event(
-                    context,
-                    channel,
-                    &room,
-                    unseen,
-                    targeted,
-                    CrossedOutcome::Refused,
-                );
-                return Err(error);
+    // What crossed this send. A send always delivers: the old guard refused when
+    // something unseen was addressed to the sender, and agents answered it with
+    // `--anyway` 73% of the time -- including when the crossed message really was
+    // addressed to them -- until they typed it pre-emptively and the guard
+    // measured nothing but its own bypass rate. The receipt now carries what
+    // crossed instead, so the sender learns it without paying a retry. Check and
+    // append still have a TOCTOU window (another room can land a message between
+    // the two); that slip is accepted. Corrupting the store is not.
+    let mut warnings = Vec::new();
+    let (crossed, skipped) =
+        match crossed_report(context, &paths, channel, &room, &actor.participant) {
+            Ok(report) => report,
+            // Checking is best-effort: a failure here must not cost the message.
+            Err(error) => {
+                warnings.push(format!(
+                    "could not check what crossed this send: {}",
+                    error.message
+                ));
+                (None, Vec::new())
             }
-            CrossedVerdict::Warn => {
-                // Deliver, but say what was crossed. Refusing here was the old
-                // behaviour and it refused on any unseen message from anyone,
-                // so a room that had just joined a busy channel was maximally
-                // crossed by construction with nothing addressed to it.
-                eprintln!(
-                    "post: warning -- {unseen} unseen message(s) from others in #{channel}, none addressed to {room}; delivering anyway. Catch up with `post chat {}`.",
-                    crate::mailbox::shell_quote(channel)
-                );
-                log_crossed_event(
-                    context,
-                    channel,
-                    &room,
-                    unseen,
-                    targeted,
-                    CrossedOutcome::Warned,
-                );
-            }
-            CrossedVerdict::Clear => {}
-        }
-    }
+        };
 
     let re = match options.re {
         Some(prefix) => Some(resolve_message_id(&paths, prefix)?),
@@ -554,276 +924,173 @@ pub(crate) fn send(
             provenance,
         },
     )?;
+    if let Some(crossed) = crossed.as_ref() {
+        log_crossed_event(
+            context,
+            channel,
+            &room,
+            crossed.unseen,
+            crossed.addressed_to_you,
+        );
+    }
     let file = paths.messages.join(format!("{id}.msg"));
-    Ok(parse_channel_message(&file)?.message)
-}
-
-/// What the unseen tip means for this send.
-pub(crate) enum CrossedVerdict {
-    /// Something unseen is addressed to this room: refuse.
-    Refuse(AppError),
-    /// Unseen messages exist but none concern this room: deliver, and say so.
-    Warn,
-    /// Nothing unseen from others.
-    Clear,
-}
-
-pub(crate) struct CrossedReport {
-    pub verdict: CrossedVerdict,
-    pub unseen: usize,
-    pub targeted: usize,
-}
-
-pub(crate) enum CrossedOutcome {
-    Refused,
-    Warned,
-    Anyway,
-}
-
-impl CrossedOutcome {
-    const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Refused => "refused",
-            Self::Warned => "warned",
-            Self::Anyway => "anyway",
-        }
-    }
-}
-
-/// Decide whether the unseen channel tip should stop this send.
-///
-/// It used to stop every send with any unseen message from anyone, which fired
-/// hardest in the situation where it protected least: a room that has just
-/// joined a busy channel is maximally crossed by construction, and none of those
-/// hundreds of messages are addressed to it. Agents learned to type `--anyway`
-/// reflexively, so the guard was measuring its own bypass rate and nothing else.
-///
-/// The line is now the one this store already draws everywhere else: a message
-/// that @mentions you, or replies to something you wrote, is conversation you
-/// must not miss (`post chat` already refuses to silently drop mentions of the
-/// reader from a skipped range). Everything else is conversation you may skim,
-/// so it warns and delivers.
-///
-/// A malformed `.msg` the room already consumed is ignored; an unreadable UNSEEN
-/// file refuses, because a message that cannot be parsed cannot be shown not to
-/// concern you. `--anyway` remains the escape hatch for all of it.
-fn crossed_send_check(
-    context: &Context,
-    paths: &ChannelPaths,
-    channel: &str,
-    room: &str,
-    participant: &crate::participant::Participant,
-    body_flag: &str,
-) -> AppResult<CrossedReport> {
-    use crate::error::MissedChannelMessage;
-
-    // The parsed message is kept alongside the bounce payload so badge
-    // computation (below) never needs a second parse of the store.
-    struct MissedItem {
-        bounce: MissedChannelMessage,
-        message: crate::model::ChannelMessage,
-        body: String,
-        targeted: bool,
-    }
-
-    // Resolved once, before the scan: needed to decide targeting, and the same
-    // value the badge pass below uses.
-    let owner_room = crate::mailbox::resolve_owner(context)?.map(|owner| owner.room);
-    let mut missed = Vec::new();
-    let eligible = match crate::cursor_state::eligibility::unread_channel(
-        context,
-        participant,
-        channel,
-    ) {
-        Ok(eligible) => eligible,
-        Err(error) if error.code == ErrorCode::ConfigInvalid => {
-            let fix = format!(
-                "post chat {} --send --anyway{}",
-                crate::mailbox::shell_quote(channel),
-                body_flag
-            );
-            return Ok(CrossedReport {
-                unseen: 1,
-                targeted: 1,
-                verdict: CrossedVerdict::Refuse(
-                    AppError::new(
-                        ErrorCode::CrossedSend,
-                        format!(
-                            "channel '{channel}' has unreadable unseen message(s); send was not delivered"
-                        ),
-                        format!(
-                            "Inspect/repair the channel store, catch up with `post chat {}`, then revise; or retry with `--anyway` to deliver regardless: `{fix}`.",
-                            crate::mailbox::shell_quote(channel)
-                        ),
-                    )
-                    .exact_fix(fix)
-                    .input(channel)
-                    .reason("unreadable unseen message"),
-                ),
-            });
-        }
-        Err(error) => return Err(error),
-    };
-    for item in eligible {
-        // System events (join/profile) are not conversation the sender needs
-        // to revise against; bounce only on ordinary messages from others.
-        if item.message.event.is_some() {
-            continue;
-        }
-        let message = item.message;
-        // Addressed to this room: an @mention of it, or a reply to something it
-        // wrote. `re` carries a message id, so the author of the parent has to
-        // be looked up; only messages that actually carry one pay for that.
-        // Addressed to this room: an @mention of it, a reply to something it
-        // wrote, or a message from the owner room.
-        //
-        // The owner clause is not deference, it is a consequence: a signed owner
-        // message binds its whole body, so adding "@you" to one invalidates the
-        // signature. Without this clause an owner's signed word could never be
-        // targeted, could therefore never appear in a refusal preview, and the
-        // signed_verified badge on that path would become unreachable code. The
-        // owner's messages to a channel are not skimmable conversation.
-        let targeted = message.mentions.iter().any(|name| name == room)
-            || owner_room.as_deref() == Some(message.from.as_str())
-            || message
-                .re
-                .as_deref()
-                .is_some_and(|parent| message_author_is(paths, parent, room));
-        missed.push(MissedItem {
-            targeted,
-            bounce: MissedChannelMessage {
-                id: message.id.clone(),
-                from: message.from.clone(),
-                subject: message.subject.clone(),
-                sent: message.sent.clone(),
-                body: item.body.clone(),
-                signed_verified: None,
-                sender_address: message.sender_address.clone(),
-                sender_provenance: message.sender_provenance.clone(),
-            },
-            message,
-            body: item.body,
-        });
-    }
-    let unseen = missed.len();
-    let targeted_count = missed.iter().filter(|item| item.targeted).count();
-    if missed.is_empty() {
-        return Ok(CrossedReport {
-            verdict: CrossedVerdict::Clear,
-            unseen: 0,
-            targeted: 0,
-        });
-    }
-    // Nothing here concerns this room, so delivering is the right default and
-    // the caller says what was crossed rather than refusing over it.
-    if targeted_count == 0 {
-        return Ok(CrossedReport {
-            verdict: CrossedVerdict::Warn,
-            unseen,
-            targeted: 0,
-        });
-    }
-    // From here the send is refused, so only the messages that caused the
-    // refusal belong in the preview. The old bounce embedded the last ten full
-    // bodies -- roughly 15KB of prose, most of it already read -- which cost the
-    // reader more context than the operation it refused (pc2_0dfb29556dec7b0c).
-    missed.retain(|item| item.targeted);
-    // Runnable as written: --anyway re-reads the body from stdin, so a caller
-    // who was piping a heredoc keeps piping it. The old fix said
-    // `--body '<revised text>'`, which is not a command -- and it steered the
-    // caller onto argv, the one form this binary's own help calls dangerous
-    // because the shell parses it first.
-    let fix = format!(
-        "post chat {} --send --anyway{}",
-        crate::mailbox::shell_quote(channel),
-        body_flag
-    );
-    // A bounce that renders missed conversation is a badge-computing surface
-    // (A0a Decision 3): resolve the owner ONCE — a broken owner.json fails
-    // the send with the config error instead of a crossed_send, and since
-    // nothing has been written yet, the draft is preserved by construction.
-    let owner = crate::mailbox::resolve_owner(context)?;
-    if let Some(owner) = owner.as_ref() {
-        for item in &mut missed {
-            if item.message.from == owner.room {
-                // Map, exactly like chat: signed-looking messages carry
-                // Some(verified-bool), ordinary unsigned messages stay
-                // None -> field omitted in JSON (A0a Decision 3).
-                item.bounce.signed_verified =
-                    crate::mailbox::signed_status(Some(owner), &item.message, &item.body, channel)
-                        .map(|status| {
-                            matches!(status, crate::mailbox::SignedStatus::Verified { .. })
-                        });
-            }
-        }
-    }
-    let mut missed: Vec<MissedChannelMessage> = missed
-        .into_iter()
-        .map(|mut item| {
-            // First line only. The whole body was never what the reader needed
-            // to decide whether to revise, and the ids are right there.
-            item.bounce.body = first_line(&item.bounce.body);
-            item.bounce
-        })
-        .collect();
-    let total = missed.len();
-    if missed.len() > PREVIEW_CAP {
-        missed = missed.split_off(missed.len() - PREVIEW_CAP);
-    }
-    let message = format!(
-        "channel '{channel}' has {total} unseen message(s) addressed to '{room}' out of {unseen} unseen; send was not delivered (showing the last {}, first line only)",
-        missed.len()
-    );
-    Ok(CrossedReport {
-        verdict: CrossedVerdict::Refuse(
-            AppError::new(ErrorCode::CrossedSend, message, format!(
-                "Read the messages addressed to you, revise, then resend the same way you sent it -- body on stdin -- adding `--anyway`: `{fix}`."
-            ))
-            .exact_fix(fix)
-            .input(channel)
-            .reason("unseen messages are addressed to this room")
-            .missed(missed),
-        ),
-        unseen,
-        targeted: targeted_count,
+    Ok(SentMessage {
+        message: parse_channel_message(&file)?.message,
+        crossed,
+        skipped,
+        warnings,
     })
 }
 
-/// The crossed-send audit log: one JSON line per send that met an unseen tip.
+/// How strictly a reader treats a channel message file it cannot parse.
 ///
-/// This exists because the guard kept no record of itself. Asked for one real
-/// interleaving the old refusal had prevented, nobody could produce one -- not
-/// because none existed, but because a refusal is an error and errors are not
-/// written anywhere. Weeks of running and zero evidence in either direction,
-/// which meant the guard could only ever be tuned by argument. `anyway_after_ms`
-/// is the field that settles it: the gap between a refusal and the `--anyway`
-/// that followed measures whether anyone read what they were shown.
-///
-/// Best-effort by construction. Telemetry must never be able to fail a send.
-fn log_crossed_event(
-    context: &Context,
-    channel: &str,
-    room: &str,
-    unseen: usize,
-    targeted: usize,
-    outcome: CrossedOutcome,
-) {
+/// `Tolerant` is every read-only listing and read: the file is skipped and
+/// reported. `Strict` keeps the fail-closed behavior for the few callers that
+/// must not act on a partial picture (the `post watch` doorbell's validation
+/// pass, and consuming cursor bookkeeping).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scan {
+    Strict,
+    Tolerant,
+}
+
+/// A file in a channel's `messages/` that could not be parsed. Readers skip it
+/// and say so; it never fails a listing, a read, a catch-up or a send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SkippedFile {
+    /// The file stem, which is the message id when the file is well-formed.
+    pub id: String,
+    pub reason: String,
+    /// Set by listings that cover several channels (`channels`, `search`,
+    /// `catchup`); a single-channel read already names its channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+
+impl SkippedFile {
+    /// Only corruption-shaped failures are skippable: a bad envelope or a file
+    /// that cannot be read. Anything else (a broken cursor store, a lock) is not
+    /// about this file and still propagates.
+    pub(crate) fn from_error(path: &Path, error: &AppError) -> Option<Self> {
+        if !matches!(error.code, ErrorCode::ConfigInvalid | ErrorCode::IoError) {
+            return None;
+        }
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("?")
+            .to_owned();
+        let detail = error
+            .details
+            .reason
+            .clone()
+            .unwrap_or_else(|| error.message.clone());
+        let reason = match error.code {
+            ErrorCode::IoError => format!("could not be read: {detail}"),
+            _ => detail,
+        };
+        Some(Self {
+            id,
+            reason: one_line(&reason, 300),
+            channel: None,
+        })
+    }
+
+    pub(crate) fn in_channel(mut self, channel: &str) -> Self {
+        self.channel = Some(channel.to_owned());
+        self
+    }
+}
+
+/// Collapse to one printable line of at most `cap` characters.
+fn one_line(text: &str, cap: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    preview(&flat, cap)
+}
+
+/// The single stdout line a text-mode command prints when it skipped files, or
+/// `None` when it skipped nothing.
+pub(crate) fn skipped_notice(skipped: &[SkippedFile]) -> Option<String> {
+    const SHOWN: usize = 3;
+    if skipped.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for file in skipped.iter().take(SHOWN) {
+        let name = match &file.channel {
+            Some(channel) => format!("#{channel}/{}", file.id),
+            None => file.id.clone(),
+        };
+        parts.push(format!(
+            "{} ({})",
+            crate::output::sanitize_text_header(&name),
+            crate::output::sanitize_text_header(&one_line(&file.reason, 80))
+        ));
+    }
+    let more = skipped.len().saturating_sub(SHOWN);
+    let tail = if more > 0 {
+        format!(", and {more} more (--json lists all)")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "post: skipped {} unreadable message file(s): {}{tail}; everything else is shown. Move the file aside or restore it.\n",
+        skipped.len(),
+        parts.join(", ")
+    ))
+}
+
+/// One message that crossed a send.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CrossedMessage {
+    pub id: String,
+    pub from: String,
+    pub display_name: Option<String>,
+    pub sent: String,
+    pub addressed_to_you: bool,
+    /// Full for a message addressed to the sender; a 300-character preview
+    /// otherwise.
+    pub body: String,
+    /// Only on signed-looking messages from the owner room: whether the
+    /// signature verifies against the complete stored body. A body is never
+    /// shown as the owner's word without this verdict beside it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_verified: Option<bool>,
+    /// Identity fields as the sender declared them, carried raw: a crossed
+    /// send is the concurrent-instance moment where attribution matters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_provenance: Option<String>,
+}
+
+/// Everything from others the sender had not seen when it sent, capped at
+/// [`CROSSED_MESSAGE_CAP`] messages, newest last.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Crossed {
+    pub unseen: usize,
+    pub addressed_to_you: usize,
+    pub messages: Vec<CrossedMessage>,
+}
+
+/// At most this many messages ride in a receipt.
+const CROSSED_MESSAGE_CAP: usize = 10;
+/// A message not addressed to the sender is shown as this many characters.
+const CROSSED_PREVIEW_CHARS: usize = 300;
+
+/// The crossed-send audit log line for a send that delivered over an unseen tip.
+fn log_crossed_event(context: &Context, channel: &str, room: &str, unseen: usize, targeted: usize) {
     let path = context.root.join("crossed-send.jsonl");
     let Some(now_ms) = epoch_millis() else { return };
-    let anyway_after_ms = match outcome {
-        CrossedOutcome::Anyway => last_refusal_ms(&path, channel, room).map(|then| now_ms - then),
-        _ => None,
-    };
-    let mut line = format!(
-        "{{\"epoch_ms\":{now_ms},\"room\":\"{}\",\"channel\":\"{}\",\"unseen\":{unseen},\"targeted\":{targeted},\"outcome\":\"{}\"",
+    let line = format!(
+        "{{\"epoch_ms\":{now_ms},\"room\":\"{}\",\"channel\":\"{}\",\"unseen\":{unseen},\"targeted\":{targeted},\"outcome\":\"delivered_crossed\"}}\n",
         ascii_escape_json(room),
         ascii_escape_json(channel),
-        outcome.as_str()
     );
-    if let Some(gap) = anyway_after_ms {
-        line.push_str(&format!(",\"anyway_after_ms\":{gap}"));
-    }
-    line.push_str("}\n");
     // Telemetry must never be able to fail a send, so every error here is
     // deliberately dropped: a lost audit line costs a data point, a failed send
     // costs the message.
@@ -842,35 +1109,114 @@ fn epoch_millis() -> Option<u128> {
         .map(|elapsed| elapsed.as_millis())
 }
 
-/// Epoch millis of this room's most recent refusal on this channel.
-fn last_refusal_ms(path: &Path, channel: &str, room: &str) -> Option<u128> {
-    let text = fs::read_to_string(path).ok()?;
-    text.lines()
-        .rev()
-        .filter(|line| line.contains(&format!("\"room\":\"{room}\"")))
-        .filter(|line| line.contains(&format!("\"channel\":\"{channel}\"")))
-        .find(|line| line.contains("\"outcome\":\"refused\""))
-        .and_then(|line| {
-            let rest = line.split("\"epoch_ms\":").nth(1)?;
-            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
+/// What crossed this send: the sender's unseen messages from others.
+///
+/// The line for "addressed to you" is the one this store draws everywhere else:
+/// a message that @mentions the room, replies to something the room wrote, or
+/// comes from the owner room is conversation the sender must not miss. A signed
+/// owner message binds its whole body, so adding "@you" to one would break the
+/// signature -- the owner clause is a consequence, not deference.
+///
+/// Corrupt unseen files are skipped and returned; system events (join/profile
+/// and unknown kinds) are not conversation the sender needs to revise against.
+fn crossed_report(
+    context: &Context,
+    paths: &ChannelPaths,
+    channel: &str,
+    room: &str,
+    participant: &crate::participant::Participant,
+) -> AppResult<(Option<Crossed>, Vec<SkippedFile>)> {
+    use crate::cursor_state::eligibility::unread_channel_with;
+
+    // The owner is resolved once: it decides which sender counts as "addressed
+    // to you" and which crossed bodies carry a signature verdict. A broken
+    // owner.json stops this report (the send says so in `warnings` and still
+    // delivers) rather than showing a signed-looking body without its verdict.
+    let owner = crate::mailbox::resolve_owner(context)?;
+    let owner_room = owner.as_ref().map(|owner| owner.room.clone());
+    let scan = unread_channel_with(context, participant, channel, Scan::Tolerant)?;
+    let skipped = scan.skipped;
+    let mut items: Vec<(ChannelMessage, String, bool)> = Vec::new();
+    for item in scan.items {
+        if item.message.event.is_some() {
+            continue;
+        }
+        let message = item.message;
+        let addressed = message.mentions.iter().any(|name| name == room)
+            || owner_room.as_deref() == Some(message.from.as_str())
+            || message
+                .re
+                .as_deref()
+                .is_some_and(|parent| message_author_is(paths, parent, room));
+        items.push((message, item.body, addressed));
+    }
+    let unseen = items.len();
+    if unseen == 0 {
+        return Ok((None, skipped));
+    }
+    let addressed_count = items.iter().filter(|(_, _, addressed)| *addressed).count();
+
+    // Which messages ride in the receipt. Addressed ones first: they are the
+    // reason to read the crossing at all, so ten newer chatter messages must not
+    // push one out. Remaining slots go to the newest of the rest. `items` is in
+    // id order, so sorting the picked indexes restores newest-last.
+    let addressed_at: Vec<usize> = (0..unseen).filter(|&i| items[i].2).collect();
+    let other_at: Vec<usize> = (0..unseen).filter(|&i| !items[i].2).collect();
+    let take_addressed = addressed_at.len().min(CROSSED_MESSAGE_CAP);
+    let mut picked: Vec<usize> = addressed_at[addressed_at.len() - take_addressed..].to_vec();
+    let room_left = CROSSED_MESSAGE_CAP - take_addressed;
+    picked.extend_from_slice(&other_at[other_at.len().saturating_sub(room_left)..]);
+    picked.sort_unstable();
+
+    let messages = picked
+        .into_iter()
+        .map(|index| {
+            let (message, body, addressed) = &items[index];
+            // Verified against the complete stored body, before any preview cut.
+            let signed_verified = owner
+                .as_ref()
+                .filter(|owner| message.from == owner.room)
+                .and_then(|owner| {
+                    crate::mailbox::signed_status(Some(owner), message, body, channel)
+                })
+                .map(|status| matches!(status, crate::mailbox::SignedStatus::Verified { .. }));
+            let body = body.trim_end();
+            let body = if *addressed {
+                body.to_owned()
+            } else {
+                preview(body, CROSSED_PREVIEW_CHARS)
+            };
+            CrossedMessage {
+                id: message.id.clone(),
+                from: message.from.clone(),
+                display_name: message.display_name.clone(),
+                sent: message.sent.clone(),
+                addressed_to_you: *addressed,
+                body,
+                signed_verified,
+                sender_address: message.sender_address.clone(),
+                sender_provenance: message.sender_provenance.clone(),
+            }
         })
+        .collect();
+    Ok((
+        Some(Crossed {
+            unseen,
+            addressed_to_you: addressed_count,
+            messages,
+        }),
+        skipped,
+    ))
 }
 
-/// How many targeted messages a refusal previews before summarizing.
-const PREVIEW_CAP: usize = 5;
-
-fn first_line(body: &str) -> String {
-    const LINE_CAP: usize = 200;
-    let line = body
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    let mut out: String = line.chars().take(LINE_CAP).collect();
-    if line.chars().count() > LINE_CAP {
-        out.push('\u{2026}');
+/// `text` cut to `cap` characters, with an ellipsis when it was cut.
+fn preview(text: &str, cap: usize) -> String {
+    if text.chars().count() <= cap {
+        return text.to_owned();
     }
-    out
+    let mut cut: String = text.chars().take(cap).collect();
+    cut.push('\u{2026}');
+    cut
 }
 
 /// Was `id` written by `room`? Used only to decide whether a reply is aimed here.
@@ -900,7 +1246,7 @@ pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResul
         0 => Err(AppError::new(
             ErrorCode::NotFound,
             format!("no message in channel matching id/prefix '{prefix}'"),
-            "Pass a full message id or a unique prefix from `post chat <channel> --history`.",
+            "Pass a full message id or a unique prefix. `post chat <channel> --history 25` lists recent ids, and `post chat <channel> --message <id> --max-bytes 8000` reads one message.",
         )
         .input(prefix)
         .reason("no matching message id")),
@@ -1179,16 +1525,11 @@ pub(crate) fn validate_channel_message(path: &Path, message: &ChannelMessage) ->
             ),
         ));
     }
-    if let Some(event) = &message.event {
-        if event != JOIN_EVENT && event != PROFILE_EVENT {
-            return Err(AppError::config(
-                path,
-                format!(
-                    "channel message event '{event}' is unknown; only '{JOIN_EVENT}' and '{PROFILE_EVENT}' exist"
-                ),
-            ));
-        }
-    }
+    // `event` is deliberately not validated against a closed list. Any kind
+    // beyond `join` and `profile` is an opaque system event (see
+    // `is_opaque_event`): additive fields were always tolerated, and a newer
+    // peer or the bridge adding a kind must not wedge every reader on this
+    // host (contract 2026-09-28 section 3).
     // Stamped profile fields render unquoted in chat banners and watch
     // text lines; a control character smuggled into a hand-written .msg
     // could forge whole lines, so refuse them at parse like `channel`.
@@ -1328,14 +1669,31 @@ pub(crate) struct ChannelSummary {
     pub archived: Option<crate::channel_archive::ArchiveMark>,
 }
 
+// The strict listing: every read-only surface here uses `list_channels_with`
+// tolerantly, but the fail-closed form stays for callers that must not act on
+// a partial picture.
+#[allow(dead_code)]
 pub(crate) fn list_channels(context: &Context) -> AppResult<Vec<ChannelSummary>> {
+    Ok(list_channels_with(context, Scan::Strict)?.0)
+}
+
+/// The channel listing with one bad channel directory (an unreadable
+/// `channel.json` or `members.json`) skipped and reported instead of failing
+/// every listing on the host.
+pub(crate) fn list_channels_with(
+    context: &Context,
+    scan: Scan,
+) -> AppResult<(Vec<ChannelSummary>, Vec<SkippedFile>)> {
     let dir = context.root.join(CHANNELS_DIR);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()))
+        }
         Err(error) => return Err(AppError::io("list channels directory", &dir, error)),
     };
     let mut summaries = Vec::new();
+    let mut skipped = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| AppError::io("read channels entry", &dir, error))?;
         if !entry.path().is_dir() {
@@ -1357,9 +1715,35 @@ pub(crate) fn list_channels(context: &Context) -> AppResult<Vec<ChannelSummary>>
             Ok(files) => files.len(),
             Err(_) => 0,
         };
+        let loaded = paths
+            .load_info()
+            .map_err(|error| ("channel.json", error))
+            .and_then(|info| {
+                paths
+                    .load_members()
+                    .map(|members| (info, members))
+                    .map_err(|error| ("members.json", error))
+            });
+        let (info, members) = match loaded {
+            Ok(loaded) => loaded,
+            Err((file, error)) if scan == Scan::Tolerant => {
+                let reason = error
+                    .details
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| error.message.clone());
+                skipped.push(SkippedFile {
+                    id: file.to_owned(),
+                    reason: one_line(&reason, 300),
+                    channel: Some(name),
+                });
+                continue;
+            }
+            Err((_, error)) => return Err(error),
+        };
         summaries.push(ChannelSummary {
-            info: paths.load_info()?,
-            members: paths.load_members()?,
+            info,
+            members,
             messages,
             // Fail open: an unreadable archive.json lists the channel as live
             // (visible) instead of failing the listing and every watch that
@@ -1368,7 +1752,7 @@ pub(crate) fn list_channels(context: &Context) -> AppResult<Vec<ChannelSummary>>
         });
     }
     summaries.sort_by(|left, right| left.info.name.cmp(&right.info.name));
-    Ok(summaries)
+    Ok((summaries, skipped))
 }
 
 #[cfg(test)]
