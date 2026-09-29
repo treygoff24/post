@@ -80,13 +80,18 @@ sed "s/@SHA@/$sha/g" "$FAKE_POST_TEMPLATE" > "$out/post"
 chmod +x "$out/post"
 "#;
 
-/// The built binary. FAKE_VERIFY picks the served-skill verdict.
+/// The built binary. FAKE_VERIFY picks the served-skill verdict and
+/// FAKE_SELF_VERIFY the verdict against the binary's own source tree.
 const FAKE_POST: &str = r#"#!/usr/bin/env bash
 # fake built post @SHA@
 case "$1 ${2:-}" in
   "version --json") printf '{"ok":true,"build_sha":"@SHA@","capabilities":["participants"]}\n' ;;
   "contract skill-manifest")
-    case "${FAKE_VERIFY:-match}" in
+    case "${4:-}" in
+      */src/skills/post) verdict="${FAKE_SELF_VERIFY:-match}" ;;
+      *) verdict="${FAKE_VERIFY:-match}" ;;
+    esac
+    case "$verdict" in
       match) printf '{"ok":true,"verdict":"match","kind":"symlink","mismatched":[],"missing":[],"extra":[],"rendered_unverified":[]}\n' ;;
       drift) printf '{"ok":false,"verdict":"drift","kind":"symlink","mismatched":["SKILL.md"],"missing":[],"extra":[],"rendered_unverified":[]}\n'; exit 1 ;;
       unverified) printf '{"ok":false,"verdict":"unverified","kind":"copy","mismatched":[],"missing":[],"extra":[],"rendered_unverified":["SKILL.md"]}\n'; exit 1 ;;
@@ -371,6 +376,27 @@ fn a_target_dir_set_in_cargo_config_is_found() {
         "the build went to the configured directory"
     );
     assert_backed_up_and_installed(&rig, &live);
+}
+
+/// A binary whose built-in skill manifest disagrees with the tree it was
+/// built from is stale build-script output, and never installs.
+#[test]
+fn a_binary_whose_manifest_disagrees_with_its_own_source_is_refused() {
+    for self_verify in ["drift", "error"] {
+        let rig = Rig::new();
+        let live = rig.live("stale-manifest");
+        let before = rig.bin_entries();
+        let output = rig.run(&[("FAKE_SELF_VERIFY", self_verify)]);
+        assert_code(&output, 3);
+        assert!(
+            stderr(&output).contains("does not match its own source"),
+            "{self_verify}: {}",
+            stderr(&output)
+        );
+        assert_eq!(rig.bin_entries(), before, "{self_verify}: nothing written");
+        assert_eq!(fs::read(rig.target()).expect("post"), live, "{self_verify}");
+        assert!(!rig.receipt.exists(), "{self_verify}: no receipt");
+    }
 }
 
 #[test]

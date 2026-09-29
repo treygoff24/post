@@ -21,6 +21,9 @@
 #    install would silently replace the link with a file.
 # 2. Check out <commit> in a temporary git worktree and run
 #    `cargo build --release --locked` there (CARGO_TARGET_DIR is honored).
+#    The built binary must report that commit's build id, and its built-in
+#    skill manifest must match that worktree's skills/post exactly; stale
+#    build-script output from a shared target directory installs nothing.
 # 3. Run scripts/install-smoke.sh from that commit against the built binary,
 #    before anything in the bin dir is touched: a failed smoke installs nothing.
 #    The smoke is told the commit (--expect-build), so it fails a binary whose
@@ -193,6 +196,17 @@ built="$work/post"
 built_sha=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build_sha"])' < <("$built" version --json)) \
   || die "the built binary has no readable version --json"
 [ "$built_sha" = "$short_sha" ] || die "built binary reports build $built_sha, expected $short_sha"
+# The skill manifest built into the binary against the tree it was built
+# from. A target directory shared across checkouts can hand back build-script
+# output from another tree (a devbox build once embedded an empty manifest);
+# such a binary would report every served copy as drift. Only a match installs.
+self_rc=0
+"$built" contract skill-manifest --verify "$src/skills/post" > "$work/self-manifest.json" 2> "$work/self-manifest.err" || self_rc=$?
+self_verdict=unchecked
+if [ "$self_rc" -le 1 ]; then
+  self_verdict=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$work/self-manifest.json" 2>/dev/null) || self_verdict=unchecked
+fi
+[ "$self_verdict" = match ] || die "the skill manifest built into $short_sha does not match its own source (verdict $self_verdict): cargo reused build-script output from another tree. Nothing was installed. Run \`cargo clean --release -p post\` in the target directory's project, then rerun"
 binary_sha256=$(sha256_of "$built")
 
 smoke="$src/scripts/install-smoke.sh"
