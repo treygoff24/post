@@ -34,7 +34,8 @@ const ADAPTER = path.join(
 );
 // The adapter imports this by its plain name, so it sits beside the adapter.
 const CORE = path.join(path.dirname(ADAPTER), "mail-hook-core.mjs");
-const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
+// Stop carries only the doorbell turn mark (see claude-mail.mjs).
+const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"];
 
 const USAGE = "usage: node install-claude-hooks.mjs <path-to-settings.json>";
 
@@ -206,12 +207,41 @@ const adapterChanged = installFile(SOURCE, ADAPTER, 0o755);
 
 const canonicalHook = () => ({ type: "command", command: "node", args: [ADAPTER], timeout: 10 });
 
+// Ownership is by path or marker, never by basename: another tool's hook that
+// happens to be named claude-mail.mjs must survive the install. A registration
+// is ours when its script is the installed adapter path (a leading $HOME,
+// ${HOME}, or ~ expanded, as the shell-form registrations wrote it), or an
+// existing file carrying the header every version of the adapter has had.
+const ADAPTER_MARKER = '// Claude Code hook adapter: injects metadata-only "new post mail" notifications';
+
+function expandHome(script) {
+  const home = os.homedir();
+  for (const prefix of ["$HOME/", "${HOME}/", "~/"]) {
+    if (script.startsWith(prefix)) return path.join(home, script.slice(prefix.length));
+  }
+  return script;
+}
+
+function isOurScript(script) {
+  if (typeof script !== "string" || script === "") return false;
+  const resolved = path.resolve(expandHome(script));
+  if (resolved === path.resolve(ADAPTER)) return true;
+  try {
+    if (fs.realpathSync(resolved) === fs.realpathSync(ADAPTER)) return true;
+  } catch {
+    // Either side missing: fall through to the marker.
+  }
+  try {
+    const head = fs.readFileSync(resolved, "utf8").split("\n", 3);
+    return head.includes(ADAPTER_MARKER);
+  } catch {
+    return false;
+  }
+}
+
 function isIntegrationHook(hook) {
-  const names = ["claude-mail.mjs", "post-claude-mail.mjs"];
   if (Array.isArray(hook?.args)) {
-    return hook.args.some(
-      (arg) => typeof arg === "string" && names.includes(path.basename(arg))
-    );
+    return path.basename(String(hook.command ?? "")) === "node" && hook.args.length === 1 && isOurScript(hook.args[0]);
   }
   // Legacy shell-form registration: `node <path>`.
   const command = String(hook?.command ?? "");
@@ -223,11 +253,16 @@ function isIntegrationHook(hook) {
   } catch {
     return false;
   }
-  return names.includes(path.basename(script));
+  return isOurScript(script);
 }
 
 const original = JSON.stringify(config);
-for (const event of EVENTS) {
+// Cleanup visits every event in the file, not only EVENTS: an upgrade from a
+// version that registered the adapter elsewhere (PreToolUse, on the first
+// doorbell turn-mark commit) must not keep launching it there. Only owned
+// registrations are removed; the adapter is re-added for EVENTS alone.
+const visited = new Set([...Object.keys(config.hooks).filter((event) => Array.isArray(config.hooks[event])), ...EVENTS]);
+for (const event of visited) {
   const groups = Array.isArray(config.hooks[event]) ? config.hooks[event] : [];
   const normalized = [];
   for (const group of groups) {
@@ -242,8 +277,10 @@ for (const event of EVENTS) {
       if (hooks.length > 0) normalized.push({ ...group, hooks });
     }
   }
-  normalized.push({ hooks: [canonicalHook()] });
-  config.hooks[event] = normalized;
+  if (EVENTS.includes(event)) normalized.push({ hooks: [canonicalHook()] });
+  else if (normalized.length === groups.length) continue; // nothing of ours here: untouched
+  if (normalized.length === 0) delete config.hooks[event];
+  else config.hooks[event] = normalized;
 }
 
 const configChanged = JSON.stringify(config) !== original;

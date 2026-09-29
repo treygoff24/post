@@ -25,6 +25,9 @@
 //                    when the agent needs the id printed at start (cursor, grok)
 //   bindingLine(id)  (optional) a line naming the id, appended after a fresh bind
 //   nonInteractive(input, env) (optional) true for a session nobody is reading
+//   observe(input, env) (optional) a side effect run on every parsed payload
+//                    before parse(), including events parse() ignores; a throw
+//                    is swallowed so it can never cost the mail check
 //
 // Invariants, shared by every harness: envelope-metadata only (ids for readable
 // direct mail, count-only for channel and unreadable), 30 s PostToolUse throttle
@@ -730,6 +733,11 @@ export function runMailHook(adapter) {
       return tryEmit({});
     }
     if (input === null || typeof input !== "object") return tryEmit({});
+    try {
+      adapter.observe?.(input, process.env);
+    } catch {
+      // Fail open: an observer is never allowed to cost the mail check.
+    }
     const parsedInput = adapter.parse(input, process.env);
     if (!parsedInput) return tryEmit({});
     const { event: eventName, phase, sessionRaw, cwd } = parsedInput;
