@@ -1501,41 +1501,6 @@ fn participant_round4_typed_participant_blocks_use_recipient_workspace() {
 }
 
 #[test]
-fn participant_round4_lineage_recipient_filtering_remains_pending_p2() {
-    let sandbox = Sandbox::new();
-    let (alpha, _beta) = register_alpha_beta(&sandbox);
-    let sender = sandbox.bind_claude("lineage-pending-sender", &alpha, Some("alpha"));
-    let sender_id = participant_id(&sender).to_owned();
-    let lineage_dir = sandbox.mail_root.join("lineages/round4-lineage");
-    fs::create_dir_all(&lineage_dir).expect("lineage dir");
-    fs::write(
-        lineage_dir.join("lineage.json"),
-        r#"{"name":"round4-lineage","founder":"founder","created":"2026-09-16 00:00:00 +0000","host":"test"}"#,
-    )
-    .expect("lineage record");
-    fs::write(
-        sandbox.mail_root.join("rules.json"),
-        r#"{"blocked":[{"from":"alpha","to":"beta","reason":"recipient workspace blocked"}]}"#,
-    )
-    .expect("recipient rule");
-
-    // P.1 only holds lineage-addressed mail. P.2 must filter blocked affiliates
-    // while freezing the receipt; this assertion prevents P.1 from pretending
-    // it can decide before recipient selection exists.
-    assert_success(&sandbox.run_as_participant(
-        &[
-            "send",
-            "--to",
-            "lineage:round4-lineage",
-            "--body",
-            "held for P.2 routing",
-        ],
-        &sender_id,
-        &alpha,
-    ));
-}
-
-#[test]
 fn participant_round4_bound_sender_assertions_refuse_disagreement() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);

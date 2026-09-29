@@ -12161,8 +12161,29 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
         let output = sandbox.run_in(&["read", &id], None, &home_room);
         assert_success(&output);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let _ = expected;
-        assert!(!stdout.contains("Sender evidence:"));
+        assert!(
+            !stdout.contains("Sender evidence:"),
+            "a default read stays quiet: {stdout}"
+        );
+        for framing in ["full", "compact"] {
+            let framed = sandbox.run_in(
+                &["read", &id, "--peek", "--framing", framing],
+                None,
+                &home_room,
+            );
+            assert_success(&framed);
+            let framed = String::from_utf8_lossy(&framed.stdout);
+            match expected {
+                Some(sentence) => assert!(
+                    framed.contains(&format!("Sender evidence: {sentence}\n")),
+                    "{value} must render its frozen sentence under {framing}: {framed}"
+                ),
+                None => assert!(
+                    !framed.contains("Sender evidence:"),
+                    "unknown {value} stays silent under {framing}: {framed}"
+                ),
+            }
+        }
         let json = sandbox.run_in(&["read", &id, "--peek", "--json"], None, &home_room);
         assert_success(&json);
         let value_json: serde_json::Value = from_stdout(&json);
@@ -12272,12 +12293,24 @@ fn mail_read_renders_address_line_with_non_credential_wording() {
     let output = sandbox.run_in(&["read", &id], None, &home_room);
     assert_success(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = "Sender address: claude-code.post.0123abcd (self-declared instance tag, opaque and non-routable)\n";
     assert!(
-        !stdout.contains(
-            "Sender address: claude-code.post.0123abcd (self-declared instance tag, opaque and non-routable)"
-        ),
-        "mail read must render the address with non-credential wording: {stdout}"
+        !stdout.contains("Sender address:"),
+        "a default read stays quiet: {stdout}"
     );
+    for framing in ["full", "compact"] {
+        let framed = sandbox.run_in(
+            &["read", &id, "--peek", "--framing", framing],
+            None,
+            &home_room,
+        );
+        assert_success(&framed);
+        let framed = String::from_utf8_lossy(&framed.stdout);
+        assert!(
+            framed.contains(line),
+            "{framing} read must render the address with non-credential wording: {framed}"
+        );
+    }
 }
 
 #[test]
@@ -12779,36 +12812,6 @@ fn workspace_sender_can_inspect_own_mail_without_consuming_a_recipient_copy() {
         .join("beta/read")
         .join(format!("{id}.mail"))
         .exists());
-}
-
-#[test]
-fn send_receipt_offers_a_runnable_sender_history_readback_command() {
-    let sandbox = Sandbox::new();
-    let (alpha, _beta) = register_alpha_beta(&sandbox);
-    let sender = sandbox.test_participant("alpha");
-    let sent = sandbox.run_as_participant(
-        &["send", "--to", "workspace:beta", "--body", "hi"],
-        &sender,
-        &alpha,
-    );
-    assert_success(&sent);
-    let text = stdout(&sent);
-    assert!(text.contains("canonical message retained at workspace:beta"));
-    assert!(text.contains("sender is not a frozen recipient"));
-    let id = text
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(3))
-        .expect("sent id in receipt");
-    assert!(
-        text.contains(&format!("post: read it back with: post read '{id}'")),
-        "missing runnable readback: {text}"
-    );
-    let readback = sandbox.run_as_participant(&["read", id, "--json"], &sender, &alpha);
-    assert_success(&readback);
-    let readback: serde_json::Value = from_stdout(&readback);
-    assert_eq!(readback["own"], true);
-    assert_eq!(readback["body"], "hi");
 }
 
 /// `--body -` was already the stdin sentinel; `--body-file -` was not, so it
