@@ -362,10 +362,13 @@ fn admission_checks(context: &Context, args: &BridgeDeliverArgs, from: &str) -> 
             return Some(Decision::Rejected("forged_from", detail));
         }
     }
-    // Conclusive lookups only (F3-3). The caller holds the participants lock,
-    // so a record `participant gc` collected is brought back here (same id)
-    // rather than refused: an idle participant is still a valid recipient.
-    match participant::revive_locked(context, &args.participant) {
+    // Conclusive lookups only (F3-3). The caller holds the participants lock.
+    // Every check that can refuse the letter reads the recipient's record where
+    // it lies (live, archived or tombstoned) and changes nothing: a refused
+    // letter must not bring a collected participant back. Only a letter that
+    // has passed them all restores the record, below.
+    let record = match participant::peek_locked(context, &args.participant) {
+        Ok(Some(record)) => record,
         Ok(None) => {
             return Some(Decision::Rejected(
                 "unknown_participant",
@@ -375,32 +378,60 @@ fn admission_checks(context: &Context, args: &BridgeDeliverArgs, from: &str) -> 
                 ),
             ))
         }
-        Ok(Some(record)) if record.ended_at.is_some() => {
-            return Some(Decision::Rejected(
-                "ended_participant",
-                format!("participant '{}' has ended", args.participant),
-            ))
-        }
-        Ok(Some(_)) => {}
         Err(error) => return Some(Decision::Retry("participant_unreadable", error.message)),
+    };
+    if record.ended_at.is_some() {
+        return Some(Decision::Rejected(
+            "ended_participant",
+            format!("participant '{}' has ended", args.participant),
+        ));
     }
     let rooms = match context.load_rooms() {
         Ok(rooms) => rooms,
         Err(error) => return Some(Decision::Retry("topology_unavailable", error.message)),
     };
+    let rules = match context.load_rules(&rooms) {
+        Ok(rules) => rules,
+        Err(error) => return Some(route_check_failure(error)),
+    };
     let target = Address {
         kind: AddressKind::Participant,
         name: args.participant.clone(),
     };
-    match super::send::ensure_route_allowed(context, &rooms, from, &target) {
-        Ok(()) => None,
+    match super::send::ensure_workspaces_route_allowed(
+        &rules,
+        from,
+        &target,
+        vec![record.workspace],
+    ) {
+        Ok(()) => {}
         Err(error) if error.code == ErrorCode::BlockedRoute => {
-            Some(Decision::Rejected("blocked_route", error.message))
+            return Some(Decision::Rejected("blocked_route", error.message))
         }
-        Err(error) if error.code == ErrorCode::IoError => {
-            Some(Decision::Retry("io_error", error.message))
-        }
-        Err(error) => Some(Decision::Retry("inventory_degraded", error.message)),
+        Err(error) => return Some(route_check_failure(error)),
+    }
+    // Admitted. Bring a collected recipient back (same id), so the record,
+    // inbox and routing below land in its live directory.
+    match participant::revive_locked(context, &args.participant) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(Decision::Rejected(
+            "unknown_participant",
+            format!(
+                "participant '{}' does not exist on this host",
+                args.participant
+            ),
+        )),
+        Err(error) => Some(Decision::Retry("participant_unreadable", error.message)),
+    }
+}
+
+/// A rule check that could not be answered is a retry: an unreadable file is
+/// `io_error`, anything else `inventory_degraded`.
+fn route_check_failure(error: crate::error::AppError) -> Decision {
+    if error.code == ErrorCode::IoError {
+        Decision::Retry("io_error", error.message)
+    } else {
+        Decision::Retry("inventory_degraded", error.message)
     }
 }
 

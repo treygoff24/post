@@ -28,6 +28,11 @@ const SMOKE_CHECKS: [&str; 6] = [
     "porch",
 ];
 
+/// The wide store the real smoke seeds. Fifty still covers all three workspace
+/// variants and the `who` count check; the 2,000-participant contract is
+/// owned by tests/scaling.rs.
+const SMOKE_WHO_PARTICIPANTS: &str = "50";
+
 /// The stub smoke committed into the throwaway repo. FAKE_SMOKE picks what
 /// it reports through --results; FAKE_SMOKE_ARGS, when set, names a file that
 /// receives the arguments the installer called it with.
@@ -55,7 +60,7 @@ case "${FAKE_SMOKE:-pass}" in
     printf '%s\n' '{"check": "version", "result": "skipped", "detail": "x", "allowed": true}' >> "$results" ;;
   silent) : > "$results" ;;
   lying)
-    printf '%s\n' '{"check": "porch", "result": "fail", "detail": "launch check failed"}' > "$results" ;;
+    all | sed 's/"porch", "result": "pass"/"porch", "result": "fail"/' > "$results" ;;
   fail) exit 1 ;;
 esac
 "#;
@@ -400,44 +405,44 @@ fn a_binary_whose_manifest_disagrees_with_its_own_source_is_refused() {
 }
 
 #[test]
-fn a_truncated_backup_under_the_build_sha_name_is_not_trusted() {
-    let rig = Rig::new();
-    let live = rig.live("truncated-case");
-    // A first run that died mid-copy.
-    let stale = rig.bin_dir.join("post-c808283.bak");
-    fs::write(&stale, &live[..live.len() / 2]).expect("truncated backup");
-    let output = rig.run(&[]);
-    assert_code(&output, 0);
-    let backup = assert_backed_up_and_installed(&rig, &live);
-    assert_ne!(backup, stale, "the truncated file is not the backup");
-    assert_eq!(
-        fs::read(&stale).expect("stale"),
-        &live[..live.len() / 2],
-        "left alone"
-    );
-    assert!(
-        stderr(&output).contains("not a copy of the live post"),
-        "{}",
-        stderr(&output)
-    );
-}
-
-#[test]
 fn a_backup_of_other_bytes_with_the_same_build_sha_is_not_trusted() {
-    let rig = Rig::new();
-    let live = rig.live("the live build");
-    let other = live_post("a different build reporting the same sha");
-    let stale = rig.bin_dir.join("post-c808283.bak");
-    write_exec(&stale, &other);
-    let output = rig.run(&[]);
-    assert_code(&output, 0);
-    let backup = assert_backed_up_and_installed(&rig, &live);
-    assert_eq!(
-        backup,
-        rig.bin_dir
-            .join(format!("post-c808283-{}.bak", &sha256_hex(&live)[..12]))
-    );
-    assert_eq!(fs::read_to_string(&stale).expect("stale"), other);
+    // Each row plants a file under the build-sha backup name that is not a
+    // copy of the live post: a first run that died mid-copy, a different
+    // build reporting the same sha, and same-length bytes that only a hash
+    // (not a size check) can tell apart.
+    let live_bytes = live_post("the live build").into_bytes();
+    let mut same_length = live_bytes.clone();
+    *same_length.last_mut().expect("bytes") ^= 1;
+    let rows: [(&str, Vec<u8>); 3] = [
+        ("truncated", live_bytes[..live_bytes.len() / 2].to_vec()),
+        (
+            "different build",
+            live_post("a different build reporting the same sha").into_bytes(),
+        ),
+        ("same length", same_length),
+    ];
+    for (row, other) in rows {
+        let rig = Rig::new();
+        let live = rig.live("the live build");
+        assert_eq!(live, live_bytes, "{row}: the live fixture is deterministic");
+        let stale = rig.bin_dir.join("post-c808283.bak");
+        fs::write(&stale, &other).expect("planted backup");
+        let output = rig.run(&[]);
+        assert_code(&output, 0);
+        let backup = assert_backed_up_and_installed(&rig, &live);
+        assert_eq!(
+            backup,
+            rig.bin_dir
+                .join(format!("post-c808283-{}.bak", &sha256_hex(&live)[..12])),
+            "{row}"
+        );
+        assert_eq!(fs::read(&stale).expect("stale"), other, "{row}: left alone");
+        assert!(
+            stderr(&output).contains("not a copy of the live post"),
+            "{row}: {}",
+            stderr(&output)
+        );
+    }
 }
 
 #[test]
@@ -556,11 +561,19 @@ fn a_smoke_missing_a_check_or_reporting_an_unknown_one_installs_nothing() {
 
 #[test]
 fn a_smoke_exiting_zero_without_an_itemized_pass_installs_nothing() {
-    for mode in ["silent", "lying"] {
+    for (mode, reason) in [
+        ("silent", "the smoke reported no checks"),
+        ("lying", "'porch' reported 'fail' but the smoke exited 0"),
+    ] {
         let rig = Rig::new();
         let live = rig.live(mode);
         let output = rig.run(&[("FAKE_SMOKE", mode)]);
         assert_code(&output, 3);
+        assert!(
+            stderr(&output).contains(reason),
+            "{mode}: {}",
+            stderr(&output)
+        );
         assert_eq!(fs::read(rig.target()).expect("post"), live, "{mode}");
         assert_eq!(rig.bin_entries(), ["post"], "{mode}");
         assert!(!rig.receipt.exists(), "{mode}");
@@ -584,6 +597,7 @@ fn the_real_smoke_fails_a_porch_skip_unless_the_operator_allows_it() {
             // Not a speed test: a loaded machine must not fail it.
             .env("POST_SMOKE_WHO_SECONDS", "10")
             .env_remove("BASH_ENV")
+            .env("POST_SMOKE_WHO_PARTICIPANTS", SMOKE_WHO_PARTICIPANTS)
             .env_remove("POST_SMOKE_ALLOW_SKIP")
             .stdin(Stdio::null());
         if let Some(allow) = allow {
@@ -648,7 +662,7 @@ fn run_real_smoke(
         .env("POST_SMOKE_ALLOW_SKIP", "porch")
         .env_remove("BASH_ENV")
         .env_remove("POST_SMOKE_WHO_SECONDS")
-        .env_remove("POST_SMOKE_WHO_PARTICIPANTS")
+        .env("POST_SMOKE_WHO_PARTICIPANTS", SMOKE_WHO_PARTICIPANTS)
         .stdin(Stdio::null());
     if let Some(seconds) = who_seconds {
         command.env("POST_SMOKE_WHO_SECONDS", seconds);
@@ -796,6 +810,7 @@ exit 0
         .env("TMPDIR", format!("{}/", tmp.display()))
         .env("PORCH_PYTHON", &fake_porch)
         .env("POST_SMOKE_WHO_SECONDS", "10")
+        .env("POST_SMOKE_WHO_PARTICIPANTS", SMOKE_WHO_PARTICIPANTS)
         .env_remove("BASH_ENV")
         .env_remove("POST_SMOKE_ALLOW_SKIP")
         .stdin(Stdio::null())

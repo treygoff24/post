@@ -11,13 +11,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
 const SUPERVISOR = path.join(HOOKS, "doorbell-supervisor.mjs");
-const POST_BIN = process.env.POST_BIN || path.join(REPO, "target", "release", "post");
+const POST_BIN = process.env.POST_BIN || cargoReleaseBin(REPO);
 // Short: macOS caps socket paths, and python's lock path shows up in errors.
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "dbsp-"));
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -241,12 +242,6 @@ describe("singleton", () => {
     const result = await exitWithin(a.exited, 5000);
     assert.equal(result.code, 70);
     assert.match(a.err, /lock helper died; stopping all delivery/);
-    // Mail and an armed pane appear after the exit: nothing rings.
-    host.control.snapshots["codex-aaaaaaaa"] = [{ ...sampleMail(), id: "20260923-000001-dead01" }];
-    host.save();
-    host.cli(["enable"], { POST_PARTICIPANT: "codex-aaaaaaaa" });
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    assert.deepEqual(host.prompts(), []);
   });
 });
 

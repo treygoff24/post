@@ -3,7 +3,7 @@
 // (`post contract samples --dir`), plus additive, optional-field, and
 // malformed variants of them. Run: node --test skills/post/hooks/*.test.mjs
 //
-// POST_BIN selects the producer (default <repo>/target/release/post). A failed
+// POST_BIN selects the producer (default: the cargo release binary). A failed
 // sample emit FAILS every test here; it never skips.
 //
 // Surfaces covered: `version --json`, `participant bind --json`,
@@ -25,13 +25,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { parseSnapshot as coreParseSnapshot } from "./mail-hook-core.mjs";
 import { parseSnapshot as supervisorParseSnapshot } from "./doorbell-supervisor.mjs";
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
-const POST_BIN = process.env.POST_BIN || path.join(REPO, "target", "release", "post");
+const POST_BIN = process.env.POST_BIN || cargoReleaseBin(REPO);
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-contract-test-"));
 const CWD = path.join(ROOT, "project");
 fs.mkdirSync(CWD, { recursive: true });
@@ -264,17 +265,27 @@ function runNode(script, args, { input = "", env }) {
 }
 
 function stubEnv(run) {
-  return { CONTRACT_CONTROL: run.control, CONTRACT_CALLS: run.calls, POST_PARTICIPANT: undefined };
+  // Ambient session state must not change what an adapter does with a sample.
+  return {
+    CONTRACT_CONTROL: run.control,
+    CONTRACT_CALLS: run.calls,
+    POST_PARTICIPANT: undefined,
+    DELEGATE_RUN_ID: undefined,
+    GROK_HOOK_EVENT: undefined,
+  };
 }
 
 // ---------------------------------------------------------- mail adapters
 
+// `event` is the hookEventName the adapter emits for `start`, `waiting` its
+// wording for waiting mail, and `nativeContext` whether it also carries the
+// context in Cursor's top-level additional_context.
 const MAIL_ADAPTERS = [
-  { name: "claude", script: "claude-mail.mjs", prefix: "POST_CLAUDE_HOOK", start: { hook_event_name: "SessionStart" }, bindingLine: false },
-  { name: "codex", script: "codex-mail.mjs", prefix: "POST_CODEX_HOOK", start: { hook_event_name: "SessionStart" }, bindingLine: false },
-  { name: "cursor", script: "cursor-mail.mjs", prefix: "POST_CURSOR_HOOK", start: { hook_event_name: "sessionStart" }, bindingLine: true },
+  { name: "claude", script: "claude-mail.mjs", prefix: "POST_CLAUDE_HOOK", start: { hook_event_name: "SessionStart" }, event: "SessionStart", waiting: "Unread agent mail", nativeContext: false, bindingLine: false },
+  { name: "codex", script: "codex-mail.mjs", prefix: "POST_CODEX_HOOK", start: { hook_event_name: "SessionStart" }, event: "SessionStart", waiting: "New mail", nativeContext: false, bindingLine: false },
+  { name: "cursor", script: "cursor-mail.mjs", prefix: "POST_CURSOR_HOOK", start: { hook_event_name: "sessionStart" }, event: "sessionStart", waiting: "Unread agent mail", nativeContext: true, bindingLine: true },
   // Grok's first prompt is its session start: version, bind, snapshot, show.
-  { name: "grok", script: "grok-mail.mjs", prefix: "POST_GROK_HOOK", start: { hook_event_name: "UserPromptSubmit" }, bindingLine: true },
+  { name: "grok", script: "grok-mail.mjs", prefix: "POST_GROK_HOOK", start: { hook_event_name: "UserPromptSubmit" }, event: "UserPromptSubmit", waiting: "Unread agent mail", nativeContext: false, bindingLine: true },
 ];
 const UNKNOWN = /inbox state is UNKNOWN \(not empty\)/;
 
@@ -331,7 +342,12 @@ for (const adapter of MAIL_ADAPTERS) {
   describe(`${adapter.name} mail adapter`, { concurrency: true }, () => {
     test("exact samples render routes, ids, counts, and the sample identity", async () => {
       const { ev, show, bind, watch } = samples();
-      const { context, watchCalls } = await runMail(adapter);
+      const { out, context, watchCalls } = await runMail(adapter);
+      // The native envelope: its event name, where the context sits, and the
+      // adapter's own wording (Codex says "New mail"; the others "Unread agent mail").
+      assert.equal(out.hookSpecificOutput.hookEventName, adapter.event);
+      assert.equal(out.additional_context, adapter.nativeContext ? context : undefined);
+      assert.match(context, new RegExp(`\\[post\\] ${adapter.waiting} is waiting for lineage `));
       const unread = watch.filter((e) => e.event === "mail" && e.pending !== true).map((e) => e.id);
       const pending = watch.filter((e) => e.event === "mail" && e.pending === true).map((e) => e.id);
       const tax = watch.filter((e) => e.event === "channel_message" && e.channel === "tax").length;
@@ -615,6 +631,19 @@ describe("watch-notice", { concurrency: true }, () => {
     assert.equal(alone.stdout, "", "an unbound snapshot alone renders nothing");
     assert.equal(beside.status, 0, beside.stderr);
     assert.equal(beside.stdout, baseline.stdout);
+  });
+
+  test("an event that merely carries bound:false is still validated as an event", async () => {
+    const { ev } = samples();
+    // Valid, so it renders like the sample without the flag; malformed, so it fails closed.
+    const [valid, forged, baseline] = await Promise.all([
+      runNotice(jsonl([{ ...clone(ev.workspaceMail), bound: false }])),
+      runNotice(jsonl([{ ...clone(ev.workspaceMail), id: "forged", bound: false }])),
+      runNotice(jsonl([ev.workspaceMail])),
+    ]);
+    assert.equal(valid.stdout, baseline.stdout);
+    assert.ok(valid.stdout.includes(ev.workspaceMail.id), valid.stdout);
+    assert.match(forged.stdout, UNKNOWN);
   });
 
   test("any malformed snapshot event makes the batch UNKNOWN", async () => {

@@ -771,23 +771,34 @@ test("explicit POST_PARTICIPANT wins over payload bootstrap", () => {
 });
 
 test("bind failure emits one setup diagnostic and leaves state retryable", () => {
-  const stateDir = freshStateDir();
-  setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
-  const failed = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
-  assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
-  // The failure is recorded (so it prints once per session), but the session
-  // holds no participant: the next turn tries setup again.
-  const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
-  assert.equal(recorded.participantId, null);
-  assert.equal(recorded.setupWarned, true);
-  const repeat = run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: "bind-failure" }, { stateDir });
-  assert.deepEqual(repeat, {}, "the same failure is not reported again");
-  setStub({ events: [] });
-  const recovered = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
-  assert.deepEqual(recovered, {});
-  const cleared = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
-  assert.ok(cleared.participantId);
-  assert.equal(cleared.setupWarned, false);
+  // Each bind answer that is not a bound participant: not JSON, unbound, and
+  // "bound" with no id.
+  for (const [index, bind_stdout] of [
+    "not-json",
+    JSON.stringify({ ok: false, status: "unbound" }),
+    JSON.stringify({ ok: true, status: "bound", id: "" }),
+  ].entries()) {
+    const stateDir = freshStateDir();
+    const sessionId = `bind-failure-${index}`;
+    const stateFile = path.join(stateDir, `session-${sessionId}.json`);
+    setStub({ events: [MAIL_A], bind_stdout });
+    const failed = run({ ...BASE, hook_event_name: "SessionStart", session_id: sessionId }, { stateDir });
+    assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/, `row ${index}`);
+    // The failure is recorded (so it prints once per session), but the session
+    // holds no participant: the next turn tries setup again.
+    const recorded = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    assert.equal(recorded.participantId, null, `row ${index}`);
+    assert.equal(recorded.setupWarned, true, `row ${index}`);
+    assert.equal(allStubCalls().at(-1).args[0], "participant", `row ${index}: no scan after a failed bind`);
+    const repeat = run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: sessionId }, { stateDir });
+    assert.deepEqual(repeat, {}, `row ${index}: the same failure is not reported again`);
+    setStub({ events: [] });
+    const recovered = run({ ...BASE, hook_event_name: "SessionStart", session_id: sessionId }, { stateDir });
+    assert.deepEqual(recovered, {}, `row ${index}`);
+    const cleared = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    assert.ok(cleared.participantId, `row ${index}`);
+    assert.equal(cleared.setupWarned, false, `row ${index}`);
+  }
 });
 
 test("lineage names are shell-quoted in the voice command", () => {

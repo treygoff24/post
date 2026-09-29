@@ -466,7 +466,6 @@ Inbound actions:
 - `receipt`: receipt creation or status change.
 - `held`: blocked route.
 - `forensic`, `quarantined`, `quarantined_path`: rejected input and evidence.
-- `undeliverable`: mail targets a room that is not real locally; includes age.
 
 Outbound actions:
 
@@ -485,7 +484,7 @@ Outbound actions:
 
 `bridge/health.json` contains `ts`, `ok`, `reason`, `first_tick_at`,
 `last_fetch_ok`, `last_push_ok`, `stalled_since`, `busy_streak`, `held`,
-`quarantined`, `undeliverable`, `outbound_unrelayable`, and `attention`. `ok`
+`quarantined`, `outbound_unrelayable`, and `attention`. `ok`
 is liveness (the bridge is running, fetching and pushing); `attention` is the
 separate list of things that are stuck: items `{kind, id, summary, fix}`,
 where `fix` is an exact command or a one-sentence instruction. Kinds:
@@ -501,8 +500,8 @@ this host refused; it clears when the sender's bounce retires it),
 on the first tick after its cause is gone, and it is empty when nothing needs
 anyone. Five consecutive
 busy ticks are unhealthy; earlier busy ticks preserve any standing unhealthy
-reason. A stale fetch, fence, divergence, push failure with queued work, or
-undeliverable item is unhealthy. Queued work includes outbound mail, receipts
+reason. A stale fetch, fence, divergence, or push failure with queued work is
+unhealthy. Queued work includes outbound mail, receipts
 not yet on the remote **of any status — `held` included** (the sender cannot
 see a hold until its receipt lands), dirty relay state, and local-ahead
 commits. Held mail itself is reported by count only.

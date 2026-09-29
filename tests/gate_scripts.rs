@@ -52,6 +52,10 @@ fn real_python() -> PathBuf {
 fn shim_dir(root: &Path, on_test: &str) -> PathBuf {
     let dir = root.join("shims");
     fs::create_dir_all(&dir).expect("shim dir");
+    let fake_post = root.join("post");
+    executable(&fake_post, "#!/bin/sh\nexit 0\n");
+    // `cargo build` reports the binary the way the real one does: a
+    // compiler-artifact message, which the gate takes its POST_BIN from.
     executable(
         &dir.join("cargo"),
         &format!(
@@ -59,24 +63,24 @@ fn shim_dir(root: &Path, on_test: &str) -> PathBuf {
 case "$1" in
   --version) echo "cargo 0.0.0 (shim)";;
   test) {on_test};;
+  build) echo '{{"reason":"compiler-artifact","target":{{"name":"post","kind":["bin"]}},"executable":"{post}"}}';;
   *) exit 0;;
 esac
-"#
+"#,
+            post = fake_post.display()
         ),
     );
-    let fake_post = root.join("post");
-    executable(&fake_post, "#!/bin/sh\nexit 0\n");
     executable(
         &dir.join("node"),
         &format!(
             r#"#!/bin/sh
 case "$1" in
-  scripts/cargo-release-bin.mjs) echo "{}";;
+  -e) exec "{}" "$@";;
   --version) echo v0.0.0;;
   *) exit 0;;
 esac
 "#,
-            fake_post.display()
+            real_tool("node").display()
         ),
     );
     executable(
@@ -107,7 +111,12 @@ exec "{}" "$@"
 }
 
 fn run_gate(shims: &Path, timeout_seconds: Option<&str>) -> (Output, Duration) {
-    let mut command = Command::new("bash");
+    // The real bash by absolute path. `Command::new("bash")` would search the
+    // child's PATH, find the stand-in `bash` shim this test just wrote, and exec
+    // that file directly: with several tests forking in parallel, a forked child
+    // can still hold the shim's write descriptor, and the exec then fails with
+    // ETXTBSY ("Text file busy"). The gate reaches the shims itself, later.
+    let mut command = Command::new(real_tool("bash"));
     command
         .arg(repo().join("scripts/gate.sh"))
         .env("PATH", format!("{}:/usr/bin:/bin", shims.display()))

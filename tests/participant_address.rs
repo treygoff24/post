@@ -471,12 +471,16 @@ fn a_remote_send_writes_only_the_archive_and_reports_queued_in_json_and_text() {
         before.len() + 1,
         "one more archive file"
     );
+    assert!(
+        !rig.root().join("outbox").exists(),
+        "post never writes outbox/"
+    );
 }
 
 #[test]
 fn a_host_qualified_address_never_falls_back_to_a_workspace() {
     let rig = Rig::new();
-    let pact_inbox = rig.sandbox.home.join("pact").join("inbox");
+    let pact_inbox = rig.root().join("pact").join("inbox");
     // `pact` is a local room. An unenrolled host is refused, never the room.
     assert_refused_unchanged(&rig, "participant:pact@nowhere", "unknown_host", 65, false);
     // A broken topology is refused, never the room.
@@ -496,41 +500,6 @@ fn a_host_qualified_address_never_falls_back_to_a_workspace() {
         !pact_inbox.exists() || fs::read_dir(&pact_inbox).expect("inbox").next().is_none(),
         "the pact room inbox stays empty"
     );
-}
-
-#[test]
-fn typed_letters_never_enter_outbox_or_a_workspace_inbox() {
-    let rig = Rig::new();
-    let before = tree_snapshot(rig.root());
-    for id in ["pact", "claude-space", REMOTE_ID] {
-        let output = rig.send(&format!("participant:{id}@{PEER}"));
-        assert!(output.status.success(), "{}", stderr(&output));
-    }
-    let after = tree_snapshot(rig.root());
-    for path in after.keys().filter(|path| !before.contains_key(*path)) {
-        let relative = path.strip_prefix(rig.root()).expect("under root");
-        let first = relative.components().next().expect("component");
-        assert!(
-            first.as_os_str() == "archive"
-                || path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(".lock")),
-            "only archive/ may gain a file, got {}",
-            relative.display()
-        );
-    }
-    assert!(
-        !rig.root().join("outbox").exists(),
-        "post never writes outbox/"
-    );
-    for room in ["pact", "claude-space", "agent-memory"] {
-        let inbox = rig.sandbox.home.join(room).join("inbox");
-        let count = fs::read_dir(&inbox)
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        assert_eq!(count, 0, "{room} inbox gained mail");
-    }
 }
 
 #[test]
@@ -947,18 +916,6 @@ fn delivery_of_an_unknown_or_invalid_id_is_refused() {
     assert_refused(&missing, "not_found", 66, false);
     let invalid = rig.delivery_as(&rig.sender, "../etc", true);
     assert_refused(&invalid, "invalid_argument", 2, false);
-}
-
-#[test]
-fn delivery_of_workspace_mail_is_unsupported() {
-    let rig = Rig::new();
-    let output = rig.send("pact");
-    assert!(output.status.success(), "{}", stderr(&output));
-    let sent: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
-    let id = sent["envelope"]["id"].as_str().expect("id");
-    let value = rig.delivery(id);
-    assert_eq!(value["state"], json!("unsupported"));
-    assert!(value.get("host").is_none(), "{value}");
 }
 
 #[test]

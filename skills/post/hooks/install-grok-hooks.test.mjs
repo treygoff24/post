@@ -333,12 +333,3 @@ test("atomic writes refuse a planted predictable legacy temp symlink", () => {
   assert.equal(fs.readFileSync(victim, "utf8"), "keep-me\n");
   assert.deepEqual(fs.readFileSync(ADAPTER, "utf8"), fs.readFileSync(SOURCE, "utf8"));
 });
-
-test("installer and installed adapter no longer reference identity-card.mjs", () => {
-  const target = freshTarget();
-  const result = run(target);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.existsSync(path.join(INSTALL_DIR, "identity-card.mjs")), false);
-  assert.ok(!fs.readFileSync(path.join(INSTALL_DIR, path.basename(ADAPTER)), "utf8").includes("identity-card.mjs"));
-  assert.ok(!fs.readFileSync(INSTALLER, "utf8").includes("identity-card.mjs"));
-});

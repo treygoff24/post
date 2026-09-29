@@ -3,7 +3,7 @@
 // events and errors the tests fire. Snapshot events are the samples the real
 // post binary emits (`post contract samples`), so the supervisor is tested
 // against production event shapes. POST_BIN selects the producer (default
-// <repo>/target/release/post); a failed sample emit FAILS, it never skips.
+// the cargo release binary); a failed sample emit FAILS, it never skips.
 //
 // Process-level tests (the singleton, the agent commands, an end-to-end ring
 // through real child processes) live in doorbell-supervisor-process.test.mjs.
@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 import { spawnSync } from "node:child_process";
 
 import {
@@ -40,7 +41,7 @@ import {
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
-const POST_BIN = process.env.POST_BIN || path.join(REPO, "target", "release", "post");
+const POST_BIN = process.env.POST_BIN || cargoReleaseBin(REPO);
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "doorbell-supervisor-test-"));
 
 test.after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -363,7 +364,6 @@ describe("selection after parsing (E5)", () => {
     assert.ok(kept.some((e) => e.event === "unreadable" && e.reason === "mail"));
     assert.ok(!kept.some((e) => e.event === "channel_message" && e.reason === "channel"));
     const args = snapshotArgs();
-    assert.deepEqual(args.slice(0, 5), ["watch", "--snapshot", "--json", "--limit", "0"]);
     assert.deepEqual(args, ["watch", "--snapshot", "--json", "--limit", "0"]);
   });
 });
@@ -991,6 +991,45 @@ describe("Claude turn marks (post-bt2)", () => {
     w.panes[0].status = "idle";
     await w.run();
     assert.equal(w.prompts.length, 1);
+  });
+
+  // The two sides above each spell the mark path themselves (the hook's test
+  // reads what the hook wrote; writeMark hand-writes what the supervisor
+  // expects), so a one-sided rename of the file name or digest keeps both
+  // green. This test owns their agreement: the real hook process writes, the
+  // real supervisor scan reads, and neither path is computed here.
+  test("the marks the real Claude hook writes are the marks the supervisor reads", async () => {
+    const w = claudeWorld();
+    assert.ok(fs.existsSync(w.paths.doorbell), "the hook writes marks only under an existing doorbell directory");
+    const hook = (event, extra = {}) => {
+      const result = spawnSync(process.execPath, [path.join(HOOKS, "claude-mail.mjs")], {
+        input: JSON.stringify({ hook_event_name: event, session_id: "session-c", cwd: w.dir, ...extra }),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          POST_MAIL_ROOT: w.paths.root,
+          POST_CLAUDE_HOOK_BIN: path.join(w.dir, "no-such-post"),
+          POST_CLAUDE_HOOK_STATE_DIR: path.join(w.dir, "hook-state"),
+          DELEGATE_RUN_ID: "",
+          POST_PARTICIPANT: "",
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+    };
+
+    // Herdr says working; the hook's Stop with background work says idle.
+    hook("Stop", { background_tasks: [{ type: "subagent" }] });
+    await w.run();
+    assert.deepEqual(w.prompts.map((p) => p.pane), ["wC:p1"]);
+    assert.equal(w.outcomes("accepted").length, 1);
+
+    // The next turn's UserPromptSubmit replaces the mark: new mail must not ring
+    // the pane that is working again (a stale idle mark would ring it).
+    hook("UserPromptSubmit");
+    w.snapshots.set("claude-aaaaaaaa", [mailWith("20260923-000001-ccccc1"), mailWith("20260923-000001-ccccc2")]);
+    w.mailArrives();
+    await w.run();
+    assert.equal(w.prompts.length, 1, "the busy mark the hook wrote is the one the supervisor read");
   });
 
   test("mail for a pane that may not ring logs one deferred line per reason", async () => {

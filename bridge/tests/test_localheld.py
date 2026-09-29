@@ -198,7 +198,7 @@ class LocalHeldTest(unittest.TestCase):
                 )
                 self.assertEqual(localheld.parse_record(data, mail_id) is not None, valid)
 
-    def test_publishing_a_record_creates_the_index_first(self):
+    def test_publish_record_creates_an_empty_index_without_appending(self):
         temporary = CanonicalTemporaryDirectory(prefix="post-bridge-held-unit-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -208,8 +208,9 @@ class LocalHeldTest(unittest.TestCase):
             root, mail_id, "0" * 64, "atlasos", "observed", ["atlasos/inbox/x.mail"]
         )
         self.assertTrue((root / "bridge" / "local-held" / (mail_id + ".json")).exists())
-        # Created before the record and still empty: a crash before the
-        # append leaves a present index, which the next tick repairs.
+        # Present and still empty: the append is the caller's, so a crash
+        # before it leaves a present index, which the next tick repairs. The
+        # order (index before record) is bound by the order-failure test.
         self.assertEqual((root / "bridge" / "local-held-index.txt").read_bytes(), b"")
 
     @unittest.skipIf(os.geteuid() == 0, "root creates files in a 0500 directory")
@@ -603,26 +604,6 @@ class LocalHeldTest(unittest.TestCase):
         self.assertTrue(self.exported(control), "route to mac never reopened")
         for mail_id in (seeded, observed):
             self.assertFalse(self.exported(mail_id), mail_id)
-
-    def test_seed_without_the_lost_record_keeps_the_fault(self):
-        # Round 2, finding 2: a re-seed must not clear the fault by
-        # rebuilding an index that no longer names the lost hold.
-        lost, kept, manifest, control = self.partial_wipe_without_backup()
-        result = self.seed(self.trey, manifest)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        summary = json.loads(result.stdout.splitlines()[-1])
-        self.assertEqual(
-            (summary["error"], summary["floor"], summary["surviving"],
-             summary["already_held"], summary["index_rebuilt"]),
-            ("lost_records", 2, 1, 1, None),
-        )
-        self.assertFalse((self.trey.root / "bridge" / "local-held-index.txt").exists())
-        self.assertIsNone(self.record(lost))
-        for _ in range(2):
-            self.sweep(self.trey, expect=1)
-            self.assert_store_fault("index_missing")
-            for mail_id in (lost, kept, control):
-                self.assertFalse(self.exported(mail_id), mail_id)
 
     def test_an_empty_index_put_back_does_not_clear_the_fault(self):
         lost, kept, _, control = self.partial_wipe_without_backup()
@@ -1502,13 +1483,19 @@ class LocalHeldTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         summary = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(
-            (summary["error"], summary["floor"], summary["surviving"], summary["index_rebuilt"]),
-            ("lost_records", 2, 1, None),
+            (summary["error"], summary["floor"], summary["surviving"],
+             summary["already_held"], summary["index_rebuilt"]),
+            ("lost_records", 2, 1, 1, None),
         )
-        self.sweep(self.trey, expect=1)
-        self.assert_store_fault("index_missing")
-        for mail_id in (lost, control):
-            self.assertFalse(self.exported(mail_id), mail_id)
+        # Round 2, finding 2: a re-seed must not clear the fault by rebuilding
+        # an index that no longer names the lost hold.
+        self.assertFalse((self.trey.root / "bridge" / "local-held-index.txt").exists())
+        self.assertIsNone(self.record(lost))
+        for _ in range(2):
+            self.sweep(self.trey, expect=1)
+            self.assert_store_fault("index_missing")
+            for mail_id in (lost, control):
+                self.assertFalse(self.exported(mail_id), mail_id)
 
     def test_a_truncated_record_does_not_count_toward_the_floor(self):
         # Review 4, finding 1: a record file with a real id whose bytes do

@@ -10,6 +10,7 @@ if grep -nE '^[[:space:]]*/[^[:space:]]*/cp[[:space:]]' scripts/smoke-installed.
     printf '%s\n' 'acceptance: smoke helper must resolve cp from PATH' >&2
     exit 1
 fi
-cargo build --release
-bash scripts/smoke-installed.sh target/release/post
+. scripts/build-release-bin.sh
+build_release_bin || { echo 'acceptance: release build failed or reported no executable' >&2; exit 1; }
+bash scripts/smoke-installed.sh "$POST_BIN"
 bash scripts/gate.sh

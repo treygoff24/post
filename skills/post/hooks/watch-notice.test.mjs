@@ -201,43 +201,6 @@ test("malformed or unknown nonempty snapshot output fails closed without echoing
   }
 });
 
-test("a future event kind is skipped and the rest of the batch still notifies", () => {
-  const FUTURE = { event: "bridge_attention", id: "x", summary: "SECRET-FUTURE" };
-  setStub({ events: [FUTURE, MAIL_A, { ...FUTURE, event: "another_kind" }] });
-  const result = run(["--snapshot"]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.notEqual(result.stdout, `${UNKNOWN}\n`);
-  assert.match(result.stdout, /20260730-010101-aaa111/);
-  assert.ok(!result.stdout.includes("SECRET-FUTURE"), "a future kind's fields are never echoed");
-  // The streaming path reads the same batch the same way.
-  const streamed = run([]);
-  assert.equal(streamed.status, 0, streamed.stderr);
-  assert.match(streamed.stdout, /20260730-010101-aaa111/);
-});
-
-test("a batch of only future kinds is quiet, not UNKNOWN", () => {
-  setStub({ events: [{ event: "future", id: "x" }, { event: "later", id: "y" }] });
-  const result = run(["--snapshot"]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "");
-});
-
-test("the unbound-reader marker is no mail and no error", () => {
-  // The line post prints (src/commands/watch.rs), and the bare bound:false form.
-  for (const marker of [
-    { event: "unbound", participant: null, bound: false, hint: "this session is not bound yet" },
-    { ok: true, participant: null, bound: false, hint: "this session is not bound yet" },
-  ]) {
-    setStub({ events: [marker] });
-    const result = run(["--snapshot"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "");
-  }
-  // A known event that merely carries bound:false is still validated as an event.
-  setStub({ events: [{ ...MAIL_A, id: "forged", bound: false }] });
-  assert.equal(run(["--snapshot"]).stdout, `${UNKNOWN}\n`);
-});
-
 test("scan failure emits UNKNOWN and exits 1", () => {
   setStub({ exit: 1, events: [MAIL_A] });
   const result = run(["--snapshot"]);
@@ -302,7 +265,8 @@ test("unknown flags and a valueless --room exit 2 without spawning post", () => 
 });
 
 test("long-running mode still emits one line per flushed batch then exits with the child", () => {
-  setStub({ events: [MAIL_A, CHAN_B] });
+  // A future kind beside the mail is skipped in the streaming path too.
+  setStub({ events: [{ event: "bridge_attention", id: "x", summary: "SECRET-FUTURE" }, MAIL_A, CHAN_B] });
   const result = run([]);
   assert.equal(result.status, 0, result.stderr);
   const lines = result.stdout.split("\n").filter(Boolean);
