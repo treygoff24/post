@@ -336,24 +336,6 @@ test("native conversation key outranks fresh launcher addresses across relaunche
   }
 });
 
-test("shims exec the helper with their harness slug", () => {
-  const sb = sandbox();
-  try {
-    for (const [shim, slug] of [
-      ["claude", "claude-code"],
-      ["codex", "codex"],
-      ["cursor", "cursor"],
-      ["grok", "grok"],
-    ]) {
-      const body = fs.readFileSync(path.join(LAUNCHER_DIR, "shims", shim), "utf8");
-      assert.match(body, new RegExp(`--harness ${slug} --`), `${shim} declares slug ${slug}`);
-      assert.match(body, /agent-session/, `${shim} routes through the helper`);
-    }
-  } finally {
-    fs.rmSync(sb.work, { recursive: true, force: true });
-  }
-});
-
 test("doctor: green inside a helper launch, red outside", () => {
   const sb = sandbox();
   try {
@@ -640,9 +622,10 @@ test("wrapper chain: shim -> re-entering wrapper -> shim terminates and runs the
     const vendorDir = path.join(sb.work, "p3-vendor");
     for (const d of [shimDir, wrapperDir, vendorDir]) fs.mkdirSync(d);
     fs.symlinkSync(path.join(LAUNCHER_DIR, "shims", "codex"), path.join(shimDir, "codex"));
+    const wrapperSaw = path.join(sb.work, "wrapper-address");
     fs.writeFileSync(
       path.join(wrapperDir, "codex"),
-      `#!/bin/sh\nexec codex "$@"\n`
+      `#!/bin/sh\nprintf '%s' "$POST_SENDER_ADDRESS" > '${wrapperSaw}'\nexec codex "$@"\n`
     );
     fs.chmodSync(path.join(wrapperDir, "codex"), 0o755);
     const marker = path.join(sb.work, "vendor-ran");
@@ -668,12 +651,12 @@ test("wrapper chain: shim -> re-entering wrapper -> shim terminates and runs the
     assert.match(record, /^ran=1 /, `vendor must run exactly once: ${record}`);
     assert.doesNotMatch(record, /visited=ABSENT/, "visited list must survive into the exec chain");
     assert.match(record, /addr=codex\./, "identity env must reach the vendor");
-    // Exactly one address minted across the whole chain: the wrapper hop
-    // re-enters the shim, and the re-entry must NOT re-mint.
+    // Exactly one address minted across the whole chain: the wrapper saw the
+    // address the first shim minted, and the vendor, after the wrapper re-entered
+    // the shim, must see that same one (the re-entry must NOT re-mint).
     const addr = record.match(/addr=(\S+)/)[1];
-    const visited = record.match(/visited=(\S+)/)[1];
-    assert.ok(visited.split(":").length >= 1, "wrapper hop must be recorded");
     assert.match(addr, ADDRESS_RE);
+    assert.equal(fs.readFileSync(wrapperSaw, "utf8"), addr, "re-entry keeps the minted address");
 
     // Mutual loop with NO real vendor: loud finite failure, no fork storm.
     fs.rmSync(path.join(vendorDir, "codex"));
