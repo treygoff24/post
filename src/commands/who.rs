@@ -4,7 +4,9 @@ use crate::cursor_state::eligibility::MailCounts;
 use crate::cursor_state::ParticipantCursors;
 use crate::error::AppResult;
 use crate::mailbox::Context;
-use crate::output::{self, WhoActingParticipant, WhoOutput, WhoParticipant, WhoRoom};
+use crate::output::{
+    self, WhoActingParticipant, WhoBridgeHealth, WhoOutput, WhoParticipant, WhoRoom,
+};
 use crate::participant::Resolved;
 use crate::presence;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,7 +50,14 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     // The count of stuck or refused letters and collisions the bridge lists in
     // its health file: who is where agents look first, and the bridge's own
     // `ok` only says it is running.
-    let bridge_attention = super::doctor::bridge_attention_items(context).len();
+    let bridge = super::doctor::bridge_attention(context);
+    let bridge_attention = bridge.items.len();
+    // A bridged host whose health file cannot be read has no attention count
+    // to show, and a missing count must not read as "nothing stuck".
+    let bridge_health = bridge.unreadable.as_deref().map(|reason| WhoBridgeHealth {
+        reason: super::doctor::bridge_health_message(reason),
+        fix: super::doctor::BRIDGE_HEALTH_FIX.to_owned(),
+    });
     let mut legacy_rooms = Vec::new();
     for room in &selected {
         let presence = presence::read_presence(context, room)?;
@@ -225,6 +234,12 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 "bridge_attention: {bridge_attention} (run `post doctor` for each item and its fix)\n"
             ));
         }
+        if let Some(health) = &bridge_health {
+            rendered.push_str(&format!(
+                "bridge_health: {} Fix: {}\n",
+                health.reason, health.fix
+            ));
+        }
         return Ok(CommandResult::success(rendered));
     }
     let count = participants.len();
@@ -241,6 +256,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             count,
             activity_note,
             bridge_attention,
+            bridge_health,
             doorbell: (doorbell.state != "absent").then(|| doorbell.state.to_owned()),
         },
         pretty,

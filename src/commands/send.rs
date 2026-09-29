@@ -19,6 +19,9 @@ const MAX_SUBJECT_BYTES: usize = 1024;
 /// with the read; the empty-body check stays after target resolution.
 pub(super) fn read_send_body(args: &mut SendArgs) -> AppResult<String> {
     let fix_prefix = send_fix_prefix(args);
+    if let Some(text) = args.text.as_deref() {
+        refuse_path_like_positional(text, &fix_prefix)?;
+    }
     let inline = args.take_inline_body();
     // Quiet: the watch-NDJSON note travels in the receipt on stdout (see
     // `body_warnings`), not on stderr where 36% of callers discard it.
@@ -285,15 +288,24 @@ where
     // lineage is delivered to the sender's own participant inbox instead. Any
     // other target is untouched: the flag widens nothing.
     let mut notes = Vec::new();
+    let mut retargeted = None;
     if args.allow_self {
         if let Some(own) = own_participant_address(&actor, &target) {
-            notes.push(format!(
+            let note = format!(
                 "--allow-self: {}:{} would skip you as its own sender, so this went to your participant inbox ({}:{})",
                 target.kind.as_str(),
                 target.name,
                 own.kind.as_str(),
                 own.name
-            ));
+            );
+            // The JSON receipt says why the recipient is not the one asked
+            // for, the same as the text one does.
+            retargeted = Some(output::SendRetarget {
+                from: format!("{}:{}", target.kind.as_str(), target.name),
+                to: format!("{}:{}", own.kind.as_str(), own.name),
+                note: note.clone(),
+            });
+            notes.push(note);
             target = own;
         }
     }
@@ -435,6 +447,7 @@ where
                 envelope,
                 archived: true,
                 delivery: None,
+                retargeted,
                 warnings,
             },
             pretty,
@@ -685,6 +698,7 @@ where
                     state: "queued".to_owned(),
                     host,
                 }),
+                retargeted: None,
                 warnings,
             },
             pretty,
@@ -818,6 +832,56 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
         prefix.push_str(" --allow-self");
     }
     prefix
+}
+
+/// True for a value that reads as a file path, not prose: one token with no
+/// whitespace that has a `/` in it or ends in a file extension (`.md`, `.txt`,
+/// `.json`: one to five letters or digits, at least one a letter, after a
+/// non-empty stem). A URL is text, not a path.
+fn looks_like_a_path(value: &str) -> bool {
+    if value.is_empty() || value.chars().any(char::is_whitespace) || value.contains("://") {
+        return false;
+    }
+    if value.contains('/') {
+        return true;
+    }
+    match value.rsplit_once('.') {
+        Some((stem, extension)) => {
+            !stem.is_empty()
+                && (1..=5).contains(&extension.len())
+                && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && extension.bytes().any(|byte| byte.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
+/// `post send`'s bare argument used to name a file; it is the message body
+/// now. A caller still using the old spelling with a file that is missing, or
+/// relative to another directory, would otherwise send the path itself as the
+/// message and get a receipt that looks right. A path-shaped value is refused
+/// whether or not the file exists; real prose (anything with a space) and a
+/// URL still send, and `--body` (or stdin) carries a literal path on purpose.
+fn refuse_path_like_positional(value: &str, fix_prefix: &str) -> AppResult<()> {
+    if !looks_like_a_path(value) {
+        return Ok(());
+    }
+    let fix = format!(
+        "{fix_prefix} --body-file {}",
+        crate::mailbox::shell_quote(value)
+    );
+    Err(AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "the bare argument '{value}' looks like a file path, but post send's bare argument is the message text, not a file; nothing was sent"
+        ),
+        format!(
+            "Run `{fix}` to send that file's contents (from the directory the path is relative to). To send the path itself as the message, pass it with --body or on stdin."
+        ),
+    )
+    .exact_fix(fix)
+    .input(value)
+    .reason("path-shaped bare argument; the file was not read"))
 }
 
 /// `read_body` for callers that report the body's surprises in their own

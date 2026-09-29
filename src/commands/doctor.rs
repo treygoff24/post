@@ -185,11 +185,19 @@ fn push_projection_error(checks: &mut Vec<DoctorCheck>, label: &str, path: &Path
 /// The one-line --brief summary. Healthy mailboxes name how many checks ran;
 /// anything else points back at the full report for the detail.
 fn brief_line(output: &DoctorOutput) -> String {
+    // A filtered report names what it hides, so "N findings" is never read as
+    // the list a reader would get from a plain `post doctor`.
+    let hidden = match (output.filtered_out, output.severity_filter.as_deref()) {
+        (Some(hidden), Some(threshold)) if hidden > 0 => {
+            format!(", {hidden} of them hidden by --severity {threshold}")
+        }
+        _ => String::new(),
+    };
     if output.count == 0 {
         format!("post doctor: ok ({} checks)\n", output.checks.len())
     } else {
         format!(
-            "post doctor: {} findings (run post doctor for detail)\n",
+            "post doctor: {} findings{hidden} (run post doctor for detail)\n",
             output.count
         )
     }
@@ -201,21 +209,13 @@ fn report(
     fixed: Vec<String>,
     threshold: Option<DoctorSeverityFilter>,
 ) -> DoctorOutput {
-    // The threshold trims the report itself, so `ok`, `status`, `count`, and
-    // the exit code all describe exactly what is shown (`severity_filter`
-    // names the threshold, so a filtered "healthy" is never read as a full one).
-    if let Some(threshold) = threshold {
-        checks.retain(|check| match threshold {
-            DoctorSeverityFilter::Warn => check.severity != DoctorSeverity::Info,
-            DoctorSeverityFilter::Error => check.severity == DoctorSeverity::Error,
-        });
-    }
     // Info checks (owner state etc.) are surface, not findings: they never
     // flip ok/status/count, so a healthy configured mailbox still exits 0.
-    let findings = checks
-        .iter()
-        .filter(|check| check.severity != DoctorSeverity::Info)
-        .count();
+    let is_finding = |check: &DoctorCheck| check.severity != DoctorSeverity::Info;
+    // `ok`, `status`, `count`, and the exit code describe every check, whatever
+    // the threshold hides: `--severity error` is a lens on the list, and an
+    // agent that gates on it must still be told about the warnings it hides.
+    let findings = checks.iter().filter(|check| is_finding(check)).count();
     let status = if findings == 0 {
         "healthy"
     } else if checks
@@ -226,6 +226,15 @@ fn report(
     } else {
         "degraded"
     };
+    if let Some(threshold) = threshold {
+        checks.retain(|check| match threshold {
+            DoctorSeverityFilter::Warn => check.severity != DoctorSeverity::Info,
+            DoctorSeverityFilter::Error => check.severity == DoctorSeverity::Error,
+        });
+    }
+    // Findings the threshold hid: `count` = the findings listed + this.
+    let filtered_out =
+        threshold.map(|_| findings - checks.iter().filter(|check| is_finding(check)).count());
     DoctorOutput {
         ok: findings == 0,
         status: status.to_owned(),
@@ -235,6 +244,7 @@ fn report(
         fixed,
         exit_codes: doctor_exit_codes(),
         severity_filter: threshold.map(|threshold| threshold.as_str().to_owned()),
+        filtered_out,
     }
 }
 
@@ -1389,28 +1399,69 @@ pub(super) struct BridgeAttention {
 /// How much of `bridge/health.json` doctor and `who` will read.
 const BRIDGE_HEALTH_MAX_BYTES: u64 = 1 << 20;
 
-/// The bridge's attention items, or none when there is no bridge, no health
-/// file, an unreadable or malformed one, or no `attention` key (an older
-/// bridge). Every failure to read is silence, never an error: a host without
-/// a bridge is healthy, and doctor already has other places to be loud.
-pub(super) fn bridge_attention_items(context: &Context) -> Vec<BridgeAttention> {
+/// What `bridge/health.json` says needs attention, and whether the file could
+/// be read at all.
+pub(super) struct BridgeAttentionReport {
+    pub items: Vec<BridgeAttention>,
+    /// Why the health file cannot be read. Set only on a bridged host (one
+    /// with a `bridge/config.json`): there a bridge that cannot report is not
+    /// the same as a bridge with nothing to report, and silence would hide
+    /// every stuck letter. An unbridged host has no health file to read and
+    /// is healthy.
+    pub unreadable: Option<String>,
+}
+
+/// The fix shown with an unreadable bridge health file, in doctor and `who`.
+pub(super) const BRIDGE_HEALTH_FIX: &str = "Check that the bridge is running (`post-bridge status` on this host); it rewrites bridge/health.json every tick. A bridge older than the attention list needs updating.";
+
+/// Why a bridged host's health file cannot be trusted, as one sentence for a
+/// doctor message or a `who` line.
+pub(super) fn bridge_health_message(reason: &str) -> String {
+    format!(
+        "this host has a bridge (bridge/config.json) but bridge/health.json {reason}, so stuck or refused letters would not show up here"
+    )
+}
+
+/// The bridge's attention items and whether its health file was readable.
+/// Nothing here is an error: doctor and `who` report what they find.
+pub(super) fn bridge_attention(context: &Context) -> BridgeAttentionReport {
+    // A config that exists but cannot be trusted still means a bridge was set
+    // up here; only a conclusively absent config is an unbridged host.
+    let bridged = !matches!(crate::bridge_topology::load_config(context), Ok(None));
+    match read_bridge_attention(context) {
+        Ok(items) => BridgeAttentionReport {
+            items,
+            unreadable: None,
+        },
+        Err(reason) => BridgeAttentionReport {
+            items: Vec::new(),
+            unreadable: bridged.then_some(reason),
+        },
+    }
+}
+
+fn read_bridge_attention(context: &Context) -> Result<Vec<BridgeAttention>, String> {
     let path = crate::bridge_topology::bridge_dir(context).join("health.json");
-    let Ok(Some(bytes)) = crate::bridge_topology::read_regular(&path, BRIDGE_HEALTH_MAX_BYTES)
-    else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return Vec::new();
-    };
-    let Some(items) = value.get("attention").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
+    let bytes = crate::bridge_topology::read_regular(&path, BRIDGE_HEALTH_MAX_BYTES)
+        .map_err(|error| format!("cannot be read ({error})"))?
+        .ok_or_else(|| "does not exist".to_owned())?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "is not valid JSON".to_owned())?;
+    let items = match value.get("attention") {
+        Some(serde_json::Value::Array(items)) => items,
+        Some(_) => return Err("has an attention entry that is not a list".to_owned()),
+        None => {
+            return Err(
+                "has no attention list (written by a bridge older than that format)".to_owned(),
+            )
+        }
     };
     let text = |item: &serde_json::Value, key: &str| {
         item.get(key)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
-    items
+    Ok(items
         .iter()
         .filter(|item| item.is_object())
         .map(|item| {
@@ -1422,7 +1473,7 @@ pub(super) fn bridge_attention_items(context: &Context) -> Vec<BridgeAttention> 
                 kind,
             }
         })
-        .collect()
+        .collect())
 }
 
 /// At most this many attention items become individual warnings; the rest are
@@ -1431,11 +1482,21 @@ pub(super) fn bridge_attention_items(context: &Context) -> Vec<BridgeAttention> 
 const ATTENTION_SHOWN: usize = 25;
 
 fn detect_bridge_attention(context: &Context, checks: &mut Vec<DoctorCheck>) {
-    let items = bridge_attention_items(context);
+    let BridgeAttentionReport { items, unreadable } = bridge_attention(context);
+    let path = crate::bridge_topology::bridge_dir(context).join("health.json");
+    if let Some(reason) = unreadable {
+        checks.push(check(
+            "bridge.health_unreadable",
+            DoctorSeverity::Warning,
+            &path,
+            &bridge_health_message(&reason),
+            false,
+            BRIDGE_HEALTH_FIX,
+        ));
+    }
     if items.is_empty() {
         return;
     }
-    let path = crate::bridge_topology::bridge_dir(context).join("health.json");
     let total = items.len();
     for item in items.into_iter().take(ATTENTION_SHOWN) {
         let id = match &item.id {

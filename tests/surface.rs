@@ -218,6 +218,55 @@ fn a_retry_fix_keeps_allow_self() {
     );
 }
 
+/// The text receipt says why the ping went to the sender's own inbox; the JSON
+/// receipt must say it too, or a consumer sees a recipient it did not ask for.
+#[test]
+fn an_allow_self_json_receipt_names_the_retarget_and_only_then() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let coordinator = alpha_participant(&sandbox, "coordinator", &alpha);
+
+    let mut argv = delegate_ping_argv("alpha", DELEGATE_MESSAGE);
+    argv.push("--json");
+    let sent = sandbox.run_as_participant(&argv, &coordinator, &alpha);
+    assert_success(&sent);
+    let receipt: Value = from_stdout(&sent);
+    let retargeted = &receipt["retargeted"];
+    assert_eq!(retargeted["from"], "workspace:alpha", "receipt: {receipt}");
+    assert_eq!(
+        retargeted["to"],
+        format!("participant:{coordinator}"),
+        "receipt: {receipt}"
+    );
+    assert!(
+        retargeted["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("--allow-self") && note.contains("participant inbox")),
+        "receipt: {receipt}"
+    );
+    // Nothing else about the receipt changed: the parsed type still reads it.
+    let typed: SendOutput = serde_json::from_value(receipt).expect("a send receipt");
+    assert!(typed.retargeted.is_some());
+
+    // A send that was not retargeted carries no such field, flag or not.
+    let plain = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "beta",
+            "--allow-self",
+            "--body",
+            "hello",
+            "--json",
+        ],
+        &coordinator,
+        &alpha,
+    );
+    assert_success(&plain);
+    let plain: Value = from_stdout(&plain);
+    assert!(plain.get("retargeted").is_none(), "receipt: {plain}");
+}
+
 #[test]
 fn allow_self_stays_out_of_the_help_agents_read() {
     let sandbox = Sandbox::new();
@@ -455,6 +504,115 @@ fn a_bare_argument_that_names_a_file_gets_the_body_file_remedy() {
     assert_eq!(
         body_of(&sandbox, &reader, &beta, &sent.envelope.id),
         "from the file\n"
+    );
+}
+
+/// The old positional FILE, used with a file that is absent, or relative to a
+/// different directory than the one the agent is in, must not send the path as
+/// the message: the receipt would look right and the body would be wrong.
+#[test]
+fn a_path_shaped_bare_argument_is_refused_even_when_the_file_is_absent() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let sender = alpha_participant(&sandbox, "path-shaped-sender", &alpha);
+    let reader = sandbox.bind_claude("path-shaped-reader", &beta, Some("beta"))["id"]
+        .as_str()
+        .expect("participant id")
+        .to_owned();
+    let delivered = || count(&sandbox.mail_root.join("beta/inbox"));
+
+    for path in [
+        "missing-notes.md",
+        "report.json",
+        "docs/plan.txt",
+        "./today",
+        "../notes/today",
+        "/nowhere/at/all",
+        "~/notes",
+    ] {
+        assert!(!alpha.join(path).exists(), "fixture: {path} must be absent");
+        let refused =
+            sandbox.run_as_participant(&["send", "--to", "beta", path, "--json"], &sender, &alpha);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{path}: stdout {} stderr {}",
+            stdout(&refused),
+            stderr(&refused)
+        );
+        let error: Value = common::from_stderr(&refused);
+        assert_eq!(error["error"]["code"], "invalid_argument", "{path}");
+        let fix = error["error"]["details"]["exact_fix"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{path}: no exact_fix in {error}"));
+        assert!(
+            fix.contains("--body-file") && fix.contains(path),
+            "{path}: the fix names the value: {fix}"
+        );
+        assert_eq!(delivered(), 0, "{path}: nothing was sent");
+    }
+
+    // The fix, run where the file lives, sends that file's contents.
+    fs::create_dir_all(alpha.join("docs")).expect("docs dir");
+    fs::write(alpha.join("docs/plan.txt"), "the plan\n").expect("write the plan");
+    let refused = sandbox.run_as_participant(
+        &["send", "--to", "beta", "docs/plan.txt", "--json"],
+        &sender,
+        &alpha,
+    );
+    let error: Value = common::from_stderr(&refused);
+    let fix = error["error"]["details"]["exact_fix"]
+        .as_str()
+        .expect("an exact_fix")
+        .to_owned();
+    let ran = sandbox.run_fix(&format!("{fix} --json"), &alpha);
+    assert_success(&ran);
+    let sent: SendOutput = from_stdout(&ran);
+    assert_eq!(
+        body_of(&sandbox, &reader, &beta, &sent.envelope.id),
+        "the plan\n"
+    );
+
+    // Text that only resembles a path still sends: prose, numbers, a word
+    // with a period, and a URL. `--body` carries a literal path on purpose.
+    for text in [
+        "hello there",
+        "ok",
+        "done.",
+        "v1.2",
+        "0.9.0",
+        "see docs/plan.txt for details",
+        "https://example.com/a/b",
+    ] {
+        let before = delivered();
+        let sent =
+            sandbox.run_as_participant(&["send", "--to", "beta", text, "--json"], &sender, &alpha);
+        assert_success(&sent);
+        let sent: SendOutput = from_stdout(&sent);
+        assert_eq!(delivered(), before + 1, "{text}");
+        assert_eq!(
+            body_of(&sandbox, &reader, &beta, &sent.envelope.id),
+            text,
+            "{text}"
+        );
+    }
+    let explicit = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "beta",
+            "--body",
+            "docs/absent.txt",
+            "--json",
+        ],
+        &sender,
+        &alpha,
+    );
+    assert_success(&explicit);
+    let explicit: SendOutput = from_stdout(&explicit);
+    assert_eq!(
+        body_of(&sandbox, &reader, &beta, &explicit.envelope.id),
+        "docs/absent.txt"
     );
 }
 

@@ -35,6 +35,29 @@
   top-level help. `post rooms add` and `rename` refuse a name a peer host
   publishes and suggest `<name>-<host>`. `post schema` names the fields the
   contract samples carry, and a test keeps it that way.
+- Surface review fixes (round 1). On a bridged host (one with
+  `bridge/config.json`), `post doctor` and `post who` say so when
+  `bridge/health.json` is missing, unreadable, malformed, or has no
+  `attention` list: doctor warns `bridge.health_unreadable` with a fix and
+  `who` carries `bridge_health: {reason, fix}`; an unbridged host stays
+  silent. `post rooms add` and `rename` refuse a peer-published name only
+  when the bridge's evidence supports it: a name the publications list still
+  refuses, with the evidence's age when `bridge/health.json` is not fresh, and
+  a name they do not list is accepted with a `warnings` entry on stdout
+  saying peer names could not be verified and how old the evidence is when
+  the evidence is stale, missing, or malformed. `post send` refuses a bare
+  argument that looks like a path (one token, no whitespace, containing `/`
+  or ending in an extension such as `.md`, `.txt`, or `.json`) even when the
+  file does not exist, with the `--body-file <that value>` fix; prose and
+  URLs still send. `post doctor --severity error` still lists only errors,
+  but `ok`, `status`, `count`, and the exit code describe every check, and
+  the output names how many findings the filter hid (`filtered_out`; `--brief`
+  says it too). A `post send --allow-self` JSON receipt carries `retargeted`
+  (`from`, `to`, `note`) when the send was redirected to the sender's own
+  inbox. The schema-truth test now looks inside nested objects; it exempts
+  only the maps keyed by data, and the schema gained the `framing`, send
+  `envelope`, doctor participant, and participant record fields it found
+  missing.
 - Bridge v2 channel sync is on by default (post-xiy; Trey ruling
   2026-09-24). A `bridge/config.json` with no `channels` key now means
   `{"mode": "all"}`: every channel publishes and imports between hosts

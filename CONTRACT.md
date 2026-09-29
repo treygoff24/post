@@ -290,8 +290,11 @@ build from a tree with uncommitted tracked changes.
   [<body> | --body <text> | --body-file <path> | stdin]`: the body forms are
   mutually exclusive alternatives; a bare positional argument is the body, the
   same as `--body` (the deprecated positional FILE is gone: the recipient is
-  always `--to`, and a bare argument that is an existing file's path is refused
-  with the `--body-file` command that sends that file); prefer stdin (a quoted
+  always `--to`, and a bare argument that looks like a path, meaning one token
+  with no whitespace that contains `/` or ends in a file extension such as
+  `.md`, `.txt`, or `.json` (a URL is text), is refused whether or not the file
+  exists, with the `--body-file` command that sends that file; `--body` or
+  stdin carries a literal path); prefer stdin (a quoted
   heredoc) or `--body-file`, and keep `--body` for short plain one-liners, since
   the shell parses argv before post sees it. A body-file path that does not
   exist is `invalid_argument` (a usage error)
@@ -308,7 +311,9 @@ build from a tree with uncommitted tracked changes.
   `warnings` (strings) only when there is something to say. The hidden
   `--allow-self` (delegate's completion pings pass it) retargets a send whose
   `--to` is the sender's own room or lineage to the sender's own participant
-  inbox and says so in the receipt; other members of that room do not receive
+  inbox and says so in the receipt (a `post:` note in text; under `--json` a
+  `retargeted` object `{from, to, note}` naming what `--to` resolved to, where
+  it went, and why); other members of that room do not receive
   it, and any other target is unaffected. Rules are
   reloaded after payload construction immediately
   before each inbox publication attempt. If inbox commits but archive
@@ -500,9 +505,19 @@ build from a tree with uncommitted tracked changes.
   not itself be published). The publications read are
   `bridge/rooms/peers/<host>.json` (`{"v":1,"host":"<host>","rooms":[...]}`,
   which must name its own host) and the entries for other hosts in
-  `bridge/rooms/owners.json`; names match ASCII case-insensitively. Both files
-  are advisory: an absent, oversize, or malformed one is skipped, never an
-  error, and a host with no `bridge/config.json` is never refused. Resuming an
+  `bridge/rooms/owners.json`; names match ASCII case-insensitively. The files
+  are advisory and only as current as the bridge's last tick, so the check
+  judges its evidence. Evidence is fresh when `bridge/health.json` ticked
+  within three of its `interval_s` and every publication read cleanly (an
+  enrolled peer with no publication file counts as unread). A listed name
+  refuses on any evidence; when the evidence is not fresh the message says it
+  may be out of date and how long ago the bridge last confirmed its state (or
+  that the age cannot be told). A name the files do not list is accepted; when
+  the evidence is not fresh (stale or missing health, a malformed, oversize,
+  or mislabeled file, a missing publication) `add`'s stdout carries a
+  `warnings` array and `rename`'s receipt a `warnings` entry saying the peer
+  names could not be verified and how old the evidence is. A host with no
+  `bridge/config.json` is never checked and says nothing. Resuming an
   interrupted rename is exempt.
 - `post rooms set-path <name> <path> [--dry-run]` — re-points a local room's
   workspace (discovery) path under the same locks and validation as `add`;
@@ -748,10 +763,14 @@ build from a tree with uncommitted tracked changes.
   and never creates cursor state.
 - `post who [--room <name>]... [--text]`: read-only participant directory.
   JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count,
-  bridge_attention?, doorbell?}`. `bridge_attention` is the number of items in
+  bridge_attention?, bridge_health?, doorbell?}`. `bridge_attention` is the number of items in
   `bridge/health.json`'s `attention` list and is present only when nonzero
   (`post doctor` lists each with its fix); `--text` prints
-  `bridge_attention: <n>`. `live_watch` is true for a fresh `post watch`
+  `bridge_attention: <n>`. `bridge_health` (`{reason, fix}`) is present only
+  on a bridged host (`bridge/config.json` exists) whose `bridge/health.json`
+  is missing, malformed, or has no `attention` list, where a missing count
+  means nothing; `--text` prints `bridge_health: <reason> Fix: <fix>`.
+  `live_watch` is true for a fresh `post watch`
   heartbeat or an armed doorbell-supervisor subscription read from
   `doorbell/health.json` (rewritten at least every 30 s; a file older than 90 s
   belongs to a dead supervisor and counts for nothing). `doorbell_armed` on a
@@ -795,14 +814,20 @@ build from a tree with uncommitted tracked changes.
   (they appear with the room's first mail, so their absence is neither
   reported nor repaired). Expired participants are one info check,
   `participants.stale`, with a count and a pointer to `post participant gc`.
-  Each item in `bridge/health.json`'s `attention` list (absent file, malformed
-  file, or absent list: nothing) is a warning `bridge.attention.<kind>[.<id>]`
-  carrying the bridge's own fix. A served skill at `~/.agents/skill-library/post`
+  Each item in `bridge/health.json`'s `attention` list is a warning
+  `bridge.attention.<kind>[.<id>]` carrying the bridge's own fix. On a bridged
+  host (`bridge/config.json` exists) a health file that is missing,
+  unreadable, malformed, or has no `attention` list is the warning
+  `bridge.health_unreadable` with a fix, because a bridge that cannot report
+  is not one with nothing to report; an unbridged host is silent. A served skill at `~/.agents/skill-library/post`
   that differs from the copy this binary was built with is the warning
   `skill.drift` (absent path: nothing). `--severity warn` drops info checks and
-  `--severity error` keeps errors only; `ok`, `status`, `count`, and the exit
-  code then describe the trimmed report, and `severity_filter` names the
-  threshold so a filtered "healthy" is never read as a full one. Doctor
+  `--severity error` lists errors only, but `ok`, `status`, `count`, and the
+  exit code always cover every check: a store with a warning and no error
+  exits 1 under `--severity error` with an empty `checks` list.
+  `severity_filter` names the threshold and `filtered_out` counts the findings
+  it hid (`count` = findings listed + `filtered_out`); `--brief` says
+  `N findings, M of them hidden by --severity error`. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
   manual reconciliation, and a mail id present in both `inbox/` and `read/`:
   identical content is `state.read_duplicate` (warning — an interrupted

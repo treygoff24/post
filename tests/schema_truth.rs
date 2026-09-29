@@ -47,33 +47,92 @@ fn names(text: &str, word: &str) -> bool {
     })
 }
 
-/// The fields a real output carries that the shape must name: the top-level
-/// keys, and the keys of the objects inside its top-level arrays. Nested
-/// objects that may be keyed by data (`unread{address:count}`) are skipped.
+/// Objects whose keys are data (room names, participant ids, addresses), not
+/// schema: the shape describes them as `name{key:value}` and their keys are
+/// whatever the store holds, so those keys are not required in the shape.
+/// Every other nested object is traversed. An entry here is a promise that
+/// the shape documents the map's value, not its keys.
+const DATA_KEYED_MAPS: &[&str] = &["unread", "pending", "pending_by_address", "rewritten"];
+
+/// The fields a real output carries that the shape must name: every key of
+/// every object at any depth (nested objects and objects inside arrays
+/// included), except the keys of the data-keyed maps above.
 fn documented_keys(value: &Value) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    let Some(object) = value.as_object() else {
-        return keys;
-    };
-    for (key, child) in object {
-        keys.insert(key.clone());
-        if let Some(items) = child.as_array() {
-            for item in items.iter().filter_map(Value::as_object) {
-                keys.extend(item.keys().cloned());
+    fn collect(value: &Value, keys: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    keys.insert(key.clone());
+                    // Only a map is exempt: `unread` in an inbox is an array
+                    // of envelopes whose fields must be named.
+                    let data_keyed = child.is_object() && DATA_KEYED_MAPS.contains(&key.as_str());
+                    if !data_keyed {
+                        collect(child, keys);
+                    }
+                }
             }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, keys)),
+            _ => {}
         }
     }
+    let mut keys = BTreeSet::new();
+    collect(value, &mut keys);
     keys
 }
 
-fn assert_documented(shape_name: &str, shape: &str, value: &Value, origin: &str) {
+/// What is wrong when `value` carries a field the shape never names.
+fn undocumented(shape_name: &str, shape: &str, value: &Value, origin: &str) -> Option<String> {
     let missing: Vec<String> = documented_keys(value)
         .into_iter()
         .filter(|key| !names(shape, key))
         .collect();
+    (!missing.is_empty()).then(|| {
+        format!("{origin}: the `{shape_name}` shape in `post schema` never names {missing:?}")
+    })
+}
+
+fn assert_documented(shape_name: &str, shape: &str, value: &Value, origin: &str) {
+    if let Some(problem) = undocumented(shape_name, shape, value, origin) {
+        panic!("{problem}\nshape:\n{shape}");
+    }
+}
+
+/// The instrument itself: it looks inside nested objects and arrays, exempts
+/// only data-keyed maps, and reports a nested field the shape never names.
+#[test]
+fn the_field_check_reaches_nested_objects_and_exempts_only_data_keyed_maps() {
+    let value = json!({
+        "envelope": {"kind": "note", "extra": {"deep": 1}},
+        "items": [{"inner": {"leaf": 1}}],
+        "pending": {"lineage:ember": 1},
+        "unread": [{"id": "m1"}],
+    });
+    let keys = documented_keys(&value);
+    for wanted in [
+        "envelope", "kind", "extra", "deep", "items", "inner", "leaf", "id",
+    ] {
+        assert!(keys.contains(wanted), "{wanted} missing from {keys:?}");
+    }
     assert!(
-        missing.is_empty(),
-        "{origin}: the `{shape_name}` shape in `post schema` never names {missing:?}\nshape:\n{shape}"
+        !keys.contains("lineage:ember"),
+        "a data-keyed map's keys are data: {keys:?}"
+    );
+
+    let shape = "envelope ({kind})\nitems[]";
+    let problem = undocumented(
+        "s",
+        shape,
+        &json!({"envelope": {"kind": 1, "secret": 2}}),
+        "t",
+    )
+    .expect("a nested field the shape never names is caught");
+    assert!(
+        problem.contains("secret") && !problem.contains("kind"),
+        "{problem}"
+    );
+    assert_eq!(
+        undocumented("s", shape, &json!({"envelope": {"kind": 1}}), "t"),
+        None
     );
 }
 
@@ -110,6 +169,7 @@ fn every_contract_sample_field_is_in_the_schema() {
     assert!(samples.len() >= 10, "the contract ships its samples");
 
     let mut checked = 0;
+    let mut problems = Vec::new();
     for (name, text) in samples {
         let shape_name = shape_for_sample(name);
         let shape = shape(&schema, shape_name);
@@ -126,10 +186,11 @@ fn every_contract_sample_field_is_in_the_schema() {
         for document in documents {
             let value: Value = serde_json::from_str(document)
                 .unwrap_or_else(|error| panic!("{name} is not JSON: {error}\n{document}"));
-            assert_documented(shape_name, &shape, &value, name);
+            problems.extend(undocumented(shape_name, &shape, &value, name));
             checked += 1;
         }
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(checked >= samples.len(), "every sample was read");
 }
 

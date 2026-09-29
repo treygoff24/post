@@ -553,12 +553,26 @@ pub struct SendOutput {
     /// bridge, and this receipt never claims remote delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<SendDelivery>,
+    /// Present only when `--allow-self` sent to the sender's own participant
+    /// inbox instead of the room or lineage named: what was asked for, where
+    /// it went, and why (the same note `--text` prints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retargeted: Option<SendRetarget>,
     /// Sent, but something about it deserves a second look (a routing
     /// receipt that could not be written, a body that looks like pasted
     /// watch output). Absent when there is nothing to say. Never an error:
     /// the letter landed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// An `--allow-self` retarget: `from` is the address the send named, `to` the
+/// sender's own participant address it was delivered to instead.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendRetarget {
+    pub from: String,
+    pub to: String,
+    pub note: String,
 }
 
 /// Delivery state at send time for a host-qualified letter: always `queued`.
@@ -1141,6 +1155,13 @@ pub struct WhoParticipant {
     pub doorbell_armed: bool,
 }
 
+/// Why a bridged host's health file could not be read, with the fix.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WhoBridgeHealth {
+    pub reason: String,
+    pub fix: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WhoOutput {
     pub ok: bool,
@@ -1155,6 +1176,11 @@ pub struct WhoOutput {
     /// `post doctor` lists them with their fixes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bridge_attention: usize,
+    /// Present only on a bridged host whose `bridge/health.json` cannot be
+    /// read (missing, malformed, or from a bridge older than the attention
+    /// list): then `bridge_attention`'s silence means nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_health: Option<WhoBridgeHealth>,
     /// What `live_watch` could see of the doorbell supervisor, present only
     /// when its health file exists (strict consumers already broke once on an
     /// unconditional additive key): `fresh` (current, so armed subscriptions
@@ -1801,6 +1827,10 @@ pub struct RoomsOutput {
     pub ok: bool,
     pub rooms: Vec<RoomOutput>,
     pub count: usize,
+    /// Present only on `post rooms add`, when the name was accepted without
+    /// fresh evidence that no peer host publishes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1938,6 +1968,11 @@ pub struct DoctorOutput {
     /// so a filtered "healthy" is never mistaken for an unfiltered one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity_filter: Option<String>,
+    /// Present only under `--severity`: how many findings the threshold hid.
+    /// `count`, `status`, `ok`, and the exit code cover every finding, so
+    /// `count` is the findings listed in `checks` plus this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_out: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

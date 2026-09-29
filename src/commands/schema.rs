@@ -13,6 +13,13 @@ use crate::output::{
 /// A session with no participant record yet, reported by a read-only command.
 const UNBOUND: &str = "bound? (false, together with participant=null and a hint, when the session has no participant yet: read-only commands answer with this marker and exit 0; absent when bound)";
 
+/// The `framing` object every body-returning read carries.
+const FRAMING: &str =
+    "framing ({source=multiple_ai_agents, authority=false, laws? (only with --framing full)})";
+
+/// The `envelope` object of a send receipt, the same fields a mail file carries.
+const SEND_ENVELOPE: &str = "envelope ({id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, to_host?, display_name?, pfp?, sender_address?, sender_provenance?})";
+
 /// A claim that names a record that does not exist.
 const PARTICIPANT_MISSING: &str = "participant_missing? ({claim=POST_PARTICIPANT|session-index, id?, message, suggested_fix, exact_fix?}; present when an explicit claim names a record that does not exist: participant show, who, doctor, and read-only listings report it here and exit 0, and every other command fails with the participant_missing error, exit 65, whose suggested_fix names the rebind command)";
 
@@ -72,7 +79,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "send",
             "post send --to <workspace:<room>|lineage:<name>|participant:<id>|participant:<id>@<host>|bare-name> [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize] [--allow-self] (<body> | --body <text> | --body-file <path> | --body-file - | stdin)",
             "text; JSON with --json",
-            "atomically writes the resolved address's canonical inbox plus archive/<id>.mail, then publishes an atomic routing receipt when recipients exist; workspace/lineage fan-out suppresses only the sending local participant (remote-origin mail never excludes a local id), while an explicit participant:<self> target is readable; --allow-self (hidden from --help; delegate's completion pings pass it) retargets a send whose --to is the sender's own room or lineage to the sender's own participant inbox, says so in the receipt, reaches nobody else in that room, and does nothing for any other target; a bare <body> argument is the body, the same as --body (the recipient is always --to; a bare argument that is an existing file's path is refused with the --body-file command that sends it); prefer stdin (a quoted heredoc) or --body-file, and keep --body for short plain one-liners; a send that landed exits 0 even when its receipt cannot be written to stdout (a note on stderr says so; the mail exists exactly once), under --json stderr stays empty and anything worth a second look rides in the receipt's warnings; subjects over 1 KiB fail, body forms are exclusive, and --from that disagrees with the bound reply address is refused; participant:<id>@<host> (split at the last @; an exact local participant record of that full name stays local; this host's bridge host resolves as participant:<id>) queues a letter for an enrolled peer host: the sender must be bound to a registered local room (remote_sender_unroutable otherwise), bridge/health.json must be fresh (ticked_at at most 3x interval_s old and at most 5 s ahead) and list typed-outbound-exclusion and participant-mail-v1 (bridge_unsupported when a fresh file lacks one; retryable bridge_status_unavailable when missing, malformed, or stale), a letter over 1 MiB (the bridge's per-letter cap) is invalid_argument even with --oversize, and a local rule blocking this sender (or *) to * applies; the letter (to=<id>, address_kind=participant, to_host=<host>) is written only to archive/<id>.mail, never to a workspace or participant inbox or outbox/, is not routed, and the receipt says delivery.state=queued; the enrolled set is bridge/registry/hosts.json minus this host, intersected with bridge/config.json peers when non-empty, with no fallback to config peers (retryable topology_unavailable when the registry or config is missing or invalid; unknown_host lists the enrolled hosts in details.matches; no_bridge without bridge/config.json); a host-qualified error never falls back to a room, lineage, or bare id",
+            "atomically writes the resolved address's canonical inbox plus archive/<id>.mail, then publishes an atomic routing receipt when recipients exist; workspace/lineage fan-out suppresses only the sending local participant (remote-origin mail never excludes a local id), while an explicit participant:<self> target is readable; --allow-self (hidden from --help; delegate's completion pings pass it) retargets a send whose --to is the sender's own room or lineage to the sender's own participant inbox, says so in the receipt (text note, and under --json a retargeted object {from, to, note}), reaches nobody else in that room, and does nothing for any other target; a bare <body> argument is the body, the same as --body (the recipient is always --to; a bare argument that looks like a path -- one token, no whitespace, containing / or ending in a file extension such as .md, .txt, or .json; a URL is text -- is refused with the --body-file command that sends it, whether or not the file exists; --body or stdin carries a literal path); prefer stdin (a quoted heredoc) or --body-file, and keep --body for short plain one-liners; a send that landed exits 0 even when its receipt cannot be written to stdout (a note on stderr says so; the mail exists exactly once), under --json stderr stays empty and anything worth a second look rides in the receipt's warnings; subjects over 1 KiB fail, body forms are exclusive, and --from that disagrees with the bound reply address is refused; participant:<id>@<host> (split at the last @; an exact local participant record of that full name stays local; this host's bridge host resolves as participant:<id>) queues a letter for an enrolled peer host: the sender must be bound to a registered local room (remote_sender_unroutable otherwise), bridge/health.json must be fresh (ticked_at at most 3x interval_s old and at most 5 s ahead) and list typed-outbound-exclusion and participant-mail-v1 (bridge_unsupported when a fresh file lacks one; retryable bridge_status_unavailable when missing, malformed, or stale), a letter over 1 MiB (the bridge's per-letter cap) is invalid_argument even with --oversize, and a local rule blocking this sender (or *) to * applies; the letter (to=<id>, address_kind=participant, to_host=<host>) is written only to archive/<id>.mail, never to a workspace or participant inbox or outbox/, is not routed, and the receipt says delivery.state=queued; the enrolled set is bridge/registry/hosts.json minus this host, intersected with bridge/config.json peers when non-empty, with no fallback to config peers (retryable topology_unavailable when the registry or config is missing or invalid; unknown_host lists the enrolled hosts in details.matches; no_bridge without bridge/config.json); a host-qualified error never falls back to a room, lineage, or bare id",
         ),
         command(
             "chat",
@@ -114,7 +121,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "rooms",
             "post rooms [add <name> <path> | set-path <name> <path> [--dry-run] | rename <old> <new> [--dry-run]]",
             "JSON",
-            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json, and when the refused name is a case-folded duplicate of a remote placeholder the refusal names the owning host in details.host and carries a `post rooms add <name>-<suffix> <path>` exact_fix where a suffix is derivable, and a name a peer host publishes on this host's bridge (bridge/rooms/peers/<host>.json, or an entry for another host in bridge/rooms/owners.json; matched ASCII case-insensitively; those files are advisory, so an absent or unreadable one is skipped and a host without bridge/config.json is never refused) gets the same refusal from add and from rename's new name (details.host, exact_fix <name>-<this host>; resuming an interrupted rename is exempt); set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing; rename moves <root>/<old> to <root>/<new>, rewrites every live reference to the name (participant workspace fields, participant cursor workspace keys, channel members.json keys, bare profiles.json keys, and the address.name of each moved routing/<id>.json receipt bound to workspace:<old>), commits rooms.json last inside the rollback (any failure through the rooms.json write restores rewritten files byte-for-byte and moves the mailbox back; a failure during the rollback itself warns on stderr per file), writes <root>/rename-journal.json ({v:1, old, new, started_at}) before its first store change and removes it after the commit or a clean rollback, resumes an interrupted rename when rerun with the same pair (skipping a move that already happened, re-planning idempotently, resumed:true), refuses every other rename while the journal stands (invalid_argument with exact_fix `post rooms rename '<old>' '<new>'`), makes every writer that would create or write <root>/<old> or <root>/<new> (send to either name, legacy room mailbox and cursor writes) refuse with config_invalid and that exact_fix while creating nothing (doctor reports rooms.rename_interrupted and, when <root>/<old> exists again, rooms.rename_old_recreated) and refuses a resume whose <root>/<old> was recreated (invalid_argument listing its files in details.matches; never merges), refuses placeholders/case-only renames/an existing <root>/<new>/owner.json or rules.json naming the old room, and on a bridged host requires a fresh bridge/health.json whose local_held counters are integer 0 and a bridge/local-held/<id>.json hold for every archive letter the bridge would export for <old> (workspace-addressed, no to_host key, to == <old>, no received/published/delivered marker; retryable bridge_guard_unavailable naming the count and up to 8 ids in details.matches) — history keeps the old name; --dry-run runs every check and writes nothing",
+            "listing is read-only; add locks, validates, and atomically updates rooms.json without editing rules.json, and when the refused name is a case-folded duplicate of a remote placeholder the refusal names the owning host in details.host and carries a `post rooms add <name>-<suffix> <path>` exact_fix where a suffix is derivable, and a name a peer host publishes on this host's bridge (bridge/rooms/peers/<host>.json, or an entry for another host in bridge/rooms/owners.json; matched ASCII case-insensitively; a listed name refuses on any evidence, and the refusal says how long ago the bridge last confirmed its state when bridge/health.json is not fresh; a name the files do not list is accepted, with a warnings entry on stdout (add) or in the receipt (rename) saying peer names could not be verified and how old the evidence is when the bridge's health is stale or missing or a publication is absent or unreadable; a host without bridge/config.json is never checked) gets the same refusal from add and from rename's new name (details.host, exact_fix <name>-<this host>; resuming an interrupted rename is exempt); set-path re-points an existing local room's workspace (discovery) path under the same locks and validation (canonical existing directory, refused when another room owns it), never moves mail or history and never rewrites participant records, always refuses remote placeholders in either direction, and with --dry-run reports the change without writing; rename moves <root>/<old> to <root>/<new>, rewrites every live reference to the name (participant workspace fields, participant cursor workspace keys, channel members.json keys, bare profiles.json keys, and the address.name of each moved routing/<id>.json receipt bound to workspace:<old>), commits rooms.json last inside the rollback (any failure through the rooms.json write restores rewritten files byte-for-byte and moves the mailbox back; a failure during the rollback itself warns on stderr per file), writes <root>/rename-journal.json ({v:1, old, new, started_at}) before its first store change and removes it after the commit or a clean rollback, resumes an interrupted rename when rerun with the same pair (skipping a move that already happened, re-planning idempotently, resumed:true), refuses every other rename while the journal stands (invalid_argument with exact_fix `post rooms rename '<old>' '<new>'`), makes every writer that would create or write <root>/<old> or <root>/<new> (send to either name, legacy room mailbox and cursor writes) refuse with config_invalid and that exact_fix while creating nothing (doctor reports rooms.rename_interrupted and, when <root>/<old> exists again, rooms.rename_old_recreated) and refuses a resume whose <root>/<old> was recreated (invalid_argument listing its files in details.matches; never merges), refuses placeholders/case-only renames/an existing <root>/<new>/owner.json or rules.json naming the old room, and on a bridged host requires a fresh bridge/health.json whose local_held counters are integer 0 and a bridge/local-held/<id>.json hold for every archive letter the bridge would export for <old> (workspace-addressed, no to_host key, to == <old>, no received/published/delivered marker; retryable bridge_guard_unavailable naming the count and up to 8 ids in details.matches) — history keeps the old name; --dry-run runs every check and writes nothing",
         ),
         command(
             "profile",
@@ -138,7 +145,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "doctor",
             "post doctor [--fix] [--brief] [--severity warn|error]",
             "JSON; one summary line with --brief",
-            "read-only unless --fix; --fix only creates the missing root, archive, and default config files (a room's inbox/ and read/ appear with its first mail and are neither reported nor created); --severity warn drops info lines and --severity error keeps errors only, and status, count, ok, and the exit code then describe what is shown (severity_filter names the threshold); expired participants are one info line (participants.stale, with a `post participant gc` preview), bridge/health.json attention items are warnings carrying the bridge's own fix (bridge.attention.<kind>[.<id>]), and a served post skill (~/.agents/skill-library/post) that differs from the one this binary was built with is a skill.drift warning; --brief prints `post doctor: ok (N checks)` or `post doctor: N findings (run post doctor for detail)` with exit codes unchanged",
+            "read-only unless --fix; --fix only creates the missing root, archive, and default config files (a room's inbox/ and read/ appear with its first mail and are neither reported nor created); --severity warn drops info lines and --severity error lists errors only, but status, count, ok, and the exit code always cover every check (severity_filter names the threshold and filtered_out counts the findings it hid, so `--severity error` exits 1 while a warning remains); expired participants are one info line (participants.stale, with a `post participant gc` preview), bridge/health.json attention items are warnings carrying the bridge's own fix (bridge.attention.<kind>[.<id>]), and on a bridged host (bridge/config.json present) a health file that is missing, malformed, or has no attention list is itself a bridge.health_unreadable warning with a fix (an unbridged host is silent), and a served post skill (~/.agents/skill-library/post) that differs from the one this binary was built with is a skill.drift warning; --brief prints `post doctor: ok (N checks)` or `post doctor: N findings (run post doctor for detail)` (`N findings, M of them hidden by --severity error` under a filter) with exit codes unchanged",
         ),
         command(
             "watch",
@@ -150,7 +157,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "who",
             "post who [--room <name>]... [--text]",
             "JSON; text with --text",
-            "read-only participant directory: acting participant/provenance first, then all participants with lineage/workspace/watch presence, then legacy room heartbeat rows under legacy_rooms; --text labels each participant's lease state lease=active|stale|ended|no lease record (JSON keeps the state key) and adds one hint line: a lease is not attention, use post chat <channel> --seen-by <message-id>; live_watch is true for a fresh `post watch` heartbeat or, when doorbell/health.json was rewritten within the last 90 s, an armed doorbell-supervisor subscription for that participant or room (doorbell_armed says which; a stale or unreadable supervisor file counts for nothing, and the doorbell field and a --text line say so); bridge_attention counts the items in bridge/health.json's attention list (`post doctor` lists them with fixes); provenance never claims to detect subagency and no PID is reported",
+            "read-only participant directory: acting participant/provenance first, then all participants with lineage/workspace/watch presence, then legacy room heartbeat rows under legacy_rooms; --text labels each participant's lease state lease=active|stale|ended|no lease record (JSON keeps the state key) and adds one hint line: a lease is not attention, use post chat <channel> --seen-by <message-id>; live_watch is true for a fresh `post watch` heartbeat or, when doorbell/health.json was rewritten within the last 90 s, an armed doorbell-supervisor subscription for that participant or room (doorbell_armed says which; a stale or unreadable supervisor file counts for nothing, and the doorbell field and a --text line say so); bridge_attention counts the items in bridge/health.json's attention list (`post doctor` lists them with fixes), and bridge_health says so when a bridged host's health file cannot be read; provenance never claims to detect subagency and no PID is reported",
         ),
         command(
             "version",
@@ -179,7 +186,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
-            "show/bind/touch/end: ok, status=bound|unbound|ended, id?, participant? (last_seen?, lease_hours, ended_at?, ephemeral? for --new records), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
+            "show/bind/touch/end: ok, status=bound|unbound|ended, id?, participant? (the record: version, id, harness, conversation_key_digest, created, last_seen?, lease_hours, workspace?, workspace_path?, lineage?, lineage_since?, ended_at?, ephemeral? for --new records), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
             PARTICIPANT_MISSING,
             "list: ok, participants, count",
             "gc (post participant gc, a dry run unless --apply): deleted[] (ids removed, each leaving a tombstone line in participants/archived.jsonl), archived[] (ids moved to participants-archive/), kept{reason: count}",
@@ -206,9 +213,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "count (findings: checks that are not info)",
             "fixed",
             "exit_codes[] (code, meaning)",
-            "severity_filter?(warn|error; present only under --severity, which trims checks and makes status, count, and ok describe the trimmed report)",
-            "participant",
-            "pending",
+            "severity_filter?(warn|error; present only under --severity, which trims the listed checks but not status, count, or ok)",
+            "filtered_out? (integer; present only under --severity: findings the filter hid, so count = findings listed in checks + filtered_out)",
+            "participant ({status=bound|unbound, id?, provenance?, workspace?, lineage?})",
+            "pending{address:count}",
             "participant_fix (when no participant is bound)",
             "participant_error (when ambient participant resolution failed)",
             PARTICIPANT_MISSING,
@@ -230,7 +238,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         read_json: fields(&[
             "ok",
-            "framing",
+            FRAMING,
             BOUND_NOW,
             UNBOUND,
             "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
@@ -241,7 +249,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         read_budget: fields(&[
             "ok",
-            "framing",
+            FRAMING,
             "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
             "body (only when complete)",
             "own (when true)",
@@ -255,7 +263,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         read_slice: fields(&[
             "ok",
-            "framing",
+            FRAMING,
             "envelope (id, from, to, kind, subject, sent, from_participant?, from_lineage?, address_kind?, display_name?, pfp?, sender_address?, sender_provenance?, origin, reply_to_participant?, reply_to_shared, pending?, address{kind,name}?)",
             "body_slice",
             "range (start, end_exclusive)",
@@ -274,6 +282,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "ok",
             "rooms[] (name, path, blocked[] (the rules.json rules whose target is this room: from, to, reason))",
             "count",
+            "warnings? (add only: strings, present when the name was accepted without fresh evidence that no peer host publishes it)",
             "set-path: ok, room, before, after, changed, dry_run",
             "rename: ok, old, new, path, mailbox_moved, rewritten, warnings, resumed, dry_run",
         ]),
@@ -298,9 +307,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         send_json: fields(&[
             "ok",
-            "envelope",
+            SEND_ENVELOPE,
             "archived",
             "delivery? ({state=queued, host}; participant:<id>@<host> sends only; never claims remote delivery)",
+            "retargeted? ({from, to, note}; present only when --allow-self sent to the sender's own participant inbox instead of the room or lineage named: from is what --to resolved to, to is where it went, note says why)",
             "warnings? (strings; present only when non-empty: the send landed and something deserves a second look, such as a routing receipt that could not be written or a body that looks like pasted watch output)",
             BOUND_NOW,
         ]),
@@ -328,7 +338,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         chat_read: fields(&[
             "ok",
-            "framing",
+            FRAMING,
             "channel",
             "room",
             "peek",
@@ -345,7 +355,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         chat_slice: fields(&[
             "ok",
-            "framing",
+            FRAMING,
             "channel",
             "room",
             "message (complete stored envelope only)",
@@ -464,6 +474,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "activity_note? (stale-delivery crash gap: frozen mail is not reassigned)",
             "count",
             "bridge_attention? (integer: how many items bridge/health.json lists under attention; present only when nonzero, and `post doctor` lists each with its fix)",
+            "bridge_health? ({reason, fix}; present only on a bridged host whose bridge/health.json is missing, malformed, or has no attention list, when the absent bridge_attention means nothing; `post doctor` reports it as bridge.health_unreadable)",
             "doorbell? (fresh|stale|unreadable: what live_watch could see of doorbell/health.json; present only when that file exists; stale and unreadable count for nothing)",
             PARTICIPANT_MISSING,
         ]),
@@ -533,7 +544,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "A bound participant determines channel identity, including session-only participants without a workspace. Membership and seen state are participant-scoped; legacy members.json supplies only a workspace default with individual opt-out.",
             "Watch emits channel events as notifications only and never marks channel messages seen; only a read consumes, and only after a successful emit.",
             "A participant's own channel messages never ring it. Long-running watch requires a bound participant and suppresses only local-origin from_participant == self (remote-origin evidence is never own); snapshot is the read-only unbound exception.",
-            "A message body comes from exactly one of --body, --body-file, or stdin (a bare argument to `post send` is the body, the same as --body; there is no positional file); a body-file path that does not exist is a usage error, never a retryable I/O fault.",
+            "A message body comes from exactly one of --body, --body-file, or stdin (a bare argument to `post send` is the body, the same as --body; there is no positional file, and a path-shaped bare argument is refused with the --body-file fix); a body-file path that does not exist is a usage error, never a retryable I/O fault.",
             "Shell quoting happens before Post: double quotes can expand dollar-positionals such as $1 in $1.63B, and an apostrophe can terminate single quotes; use --body-file or stdin for shell-sensitive prose.",
             "Subjects over 1 KiB fail before any write with no override; longer text belongs in the body.",
             "Message bodies over 32 KiB fail before any write unless --oversize records explicit intent; a body of complete Post watch-event NDJSON lines still sends, with a warning in the receipt (warnings under --json).",
