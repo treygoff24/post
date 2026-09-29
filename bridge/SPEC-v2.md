@@ -443,8 +443,8 @@ C1 grammar (name, id, parts); mode 100644; size ≤ BRIDGE_MAX_MAIL_BYTES; denie
 C2 bounded `git show`; envelope: header ≤ 4 KiB before the first "\n---\n",
    duplicate-key-rejecting JSON; required id, from, channel, subject, sent (strings);
    channel == <name>; id == stem; sent matches "%Y-%m-%d %H:%M:%S %z" (post's format,
-   src/mailbox.rs local_timestamp_micros); known optional keys: event ∈ {join, profile},
-   display_name, pfp, re (canonical channel id), mentions (list of room-grammar strings),
+   src/mailbox.rs local_timestamp_micros); known optional keys: event (any string; `join` drives membership,
+   every other kind is opaque and relays unchanged), display_name, pfp, re (canonical channel id), mentions (list of room-grammar strings),
    signature_ref, sender_address, sender_provenance, from_host; unknown keys permitted, logged once.
    Body never parsed. Fail ⇒ chan_quarantined, forensic copy
    bridge/quarantine/channels/<H>/<name>/<id>.msg, next.
@@ -563,7 +563,7 @@ construction, step C5(b)):
 
     bridge/events/<name>/<id>.json
     {"host": "<H>", "channel": "<name>", "id": "<id>", "from": "<room>",
-     "event": null | "join" | "profile", "mentions": ["hq"]}
+     "event": null | <any string kind>, "mentions": ["hq"]}
 
 Names and ids only — never subject or body (the doorbell's rule: content
 reaches a model through a door the model opened; the test asserts the

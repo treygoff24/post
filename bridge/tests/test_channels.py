@@ -2332,7 +2332,10 @@ class ChannelIntegrationTest(unittest.TestCase):
             elif label == "sent":
                 envelope["sent"] = "tomorrow"
             elif label == "event":
-                envelope["event"] = "leave"
+                # A non-string kind is malformed; a string kind the bridge
+                # does not know is opaque and imports (see the unknown-kind
+                # tests below).
+                envelope["event"] = 5
             elif label == "mentions":
                 envelope["mentions"] = "bob"
             elif label == "re":
@@ -2356,6 +2359,68 @@ class ChannelIntegrationTest(unittest.TestCase):
         self.assertTrue(
             (self.beta.root / "channels" / name / "messages" / (unknown_id + ".msg")).is_file()
         )
+
+    def test_unknown_event_kinds_import_unchanged(self):
+        # post-11n: a channel event kind this bridge has never heard of is an
+        # opaque system event. It imports byte-for-byte, so a newer post on
+        # one host cannot wedge the channel for the rest.
+        name = "kinds-in"
+        root = self.alpha.repo / "channels" / name
+        (root / "messages").mkdir(parents=True)
+        (root / "channel.json").write_text(json.dumps(channel_record(name, "alice")) + "\n")
+        wanted = {}
+        for offset, event in enumerate(("leave", "poke", "topic-change", "join", "profile"), 700):
+            message_id = channel_id(offset)
+            wanted[message_id] = channel_message(message_id, "alice", name, event=event)
+        plain_id = channel_id(710)
+        wanted[plain_id] = channel_message(plain_id, "alice", name)
+        for message_id, data in wanted.items():
+            (root / "messages" / (message_id + ".msg")).write_bytes(data)
+        self.alpha.commit("publish event kinds")
+
+        stats = self.import_alpha()
+
+        self.assertEqual(stats.quarantined, 0, self.log.actions("quarantined"))
+        self.assertEqual(stats.imported, len(wanted))
+        for message_id, data in wanted.items():
+            imported = self.beta.root / "channels" / name / "messages" / (message_id + ".msg")
+            self.assertEqual(imported.read_bytes(), data)
+
+    def test_non_string_event_kind_is_still_quarantined(self):
+        name = "kinds-bad"
+        root = self.alpha.repo / "channels" / name
+        (root / "messages").mkdir(parents=True)
+        (root / "channel.json").write_text(json.dumps(channel_record(name, "alice")) + "\n")
+        bad = {}
+        for offset, event in enumerate((5, ["join"], {"k": "v"}, True), 720):
+            message_id = channel_id(offset)
+            bad[message_id] = channel_message(message_id, "alice", name, event=event)
+        for message_id, data in bad.items():
+            (root / "messages" / (message_id + ".msg")).write_bytes(data)
+        self.alpha.commit("publish bad event kinds")
+
+        stats = self.import_alpha()
+
+        self.assertEqual(stats.imported, 0)
+        self.assertEqual(stats.quarantined, len(bad))
+
+    def test_unknown_event_kinds_publish_unchanged(self):
+        name = "kinds-out"
+        self.alpha.join(name, "alice")
+        local = self.alpha.root / "channels" / name / "messages"
+        wanted = {}
+        for offset, event in enumerate(("leave", "poke", "topic-change"), 730):
+            message_id = channel_id(offset)
+            data = channel_message(message_id, "alice", name, event=event)
+            (local / (message_id + ".msg")).write_bytes(data)
+            wanted[message_id] = data
+
+        stats = self.publish(self.alpha)
+
+        self.assertEqual(stats.unpublishable, 0, self.log.actions("channel_unpublishable"))
+        for message_id, data in wanted.items():
+            relayed = self.alpha.repo / "channels" / name / "messages" / (message_id + ".msg")
+            self.assertEqual(relayed.read_bytes(), data)
 
     def test_attribution_keys_are_known_and_validated_on_import(self):
         # SPEC-v2 r5.4 (post-782): channel envelopes carry the same

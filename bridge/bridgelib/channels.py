@@ -241,8 +241,13 @@ def _parse_envelope(
     common.validate_attribution(value, CHANNEL_ADDRESS_KINDS)
     if "from_host" in value and common.HOST_RE.fullmatch(value["from_host"]) is None:
         raise common.ConfigError("malformed_header: invalid from_host")
-    if "event" in value and value["event"] not in ("join", "profile"):
-        raise common.ConfigError("invalid_event")
+    # An event kind is any string. `join` is the one kind the bridge acts on
+    # (membership, in _membership_locked); every other kind, `profile` and
+    # kinds a newer post invents alike, is an opaque system event that
+    # imports and relays byte-for-byte. Refusing an unknown kind here used to
+    # quarantine it and wedge the channel for every member (post-11n).
+    if "event" in value and not isinstance(value["event"], str):
+        raise common.ConfigError("malformed_header: event must be a string")
     if "re" in value:
         _validate_channel_id(value["re"], "envelope re")
     if "mentions" in value:
