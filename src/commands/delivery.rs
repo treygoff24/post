@@ -18,7 +18,8 @@
 //! A workspace letter to a room homed on another host is answered from
 //! `bridge/room-acked/<id>.json` (the sending bridge's record of the
 //! receiver's verdict), then the plain-text `bridge/published/<id>` marker,
-//! then the room's current registration as a placeholder (`queued`); see
+//! then the room's current registration as a placeholder while the letter
+//! still waits in its inbox (`queued`); see
 //! `workspace_letter`.
 //!
 //! Precedence: a receipt (it may outrun the published marker), then the
@@ -284,9 +285,24 @@ fn decide_workspace(
     }
     match registered {
         Ok(crate::output::RoomHome::Placeholder(_)) => {
-            output.state = "queued";
-            output.host = host;
-            Ok(true)
+            // The bridge collects the letter from the room's inbox (and tidies
+            // it away once published). A room rehomed after a local delivery
+            // is not evidence that this letter ever crossed hosts.
+            let waiting = context
+                .root
+                .join(room)
+                .join("inbox")
+                .join(format!("{id}.mail"));
+            if std::fs::symlink_metadata(&waiting).is_ok_and(|meta| meta.is_file()) {
+                output.state = "queued";
+                output.host = host;
+                Ok(true)
+            } else {
+                output.reason = Some(format!(
+                    "no bridge record of this letter, and it is not waiting in '{room}' for the bridge"
+                ));
+                Ok(false)
+            }
         }
         Ok(crate::output::RoomHome::Local) => {
             output.reason = Some(format!(

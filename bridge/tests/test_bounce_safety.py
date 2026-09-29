@@ -109,13 +109,62 @@ class DeliveredIsFinalTest(TerminalFixture):
         self.assertEqual(record["sha256"], hashlib.sha256(archived).hexdigest())
         self.assertRegex(record["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
 
-    def test_a_room_verdict_already_on_disk_is_never_replaced(self):
-        mail_id, relative = self.deliver_one()
+    def preplace_ack(self, mail_id, **changes):
+        archived = (self.fc.root / "archive" / (mail_id + ".mail")).read_bytes()
+        record = {
+            "v": 1, "id": mail_id, "host": "trey", "room": "hq",
+            "status": "delivered", "reason": None,
+            "sha256": hashlib.sha256(archived).hexdigest(),
+            "at": "2000-01-01T00:00:00+00:00",
+        }
+        record.update(changes)
         ack = self.fc.root / "bridge" / "room-acked" / (mail_id + ".json")
         ack.parent.mkdir(parents=True, exist_ok=True)
-        ack.write_text('{"first":"writer"}\n')
+        ack.write_text(json.dumps(record, sort_keys=True) + "\n")
+        return ack
+
+    def test_this_letters_own_verdict_already_on_disk_is_kept_and_prunes(self):
+        mail_id, relative = self.deliver_one()
+        ack = self.preplace_ack(mail_id)
+        before = ack.read_text()
         self.assert_stays_delivered(mail_id, relative)
-        self.assertEqual(ack.read_text(), '{"first":"writer"}\n')
+        self.assertEqual(ack.read_text(), before)
+
+    def test_a_disagreeing_verdict_on_disk_keeps_the_entry_and_is_never_replaced(self):
+        disagreements = [
+            {"id": "20260101-000000-aaaaaa"},
+            {"sha256": "0" * 64},
+            {"room": "atlasos"},
+            {"host": "mac"},
+            {"status": "rejected", "reason": "unknown_room"},
+            {"extra": 1},
+        ]
+        mail_id, relative = self.deliver_one()
+        for changes in disagreements:
+            ack = self.preplace_ack(mail_id, **changes)
+            before = ack.read_text()
+            self.full_sweep(self.fc, returncodes=(0, 1))
+            self.assertIn(relative, self.remote_tree("fc"), changes)
+            self.assertEqual(ack.read_text(), before, changes)
+        self.assertGreaterEqual(
+            len(self.actions(self.fc, "room_ack_conflict", mail_id)), len(disagreements)
+        )
+        ack.write_text("{not json\n")
+        self.full_sweep(self.fc, returncodes=(0, 1))
+        self.assertIn(relative, self.remote_tree("fc"))
+        self.assertEqual(ack.read_text(), "{not json\n")
+
+    def test_a_room_ack_path_escaping_the_root_is_logged_not_fatal(self):
+        mail_id, relative = self.deliver_one()
+        outside = Path(self.temporary.name) / "elsewhere"
+        outside.mkdir()
+        link = self.fc.root / "bridge" / "room-acked"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside, target_is_directory=True)
+        self.full_sweep(self.fc, returncodes=(0, 1))
+        self.assertIn(relative, self.remote_tree("fc"))
+        self.assertEqual(len(self.actions(self.fc, "room_ack_failed", mail_id)), 1)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_an_unwritable_verdict_keeps_the_entry_for_the_next_tick(self):
         mail_id, relative = self.deliver_one()

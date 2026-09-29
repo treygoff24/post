@@ -1766,16 +1766,32 @@ def record_room_ack(settings, host, room, mail_id, status, reason, sha256, logge
         "at": utc_now(),
     }
     content = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
-    path = destination(settings.root, "bridge", "room-acked", mail_id + ".json")
     try:
-        publish_marker(settings, path, content)
-        # publish_marker reads any FileExistsError as "already published",
-        # which a file standing where the directory belongs also raises.
+        path = destination(settings.root, "bridge", "room-acked", mail_id + ".json")
+        created = publish_marker(settings, path, content)
+        if created:
+            return True
+        # Already there (or a FileExistsError from a file standing where the
+        # directory belongs): the record must be this letter's own verdict,
+        # or the entry stays and the disagreement is logged.
         if path.is_symlink() or not path.is_file():
             raise ConfigError("room-acked record is not a regular file")
+        existing = load_json_bytes(open_regular(path, 4096), "room-acked record")
     except (ConfigError, OSError) as error:
         logger.emit(
             "room_ack_failed", host=host, room=room, id=mail_id, reason=str(error)
+        )
+        return False
+    same = (
+        isinstance(existing, dict)
+        and all(existing.get(k) == record[k] for k in (
+            "v", "id", "host", "room", "status", "reason", "sha256"))
+        and isinstance(existing.get("at"), str)
+        and set(existing) == set(record)
+    )
+    if not same:
+        logger.emit(
+            "room_ack_conflict", host=host, room=room, id=mail_id, status=status
         )
         return False
     return True

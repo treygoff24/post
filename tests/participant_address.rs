@@ -1224,3 +1224,53 @@ fn workspace_delivery_to_a_local_room_is_unsupported_with_a_true_reason() {
     assert!(reason.contains("'pact' is a room on this host"), "{reason}");
     assert!(!reason.contains("only participant"), "{reason}");
 }
+
+#[test]
+fn a_locally_delivered_letter_is_not_queued_when_its_room_is_rehomed_later() {
+    let rig = Rig::new();
+    let output = rig.send("pact");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let sent: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+    let id = sent["envelope"]["id"].as_str().expect("id").to_owned();
+    // The recipient consumed it: the letter left the inbox.
+    let inbox_copy = rig.root().join("pact/inbox").join(format!("{id}.mail"));
+    let read_dir = rig.root().join("pact/read");
+    fs::create_dir_all(&read_dir).expect("read dir");
+    fs::rename(&inbox_copy, read_dir.join(format!("{id}.mail"))).expect("consume");
+    // Then the room is rehomed under a remote host.
+    let placeholder = rig.root().join("remote").join(PEER).join("pact");
+    fs::create_dir_all(&placeholder).expect("placeholder");
+    let mut rooms: serde_json::Map<String, Value> =
+        serde_json::from_slice(&fs::read(rig.root().join("rooms.json")).expect("rooms"))
+            .expect("rooms json");
+    rooms.insert("pact".into(), json!(placeholder));
+    fs::write(
+        rig.root().join("rooms.json"),
+        Value::Object(rooms).to_string(),
+    )
+    .expect("rooms");
+    let value = rig.delivery(&id);
+    assert_eq!(value["state"], json!("unsupported"), "{value}");
+    assert!(
+        value["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not waiting")),
+        "{value}"
+    );
+}
+
+#[test]
+fn a_remote_room_letter_is_queued_only_while_it_waits_in_the_inbox() {
+    let rig = Rig::new();
+    rig.register_remote_room();
+    let (id, _) = rig.queue_room_letter();
+    let waiting = rig
+        .root()
+        .join(ROOM)
+        .join("inbox")
+        .join(format!("{id}.mail"));
+    assert!(waiting.is_file(), "the bridge collects it from here");
+    assert_eq!(rig.delivery(&id)["state"], json!("queued"));
+    fs::remove_file(&waiting).expect("tidied by the bridge");
+    assert_eq!(rig.delivery(&id)["state"], json!("unsupported"));
+}
