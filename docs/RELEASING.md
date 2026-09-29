@@ -64,19 +64,35 @@ and verifies the installer from the live URL.
 - Smoke the installed binary: `scripts/smoke-installed.sh /path/to/post`
   runs a live end-to-end pass (doctor bootstrap, watch semantics, digest
   fencepost) against a throwaway mail root — safe to run anywhere.
-- Upgrade the estate: Mac `~/.local/bin/post`, devbox host
-  `/usr/local/bin/post`, and all five cells (trey/matt/jc/fc/sol). **One
-  canonical copy per machine/cell** (Trey ruling, 2026-08-31): cell binaries
-  live at `/usr/local/bin/post`, root-owned and not agent-writable, updated
-  from the Mac via the host — `sudo incus file push <binary>
-  <cell>/usr/local/bin/post.new --uid 0 --gid 0 --mode 0755`, then in-cell
-  `mv post post-<old>.bak && mv post.new post`. Keep exactly one prior
-  `.bak`; delete older ones. Agents never install user-space copies —
-  `~/.local/bin/post` shadowing the canonical binary is the drift machine
-  that forked the trey cell at 0.7.0/0.8.0. In fc/sol, `~/.local/bin/post`
-  is a symlink to the canonical copy (their systemd units and hooks
-  hardcode that path) — leave the symlink in place.
-- Verify each swap in place: `sha256sum` against the release sidecar and
-  `scripts/smoke-installed.sh /usr/local/bin/post` in at least one cell.
+- **Where post lives is free; who can update it is not** (Trey ruling,
+  2026-09-29, superseding the 2026-08-31 one-root-owned-copy rule): any
+  install location is fine so long as an agent on the devbox, without sudo,
+  can install and update post.
+- Mac and the trey cell: `scripts/install-post.sh <full-sha>` on each host
+  installs to `~/.local/bin/post`. It builds the commit in a temporary
+  worktree, refuses a commit no Forgejo branch contains or a build whose
+  skill manifest disagrees with its source, smokes the binary, keeps a
+  `.bak`, and writes a receipt to `~/.local/share/post/install-receipt.json`.
+  `post --version` names the build and `post doctor` lists other post
+  binaries on PATH, which is what now guards against the drift that forked
+  the trey cell at 0.7.0/0.8.0. The trey cell's `/usr/local/bin/post` is a
+  stale Aug 31 build, shadowed on PATH; the bridge unit hardcodes
+  `~/.local/bin/post`.
+- Reinstall the bridge on the same commit: `bridge/install.sh` on the
+  devbox (arguments in `bridge/README.md`, values from the running
+  `post-bridge` unit's environment); on the Mac, copy `bridge/sweep.py`,
+  `bridge/bridgelib/*.py` and a `BUILD` file (`commit=<sha>`, `dirty=no`)
+  into a temp dir, swap it over `~/.local/lib/post-bridge`, and run
+  `post-bridge-sweep --check-config` with the LaunchAgent's environment.
+- The other cells (matt/jc/fc/sol) still run the root-owned
+  `/usr/local/bin/post`, updated from the Mac via the host (`sudo incus
+  file push <binary> <cell>/usr/local/bin/post.new --uid 0 --gid 0 --mode
+  0755`, then in-cell `mv post post-<old>.bak && mv post.new post`). That
+  layout does not yet meet the no-sudo rule; moving them is open work. In
+  fc/sol, `~/.local/bin/post` is a symlink to the canonical copy (their
+  systemd units and hooks hardcode that path).
+- Verify each install: `scripts/smoke-installed.sh <path-to-post>` on at
+  least one devbox cell, and `sha256sum` against the release sidecar for
+  release binaries.
 - Announce in `#machineroom-devbox`; leave running watches on their old
   inode — they pick up the new binary on restart.
