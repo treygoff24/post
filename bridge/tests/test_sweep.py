@@ -2786,6 +2786,52 @@ class SweeperTest(unittest.TestCase):
         identity = self.fc.git("show", "-s", "--format=%an <%ae>", "HEAD")
         self.assertEqual(identity.stdout.strip(), "post-bridge <post-bridge@fc>")
 
+    def test_each_branch_reflog_contains_only_its_owner_commits(self):
+        self.bootstrap()
+        for machine, sender, recipient in (
+            (self.fc, "garden", "hq"),
+            (self.trey, "hq", "porch"),
+            (self.mac, "porch", "garden"),
+        ):
+            machine.send(sender, recipient, "ownership")
+            self.assertEqual(machine.sweep().returncode, 0)
+        for host in ("fc", "trey", "mac"):
+            reflog_commits = run(
+                [
+                    "git",
+                    "--git-dir",
+                    self.topology.forge,
+                    "reflog",
+                    "show",
+                    f"refs/heads/machines/{host}",
+                    "--format=%H",
+                ]
+            ).stdout.splitlines()
+            authors = [
+                run(
+                    [
+                        "git",
+                        "--git-dir",
+                        self.topology.forge,
+                        "show",
+                        "-s",
+                        "--format=%ae",
+                        commit,
+                    ]
+                ).stdout.strip()
+                for commit in reflog_commits
+            ]
+            self.assertTrue(authors)
+            self.assertTrue(
+                all(
+                    author == "fixture@invalid"
+                    or author == f"post-bridge@{host}"
+                    for author in authors
+                ),
+                (host, authors),
+            )
+
+
     def test_duplicate_config_keys_and_loose_key_mode_are_fatal(self):
         config_path = self.fc.root / "bridge" / "config.json"
         valid = config_path.read_text()
