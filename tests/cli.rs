@@ -12192,7 +12192,7 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
 }
 
 #[test]
-fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
+fn chat_text_reads_stay_quiet_while_json_carries_raw_provenance_and_address() {
     let sandbox = Sandbox::new();
     let home_room = sandbox.home.join("claude-space");
     fs::create_dir_all(&home_room).expect("room tree");
@@ -12226,6 +12226,9 @@ fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
         .expect("write channel fixture");
     }
 
+    // Channel text reads carry no evidence lines under any framing (mail read
+    // renders them only under full/compact, CONTRACT.md); JSON below carries
+    // the raw fields.
     for framing in ["compact", "full", "auto"] {
         let output = sandbox.run_in(
             &["chat", "idm1r", "--peek", "--framing", framing],
@@ -12235,18 +12238,12 @@ fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
         assert_success(&output);
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(
-            !text.contains(FROZEN_INFERRED_CWD),
-            "inferred evidence must render under {framing}: {text}"
+            text.contains("hello from declared-env") && text.contains("hello from inferred-cwd"),
+            "both messages must be in the read under {framing}: {text}"
         );
         assert!(
-            !text.contains(FROZEN_DECLARED_ENV),
-            "declared evidence must render under {framing}: {text}"
-        );
-        assert!(
-            !text.contains(
-                "[sender address: codex.pact.deadbeef — self-declared instance tag, opaque and non-routable]"
-            ),
-            "the address line must render under {framing}: {text}"
+            !text.contains("Sender evidence:") && !text.contains("Sender address:"),
+            "channel text reads stay quiet under {framing}: {text}"
         );
     }
 
