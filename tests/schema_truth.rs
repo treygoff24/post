@@ -280,7 +280,16 @@ fn the_schema_declares_the_fields_the_contract_names() {
         ("catchup", &["skipped", "bound_now"][..]),
         (
             "participant",
-            &["participant_missing", "gc", "deleted", "archived", "kept"][..],
+            &[
+                "participant_missing",
+                "gc",
+                "deleted",
+                "archived",
+                "kept",
+                "restore",
+                "restored",
+                "from",
+            ][..],
         ),
         ("who", &["participant_missing", "bridge_attention"][..]),
         ("doctor", &["participant_missing", "severity_filter"][..]),
@@ -363,6 +372,181 @@ fn the_identity_states_are_documented_and_live() {
         &participant,
         &bound,
         "participant bind --new",
+    );
+}
+
+/// Age a participant record so `participant gc` collects it.
+fn age_record(sandbox: &Sandbox, id: &str) {
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(id)
+        .join("participant.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("record JSON");
+    record["last_seen"] = json!("2020-01-01T00:00:00Z");
+    fs::write(&path, serde_json::to_vec_pretty(&record).expect("bytes")).expect("write record");
+}
+
+fn run_gc(sandbox: &Sandbox, apply: bool) -> Value {
+    let mut args = vec!["participant", "gc", "--json"];
+    if apply {
+        args.push("--apply");
+    }
+    let output = sandbox.run_without_identity(&args, &sandbox.path);
+    assert_success(&output);
+    from_stdout(&output)
+}
+
+fn run_restore(sandbox: &Sandbox, id: &str) -> std::process::Output {
+    sandbox.run_without_identity(&["participant", "restore", id, "--json"], &sandbox.path)
+}
+
+/// `participant gc` and `participant restore` are listed in the schema's
+/// usage, described in full, and every field their real output prints is
+/// named in the participant shape: a dry run and an apply with something to
+/// delete, something to archive, and records kept; a restore from a tombstone,
+/// from an archive, and of a record already present; and the error for an id
+/// nothing ever held.
+#[test]
+fn participant_gc_and_restore_are_documented_and_live() {
+    let sandbox = Sandbox::new();
+    let schema = schema(&sandbox);
+    let entry = schema["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .find(|command| command["name"] == "participant")
+        .expect("the participant command");
+    let usage = entry["usage"].as_str().expect("usage");
+    for verb in [
+        "post participant gc [--apply]",
+        "post participant restore <id>",
+    ] {
+        assert!(usage.contains(verb), "usage lacks `{verb}`: {usage}");
+    }
+    let effects = entry["side_effects"].as_str().expect("side_effects");
+    // Specific enough that no other sentence of the entry can satisfy them:
+    // `idempotently`, `fenced writer`, and `participant_missing` all occur
+    // elsewhere in this command's text.
+    for phrase in [
+        "is a dry run unless --apply",
+        "--apply is a fenced writer",
+        "leaving a tombstone line in participants/archived.jsonl",
+        "to participants-archive/<id>/",
+        "idempotent: an id already present answers restored=false",
+        "fails participant_missing, exit 65",
+    ] {
+        assert!(
+            effects.contains(phrase),
+            "the participant side effects never say `{phrase}`: {effects}"
+        );
+    }
+    let participant = shape(&schema, "participant");
+    // The restore line alone must name every top-level field of a restore
+    // answer: `restored` and `from` are also words elsewhere in the shape, so
+    // the whole-shape check below cannot catch a line that stopped naming them.
+    let restore_line = participant
+        .lines()
+        .find(|line| line.starts_with("restore ("))
+        .expect("the participant shape has a `restore (` line");
+    let cwd = sandbox.path.clone();
+
+    // One record that holds nothing (tier 1) and one that holds a channel
+    // membership (tier 2), both long idle.
+    let bare = sandbox.run_in_env(&["participant", "bind", "--new", "--json"], None, &cwd, &[]);
+    assert_success(&bare);
+    let bare: Value = from_stdout(&bare);
+    let bare = bare["participant"]["id"].as_str().expect("id").to_owned();
+    let stateful = sandbox.run_in_env(
+        &[
+            "participant",
+            "bind",
+            "--harness",
+            "claude",
+            "--key",
+            "schema-truth-restore",
+            "--json",
+        ],
+        None,
+        &cwd,
+        &[],
+    );
+    assert_success(&stateful);
+    let stateful: Value = from_stdout(&stateful);
+    let stateful = stateful["participant"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let joined = sandbox.run_as_participant(
+        &["chat", "schema-truth-room", "--join", "--json"],
+        &stateful,
+        &cwd,
+    );
+    assert_success(&joined);
+    age_record(&sandbox, &bare);
+    age_record(&sandbox, &stateful);
+
+    let dry = run_gc(&sandbox, false);
+    assert_eq!(dry["applied"], false, "fixture: {dry}");
+    assert_eq!(dry["deleted"], json!([bare]), "fixture: {dry}");
+    assert_eq!(dry["archived"], json!([stateful]), "fixture: {dry}");
+    assert!(dry["kept"].is_object(), "fixture: {dry}");
+    assert_documented("participant", &participant, &dry, "participant gc");
+    let applied = run_gc(&sandbox, true);
+    assert_eq!(applied["applied"], true, "fixture: {applied}");
+    assert_eq!(applied["deleted"], dry["deleted"], "fixture: {applied}");
+    assert_eq!(applied["archived"], dry["archived"], "fixture: {applied}");
+    assert_documented(
+        "participant",
+        &participant,
+        &applied,
+        "participant gc --apply",
+    );
+
+    for (id, from) in [(&bare, "tombstone"), (&stateful, "archive")] {
+        let output = run_restore(&sandbox, id);
+        assert_success(&output);
+        let restored: Value = from_stdout(&output);
+        assert_eq!(restored["restored"], true, "fixture: {restored}");
+        assert_eq!(restored["from"], from, "fixture: {restored}");
+        for key in restored.as_object().expect("object").keys() {
+            assert!(
+                names(restore_line, key),
+                "the restore line never names `{key}`: {restore_line}"
+            );
+        }
+        assert_documented(
+            "participant",
+            &participant,
+            &restored,
+            &format!("participant restore ({from})"),
+        );
+        // Again: already present.
+        let output = run_restore(&sandbox, id);
+        assert_success(&output);
+        let again: Value = from_stdout(&output);
+        assert_eq!(again["restored"], false, "fixture: {again}");
+        assert!(again.get("from").is_none(), "fixture: {again}");
+        assert_documented(
+            "participant",
+            &participant,
+            &again,
+            "participant restore (present)",
+        );
+    }
+
+    // An id nothing ever held: the error the schema promises, exit 65.
+    let never = run_restore(&sandbox, "claude-0badf00d");
+    assert_eq!(never.status.code(), Some(65), "{never:?}");
+    let error: Value = common::from_stderr(&never);
+    assert_eq!(
+        error["error"]["code"], "participant_missing",
+        "fixture: {error}"
+    );
+    assert!(
+        participant.contains("participant_missing") && participant.contains("exit 65"),
+        "the participant shape must name the restore error and its exit code:\n{participant}"
     );
 }
 

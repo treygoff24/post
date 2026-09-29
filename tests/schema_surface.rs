@@ -270,6 +270,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
         [
             "show/bind/touch/end:",
             "list:",
+            "restore",
             "notice:",
             "participant_missing",
             "gc"

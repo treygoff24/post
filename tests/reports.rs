@@ -515,6 +515,65 @@ fn doctor_and_who_report_a_missing_participant_claim_as_a_field() {
     assert!(unbound.get("participant_missing").is_none(), "{unbound}");
 }
 
+/// `schema`, `version` and help describe the tool, not the session, so they
+/// never leave an identity line on stderr. Doctor carries the identity state
+/// in its own output (`participant`, `participant_missing`), so its stderr
+/// line is dropped too, `--brief` included. Every other text-mode reader keeps
+/// its line.
+#[test]
+fn schema_version_help_and_doctor_leave_no_identity_line_on_stderr() {
+    let sandbox = Sandbox::new_unseeded();
+    let cwd = sandbox.path.clone();
+    let no_line = |label: &str, args: &[&str], output: &std::process::Output| {
+        let text = stderr(output);
+        assert!(
+            !text.contains("participant:") && !text.contains("participant resolution error"),
+            "{label} {args:?} left an identity line on stderr: {text}"
+        );
+    };
+    let quiet: [&[&str]; 8] = [
+        &["schema"],
+        &["doctor"],
+        &["doctor", "--brief"],
+        &["doctor", "--fix"],
+        &["version"],
+        &["--version"],
+        &["help"],
+        &["participant", "--help"],
+    ];
+    for (label, claim) in [("unbound", false), ("missing claim", true)] {
+        let run = |args: &[&str]| {
+            if claim {
+                sandbox.run_unbound(args, &cwd)
+            } else {
+                sandbox.run_without_identity(args, &cwd)
+            }
+        };
+        for args in quiet {
+            no_line(label, args, &run(args));
+        }
+        // The state is still answered, on stdout.
+        let doctor: Value = from_stdout(&run(&["doctor"]));
+        assert_eq!(doctor["bound"], false, "{label}: {doctor}");
+        if claim {
+            assert_eq!(doctor["participant_missing"]["claim"], "POST_PARTICIPANT");
+        } else {
+            assert_eq!(doctor["participant"]["status"], "unbound", "{doctor}");
+        }
+        // A control: other text-mode readers still say it.
+        let control = run(&["participant", "list"]);
+        assert!(
+            stderr(&control).contains(if claim {
+                "participant: missing"
+            } else {
+                "participant: unbound"
+            }),
+            "{label}: {}",
+            stderr(&control)
+        );
+    }
+}
+
 /// The prune numbers in `participants.stale` are the plan `post participant
 /// gc` makes, and its fix names the dry run and `--apply`.
 #[test]

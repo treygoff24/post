@@ -74,9 +74,15 @@
   ephemeral (`lease_hours: 1`, `"ephemeral": true`). `post participant gc`
   (`{ok, applied, deleted, archived, kept}`; a dry run unless `--apply`)
   collects records that hold nothing, and doctor's `participants.stale` line
-  quotes the same plan and names its dry run and `--apply`. `post schema` and
-  the contract document all of these shapes, and a live test keeps the schema
-  naming every field they print.
+  quotes the same plan and names its dry run and `--apply`. `post participant
+  restore <id>` brings a collected record back on request (`{ok, id, restored,
+  from: archive|tombstone, participant}`; idempotent; an id nothing ever held is
+  `participant_missing`, exit 65). `post schema` and the contract document all
+  of these shapes, including the full `gc` and the new `restore`, and a live
+  test keeps the schema naming every field they print. `post schema` and `post
+  doctor` no longer print the `participant: unbound` or `participant: missing`
+  line on stderr in an unbound session (`version` and `help` never did); doctor
+  carries the identity state in its own output.
 - Bridge v2 channel sync is on by default (post-xiy; Trey ruling
   2026-09-24). A `bridge/config.json` with no `channels` key now means
   `{"mode": "all"}`: every channel publishes and imports between hosts

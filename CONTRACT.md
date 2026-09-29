@@ -115,7 +115,9 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
 - The same read-only forms remain available without a participant binding and
   never mint or initialize participant state. An unbound session gets an
   explicit answer on stdout (see "Identity states"); the human line on stderr
-  is text mode only and never appears under `--json`. `post participant show`
+  is text mode only and never appears under `--json`, and `schema`, `version`,
+  `help`, and `doctor` never print it in any mode (`doctor` carries the
+  identity state in its own output). `post participant show`
   carries its own unbound payload; `post version` bypasses participant
   resolution. `post watch --snapshot` stdout remains NDJSON or empty, never
   prose except the text-mode unbound line.
@@ -1046,6 +1048,12 @@ build from a tree with uncommitted tracked changes.
   show`, `who`, `doctor`, and the read-only listings) exit 0 and carry it as
   fields instead: `bound: false` and `participant_missing: {claim=
   POST_PARTICIPANT|session-index, id?, message, suggested_fix, exact_fix?}`.
+  The one claim that is repaired instead of reported: an explicit
+  `POST_PARTICIPANT` naming a record `participant gc` collected is brought back
+  under the participants lock, as the same participant, before the command runs
+  (a tombstoned id is recreated with its id, lease, workspace and display
+  name; an archive returns whole), and a write reports it as `bound_now`. Only a
+  claim nothing ever held stays `participant_missing`.
   `who` and `doctor` also report their `participant.status` as `missing` with
   the repair in `fix`; doctor's status, count and exit code are unchanged (a
   missing claim is a diagnosis, not a store fault), and `doctor --brief` names
@@ -1091,6 +1099,14 @@ build from a tree with uncommitted tracked changes.
   pending or held mail (frozen unread mail is retained, never rerouted).
   `post doctor`'s `participants.stale` quotes the same plan's delete and archive
   counts and names `post participant gc` (dry run) and `--apply`.
+- **`participant restore <id> [--json]`** brings one collected record back on
+  request, as a fenced writer like `gc --apply`. Output: `{"ok":true,"id":id,
+  "restored":bool,"from":"archive"|"tombstone","participant":{...}}`. It is
+  idempotent: an id that is already present answers `restored: false`, with no
+  `from`, and writes nothing. An id nothing ever held, or a collected record
+  that cannot be brought back, fails `participant_missing`, exit 65, and creates
+  nothing. `post schema` lists both `gc` and `restore` in the participant
+  command's usage and shapes.
 
 ## Lineage voice withdrawal (amendment, 2026-09-16)
 

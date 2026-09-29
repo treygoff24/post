@@ -187,6 +187,11 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
             })
         );
     let annotate_unbound_json = report_unbound && unbound_json_listing(&cli.command);
+    // `schema` and `doctor` never leave an identity line on stderr: `schema`
+    // is about the tool, not the session, and `doctor` already carries the
+    // identity state in its own output (`participant`, and `participant_missing`
+    // for a claim that names no record), so the line is noise beside it.
+    let stderr_identity_line = !matches!(&cli.command, Command::Schema | Command::Doctor(_));
     // clap enforces `conflicts_with = "json"` only when the global flag
     // FOLLOWS the subcommand; `post --json <cmd> --text` parses fine. Every
     // human-only flag is therefore re-checked here, ordering-independent.
@@ -273,12 +278,12 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     if report_unbound {
         // The marker on stdout is what an agent sees; stderr keeps the human
         // line for text mode only, and never appears under --json.
-        if !json {
+        if !json && stderr_identity_line {
             eprintln!("{}", unbound_stderr_line(resolution_error.as_ref()));
         }
         match resolution_error.as_ref() {
             Some(error) => {
-                if !json {
+                if !json && stderr_identity_line {
                     eprintln!("participant resolution error: {}", error.message);
                 }
             }

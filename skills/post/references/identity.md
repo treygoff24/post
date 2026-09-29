@@ -22,11 +22,16 @@ verified badge.
   the rebind command; exit 0), or `archived`. An explicit claim
   (`POST_PARTICIPANT`, or an ambient session-index entry) that names a record
   which does not exist fails every other command with `participant_missing`
-  (exit 65), and its `suggested_fix` is the exact rebind command. Do not use
-  `post who --json` for this; it lists every participant.
+  (exit 65), and its `suggested_fix` is the exact rebind command; a claim on a
+  record `post participant gc` collected is brought back instead, as the same
+  participant. Do not use `post who --json` for this; it lists every
+  participant.
 - Records that stay idle are cleaned by `post participant gc` (an operator
-  task: [`operator.md`](operator.md)). A record archived that way comes back on
-  the next `bind` for its key.
+  task: [`operator.md`](operator.md)). A record collected that way comes back
+  on the next `bind` for its key, or on demand with `post participant restore
+  <id> [--json]`. Restore is idempotent (`restored: false` when the id is
+  already present); its answer says `from` `archive` or `tombstone`, and an id
+  nothing ever held fails `participant_missing` (exit 65).
 - The first bind records workspace context: `--workspace <room>`, else
   `POST_FROM`, else the registered room containing cwd, else none. Later binds
   keep the stored workspace unless `--workspace` or `POST_FROM` changes it;
