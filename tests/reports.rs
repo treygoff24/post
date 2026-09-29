@@ -937,6 +937,40 @@ fn rooms_add_refuses_a_name_a_peer_host_publishes() {
     assert!(!listing.rooms.iter().any(|room| room.name == "tax"));
 }
 
+/// The bridge registers each room a peer publishes as a placeholder at
+/// `<root>/remote/<host>/<name>` with plain `post rooms add`. That is the
+/// publisher's own room, so it registers; a placeholder filed under some other
+/// host is still a clash.
+#[test]
+fn the_bridge_registers_a_peers_room_as_its_placeholder() {
+    let sandbox = bridged_sandbox();
+    let placeholder = sandbox.mail_root.join("remote/devbox/tax");
+    fs::create_dir_all(&placeholder).expect("create placeholder");
+    let placeholder = placeholder.to_string_lossy().into_owned();
+
+    let added = sandbox.run(&["rooms", "add", "--", "tax", &placeholder]);
+    assert_success(&added);
+    assert!(
+        !String::from_utf8_lossy(&added.stdout).contains("warning"),
+        "no peer-evidence warning for the publisher's own placeholder: {}",
+        String::from_utf8_lossy(&added.stdout)
+    );
+    let listing: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
+    assert!(listing.rooms.iter().any(|room| room.name == "tax"));
+
+    let elsewhere = sandbox.mail_root.join("remote/other/hq");
+    fs::create_dir_all(&elsewhere).expect("create foreign placeholder");
+    let refused = sandbox.run(&["rooms", "add", "--", "hq", &elsewhere.to_string_lossy()]);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&refused)
+    );
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.details.host.as_deref(), Some("devbox"));
+}
+
 #[test]
 fn a_peers_room_name_is_matched_case_insensitively() {
     let sandbox = bridged_sandbox();
@@ -957,7 +991,7 @@ fn the_ownership_memory_also_protects_a_name() {
     let sandbox = bridged_sandbox();
     write(
         &sandbox.mail_root.join("bridge/rooms/owners.json"),
-        r#"{"legal":{"host":"devbox"},"mine":{"host":"trey"}}"#,
+        r#"{"legal":{"host":"devbox"},"mine":{"host":"trey"},"ours":{"host":"local","first_seen":""}}"#,
     );
     let legal = checkout(&sandbox, "legal");
     let refused = sandbox.run(&["rooms", "add", "legal", &legal]);
@@ -971,6 +1005,9 @@ fn the_ownership_memory_also_protects_a_name() {
     // A name this host owns itself is not a peer's.
     let mine = checkout(&sandbox, "mine");
     assert_success(&sandbox.run(&["rooms", "add", "mine", &mine]));
+    // The bridge itself records this host's rooms under `local`.
+    let ours = checkout(&sandbox, "ours");
+    assert_success(&sandbox.run(&["rooms", "add", "ours", &ours]));
 }
 
 #[test]

@@ -33,16 +33,22 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod script");
 }
 
-fn real_python() -> PathBuf {
+fn real_tool(name: &str) -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
-        .map(|dir| dir.join("python3"))
+        .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
-        .expect("python3 on PATH")
+        .unwrap_or_else(|| panic!("{name} on PATH"))
+}
+
+fn real_python() -> PathBuf {
+    real_tool("python3")
 }
 
 /// Stand-in `cargo`, `node`, and `python3` that succeed instantly, except that
 /// `cargo test` runs `on_test` (a shell snippet). `python3` passes the timeout
-/// wrapper through to the real interpreter and nothing else.
+/// wrapper through to the real interpreter and nothing else. `bash` stands in
+/// for the bridge suite (`bridge/tests/run-all.sh`, reached through its
+/// `env bash` line) and runs everything else for real.
 fn shim_dir(root: &Path, on_test: &str) -> PathBuf {
     let dir = root.join("shims");
     fs::create_dir_all(&dir).expect("shim dir");
@@ -83,6 +89,18 @@ case "$1" in
 esac
 "#,
             real_python().display()
+        ),
+    );
+    executable(
+        &dir.join("bash"),
+        &format!(
+            r#"#!/bin/sh
+case "$1" in
+  bridge/tests/run-all.sh|*/bridge/tests/run-all.sh) exit 0;;
+esac
+exec "{}" "$@"
+"#,
+            real_tool("bash").display()
         ),
     );
     dir

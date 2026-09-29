@@ -456,6 +456,7 @@ class BounceRecordTest(TwoRoomFixture):
             self.intent(mail_id)["letter_id"], "someone", "garden",
             body=b"not a bounce at all\n", subject="something else",
         )
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(stranger)
         result = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

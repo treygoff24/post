@@ -827,14 +827,13 @@ class RoomsTest(unittest.TestCase):
                 collided = True
                 foreign = self.local.base / "rooms" / "racing-foreign"
                 foreign.mkdir()
-                original_run(
-                    [POST, "rooms", "add", "--", "racing", str(foreign)],
-                    env=kwargs["env"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
+                # A local registration of the name made before this host
+                # learned h1 publishes it (post rooms add now refuses a
+                # published name, so the race is set up in the table itself).
+                table_path = self.local.root / "rooms.json"
+                table = json.loads(table_path.read_text())
+                table["racing"] = str(foreign)
+                table_path.write_text(json.dumps(table, indent=2) + "\n")
             return original_run(command, **kwargs)
 
         with mock.patch.object(rooms.subprocess, "run", side_effect=register_before_add):

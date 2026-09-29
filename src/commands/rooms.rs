@@ -91,9 +91,20 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .reason("duplicate room name under ASCII case folding"));
     }
 
+    // The bridge registers every peer room it imports as a placeholder under
+    // `<root>/remote/<host>/`. A placeholder of the very host that publishes
+    // the name is that host's own room, not a local checkout taking its name,
+    // so neither the refusal nor the evidence warning applies to it.
+    let placeholder_host = crate::output::stored_path_remote_host_of(context, &args.path);
     let peers = peer_name_check(context, &args.name);
-    let peer_warning = peers.evidence.warning(&args.name);
-    if let Some(published) = peers.published {
+    let peer_warning = match placeholder_host {
+        Some(_) => None,
+        None => peers.evidence.warning(&args.name),
+    };
+    if let Some(published) = peers
+        .published
+        .filter(|published| placeholder_host.as_deref() != Some(published.host.as_str()))
+    {
         return Err(peer_published_error(PeerPublished {
             context,
             rooms: &rooms,
@@ -873,6 +884,10 @@ fn peer_name_check(context: &Context, name: &str) -> PeerNameCheck {
     }
 }
 
+/// The owner-of-record token the bridge writes into `owners.json` for a room
+/// this host owns (`LOCAL` in `bridge/bridgelib/snapshot.py`).
+const BRIDGE_LOCAL_OWNER: &str = "local";
+
 /// The peer host that publishes `name` (ASCII case-insensitive), if this host
 /// is bridged and a peer's rooms publication or the ownership memory names
 /// it, with a description of every file that could not be read. Reads
@@ -962,11 +977,14 @@ fn lookup_published_room(
         problems.push(format!("{} is not a JSON object", owners_path.display()));
         return (None, problems);
     };
+    // The bridge records a room this host owns under the literal host
+    // `local` (its owner-of-record token), not under this host's id.
     let found = owners.as_object().and_then(|owners| {
         owners.iter().find_map(|(room, record)| {
             let host = record.get("host")?.as_str()?;
             (room.eq_ignore_ascii_case(name)
                 && host != own_host
+                && host != BRIDGE_LOCAL_OWNER
                 && crate::bridge_topology::valid_host(host))
             .then(|| PublishedRoom {
                 name: room.clone(),

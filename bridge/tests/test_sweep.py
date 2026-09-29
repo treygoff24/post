@@ -3480,6 +3480,9 @@ class SweeperTest(unittest.TestCase):
         mail_id = self.fc.send("garden", "hq", "mode preservation")
         self.fc.sweep()
         inbox_dir = self.trey.root / "hq" / "inbox"
+        # post creates a room's mailbox only when it writes mail there, so a
+        # pre-existing inbox is made here.
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         inbox_dir.chmod(0o750)
         archive_dir = self.trey.root / "archive"
         archive_dir.chmod(0o751)

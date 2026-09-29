@@ -1282,6 +1282,7 @@ class LocalHeldTest(unittest.TestCase):
             data = (root / "archive" / (mail_id + ".mail")).read_bytes()
             mailbox = "read" if n % 3 == 0 else "inbox"
             evidence = [f"atlasos/{mailbox}/{mail_id}.mail"]
+            (root / "atlasos" / mailbox).mkdir(parents=True, exist_ok=True)
             (root / "atlasos" / mailbox / (mail_id + ".mail")).write_bytes(data)
             if mail_id in seeded:
                 reason, evidence = "seeded", evidence + [manifest_path]
