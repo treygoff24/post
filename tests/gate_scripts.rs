@@ -107,7 +107,12 @@ exec "{}" "$@"
 }
 
 fn run_gate(shims: &Path, timeout_seconds: Option<&str>) -> (Output, Duration) {
-    let mut command = Command::new("bash");
+    // The real bash by absolute path. `Command::new("bash")` would search the
+    // child's PATH, find the stand-in `bash` shim this test just wrote, and exec
+    // that file directly: with several tests forking in parallel, a forked child
+    // can still hold the shim's write descriptor, and the exec then fails with
+    // ETXTBSY ("Text file busy"). The gate reaches the shims itself, later.
+    let mut command = Command::new(real_tool("bash"));
     command
         .arg(repo().join("scripts/gate.sh"))
         .env("PATH", format!("{}:/usr/bin:/bin", shims.display()))

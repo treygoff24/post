@@ -678,6 +678,27 @@ for (const [name, adapter] of Object.entries(ADAPTERS)) {
       for (const phase of laterPhases) assert.deepEqual(world.run(phase, "sess-v"), {}, `${phase} must not repeat the setup warning`);
     });
 
+    test("a version probe that fails is distinguished from a binary that lacks the capability", () => {
+      const world = makeWorld("probe-failure", adapter);
+      world.control({ version: [{ stdout: "not-json" }], watch: [{ stdout: jsonl(MAIL) }] });
+      const context = contextOf(world.run(first, "sess-probe"));
+      assert.match(context, /could not verify installed post capabilities/);
+      assert.doesNotMatch(context, /lacks the participants capability/);
+      assert.equal(world.calls().at(-1).key, "version", "nothing ran after the failed probe");
+    });
+
+    test("the first event still reads affiliation when the snapshot fails", () => {
+      const world = makeWorld("show-on-failure", adapter);
+      world.control({
+        watch: [{ exit: 1 }],
+        "participant show": [{ stdout: { ok: true, status: "bound", id: derivedId(name, "sess-show"), participant: { id: derivedId(name, "sess-show"), lineage: "ember" } } }],
+      });
+      const context = contextOf(world.run(first, "sess-show"));
+      assert.match(context, /UNKNOWN \(not empty\)/);
+      assert.match(context, /continuing lineage ember/);
+      assert.equal(world.calls().at(-1).key, "participant show", "the affiliation read follows the failed scan");
+    });
+
     test("a bind that keeps failing is reported once, retried every turn, and clears when it works", () => {
       const world = makeWorld("bind-broken", adapter);
       world.control({ "participant bind": [{ exit: 1 }] });
@@ -731,6 +752,94 @@ for (const [name, adapter] of Object.entries(ADAPTERS)) {
       });
     }
   });
+}
+
+// ------------------------------------------------ the direct backlog is capped
+
+for (const [name, adapter] of Object.entries(ADAPTERS)) {
+  test(`${name}: a huge direct backlog lists at most 20 ids plus an exact remainder, once`, () => {
+    const world = makeWorld("huge-direct", adapter);
+    const mail = Array.from({ length: 25 }, (_, index) => ({
+      ...MAIL,
+      id: `20260722-010101-${index.toString(16).padStart(6, "0")}`,
+      from: "secret-sender",
+    }));
+    world.control({ watch: [{ stdout: jsonl(...mail) }] });
+    const first = adapter.hasStart ? "start" : "prompt";
+    const context = contextOf(world.run(first, "sess-huge-direct"));
+    assert.match(context, /\+5 more/);
+    assert.ok(context.includes(mail[19].id));
+    assert.ok(!context.includes(mail[20].id));
+    assert.ok(!context.includes("SECRET"));
+    assert.ok(!context.includes("secret-sender"));
+    assert.ok(Buffer.byteLength(context, "utf8") <= 4096);
+    assert.deepEqual(world.run("prompt", "sess-huge-direct"), {}, "the whole delivered batch is deduped");
+  });
+}
+
+// ----------------- Cursor and Grok carry the binding line (`bindingLine`)
+
+for (const [name, adapter] of Object.entries(ADAPTERS).filter(([, a]) => !a.lazy)) {
+  describe(`${name}: the binding line`, () => {
+    const first = adapter.hasStart ? "start" : "prompt";
+    const binding = (id) => `[post] participant ${id}; prefix Post commands with POST_PARTICIPANT=${id}`;
+    const bound = (id, lineage) => ({ stdout: { ok: true, status: "bound", id, participant: { id, lineage } } });
+
+    test("an empty snapshot still emits the fresh binding line", () => {
+      const world = makeWorld("binding-empty", adapter);
+      world.control({ watch: [{ stdout: "" }] });
+      assert.equal(contextOf(world.run(first, "s-empty")), binding("test-participant"));
+    });
+
+    test("an unaffiliated participant gets only the neutral binding line", () => {
+      const world = makeWorld("binding-neutral", adapter);
+      const id = `${name}-abc12345`;
+      world.control({ "participant bind": [bound(id, null)], "participant show": [bound(id, null)], watch: [{ stdout: "" }] });
+      assert.equal(contextOf(world.run(first, "unaffiliated")), binding(id));
+    });
+
+    test("an affiliated participant gets the binding line, then the identity line", () => {
+      const world = makeWorld("binding-affiliated", adapter);
+      const id = `${name}-abc12345`;
+      world.control({ "participant bind": [bound(id, null)], "participant show": [bound(id, "ember")], watch: [{ stdout: "" }] });
+      assert.equal(
+        contextOf(world.run(first, "affiliated")),
+        `${binding(id)}\n[post] participant ${id}, continuing lineage ember; voices on request: post identity show 'ember' --voices`
+      );
+    });
+
+    test("a setup retry emits the binding line again", () => {
+      const world = makeWorld("binding-retry", adapter);
+      const id = `${name}-retry123`;
+      world.control({ watch: [{ exit: 1 }], "participant bind": [bound(id, null)] });
+      assert.match(contextOf(world.run(first, "retry-binding")), /UNKNOWN/);
+      world.control({ "participant bind": [bound(id, null)], "participant show": [bound(id, null)], watch: [{ stdout: "" }] });
+      assert.equal(contextOf(world.run(first, "retry-binding")), binding(id));
+    });
+  });
+}
+
+// ------------------------------- what resets the dedupe record, per adapter
+
+for (const [name, adapter] of Object.entries(ADAPTERS)) {
+  test(`${name}: a new session id surfaces the still-unread backlog again`, () => {
+    const world = makeWorld("new-session", adapter);
+    world.control({ watch: [{ stdout: jsonl(MAIL) }] });
+    const first = adapter.hasStart ? "start" : "prompt";
+    assert.match(contextOf(world.run(first, "sess-one")), /20260730-010101-aaa111/);
+    assert.deepEqual(world.run("prompt", "sess-one"), {}, "the same session is deduped");
+    assert.match(contextOf(world.run(first, "sess-two")), /20260730-010101-aaa111/);
+  });
+
+  if (adapter.hasStart) {
+    test(`${name}: a repeated session start resets dedupe so a pending backlog surfaces again`, () => {
+      const world = makeWorld("start-again", adapter);
+      world.control({ watch: [{ stdout: jsonl(MAIL) }] });
+      world.run("start", "sess-again");
+      assert.deepEqual(world.run("prompt", "sess-again"), {});
+      assert.match(contextOf(world.run("start", "sess-again")), /20260730-010101-aaa111/);
+    });
+  }
 }
 
 // -------------------------------------- one deadline for the whole invocation

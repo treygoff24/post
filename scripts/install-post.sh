@@ -102,7 +102,7 @@ while [ "$#" -gt 0 ]; do
     --served) [ "$#" -ge 2 ] || die "--served needs a value" 2; served="$2"; shift ;;
     --receipt) [ "$#" -ge 2 ] || die "--receipt needs a value" 2; receipt="$2"; shift ;;
     --repo) [ "$#" -ge 2 ] || die "--repo needs a value" 2; repo="$2"; shift ;;
-    -h|--help) sed -n '2,78p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,81p' "$0"; exit 0 ;;
     -*) die "unknown option: $1" 2 ;;
     *) [ -z "$commit" ] || die "one commit only" 2; commit="$1" ;;
   esac
