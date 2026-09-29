@@ -179,13 +179,13 @@ pub(crate) enum BridgeHealth {
     Unavailable(String),
 }
 
+/// How far ahead of this host's clock a bridge stamp may be.
+pub(crate) const MAX_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Read `bridge/health.json` against `now`. Fresh means `ticked_at` is no
 /// older than three times `interval_s`, and not further in the future than
 /// that either (a far-future stamp could vouch forever). Unknown keys are
 /// ignored; the bridge adds counters over time.
-/// How far ahead of this host's clock a bridge stamp may be.
-pub(crate) const MAX_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_secs(5);
-
 pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> BridgeHealth {
     let path = bridge_dir(context).join("health.json");
     let value = match read_health_json(&path) {
