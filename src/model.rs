@@ -130,7 +130,9 @@ pub struct ChannelMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub re: Option<String>,
     /// Registered room names @mentioned in the body (word-boundary match).
-    /// Absent/empty on old messages and on bodies with no mentions.
+    /// Absent/empty on old messages and on bodies with no mentions. Readers
+    /// also resolve participant-id and lineage `@name` from the body
+    /// (`channel::MentionTargets`), so this list is not the only signal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
     /// Signed-message-v2 locator: `{"version": 2, "tag": "<ts>"}`. Kept as a

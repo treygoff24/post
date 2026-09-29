@@ -1306,6 +1306,7 @@ fn crossed_report(
     // delivers) rather than showing a signed-looking body without its verdict.
     let owner = crate::mailbox::resolve_owner(context)?;
     let owner_room = owner.as_ref().map(|owner| owner.room.clone());
+    let targets = MentionTargets::of_participant(participant);
     let scan = unread_channel_with(context, participant, channel, Scan::Tolerant)?;
     let skipped = scan.skipped;
     let mut items: Vec<(ChannelMessage, String, bool)> = Vec::new();
@@ -1314,7 +1315,7 @@ fn crossed_report(
             continue;
         }
         let message = item.message;
-        let addressed = message.mentions.iter().any(|name| name == room)
+        let addressed = targets.addressed_by(&message, &item.body)
             || owner_room.as_deref() == Some(message.from.as_str())
             || message
                 .re
@@ -1488,6 +1489,53 @@ pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
         }
     }
     found.into_iter().collect()
+}
+
+/// The names a reader answers to in an `@name` tag: its workspace, its
+/// participant id, and its lineage. Resolution happens at READ time against the
+/// body, so a message sent by an older binary (or through the bridge from a
+/// host that only stamps workspaces) still addresses the reader.
+pub(crate) struct MentionTargets {
+    names: RoomMap,
+}
+
+impl MentionTargets {
+    pub(crate) fn of_participant(participant: &crate::participant::Participant) -> Self {
+        Self::of_names(
+            [
+                participant.workspace.as_deref(),
+                Some(participant.id.as_str()),
+                participant.lineage.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        )
+    }
+
+    /// A reader known only by its acting room name (workspace or participant id).
+    pub(crate) fn of_room(room: &str) -> Self {
+        Self::of_names([room])
+    }
+
+    fn of_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            names: names
+                .into_iter()
+                .map(|name| (name.to_owned(), String::new()))
+                .collect(),
+        }
+    }
+
+    /// True when the message stamped one of these names or its body carries
+    /// `@<name>` for one of them. A name that is both a workspace and a lineage
+    /// is one entry here, so it addresses the reader once.
+    pub(crate) fn addressed_by(&self, message: &ChannelMessage, body: &str) -> bool {
+        message
+            .mentions
+            .iter()
+            .any(|mention| self.names.contains_key(mention))
+            || !extract_mentions(body, &self.names).is_empty()
+    }
 }
 
 fn is_mention_boundary_char(c: char) -> bool {

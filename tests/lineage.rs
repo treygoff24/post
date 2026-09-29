@@ -1867,3 +1867,74 @@ fn lineage_terms_use_voice_content_rules_and_show_reads_record_version() {
     assert_success(&shown);
     assert_eq!(from_stdout::<Value>(&shown)["lineage"]["version"], 7);
 }
+
+/// A message as an OLD sender binary (or the Mac bridge) leaves it: the body
+/// carries `@name`, and `mentions` is absent because that sender never stamped it.
+fn write_unstamped_message(sandbox: &Sandbox, id: &str, body: &str) {
+    common::write_channel_message(sandbox, "ops", id, "trey", "hi", body);
+}
+
+fn seed_lineage_member(sandbox: &Sandbox) -> String {
+    let member = sandbox.seed_session_only_participant();
+    assert_success(&run_as(sandbox, &member, &["identity", "new", "sieve"]));
+    assert_success(&run_as(
+        sandbox,
+        &member,
+        &["chat", "ops", "--join", "--backlog", "--json"],
+    ));
+    member
+}
+
+#[test]
+fn channel_body_at_lineage_or_participant_id_reads_as_a_mention_without_a_stamp() {
+    let sandbox = Sandbox::new();
+    let member = seed_lineage_member(&sandbox);
+    write_unstamped_message(&sandbox, "20990923-060000-000001-aaaa01", "@sieve look");
+    write_unstamped_message(
+        &sandbox,
+        "20990923-060000-000002-aaaa02",
+        &format!("ping @{member}, please"),
+    );
+    write_unstamped_message(&sandbox, "20990923-060000-000003-aaaa03", "@sievex no");
+    write_unstamped_message(&sandbox, "20990923-060000-000004-aaaa04", "plain");
+
+    let watch = run_as(
+        &sandbox,
+        &member,
+        &["watch", "--snapshot", "--json", "--reason", "mention"],
+    );
+    assert_success(&watch);
+    let ids: Vec<String> = stdout(&watch)
+        .lines()
+        .map(|line| {
+            let event: Value = serde_json::from_str(line).expect("event json");
+            assert_eq!(event["reason"], "mention");
+            event["id"].as_str().expect("id").to_owned()
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "20990923-060000-000001-aaaa01".to_owned(),
+            "20990923-060000-000002-aaaa02".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn send_receipt_counts_an_unstamped_lineage_mention_as_addressed_to_you() {
+    let sandbox = Sandbox::new();
+    let member = seed_lineage_member(&sandbox);
+    write_unstamped_message(&sandbox, "20990923-060000-000001-aaaa01", "@sieve look");
+    write_unstamped_message(&sandbox, "20990923-060000-000002-aaaa02", "plain");
+
+    let sent = run_as(
+        &sandbox,
+        &member,
+        &["chat", "ops", "--send", "--body", "on it", "--json"],
+    );
+    assert_success(&sent);
+    let receipt: Value = from_stdout(&sent);
+    assert_eq!(receipt["crossed"]["unseen"], 2, "{receipt}");
+    assert_eq!(receipt["crossed"]["addressed_to_you"], 1, "{receipt}");
+}

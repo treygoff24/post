@@ -1616,6 +1616,7 @@ fn scan_watch_target(
         },
     );
     let channel_watch_address = WatchAddress::from_address(&channel_address);
+    let mention_targets = crate::channel::MentionTargets::of_participant(participant);
     let channel_context = if channel_address.kind == AddressKind::Workspace {
         channel_address.name.clone()
     } else {
@@ -1763,6 +1764,7 @@ fn scan_watch_target(
                 continue;
             }
             emitted_channel_ids.insert(dedupe_id);
+            let mentioned = mention_targets.addressed_by(&item.message, &item.body);
             batch.push(WatchDelivery::channel(
                 &channel_context,
                 &channel,
@@ -1770,7 +1772,7 @@ fn scan_watch_target(
                     context,
                     item.message,
                     channel_watch_address.clone(),
-                    &channel_context,
+                    mentioned,
                     Some(sanitize_preview(&item.body)),
                 ),
             ));
@@ -1913,6 +1915,7 @@ fn scan_unreadable_participant_channel(
     batch: &mut Vec<WatchDelivery>,
 ) -> AppResult<()> {
     let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
+    let mention_targets = crate::channel::MentionTargets::of_participant(participant);
     // The join-from-now watermark applies here too: this degraded scan is
     // already a best-effort pass, so a membership record that cannot be read
     // degrades to no floor (every deliverable file is considered) rather than
@@ -1960,6 +1963,7 @@ fn scan_unreadable_participant_channel(
             Ok(parsed) => {
                 seen_paths.insert(path);
                 emitted_channel_ids.insert(dedupe);
+                let mentioned = mention_targets.addressed_by(&parsed.message, &parsed.body);
                 batch.push(WatchDelivery::channel(
                     channel_context,
                     channel,
@@ -1967,7 +1971,7 @@ fn scan_unreadable_participant_channel(
                         context,
                         parsed.message,
                         channel_watch_address.clone(),
-                        channel_context,
+                        mentioned,
                         Some(sanitize_preview(&parsed.body)),
                     ),
                 ));
@@ -2129,6 +2133,7 @@ fn scan_batch_measured(
                         context,
                         parsed.message,
                         room,
+                        &parsed.body,
                         Some(sanitize_preview(&parsed.body)),
                     ),
                 ));
