@@ -2570,6 +2570,57 @@ fn routing_two_participants_consume_independently_and_canonical_file_stays_put()
         .is_file());
 }
 
+/// `count` and `unread_count` are the number of inbox ids the participant has
+/// not consumed, not raw inbox files minus the seen set. A consumed letter
+/// whose file has left the inbox (a gc, or a hand removal) leaves a seen id
+/// with no file: raw-files-minus-seen would report 0 here, the per-id
+/// predicate reports the one unconsumed letter. A file duplicate of a consumed
+/// id (a failed unlink) is excluded from the count too, though a raw file
+/// count would include it.
+#[test]
+fn inbox_counts_are_eligible_ids_not_raw_files_minus_seen() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let a = bind(&sandbox, "counts-a", &alpha, "alpha");
+    let c = bind(&sandbox, "counts-c", &beta, "beta");
+    let first = send_as(&sandbox, &c, &beta, "workspace:alpha", "first");
+    let first = first["envelope"]["id"]
+        .as_str()
+        .expect("first id")
+        .to_owned();
+    let second = send_as(&sandbox, &c, &beta, "workspace:alpha", "second");
+    let second = second["envelope"]["id"]
+        .as_str()
+        .expect("second id")
+        .to_owned();
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["unread_count"], 2, "{listed}");
+
+    assert_success(&sandbox.run_as_participant(&["read", &first, "--json"], &a, &alpha));
+    let inbox = sandbox.mail_root.join("alpha/inbox");
+    let first_file = inbox.join(format!("{first}.mail"));
+    let saved = fs::read(&first_file).expect("consumed letter still in the canonical inbox");
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["unread_count"], 1, "{listed}");
+
+    // The consumed letter's file leaves the inbox: one file (second), one
+    // seen id (first), one unconsumed letter.
+    fs::remove_file(&first_file).expect("remove consumed file");
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["unread_count"], 1, "{listed}");
+
+    // A failed unlink: the consumed id's file is back beside the unread one.
+    // Two raw files, still one unconsumed id.
+    fs::write(&first_file, saved).expect("plant duplicate of the consumed letter");
+    assert!(inbox.join(format!("{second}.mail")).is_file());
+    let listed = inbox_as(&sandbox, &a, &alpha);
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["unread_count"], 1, "{listed}");
+}
+
 #[test]
 fn routing_missing_receipt_is_pending_until_writer_recovers_it() {
     let sandbox = Sandbox::new();
