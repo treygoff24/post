@@ -1314,6 +1314,16 @@ rejection final, so no rollback step does that.
      `participants/<id>/imports/<mail-id>.json` exists under the mail
      root. The bridge checks existence only and never reads the file; this
      couples the bridge to post's layout (post `src/imports.rs`);
+   - when `participants/<id>/` is absent and `participants-archive/<id>/`
+     is a directory, `post participant gc` archived the record, and post
+     would reject the letter `unknown_participant` for good. The bridge
+     makes no post call: it records a `participant_archived` retry, writes
+     no receipt, and lists one `archived_participant` item per participant
+     in health `attention` with the restore move
+     (`mv participants-archive/<id> participants/<id>`, the move post's own
+     restore makes). The bridge never writes inside the participant store;
+     no post command restores by id. Once the record is back the next full
+     tick delivers and the item leaves;
    - otherwise `post bridge deliver --participant=<id> --source-host=<H>
      --mail-id=<id> --sha256=<hex> --file=<private tmp> --json`, 30 s cap.
 3. After outbound selection: the sender pass. It consumes receipts, prunes

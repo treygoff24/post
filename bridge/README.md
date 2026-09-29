@@ -1,5 +1,9 @@
 # post-bridge
 
+This directory is the bridge's home. Its history before the move into the post
+repo lives in `claude-space` (`post-bridge/`, up to commit 6f57ce1), together
+with the reviews, candidates and research that were left behind.
+
 `post-bridge` carries direct Post mail between pinned hosts through one
 single-writer Git branch per host. It does not change Post, discover rooms, read
 `main`, or treat envelope identity fields as credentials. The forge-authenticated
@@ -18,7 +22,7 @@ Crashes reconcile from disk on the next tick.
 ## Install
 
 ```sh
-post-bridge/install.sh --repo-url ssh://git@<forge>:2222/estate/post-relay.git \
+bridge/install.sh --repo-url ssh://git@<forge>:2222/estate/post-relay.git \
   --host <host> --ssh-key /abs/path/to/relay_key --config /abs/path/to/config.json \
   [--post-bin /abs/path/to/post] [--interval 15]
 ```
@@ -28,9 +32,12 @@ Start `--config` from `config.template.json`: fill in `host` and `relay_url`
 only protects a channel on the host that publishes it, so every host carries
 the same list. The installer warns when a config has no `channels` key.
 
-The installer requires Python 3.9 or newer and exactly Post 0.9.0. It resolves
-Post at install time, installs `sweep.py` and `bridgelib/` under
-`~/.local/lib/post-bridge/`, writes `~/.local/bin/post-bridge-sweep`, clones the
+The installer requires Python 3.9 or newer and Post 0.9.0 (`post --version`
+may add a trailing `(build ...)` annotation; the semver stays pinned). It resolves
+Post at install time, installs `sweep.py` and `bridgelib/` from this
+directory under `~/.local/lib/post-bridge/` together with a `BUILD` file that
+names the post repo commit it was installed from (`commit=<sha>`, and
+`dirty=yes` when `bridge/` had uncommitted changes), writes `~/.local/bin/post-bridge-sweep`, clones the
 relay with the relay key baked into `core.sshCommand`, and exclusively creates
 `$POST_MAIL_ROOT/bridge/config.json`. It runs `--check-config` before enabling
 the systemd timer and never starts the service directly. The Linux interval is
@@ -64,8 +71,8 @@ health record reach stdout only.
 
 ## Enroll
 
-Run `post-bridge/enroll.sh --host <host> [--dry-run] [--init-registry]` as a
-Forgejo operator, or `post-bridge/enroll.sh --verify <host>` to check an existing
+Run `bridge/enroll.sh --host <host> [--dry-run] [--init-registry]` as a
+Forgejo operator, or `bridge/enroll.sh --verify <host>` to check an existing
 enrollment. The script checks the Forgejo user when its token has `read:user`;
 otherwise it relies on the exact branch-protection API to validate the username.
 It checks registry and wildcard protections, then adds the host to the sorted
@@ -98,6 +105,12 @@ Optional variables:
 - `BRIDGE_FETCH_GRACE_SECONDS`: seconds since the last successful fetch before
   a partition becomes unhealthy, default 600. Before the first successful
   fetch, the grace period starts at `first_tick_at`.
+- `BRIDGE_DECIDED_RECHECK_SECONDS`: how long a "decided" marker is trusted
+  before the letter is verified again, default 21600 (6 hours), `0` verifies
+  every letter every tick. See Decided markers below.
+- `BRIDGE_BOUNCE_TRANSIENT_SECONDS`: how long a refusal the receiver could still
+  clear by itself (`unknown_room`, `unpublished_sender`, `name_collision`)
+  waits before the sender's bridge treats it as terminal, default 3600.
 - `BRIDGE_CRASH_AFTER`, `BRIDGE_RAISE_AFTER`, `BRIDGE_TEST_HEALTH_DELAY_MS`:
   test-only hooks, described under Crash hooks below.
 
@@ -142,9 +155,12 @@ denied. A peer room may not collide with a real local room.
 
 The sweeper reads `post rooms --json` before registration. It creates each
 workspace at `remote/<host>/<room>` and calls `post rooms add` only when the
-name is absent. It also creates `<root>/<placeholder>/inbox` and `read`, because
-`post rooms add` does not create them. An existing registration at that exact
-real path is a no-op. A different registration writes
+name is absent. It does not create `<root>/<placeholder>/inbox` or `read`: post
+makes a room's mailbox directories the first time it writes there, and creating
+them for every peer room on every tick left empty directories behind after a
+rename or release. (A `post doctor` that still lists `room.<peer>.inbox_missing`
+or `read_missing` as errors predates that change.) An existing registration at
+that exact real path is a no-op. A different registration writes
 `bridge/collisions.json` and exits 2.
 
 ## Files and branches
@@ -170,6 +186,11 @@ Local bridge state is under `$POST_MAIL_ROOT/bridge/`:
   (exclusive-created before any delivery byte moves) that doubles as the
   bridge-origin exclusion marker for outbound selection.
 - `published/<id>`: derived after the outbox object is confirmed on the remote.
+- `decided/held/<id>`, `decided/unrelayable/<id>`, `chan-decided/<channel>/<id>`:
+  decided markers (see Decided markers).
+- `bounced/`: the bounce of a terminally refused letter (see Bounce):
+  `<id>.json` (intent), `<id>.body` (original text), `<id>.sent`, and
+  `undeliverable/` (notices with nobody to read them).
 - `quarantine/`: rejected bytes or metadata retained for local forensics.
 - `tmp/`: same-filesystem publication temporaries, cleared during recovery.
 - `stray/`: unexpected relay-worktree files moved aside during recovery.
@@ -179,7 +200,8 @@ Local bridge state is under `$POST_MAIL_ROOT/bridge/`:
 Directories the bridge creates (`bridge/**`, placeholder `inbox/`/`read/`) get
 the process umask; the bridge never chmods a directory it did not create in
 that call, so post's rooms, the archive, and pre-existing placeholders keep
-their modes.
+their modes. The bridge does not create a placeholder's `inbox/` or `read/`
+at all; post does, when a letter first passes through them.
 
 The sender's `archive/` is read-only to the bridge. Placeholder `inbox/` and
 `read/` copies are routing artifacts and are removed only after push success.
@@ -269,13 +291,89 @@ Statuses:
   collision. The sender keeps the item.
 
 Receipt paths, modes, size, keys, values, and SHA-256 are hostile input on the
-sender. Only a valid `delivered` receipt prunes.
+sender. Only a valid `delivered` receipt prunes, except for the bounce below.
+
+### Bounce
+
+A `quarantined` receipt the receiver will never turn into a delivery
+(`forged_self`, `remote_participant_unhomed`, an id collision, malformed
+input) is *terminal*.
+One the receiver could still clear itself (`unknown_room`,
+`unpublished_sender`, `name_collision`) becomes terminal once it is older than
+`BRIDGE_BOUNCE_TRANSIENT_SECONDS`, measured from the receipt's own first-written
+time. On a terminal receipt the sender's bridge:
+
+1. writes a system letter (`from: post-bridge`, subject `Undeliverable:
+   <original subject>`) into the sending participant's inbox while that
+   participant is active. A participant whose session ended or whose lease
+   lapsed reads nothing until its conversation resumes, so the notice goes to
+   the inbox of the room it worked in instead (any session in that workspace
+   sees it), then to the letter's own sending room when that is a room on this
+   host, then to the inactive participant's own inbox, and with no such
+   participant at all to `bridge/bounced/undeliverable/` plus an `attention`
+   item. The body names the
+   letter id, recipient, the reason in words, and the exact `post send
+   --body-file` command that re-sends the original text (kept in
+   `bridge/bounced/<id>.body`). It reads with `post inbox` and `post read`.
+2. records that it did, then retires the outbox entry with `git rm`.
+
+Every step is idempotent under a hard kill (see the `bounce-*` crash hooks), so
+a crash never sends two notices or none. The notice never enters `archive/`,
+so it cannot itself travel to a peer.
+
+### Decided markers
+
+A full tick used to re-open and re-judge every archive letter and every local
+channel message on every tick. Now only ids the bridge has not settled are
+opened; the rest are recognised from directory listings.
+
+- Received, delivered and published letters are already settled and are listed
+  once per tick from `bridge/received`, `bridge/delivered` and
+  `bridge/published`.
+- `decided/held/<id>`: the local-held guard holds the letter and its record
+  verified. The marker is trusted for `BRIDGE_DECIDED_RECHECK_SECONDS`, then the
+  letter is verified again and the marker refreshed. The guard's store-level
+  checks (index shortfall, floors, sentinel) still run every tick, so deleting a
+  record is still caught at once.
+- `decided/unrelayable/<id>`: the letter cannot be relayed. It is re-read only
+  when its size or mtime changes. Only a verdict about the file's content is
+  remembered; a read that failed on I/O is retried every tick.
+- `chan-decided/<channel>/<id>`: a local channel message this host will not
+  publish (imported from a peer, or authored under a name that is not a local
+  room). Messages already committed on this host's branch are found with one
+  `git ls-tree` per tick and skipped without being opened.
+
+A marker is written only after the work it records, so a crash between them
+redoes the work (idempotently) and never skips a letter undecided. A torn or
+missing marker means "judge it again".
+
+### Participant mail for an archived record
+
+`post participant gc` moves a long-idle participant record whole from
+`<root>/participants/<id>/` to `<root>/participants-archive/<id>/`; the
+session's next `post participant bind` moves it back. While it is archived,
+post cannot find the participant and `post bridge deliver` rejects a letter for
+it for good (`unknown_participant`). So before calling deliver the bridge checks
+for that state and, instead of asking, holds the letter: a `pmail_retry` with
+reason `participant_archived` (counted in `pmail.retry_reasons`), no receipt,
+nothing written into the missing directory, and one `archived_participant`
+attention item per participant naming the letters and the fix, which is the
+same move post's own restore makes:
+`mv <root>/participants-archive/<id> <root>/participants/<id>`. The next full
+tick after the record is back delivers the letters and the item leaves the
+list. No post command restores by id (`bind` restores by the session's
+conversation key, which the bridge does not have), and the bridge does not
+write inside post's participant store, so this is the attention path, not an
+automatic restore.
 
 ## Logs
 
-Each action is one compact JSON line in `bridge/log.jsonl` and is echoed to
-stdout. The log rotates at 10 MiB to `log.jsonl.1`; one prior file is kept.
-No action contains a mail body.
+Each action is one compact JSON line in `bridge/log.jsonl`. A tick does not
+copy its log lines to stdout (under launchd that only grew a second, unrotated
+file); the operator commands (`--seed-local-holds`, `--init-held-sentinel`) do,
+because their stdout is their result. A quiet tick (nothing changed) writes no
+`health` line. The log rotates at 10 MiB to `log.jsonl.1`; one prior file is
+kept. No action contains a mail body.
 
 A standing per-letter condition (`quarantined`, `forensic`,
 `quarantined_path`, `held`, `outbound_ignored`, `outbound_waiting`,
@@ -340,7 +438,18 @@ Outbound actions:
 
 `bridge/health.json` contains `ts`, `ok`, `reason`, `first_tick_at`,
 `last_fetch_ok`, `last_push_ok`, `stalled_since`, `busy_streak`, `held`,
-`quarantined`, `undeliverable`, and `outbound_unrelayable`. Five consecutive
+`quarantined`, `undeliverable`, `outbound_unrelayable`, and `attention`. `ok`
+is liveness (the bridge is running, fetching and pushing); `attention` is the
+separate list of things that are stuck: items `{kind, id, summary, fix}`,
+where `fix` is an exact command or a one-sentence instruction. Kinds:
+`refused_letter` (a terminal refusal whose sender could not be told, or whose
+bounce failed), `unrelayable_letter`, `quarantined_inbound` (a peer's letter
+this host refused; it clears when the sender's bounce retires it),
+`archived_participant` (participant mail waiting for a participant whose record
+`post participant gc` moved to `participants-archive/<id>/`; see below), and
+`name_collision`. The list is recomputed each full tick, so an item leaves it
+on the first tick after its cause is gone, and it is empty when nothing needs
+anyone. Five consecutive
 busy ticks are unhealthy; earlier busy ticks preserve any standing unhealthy
 reason. A stale fetch, fence, divergence, push failure with queued work, or
 undeliverable item is unhealthy. Queued work includes outbound mail, receipts
@@ -416,7 +525,12 @@ Boundaries:
   `after-commit`, `after-push` (the instant the push subprocess returns
   success, before any derivation), `after-derive` (after markers are derived
   from the pushed HEAD), `outbound-o4-published`, `outbound-o4-tidy`,
-  `outbound-o5-prune`.
+  `outbound-o5-prune`, `outbound-o6-bounced` (the notice is written and
+  recorded; the outbox entry is not yet retired).
+- Bounce: `bounce-b1-intent`, `bounce-b2-body`, `bounce-b3-letter`,
+  `bounce-b4-sent`.
+- Decided markers: `decided-d0-before-marker` (the hold's record is written,
+  its marker is not), `decided-d1-marked`.
 
 The tests exercise every hook against a real Post binary, including a real
 `post read` between inbound ticks and prune recovery after commit and push.
@@ -438,11 +552,16 @@ lowered and restored. No v1 process rebases, force-pushes, or rewrites history.
 From the repository root:
 
 ```sh
-python3 post-bridge/tests/test_sweep.py
-python3 -m py_compile post-bridge/sweep.py post-bridge/tests/test_sweep.py
-ruff check post-bridge/sweep.py post-bridge/tests/test_sweep.py
+POST_BIN=/abs/path/to/post bridge/tests/run-all.sh
 ```
 
-The test file refuses to run unless `post --version` is exactly `post 0.6.0`.
-All mail roots are temporary and initialized by `post doctor --fix`; the suite
-never touches the user's real Post root.
+`run-all.sh` runs every `bridge/tests/test_*.py` module (through
+`python3 -m unittest`) and every `test_*.sh` script, four at a time
+(`BRIDGE_TEST_JOBS` changes that), and exits non-zero with the failing
+suite's log if any fail. One module alone: `POST_BIN=... python3 -m unittest
+bridge.tests.test_sweep`.
+
+The suites refuse to run unless `post --version` is `post 0.9.0`, optionally
+followed by a ` (build ...)` annotation as a release build prints. All mail
+roots are temporary and initialized by `post doctor --fix`; the suite never
+touches the user's real Post root or relay repo.
