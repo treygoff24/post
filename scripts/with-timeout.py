@@ -4,17 +4,52 @@
     scripts/with-timeout.py SECONDS COMMAND [ARG...]
 
 The command runs in its own process group. On expiry the whole group gets
-SIGTERM, then SIGKILL five seconds later, so a hung test binary and the
-children it spawned die with the `cargo test` that started them. Exit status
-is the command's own; 124 when the limit expired (as GNU timeout); 125 on a
-usage error or when the command could not be started.
+SIGTERM; five seconds later anything still in the group gets SIGKILL, whether
+or not the command itself has exited, so a hung test binary and the children
+it spawned (even ones that ignore SIGTERM) die with the `cargo test` that
+started them. Exit status is the command's own; 124 when the limit expired
+(as GNU timeout); 125 on a usage error or when the command could not be
+started.
 """
 import os
 import signal
 import subprocess
 import sys
+import time
 
 GRACE_SECONDS = 5
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _kill_group(child):
+    """SIGTERM the child's group, then SIGKILL whatever is left after the grace
+    period. The direct child exiting does not end the wait: a grandchild that
+    ignores SIGTERM is still in the group and must not outlive the limit."""
+    pgid = child.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + GRACE_SECONDS
+    while time.monotonic() < deadline:
+        child.poll()  # reap it, so a zombie leader does not keep the group "alive"
+        if not _group_alive(pgid):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait()
 
 
 def main(argv):
@@ -49,16 +84,7 @@ def main(argv):
         return status if status >= 0 else 128 - status
     except subprocess.TimeoutExpired:
         print(f"with-timeout: {argv[2]} exceeded {argv[1]} s; killing its process group", file=sys.stderr)
-        for signum, wait in ((signal.SIGTERM, GRACE_SECONDS), (signal.SIGKILL, None)):
-            try:
-                os.killpg(child.pid, signum)
-            except ProcessLookupError:
-                break
-            try:
-                child.wait(timeout=wait)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+        _kill_group(child)
         return 124
 
 

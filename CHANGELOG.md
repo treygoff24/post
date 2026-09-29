@@ -10,13 +10,18 @@
 ### Changed
 - Surface and deploy fixes (2026-09-28 fix wave). `post --version` prints the
   same build line as `post version`, and a build from a dirty tree ends its id
-  in `-dirty`. `scripts/install-post.sh` refuses a commit no branch on `origin`
-  contains (`--allow-unreachable` overrides), and the install smoke asserts
+  in `-dirty`. `scripts/install-post.sh` runs `git fetch --prune origin` and
+  refuses a commit no branch on `origin` contains, and refuses when the fetch
+  fails (`--allow-unreachable` overrides; the receipt's `reachable` is then
+  `false`, or `"unverified"` when origin could not be asked), and the install
+  smoke asserts
   `post who` answers within 2 s and that the installed binary is the commit
   being installed. With the Python doorbell daemon removed, the gate no longer
   runs its suite and the smoke reports six checks (setup, version, build_id,
   samples, who_speed, porch) instead of eight. `scripts/gate.sh` puts a time
-  limit on `cargo test` (`GATE_TEST_TIMEOUT`, default 1200 s). `post send --json` prints nothing on
+  limit on `cargo test` (`GATE_TEST_TIMEOUT`, default 1200 s) and, on expiry,
+  kills the whole process group with SIGKILL even after the command exited.
+  `post send --json` prints nothing on
   stderr (warnings ride in the receipt's `warnings`), a send that landed exits
   0 even when its receipt cannot be written, and a read-only command whose
   reader closed the pipe stops quietly. `post send`'s positional argument is
