@@ -2693,6 +2693,120 @@ fn participant_lifecycle_malformed_timestamps_are_skipped_and_doctor_names_them(
     }
 }
 
+/// A damaged record is a participant that exists but cannot be listed. The
+/// stderr warning is not enough: agents that discard stderr would read the
+/// roster as complete. `participant list` and `who` name the skipped ids and
+/// reasons on stdout, and say nothing when the roster is whole.
+#[test]
+fn list_and_who_name_damaged_participant_records_on_stdout() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let healthy =
+        participant_id(&sandbox.bind_claude("roster-healthy", &alpha, Some("alpha"))).to_owned();
+
+    // A whole roster carries no `skipped` key at all.
+    let whole_list: Value =
+        from_stdout(&sandbox.run_as_participant(&["participant", "list"], &healthy, &alpha));
+    assert!(whole_list.get("skipped").is_none(), "{whole_list}");
+    let whole_who: Value = from_stdout(&sandbox.run_as_participant(&["who"], &healthy, &alpha));
+    assert!(whole_who.get("skipped").is_none(), "{whole_who}");
+    let whole_text = sandbox.run_as_participant(&["who", "--text"], &healthy, &alpha);
+    assert_success(&whole_text);
+    assert!(
+        !common::stdout(&whole_text).contains("skipped:"),
+        "{}",
+        common::stdout(&whole_text)
+    );
+
+    // Two damaged records, damaged two different ways.
+    let record = sandbox
+        .mail_root
+        .join("participants/zz-broken/participant.json");
+    fs::create_dir_all(record.parent().expect("record parent")).expect("participant dir");
+    fs::write(&record, b"{not json").expect("malformed participant");
+    let dated =
+        participant_id(&sandbox.bind_claude("roster-dated", &beta, Some("beta"))).to_owned();
+    edit_participant(&sandbox, &dated, |record| {
+        record.insert(
+            "last_seen".to_owned(),
+            Value::String("2026-09-16T0x:00:00Z".to_owned()),
+        );
+    });
+
+    let assert_skipped = |value: &Value, what: &str| {
+        let skipped = value["skipped"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{what}: no skipped list: {value}"));
+        let ids: Vec<&str> = skipped
+            .iter()
+            .map(|entry| entry["id"].as_str().expect("skipped id"))
+            .collect();
+        let mut sorted = vec![dated.as_str(), "zz-broken"];
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "{what}: {value}");
+        for entry in skipped {
+            let reason = entry["reason"].as_str().expect("skipped reason");
+            let expected = if entry["id"] == "zz-broken" {
+                "invalid participant JSON"
+            } else {
+                "RFC3339"
+            };
+            assert!(reason.contains(expected), "{what}: {entry}");
+        }
+        let listed: Vec<&str> = value["participants"]
+            .as_array()
+            .expect("participants")
+            .iter()
+            .map(|entry| entry["id"].as_str().expect("participant id"))
+            .collect();
+        assert!(listed.contains(&healthy.as_str()), "{what}: {value}");
+        assert!(
+            !listed.contains(&dated.as_str()) && !listed.contains(&"zz-broken"),
+            "{what}: a skipped record must not also be listed: {value}"
+        );
+        assert_eq!(value["count"], listed.len(), "{what}: {value}");
+    };
+
+    let list = sandbox.run_as_participant(&["participant", "list"], &healthy, &alpha);
+    // Not `assert_success`: the stderr warning is expected here.
+    assert_eq!(list.status.code(), Some(0));
+    assert_skipped(&from_stdout(&list), "participant list");
+    assert!(
+        common::stderr(&list).contains("skipped corrupt participant"),
+        "the stderr warning stays for a human at a terminal"
+    );
+
+    let who = sandbox.run_as_participant(&["who"], &healthy, &alpha);
+    assert_eq!(who.status.code(), Some(0));
+    assert_skipped(&from_stdout(&who), "who");
+
+    // A workspace scope cannot place a record it cannot read, so it does not
+    // filter the damaged ones out.
+    let scoped = sandbox.run_as_participant(&["who", "--room", "alpha"], &healthy, &alpha);
+    assert_eq!(scoped.status.code(), Some(0));
+    assert_skipped(&from_stdout(&scoped), "who --room alpha");
+
+    let text = sandbox.run_as_participant(&["who", "--text"], &healthy, &alpha);
+    assert_eq!(text.status.code(), Some(0));
+    let text = common::stdout(&text);
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("skipped:"))
+        .unwrap_or_else(|| panic!("no skipped line in who --text:\n{text}"));
+    assert!(line.contains("2 participant record(s)"), "{line}");
+    assert!(line.contains("zz-broken"), "{line}");
+    assert!(line.contains(&dated), "{line}");
+    assert!(line.contains("RFC3339"), "{line}");
+    assert!(line.contains("Fix:"), "{line}");
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("skipped:"))
+            .count(),
+        1,
+        "one text line for all of them:\n{text}"
+    );
+}
+
 #[test]
 fn participant_lifecycle_central_writer_refresh_and_read_only_stability() {
     let sandbox = Sandbox::new();

@@ -68,9 +68,12 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     // The one claim that is repaired rather than reported: an explicit
     // `POST_PARTICIPANT` naming a record `participant gc` collected (Loom
     // exports one from a `bind --new` record, and it can sit idle for a day).
-    // Its id is brought back under the lock, as the same participant, before
-    // the command runs.
-    let mut revived_claim = None;
+    // Restoring it changes the store, so only a command that is a writer does
+    // it, and only once the migration fence has admitted that command (below):
+    // a refused write leaves the collected record where it was. A command that
+    // only reads reports the claim (`participant_missing`, whose fix is
+    // `post participant restore <id>`) and creates nothing.
+    let mut claim_to_restore = None;
     let (mut resolved_participant, resolution_error) = if explicit_bootstrap {
         (crate::participant::Resolved::Unbound, None)
     } else {
@@ -80,28 +83,13 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
                 if error.code == ErrorCode::ParticipantMissing
                     && !tolerates_resolution_error(&cli.command, &error, resolution_required) =>
             {
-                match crate::participant::revive_explicit_claim(&context) {
-                    Ok(Some(revived)) => {
-                        revived_claim = Some(BoundNow {
-                            id: revived.id.clone(),
-                            workspace: revived.workspace.clone(),
-                        });
-                        (
-                            crate::participant::Resolved::Bound {
-                                participant: Box::new(revived),
-                                provenance: crate::participant::Provenance::ExplicitEnv,
-                            },
-                            None,
-                        )
-                    }
-                    // Never existed: the claim is wrong, and says so.
-                    Ok(None) => return Err(error),
-                    Err(cause) => {
-                        return Err(error.reason(format!(
-                            "the collected record could not be restored: {}",
-                            cause.message
-                        )))
-                    }
+                if writes && crate::participant::explicit_claim_is_collected(&context)? {
+                    claim_to_restore = Some(error);
+                    (crate::participant::Resolved::Unbound, None)
+                } else {
+                    // A reader, or a claim nothing ever held: the claim is
+                    // wrong, and says so.
+                    return Err(error);
                 }
             }
             Err(error) if tolerates_resolution_error(&cli.command, &error, resolution_required) => {
@@ -112,7 +100,10 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     };
     // Unbound readers get an explicit marker on stdout instead of running:
     // their bodies would otherwise guess a room from the working directory.
-    if resolved_participant.participant().is_none() && resolution_error.is_none() {
+    if resolved_participant.participant().is_none()
+        && resolution_error.is_none()
+        && claim_to_restore.is_none()
+    {
         if let Some(marker) = unbound_reader_marker(&cli.command, json)? {
             return Ok(marker);
         }
@@ -122,6 +113,31 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     } else {
         None
     };
+    // Admitted: now the collected claim is brought back, under the lock, as
+    // the same participant, before the command runs.
+    let mut revived_claim = None;
+    if let Some(error) = claim_to_restore {
+        match crate::participant::revive_explicit_claim(&context) {
+            Ok(Some(revived)) => {
+                revived_claim = Some(BoundNow {
+                    id: revived.id.clone(),
+                    workspace: revived.workspace.clone(),
+                });
+                resolved_participant = crate::participant::Resolved::Bound {
+                    participant: Box::new(revived),
+                    provenance: crate::participant::Provenance::ExplicitEnv,
+                };
+            }
+            // Gone between the check and the lock: the claim is wrong.
+            Ok(None) => return Err(error),
+            Err(cause) => {
+                return Err(error.reason(format!(
+                    "the collected record could not be restored: {}",
+                    cause.message
+                )))
+            }
+        }
+    }
     // A write run with a harness conversation key but no record yet binds the
     // session first, exactly as `participant bind --harness <h> --key <key>`
     // would (same deterministic id), then proceeds. Without a key it is the

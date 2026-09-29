@@ -614,6 +614,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "legacy_rooms",
             "activity_note",
             "count",
+            "skipped",
             "bridge_attention",
             "bridge_health",
             "doorbell",

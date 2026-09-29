@@ -395,10 +395,28 @@ pub(crate) fn resolve(context: &Context) -> AppResult<Resolved> {
                 participant: Box::new(participant),
                 provenance: Provenance::ExplicitEnv,
             }),
-            None => Err(AppError::participant_missing(
-                MissingClaim::Explicit { id: &explicit },
-                ambient_key_available(),
-            )),
+            // Read-only lookup: a claim that names a record `participant gc`
+            // collected says so, and names the command that brings it back.
+            None => Err(match gc::holder(context, &explicit) {
+                Ok(gc::Holder::Archived { .. }) => AppError::participant_missing(
+                    MissingClaim::Collected {
+                        id: &explicit,
+                        archived: true,
+                    },
+                    ambient_key_available(),
+                ),
+                Ok(gc::Holder::Tombstone { .. }) => AppError::participant_missing(
+                    MissingClaim::Collected {
+                        id: &explicit,
+                        archived: false,
+                    },
+                    ambient_key_available(),
+                ),
+                _ => AppError::participant_missing(
+                    MissingClaim::Explicit { id: &explicit },
+                    ambient_key_available(),
+                ),
+            }),
         };
     }
 
@@ -612,9 +630,24 @@ pub(crate) fn revive_locked(context: &Context, id: &str) -> AppResult<Option<Par
     Ok(Some(revived))
 }
 
+/// Whether the explicit `POST_PARTICIPANT` claim names a record that
+/// `participant gc` collected (archived or deleted). Read-only: it answers
+/// without the lock and creates nothing.
+pub(crate) fn explicit_claim_is_collected(context: &Context) -> AppResult<bool> {
+    let Some(explicit) = env_utf8("POST_PARTICIPANT")? else {
+        return Ok(false);
+    };
+    validate_participant_id(&explicit)?;
+    Ok(!matches!(
+        gc::holder(context, &explicit)?,
+        gc::Holder::Nobody
+    ))
+}
+
 /// The explicit `POST_PARTICIPANT` claim's record, brought back if it was
 /// collected. `None` when there is no explicit claim, or nothing collected
 /// holds its id (it never existed: the claim stays `participant_missing`).
+/// Changes the store, so the caller has already been admitted as a writer.
 pub(crate) fn revive_explicit_claim(context: &Context) -> AppResult<Option<Participant>> {
     let Some(explicit) = env_utf8("POST_PARTICIPANT")? else {
         return Ok(None);
@@ -871,14 +904,53 @@ pub(crate) fn lock(context: &Context) -> AppResult<File> {
     Ok(file)
 }
 
+/// A participant directory whose record could not be read. Roster commands
+/// carry these on stdout: a damaged record is a participant that exists but
+/// cannot be listed, and a caller that discards stderr must not mistake the
+/// remaining roster for a complete one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedParticipant {
+    pub id: String,
+    pub reason: String,
+}
+
+/// Every readable record, with the damaged ones warned about on stderr and
+/// otherwise dropped. Callers that render a roster use `list_with_skipped`
+/// so the drop is visible on stdout; this is for the ones that only need to
+/// find a participant (routing, doctor's profile checks).
 pub(crate) fn list(context: &Context) -> AppResult<Vec<Participant>> {
+    let (participants, skipped) = list_with_skipped(context)?;
+    warn_skipped(&skipped);
+    Ok(participants)
+}
+
+/// The stderr warning for each damaged record. Roster commands print it too,
+/// alongside the stdout `skipped` report, so a human at a terminal and an
+/// agent that discards stderr are both told.
+pub(crate) fn warn_skipped(skipped: &[SkippedParticipant]) {
+    for record in skipped {
+        eprintln!(
+            "post: warning: skipped corrupt participant {:?}: {:?}",
+            record.id, record.reason
+        );
+    }
+}
+
+/// Readable records plus the damaged ones, each with the reason it was
+/// skipped, both sorted by id.
+pub(crate) fn list_with_skipped(
+    context: &Context,
+) -> AppResult<(Vec<Participant>, Vec<SkippedParticipant>)> {
     let root = context.root.join(PARTICIPANTS_DIR);
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()));
+        }
         Err(error) => return Err(AppError::io("list participants", &root, error)),
     };
     let mut participants = Vec::new();
+    let mut skipped = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| AppError::io("read participant entry", &root, error))?;
         if !entry
@@ -897,15 +969,18 @@ pub(crate) fn list(context: &Context) -> AppResult<Vec<Participant>> {
         match load(context, &id) {
             Ok(Some(participant)) => participants.push(participant),
             Ok(None) => {}
-            Err(error) if error.code == ErrorCode::ConfigInvalid => eprintln!(
-                "post: warning: skipped corrupt participant {:?}: {:?}",
-                id, error.message
-            ),
+            Err(error) if error.code == ErrorCode::ConfigInvalid => {
+                skipped.push(SkippedParticipant {
+                    id,
+                    reason: error.message,
+                });
+            }
             Err(error) => return Err(error),
         }
     }
     participants.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(participants)
+    skipped.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok((participants, skipped))
 }
 
 #[allow(dead_code)] // routing seam consumed by P.2

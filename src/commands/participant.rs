@@ -77,6 +77,11 @@ struct ParticipantListOutput {
     ok: bool,
     participants: Vec<Participant>,
     count: usize,
+    /// Damaged records left out of `participants`, with the reason. Present
+    /// only when there is one; stderr also carries a warning, but a caller
+    /// that discards stderr must still see the roster has a hole in it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    skipped: Vec<participant::SkippedParticipant>,
 }
 
 pub(super) fn run(
@@ -215,13 +220,15 @@ pub(super) fn run(
         ParticipantCommand::Gc(args) => super::participant_gc::run(context, args.apply, pretty),
         ParticipantCommand::Restore(args) => restore(context, &args.id, pretty),
         ParticipantCommand::List => {
-            let participants = participant::list(context)?;
+            let (participants, skipped) = participant::list_with_skipped(context)?;
+            participant::warn_skipped(&skipped);
             let count = participants.len();
             CommandResult::json(
                 &ParticipantListOutput {
                     ok: true,
                     participants,
                     count,
+                    skipped,
                 },
                 pretty,
             )
