@@ -436,6 +436,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "envelope",
             "archived",
             "delivery",
+            "cross_host",
             "retargeted",
             "bound_now",
             "warnings"

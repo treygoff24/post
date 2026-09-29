@@ -87,6 +87,49 @@ class DeliveredIsFinalTest(TerminalFixture):
         self.assertFalse(list((self.fc.root / "bridge").glob("bounced/**/*.mail")))
         self.assertTrue((self.trey.root / "hq" / "inbox" / (mail_id + ".mail")).is_file())
 
+    def room_ack(self, machine, mail_id):
+        path = machine.root / "bridge" / "room-acked" / (mail_id + ".json")
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def test_a_delivered_room_letter_leaves_a_durable_verdict(self):
+        mail_id, relative = self.deliver_one()
+        self.assertIsNone(self.room_ack(self.fc, mail_id))
+        self.assert_stays_delivered(mail_id, relative)
+        record = self.room_ack(self.fc, mail_id)
+        archived = (self.fc.root / "archive" / (mail_id + ".mail")).read_bytes()
+        self.assertEqual(
+            set(record),
+            {"v", "id", "host", "room", "status", "reason", "sha256", "at"},
+        )
+        self.assertEqual(
+            {k: record[k] for k in ("v", "id", "host", "room", "status", "reason")},
+            {"v": 1, "id": mail_id, "host": "trey", "room": "hq",
+             "status": "delivered", "reason": None},
+        )
+        self.assertEqual(record["sha256"], hashlib.sha256(archived).hexdigest())
+        self.assertRegex(record["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+
+    def test_a_room_verdict_already_on_disk_is_never_replaced(self):
+        mail_id, relative = self.deliver_one()
+        ack = self.fc.root / "bridge" / "room-acked" / (mail_id + ".json")
+        ack.parent.mkdir(parents=True, exist_ok=True)
+        ack.write_text('{"first":"writer"}\n')
+        self.assert_stays_delivered(mail_id, relative)
+        self.assertEqual(ack.read_text(), '{"first":"writer"}\n')
+
+    def test_an_unwritable_verdict_keeps_the_entry_for_the_next_tick(self):
+        mail_id, relative = self.deliver_one()
+        blocker = self.fc.root / "bridge" / "room-acked"
+        blocker.parent.mkdir(parents=True, exist_ok=True)
+        blocker.write_text("not a directory")
+        self.full_sweep(self.fc, returncodes=(0, 1))
+        self.assertIn(relative, self.remote_tree("fc"))
+        self.assertEqual(len(self.actions(self.fc, "room_ack_failed", mail_id)), 1)
+        blocker.unlink()
+        self.full_sweep(self.fc)
+        self.assertNotIn(relative, self.remote_tree("fc"))
+        self.assertEqual(self.room_ack(self.fc, mail_id)["status"], "delivered")
+
     def test_a_room_removed_after_delivery_does_not_take_the_delivery_back(self):
         mail_id, relative = self.deliver_one()
         self.remove_room(self.trey, "hq")

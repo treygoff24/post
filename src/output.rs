@@ -553,6 +553,11 @@ pub struct SendOutput {
     /// bridge, and this receipt never claims remote delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<SendDelivery>,
+    /// Present only for a workspace send whose room is homed on another
+    /// host: the letter is queued for the bridge, and `post delivery <id>`
+    /// tracks it. Absent for a room on this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_host: Option<SendCrossHost>,
     /// Present only when `--allow-self` sent to the sender's own participant
     /// inbox instead of the room or lineage named: what was asked for, where
     /// it went, and why (the same note `--text` prints).
@@ -579,6 +584,13 @@ pub struct SendRetarget {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendDelivery {
     pub state: String,
+    pub host: String,
+}
+
+/// Send-time state of a workspace letter for a room on another host.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendCrossHost {
+    pub status: String,
     pub host: String,
 }
 

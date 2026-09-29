@@ -449,6 +449,18 @@ where
         None => "no frozen recipient exists yet; message is pending sender history",
     };
 
+    // A room homed on another host is reached through the bridge: say so, so
+    // the sender knows to check `post delivery`. Read after the commit; a
+    // registry that cannot be read here changes nothing about the send.
+    let cross_host = match (target.kind, output::room_home(context, &target.name)) {
+        (crate::participant::AddressKind::Workspace, Ok(output::RoomHome::Placeholder(host))) => {
+            Some(output::SendCrossHost {
+                status: "queued".to_owned(),
+                host,
+            })
+        }
+        _ => None,
+    };
     let rendered = if json_output {
         output::json(
             &SendOutput {
@@ -456,6 +468,7 @@ where
                 envelope,
                 archived: true,
                 delivery: None,
+                cross_host,
                 retargeted,
                 warnings,
             },
@@ -472,6 +485,13 @@ where
             target.name,
             crate::mailbox::shell_quote(&envelope.id),
         );
+        if let Some(cross) = &cross_host {
+            text.push_str(&format!(
+                "post: queued for {}; not yet delivered. check it with: post delivery {}\n",
+                cross.host,
+                crate::mailbox::shell_quote(&envelope.id),
+            ));
+        }
         for note in &notes {
             text.push_str(&format!("post: {note}\n"));
         }
@@ -707,6 +727,7 @@ where
                     state: "queued".to_owned(),
                     host,
                 }),
+                cross_host: None,
                 retargeted: None,
                 warnings,
             },

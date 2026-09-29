@@ -1009,3 +1009,218 @@ fn delivery_reports_a_receipt_conflict() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// workspace mail to a room homed on another host
+
+const ROOM: &str = "loom";
+const COMMIT: &str = "83d1252c2f0e4b6a9c1d7e5f3a8b0c4d6e2f1a90";
+
+impl Rig {
+    /// Register `ROOM` as a bridge placeholder for a room homed on `PEER`.
+    fn register_remote_room(&self) {
+        let placeholder = self.root().join("remote").join(PEER).join(ROOM);
+        fs::create_dir_all(&placeholder).expect("placeholder");
+        let mut rooms: serde_json::Map<String, Value> =
+            serde_json::from_slice(&fs::read(self.root().join("rooms.json")).expect("rooms"))
+                .expect("rooms json");
+        rooms.insert(ROOM.into(), json!(placeholder));
+        fs::write(
+            self.root().join("rooms.json"),
+            Value::Object(rooms).to_string(),
+        )
+        .expect("rooms");
+    }
+
+    fn unregister_room(&self) {
+        let mut rooms: serde_json::Map<String, Value> =
+            serde_json::from_slice(&fs::read(self.root().join("rooms.json")).expect("rooms"))
+                .expect("rooms json");
+        rooms.remove(ROOM);
+        fs::write(
+            self.root().join("rooms.json"),
+            Value::Object(rooms).to_string(),
+        )
+        .expect("rooms");
+    }
+
+    /// Send a workspace letter to the remote room; returns (id, archive sha).
+    fn queue_room_letter(&self) -> (String, String) {
+        let output = self.send(ROOM);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let receipt: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+        let id = receipt["envelope"]["id"].as_str().expect("id").to_owned();
+        let sha = sha256_hex(&fs::read(self.archive_file(&id)).expect("archive"));
+        (id, sha)
+    }
+
+    fn write_room_ack(&self, id: &str, sha: &str, status: &str, reason: Option<&str>) {
+        self.write_evidence(
+            "room-acked",
+            id,
+            &room_ack(id, sha, status, reason).to_string(),
+        );
+    }
+}
+
+fn room_ack(id: &str, sha: &str, status: &str, reason: Option<&str>) -> Value {
+    json!({
+        "v": 1, "id": id, "host": PEER, "room": ROOM, "status": status,
+        "reason": reason, "sha256": sha, "at": "2026-09-29T05:53:41+00:00"
+    })
+}
+
+#[test]
+fn a_workspace_send_to_a_remote_room_says_it_is_queued_for_that_host() {
+    let rig = Rig::new();
+    rig.register_remote_room();
+    let output = rig.send(ROOM);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "", "--json keeps stderr empty");
+    let receipt: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+    assert_eq!(
+        receipt["cross_host"],
+        json!({"status": "queued", "host": PEER})
+    );
+    assert!(receipt.get("delivery").is_none(), "{receipt}");
+    // Text mode: one stdout line naming the host and the command to run.
+    let output = rig.send_as(&rig.sender, ROOM, false);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("queued for"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(
+        lines[0].contains(PEER) && lines[0].contains("post delivery '2"),
+        "{text}"
+    );
+    // Text mode's existing identity line is the only thing on stderr.
+    assert!(!stderr(&output).contains("queued"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_workspace_send_to_a_local_room_has_no_cross_host_field() {
+    let rig = Rig::new();
+    let output = rig.send("pact");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let receipt: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+    assert!(receipt.get("cross_host").is_none(), "{receipt}");
+    let text = stdout(&rig.send_as(&rig.sender, "pact", false));
+    assert!(!text.contains("queued for"), "{text}");
+}
+
+#[test]
+fn workspace_delivery_reports_each_state_from_its_evidence() {
+    let rig = Rig::new();
+    rig.register_remote_room();
+    let (id, sha) = rig.queue_room_letter();
+    let queued = rig.delivery(&id);
+    assert_eq!(queued["state"], json!("queued"));
+    assert_eq!(queued["room"], json!(ROOM));
+    assert_eq!(queued["host"], json!(PEER));
+    assert_eq!(queued["sha256"], json!(sha));
+    assert_eq!(queued["conflict"], json!(false));
+    assert!(queued.get("participant").is_none(), "{queued}");
+    // The bridge's published marker is plain text: the relay commit.
+    rig.write_bridge(&format!("published/{id}"), &format!("{COMMIT}\n"));
+    let published = rig.delivery(&id);
+    assert_eq!(published["state"], json!("published"));
+    assert_eq!(published["commit"], json!(COMMIT));
+    assert_eq!(published["host"], json!(PEER));
+    rig.write_room_ack(&id, &sha, "delivered", None);
+    let received = rig.delivery(&id);
+    assert_eq!(received["state"], json!("received"));
+    assert_eq!(received["host"], json!(PEER));
+    assert_eq!(received["acked_at"], json!("2026-09-29T05:53:41+00:00"));
+    assert!(received.get("reason").is_none(), "{received}");
+    // Evidence answers whatever the room's registration is now: the bridge
+    // tidies the placeholder away once the letter is published.
+    rig.unregister_room();
+    assert_eq!(rig.delivery(&id)["state"], json!("received"));
+    rig.write_room_ack(&id, &sha, "rejected", Some("unknown_room"));
+    let rejected = rig.delivery(&id);
+    assert_eq!(rejected["state"], json!("rejected"));
+    assert_eq!(rejected["reason"], json!("unknown_room"));
+    let text = stdout(&rig.delivery_as(&rig.sender, &id, false));
+    assert!(
+        text.contains(&format!("{id}: rejected (workspace:{ROOM}@{PEER})")),
+        "{text}"
+    );
+    assert!(text.contains("reason: unknown_room"), "{text}");
+    // The marker outlives a rehomed room too.
+    fs::remove_file(rig.evidence("room-acked", &id)).expect("drop record");
+    let published = rig.delivery(&id);
+    assert_eq!(published["state"], json!("published"));
+    assert!(published.get("host").is_none(), "{published}");
+}
+
+#[test]
+fn workspace_delivery_reports_corrupt_evidence_as_unknown() {
+    let rig = Rig::new();
+    rig.register_remote_room();
+    let (id, sha) = rig.queue_room_letter();
+    let other_sha = "0".repeat(64);
+    let mut extra = room_ack(&id, &sha, "delivered", None);
+    extra["note"] = json!("x");
+    let mut missing = room_ack(&id, &sha, "delivered", None);
+    missing.as_object_mut().expect("object").remove("at");
+    let with = |key: &str, value: Value| {
+        let mut record = room_ack(&id, &sha, "delivered", None);
+        record[key] = value;
+        record.to_string()
+    };
+    let acked = format!("room-acked/{id}.json");
+    let marker_path = format!("published/{id}");
+    let cases: Vec<(&str, String)> = vec![
+        (&acked, "{not json".into()),
+        (&acked, extra.to_string()),
+        (&acked, missing.to_string()),
+        (&acked, with("sha256", json!(other_sha))),
+        (&acked, with("room", json!("elsewhere"))),
+        (&acked, with("id", json!("20260101-000000-aaaaaa"))),
+        (&acked, with("status", json!("maybe"))),
+        (&acked, with("reason", json!("unknown_room"))),
+        (&acked, room_ack(&id, &sha, "rejected", None).to_string()),
+        (&marker_path, "not-a-hash\n".into()),
+        (&marker_path, String::new()),
+    ];
+    for (relative, contents) in cases {
+        for clean in [&acked, &marker_path] {
+            let _ = fs::remove_file(rig.bridge().join(clean));
+        }
+        rig.write_bridge(relative, &contents);
+        let value = rig.delivery(&id);
+        assert_eq!(
+            value["state"],
+            json!("unknown"),
+            "{relative} {contents}: {value}"
+        );
+        assert!(
+            value["evidence_file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with(relative)),
+            "{relative}: {value}"
+        );
+        assert!(value["evidence_error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
+    }
+}
+
+#[test]
+fn workspace_delivery_to_a_local_room_is_unsupported_with_a_true_reason() {
+    let rig = Rig::new();
+    let output = rig.send("pact");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let sent: Value = serde_json::from_str(&stdout(&output)).expect("send JSON");
+    let id = sent["envelope"]["id"].as_str().expect("id");
+    let value = rig.delivery(id);
+    assert_eq!(value["state"], json!("unsupported"));
+    assert!(value.get("host").is_none(), "{value}");
+    assert!(value.get("room").is_none(), "{value}");
+    let reason = value["reason"].as_str().expect("reason");
+    assert!(reason.contains("'pact' is a room on this host"), "{reason}");
+    assert!(!reason.contains("only participant"), "{reason}");
+}
