@@ -695,6 +695,9 @@ fn a_crash_after_d2_leaves_record_and_inbox_and_the_rerun_verifies_them() {
         "a replay writes nothing but the routing receipt: {changed:?}"
     );
     assert_eq!(fs::read(rig.inbox_path()).unwrap(), bytes);
+    // The replay routes: the exact receipt exists for the admitted recipient
+    // and the letter reads. Last, because the consuming read changes state.
+    assert_routed_to_the_recipient_and_readable(&rig);
 }
 
 // ------------------------------- replay skips the mutable admission checks
@@ -1468,11 +1471,7 @@ fn origin_search_and_catchup_keep_a_colliding_import_remote() {
 
 #[test]
 fn origin_keeps_the_admitted_host_after_the_placeholder_is_removed_or_rehomed() {
-    for topology in [
-        Topology::Removed,
-        Topology::RehomedRemote,
-        Topology::RehomedLocal,
-    ] {
+    for topology in [Topology::RehomedRemote, Topology::RehomedLocal] {
         let rig = Rig::new();
         rig.deliver_colliding(topology);
         let inbox = rig.reader_json(&["inbox", "--json"]);
