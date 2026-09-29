@@ -268,27 +268,48 @@ On Unix, result stdout is written directly to inherited fd1 through an
 unbuffered strict writer rather than Rust's EBADF-tolerant `StdoutRaw` wrapper.
 An invalid or read-only descriptor cannot count as a successful emit, and no
 `after_stdout` cursor update, catchup delta, or exact acknowledgement runs.
-Committed-delivery failures remain non-retryable
-`delivered_output_failure`; committed room-registration output failures retain
-their existing success semantics.
+A `post send` that landed never exits nonzero: when its receipt cannot be
+written, the mail is on disk exactly once, the exit code is 0, and one stderr
+line says the change was committed (a nonzero exit made callers resend, and the
+resend was a second copy). Other committed channel mutations keep the
+non-retryable `delivered_output_failure`; committed room-registration output
+failures retain their existing success semantics. A read-only command whose
+reader closed the pipe (`post who --text | head`) stops quietly with its own
+exit code rather than reporting a retryable `io_error`; only a command that
+still owes a state change after its output (a consuming read) keeps the error.
+`--json` output is one JSON document on stdout with nothing on stderr, so
+`2>&1 | jq` parses it; what is degraded or worth a second look rides in the
+document. A command run with `--text` or `--brief` reports its failures as
+prose on stderr; every other failure is the JSON error envelope. `post
+--version` prints the same line as `post version`
+(`post <semver> (build <short-sha>[-dirty], store v2; ...)`); `-dirty` marks a
+build from a tree with uncommitted tracked changes.
 
 - `post send --to <workspace:<room>|lineage:<name>|participant:<id>|bare-name>
   [--from <name>] [--kind letter|note|signal] [--subject <s>] [--oversize]
-  (--body <text> | --body-file <path> | stdin)`: the three body forms are mutually exclusive
-  alternatives; a bare positional FILE
-  remains accepted as the deprecated spelling of `--body-file`, and a
-  body-file path that does not exist is `invalid_argument` (a usage error)
+  [<body> | --body <text> | --body-file <path> | stdin]`: the body forms are
+  mutually exclusive alternatives; a bare positional argument is the body, the
+  same as `--body` (the deprecated positional FILE is gone: the recipient is
+  always `--to`, and a bare argument that is an existing file's path is refused
+  with the `--body-file` command that sends that file); prefer stdin (a quoted
+  heredoc) or `--body-file`, and keep `--body` for short plain one-liners, since
+  the shell parses argv before post sees it. A body-file path that does not
+  exist is `invalid_argument` (a usage error)
   rather than a retryable `io_error`. Bare targets resolve deterministically in
   workspace → lineage → participant priority; typed `kind:name` addresses bypass
   that priority. Refuses: unknown recipient, a blocked direct target (quotes
   reason), reserved-name impersonation, subjects over 1 KiB, empty body, and
   bodies over 32 KiB unless `--oversize` records explicit intent. A complete
-  Post watch-event NDJSON line warns on stderr but does not block legitimate
-  forensic traffic. `--body`
-  exists so agents don't need heredocs (the first real mail shipped the literal
-  word "placeholder" via a botched heredoc — design against that). Success
+  Post watch-event NDJSON line does not block legitimate forensic traffic; the
+  receipt carries a warning (`warnings` under `--json`, a `post: warning:` line
+  in text). Success
   (text): `post: sent <kind> <id> <from> -> <to>` followed by a participant
-  readback command. Success (json): full envelope + `archived: true`. Rules are
+  readback command. Success (json): full envelope + `archived: true`, plus
+  `warnings` (strings) only when there is something to say. The hidden
+  `--allow-self` (delegate's completion pings pass it) retargets a send whose
+  `--to` is the sender's own room or lineage to the sender's own participant
+  inbox and says so in the receipt; other members of that room do not receive
+  it, and any other target is unaffected. Rules are
   reloaded after payload construction immediately
   before each inbox publication attempt. If inbox commits but archive
   publication fails, `delivered_unarchived` is non-retryable and the message
@@ -471,7 +492,18 @@ their existing success semantics.
   `.../cos-crons` does not. The offered candidate is the first, in order of
   the learned suffixes by rank and then the bridge host id, that is a valid
   and untaken room name, names no lineage, and has no blocked route to it;
-  when none survives, no `exact_fix` is offered.
+  when none survives, no `exact_fix` is offered. On a bridged host (one with
+  `bridge/config.json`), a name a peer host publishes on the bridge is refused
+  the same way, by `add` and by `rename`'s new name: `invalid_argument` with
+  `details.host` naming the publisher and an `exact_fix` that registers
+  `<name>-<this host>` (the same candidate rules apply, and the candidate must
+  not itself be published). The publications read are
+  `bridge/rooms/peers/<host>.json` (`{"v":1,"host":"<host>","rooms":[...]}`,
+  which must name its own host) and the entries for other hosts in
+  `bridge/rooms/owners.json`; names match ASCII case-insensitively. Both files
+  are advisory: an absent, oversize, or malformed one is skipped, never an
+  error, and a host with no `bridge/config.json` is never refused. Resuming an
+  interrupted rename is exempt.
 - `post rooms set-path <name> <path> [--dry-run]` — re-points a local room's
   workspace (discovery) path under the same locks and validation as `add`;
   it never moves mail or history, never rewrites participant records, and
@@ -506,8 +538,7 @@ their existing success semantics.
   While the journal stands, `post send` to either named room, a legacy
   room's mailbox or cursor write for either, and anything else that would
   create `<root>/<old>` or `<root>/<new>` refuses with `config_invalid`
-  and the same `exact_fix`, creating nothing; `post doctor --fix` skips
-  both rooms (all rooms when the journal is unreadable). Rerunning that same pair resumes it:
+  and the same `exact_fix`, creating nothing. Rerunning that same pair resumes it:
   when `<root>/<old>` is gone and `<root>/<new>` exists, the move is skipped,
   the rewrites are re-planned from `<root>/<new>` (each is idempotent), and
   `rooms.json` commits. When `rooms.json` already names `<new>`, only
@@ -534,7 +565,7 @@ their existing success semantics.
   with the same retryable `bridge_guard_unavailable`, naming the count and up
   to 8 ids (`details.matches`); the bridge stamps holds on its next full
   tick. Envelopes that do not parse are skipped, as the bridge skips them. `--dry-run` runs every check and writes nothing.
-- `post chat <channel> --send [--anyway] [--re <id>] [--subject <s>]
+- `post chat <channel> --send [--re <id>] [--subject <s>]
   [--oversize] [--signature-ref <tag>] (--body <text> | --body-file <path> |
   stdin)`: sends to a shared channel as the bound participant. A session-only
   participant may join explicitly; a workspace may supply legacy default
@@ -558,11 +589,15 @@ their existing success semantics.
   detection used by direct mail run before the append-only channel write.
   Bodies are scanned for `@<room>` word-boundary mentions of registered rooms
   (stamped into the envelope as `mentions`). `--re <id>` stamps a reply to a
-  prior message in the same channel (full id or unique prefix). By default, if
-  ordinary unseen messages from other participants exist in the channel, the send is
-  refused with `crossed_send` (details include up to the last 10 missed
-  messages); `--anyway` delivers regardless. System join/profile events do not
-  trigger the bounce. A plain read whose stdout is the null device is refused
+  prior message in the same channel (full id or unique prefix). A send always
+  delivers. When ordinary unseen messages from other participants exist in the
+  channel, the JSON receipt carries `crossed: {unseen, addressed_to_you,
+  messages[]}` (at most 10 messages, newest last, each `{id, from,
+  display_name?, sent, addressed_to_you, body}` plus `signed_verified?`,
+  `sender_address?`, and `sender_provenance?` when they apply): the whole body
+  for a message addressed to the sender, a 300-character preview otherwise;
+  text mode prints them after the sent line. The crossed messages stay unread.
+  System join/profile events never count as crossed. A plain read whose stdout is the null device is refused
   before anything is emitted, consuming nothing; `--discard` is the deliberate
   way to mark every currently-existing unseen message seen without printing
   them, and reports `{ok, channel, room, discarded, cursor}` (`cursor` is the
@@ -606,7 +641,7 @@ their existing success semantics.
   `YYYYMMDD-HHMMSS-ffffff` watermark compared against message ids, which carry
   the same UTC prefix; a message whose id sorts before it is history. History
   is never unread: it is absent from `post channels` unread counts, plain
-  consuming reads and their `has_more`, `crossed_send`, `post watch` channel
+  consuming reads and their `has_more`, a send's `crossed` block, `post watch` channel
   and mention events (live and `--snapshot`), catchup, and `--discard`/
   `--discard-through` counts. It stays readable: `--peek` glances at every
   unseen message including history (its @mention rescue skips history), and
@@ -630,7 +665,7 @@ their existing success semantics.
   The membership start is a participant's, so it binds only participant reads.
   Unbound room mode has no participant and therefore no start and no floor:
   `post watch --snapshot --room <room>` run without a participant binding
-  (as `codex-notify-monitor.mjs` runs it from launchd) keeps the old rule that
+  keeps the old rule that
   every channel message the room has not seen is new, so a message from
   before any join still surfaces there, including as `reason: mention`. Join from now does not cover room
   mode.
@@ -640,10 +675,11 @@ their existing success semantics.
   an unreadable/unparseable unseen `.msg` file makes a plain read return
   `config_invalid` with the seen-set untouched (a read consumes only messages
   it emitted, never one it could not). Non-consuming `--history`/`--since`
-  reads warn on stderr and skip unreadable messages. Crossed-send applies the
-  same posture: an unreadable unseen file from another participant bounces a normal
-  send (`--anyway` remains the escape hatch); malformed files already in the
-  seen-set are ignored. Requires
+  reads warn on stderr and skip unreadable messages. The crossing check applies
+  the same posture: an unreadable unseen file from another participant is left
+  out of `crossed` and named in the receipt's `skipped` list (`[{id, reason}]`)
+  while the send delivers; malformed files already in the seen-set are
+  ignored. Requires
   membership; otherwise `not_a_member` with suggested fix `post chat <channel>
   --join`. Success JSON: `{ok, message}`. The channel message is committed to
   `channels/<name>/messages/<id>.msg`; after a committed send, stdout failure
@@ -711,7 +747,18 @@ their existing success semantics.
   member. `messages` remains the raw message-file count. Listing is read-only
   and never creates cursor state.
 - `post who [--room <name>]... [--text]`: read-only participant directory.
-  JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count}`.
+  JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count,
+  bridge_attention?, doorbell?}`. `bridge_attention` is the number of items in
+  `bridge/health.json`'s `attention` list and is present only when nonzero
+  (`post doctor` lists each with its fix); `--text` prints
+  `bridge_attention: <n>`. `live_watch` is true for a fresh `post watch`
+  heartbeat or an armed doorbell-supervisor subscription read from
+  `doorbell/health.json` (rewritten at least every 30 s; a file older than 90 s
+  belongs to a dead supervisor and counts for nothing). `doorbell_armed` on a
+  participant or legacy-room row (present only when true) says which, and
+  `doorbell` (`fresh`, `stale`, or `unreadable`; present only when the file
+  exists) says whether the supervisor's word was counted, with a `doorbell:`
+  line in text for the last two.
   The caller is first and carries binding provenance. Every participant row
   reports `id`, `harness`, lifecycle `state`, `last_seen` when present,
   optional lineage/workspace, watch state, and separate `unread` and `pending`
@@ -723,7 +770,7 @@ their existing success semantics.
   It never reports PIDs or process information.
 - `post schema` — the full machine contract: commands, flags, output shapes,
   error codes, exit codes, laws.
-- `post doctor [--fix] [--brief]` — validates root exists, rooms.json/rules.json parse
+- `post doctor [--fix] [--brief] [--severity warn|error]` — validates root exists, rooms.json/rules.json parse
   and have sane shapes, room paths exist (warn), stray non-.mail files,
   malformed envelopes, and channel state including malformed channel metadata,
   membership, and messages. For each registered room it also checks
@@ -742,8 +789,20 @@ their existing success semantics.
   discarded or repaired, and its suggested fix says so -- preserving the ids is
   the repair, because the seen-set is the only record of what that participant
   has read.
-  `--fix` creates missing dirs/defaults only — never touches rules content,
-  mail, channel history, membership, cursor state, or cursor locks. Doctor
+  `--fix` creates the missing root, `archive/`, and default config files only
+  — never touches rules content, mail, channel history, membership, cursor
+  state, or cursor locks, and never creates a room's `inbox/` or `read/`
+  (they appear with the room's first mail, so their absence is neither
+  reported nor repaired). Expired participants are one info check,
+  `participants.stale`, with a count and a pointer to `post participant gc`.
+  Each item in `bridge/health.json`'s `attention` list (absent file, malformed
+  file, or absent list: nothing) is a warning `bridge.attention.<kind>[.<id>]`
+  carrying the bridge's own fix. A served skill at `~/.agents/skill-library/post`
+  that differs from the copy this binary was built with is the warning
+  `skill.drift` (absent path: nothing). `--severity warn` drops info checks and
+  `--severity error` keeps errors only; `ok`, `status`, `count`, and the exit
+  code then describe the trimmed report, and `severity_filter` names the
+  threshold so a filtered "healthy" is never read as a full one. Doctor
   also reports delivered mail with a missing or mismatched archive copy for
   manual reconciliation, and a mail id present in both `inbox/` and `read/`:
   identical content is `state.read_duplicate` (warning — an interrupted
@@ -1156,16 +1215,18 @@ suggested_fix}}`. Codes (stable): `unknown_room`, `blocked_route`,
 `reserved_sender`, `empty_body`, `ambiguous_id`, `not_found`,
 `invalid_argument`, `config_invalid`, `duplicate_workspace`, `io_error`,
 `delivered_output_failure`, `delivered_unarchived`, `not_a_member`,
-`crossed_send`.
-Pre-commit `io_error` is retryable with exit 75. `duplicate_workspace`,
-`not_a_member`, and `crossed_send` are non-retryable with exit 65. Both delivered variants are
-non-retryable with exit 70: `delivered_output_failure` means a direct send or
-channel mutation committed but stdout receipt failed; `delivered_unarchived`
+`crossed_send` (reserved: no command produces it now that a crossed channel send
+always delivers).
+Pre-commit `io_error` is retryable with exit 75. `duplicate_workspace` and
+`not_a_member` are non-retryable with exit 65. Both delivered variants are
+non-retryable with exit 70: `delivered_output_failure` means a channel
+mutation committed but stdout receipt failed (a direct `post send` that landed
+exits 0 instead, with a stderr note); `delivered_unarchived`
 means inbox delivery committed but archive publication failed. Room
 registration stdout failure after commit is reported as success with best-effort
 diagnostics, not `delivered_output_failure`. Exit codes per the agent-CLI
 standard: 2 usage, 65 validation (unknown_room, reserved_sender, empty_body,
-ambiguous_id, duplicate_workspace, not_a_member, crossed_send), 66 not_found, 77
+ambiguous_id, duplicate_workspace, not_a_member), 66 not_found, 77
 blocked_route (permission class), 78 config_invalid, 70 post-commit/internal
 failure, 75 retryable pre-commit I/O.
 

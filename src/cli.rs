@@ -58,7 +58,7 @@ fn positive_bytes(value: &str) -> Result<usize, String> {
     rename_all = "kebab-case"
 )]
 pub(crate) struct Cli {
-    /// Emit JSON for send/read/chat; inbox/rooms/channels/profile/schema/doctor are already JSON.
+    /// Print JSON instead of text. Commands that print text by default (send, read, chat, catchup, search, version, delivery, profile) print one JSON object; the rest already print JSON, and the ones with a text flag print their human form only when it is given; watch always streams NDJSON.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -79,7 +79,7 @@ pub(crate) enum Command {
     Participant(ParticipantArgs),
     /// Inspect or change optional persistent lineages.
     Identity(IdentityArgs),
-    /// Send mail from --body, FILE, or stdin.
+    /// Send mail; write the body on stdin (heredoc) or with --body-file.
     Send(SendArgs),
     /// Join, send to, or read a shared channel (group chat).
     Chat(ChatArgs),
@@ -113,6 +113,7 @@ pub(crate) enum Command {
     /// of the JSON consumers read.
     Contract(ContractArgs),
     /// Bridge-only entry points. Humans and agents never need these.
+    #[command(hide = true)]
     Bridge(BridgeArgs),
     /// Show where a host-qualified letter you sent stands: queued, published, received, or rejected.
     Delivery(DeliveryArgs),
@@ -215,11 +216,11 @@ pub(crate) struct ParticipantBindArgs {
     #[arg(long, value_name = "ROOM", value_parser = nonempty_without_controls)]
     pub workspace: Option<String>,
 
-    /// Harness slug for --key, or an optional label for --new (default: shell).
+    /// Harness slug. Required with --key (the participant id is derived from harness and key); an optional label for --new (default: shell).
     #[arg(long, value_name = "SLUG", value_parser = nonempty_without_controls)]
     pub harness: Option<String>,
 
-    /// Deterministic conversation key for a shell without harness-provided identity.
+    /// Deterministic conversation key for a shell without harness-provided identity. Requires --harness.
     #[arg(
         long,
         value_name = "CONVERSATION_KEY",
@@ -389,10 +390,13 @@ pub(crate) struct SearchArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post send --to <ROOM> [OPTIONS] [--oversize] --body <TEXT>\n       \
-     post send --to <ROOM> [OPTIONS] [--oversize] --body-file <PATH>\n       \
-     post send --to <ROOM> [OPTIONS] [--oversize] < BODY_FILE\n\n\
-     The three body forms are alternatives: pass exactly one, or none to read stdin."
+    override_usage = "post send --to <ROOM> [OPTIONS] <<'EOF'      (body on stdin: heredoc or pipe, SAFEST)\n       \
+     post send --to <ROOM> [OPTIONS] --body-file <PATH>   (body from a UTF-8 file; --body-file - reads stdin)\n       \
+     post send --to <ROOM> [OPTIONS] --body <TEXT>        (short one-liners only)\n\n\
+     Pass exactly one body source, or none to read stdin. A body on argv is parsed by your shell\n\
+     first: backticks and $(...) inside double quotes execute and splice their output into the\n\
+     message, and $1.63B expands. Prose belongs on stdin or in a file; a heredoc with a quoted\n\
+     delimiter ('EOF') passes it through untouched. A bare [BODY] argument is the same as --body."
 )]
 pub(crate) struct SendArgs {
     /// Registered recipient room.
@@ -411,28 +415,46 @@ pub(crate) struct SendArgs {
     #[arg(long, default_value = "", value_parser = without_controls)]
     pub subject: String,
 
-    /// Inline message body text. A shell can expand `$1.63B` inside double
-    /// quotes or end single quotes at an apostrophe; use --body-file or stdin
-    /// for shell-sensitive prose.
-    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file"])]
-    pub body: Option<String>,
-
-    /// Read the message body from this UTF-8 file.
+    /// Read the message body from this UTF-8 file (`-` reads stdin). The safe
+    /// spelling for anything longer than one plain line.
     #[arg(
         long = "body-file",
         value_name = "PATH",
         value_hint = clap::ValueHint::FilePath,
-        conflicts_with = "file"
+        conflicts_with_all = ["body", "text"]
     )]
     pub body_file: Option<PathBuf>,
+
+    /// Inline body text, for a short plain one-liner only. Your shell parses
+    /// it before post sees it: `$1.63B` expands inside double quotes, an
+    /// apostrophe ends single quotes, and backticks run commands. Anything
+    /// else goes on stdin (`<<'EOF'`) or through --body-file.
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "text"])]
+    pub body: Option<String>,
 
     /// Allow a body larger than the default 32 KiB safety limit.
     #[arg(long)]
     pub oversize: bool,
 
-    /// Deprecated positional spelling of --body-file; omit every body source to read stdin.
-    #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
-    pub file: Option<PathBuf>,
+    /// Deliver to the sender's own participant inbox when `--to` names the
+    /// sender's own room or lineage. A room send never reaches its own
+    /// sender, so a session that pings its own room (delegate completion
+    /// notices) would otherwise hear nothing. No effect on any other target.
+    #[arg(long = "allow-self", hide = true)]
+    pub allow_self: bool,
+
+    /// A short body given directly, the same as --body; omit every body
+    /// source to read stdin.
+    #[arg(value_name = "BODY")]
+    pub text: Option<String>,
+}
+
+impl SendArgs {
+    /// The inline body, whichever spelling carried it (`--body` or the bare
+    /// argument; clap refuses both at once).
+    pub(crate) fn take_inline_body(&mut self) -> Option<String> {
+        self.body.take().or_else(|| self.text.take())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -697,7 +719,7 @@ pub(crate) struct InboxArgs {
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
 
-    /// Adopt held lineage-addressed mail for current affiliates (implemented by P.2).
+    /// Deliver held mail addressed to your lineage to its current members (needs a lineage; see `post identity`).
     #[arg(long)]
     pub adopt: bool,
 }
@@ -1019,4 +1041,29 @@ pub(crate) struct DoctorArgs {
     /// conflicts with --json).
     #[arg(long, conflicts_with = "json")]
     pub brief: bool,
+
+    /// Report only findings at this level or worse: `warn` drops the
+    /// informational lines, `error` keeps errors only. Status, count, and the
+    /// exit code follow what is reported, so `--severity error` exits 0 on a
+    /// store whose only findings are warnings.
+    #[arg(long, value_enum, value_name = "LEVEL")]
+    pub severity: Option<DoctorSeverityFilter>,
+}
+
+/// The `post doctor --severity` threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum DoctorSeverityFilter {
+    /// Warnings and errors.
+    Warn,
+    /// Errors only.
+    Error,
+}
+
+impl DoctorSeverityFilter {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
 }

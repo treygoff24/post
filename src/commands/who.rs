@@ -44,13 +44,20 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     // which the unscoped command promises to list.
     let scope: Option<BTreeSet<&str>> =
         room_filter_requested.then(|| selected.iter().map(String::as_str).collect());
+    let doorbell = read_doorbell(context);
+    // The count of stuck or refused letters and collisions the bridge lists in
+    // its health file: who is where agents look first, and the bridge's own
+    // `ok` only says it is running.
+    let bridge_attention = super::doctor::bridge_attention_items(context).len();
     let mut legacy_rooms = Vec::new();
     for room in &selected {
         let presence = presence::read_presence(context, room)?;
+        let doorbell_armed = doorbell.rooms.contains(&presence.room);
         legacy_rooms.push(WhoRoom {
+            live_watch: presence.live_watch || doorbell_armed,
             room: presence.room,
-            live_watch: presence.live_watch,
             last_seen: presence.last_seen,
+            doorbell_armed,
         });
     }
     legacy_rooms.sort_by(|a, b| a.room.cmp(&b.room));
@@ -121,6 +128,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         let (unread, pending) = mail_counts(context, &mut counts, &participant)?;
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
         let state = participant.state_label(now).to_owned();
+        let doorbell_armed = doorbell.participants.contains(&participant.id);
         participants.push(WhoParticipant {
             id: participant.id,
             harness: participant.harness,
@@ -130,8 +138,9 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             workspace: participant.workspace,
             unread,
             pending,
-            live_watch: presence.live_watch,
+            live_watch: presence.live_watch || doorbell_armed,
             watch_last_seen: presence.last_seen,
+            doorbell_armed,
         });
     }
     participants.sort_by(|left, right| {
@@ -164,8 +173,13 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             let live = if entry.live_watch { "yes" } else { "no" };
             let seen = entry.last_seen.as_deref().unwrap_or("no lease record");
             let watch_seen = entry.watch_last_seen.as_deref().unwrap_or("never");
+            let armed = if entry.doorbell_armed {
+                "  doorbell=armed"
+            } else {
+                ""
+            };
             rendered.push_str(&format!(
-                "participant {}  lease={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}  unread={:?}  pending={:?}\n",
+                "participant {}  lease={}  last-seen={seen}  harness={}  lineage={}  workspace={}  live-watch={live}  watch-last-seen={watch_seen}{armed}  unread={:?}  pending={:?}\n",
                 output::sanitize_text_header(&entry.id),
                 entry.state,
                 output::sanitize_text_header(&entry.harness),
@@ -187,9 +201,28 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         for entry in &legacy_rooms {
             let live = if entry.live_watch { "yes" } else { "no" };
             let seen = entry.last_seen.as_deref().unwrap_or("never");
+            let armed = if entry.doorbell_armed {
+                "  doorbell=armed"
+            } else {
+                ""
+            };
             rendered.push_str(&format!(
-                "legacy-room {}  live-watch={live}  last-seen={seen}\n",
+                "legacy-room {}  live-watch={live}  last-seen={seen}{armed}\n",
                 output::sanitize_text_header(&entry.room)
+            ));
+        }
+        // A doorbell file that cannot vouch for anything is said out loud: a
+        // reader seeing live-watch=no must know the supervisor's word was not
+        // counted, not that nobody is armed.
+        if matches!(doorbell.state, "stale" | "unreadable") {
+            rendered.push_str(&format!(
+                "doorbell: {} (live-watch counts `post watch` heartbeats only; the supervisor's armed subscriptions were not counted)\n",
+                doorbell.state
+            ));
+        }
+        if bridge_attention > 0 {
+            rendered.push_str(&format!(
+                "bridge_attention: {bridge_attention} (run `post doctor` for each item and its fix)\n"
             ));
         }
         return Ok(CommandResult::success(rendered));
@@ -207,9 +240,69 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             legacy_rooms,
             count,
             activity_note,
+            bridge_attention,
+            doorbell: (doorbell.state != "absent").then(|| doorbell.state.to_owned()),
         },
         pretty,
     )
+}
+
+/// What the doorbell supervisor's `doorbell/health.json` says is armed. It
+/// rewrites the file at least every 30 seconds while it runs, so a file older
+/// than [`DOORBELL_FRESH`] belongs to a dead supervisor and arms nothing.
+struct Doorbell {
+    state: &'static str,
+    participants: BTreeSet<String>,
+    rooms: BTreeSet<String>,
+}
+
+const DOORBELL_FRESH: std::time::Duration = std::time::Duration::from_secs(90);
+const DOORBELL_HEALTH_MAX_BYTES: u64 = 4 << 20;
+
+fn read_doorbell(context: &Context) -> Doorbell {
+    let empty = |state| Doorbell {
+        state,
+        participants: BTreeSet::new(),
+        rooms: BTreeSet::new(),
+    };
+    let path = context.root.join("doorbell").join("health.json");
+    let bytes = match crate::bridge_topology::read_regular(&path, DOORBELL_HEALTH_MAX_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return empty("absent"),
+        Err(_) => return empty("unreadable"),
+    };
+    let modified = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => modified,
+        Err(_) => return empty("unreadable"),
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return empty("unreadable");
+    };
+    let fresh = match std::time::SystemTime::now().duration_since(modified) {
+        Ok(age) => age <= DOORBELL_FRESH,
+        // Stamped in the future: within a few seconds is clock skew, more is
+        // a file that could vouch forever.
+        Err(ahead) => ahead.duration() <= std::time::Duration::from_secs(5),
+    };
+    if !fresh {
+        return empty("stale");
+    }
+    let armed = |key: &str, name: &str| -> BTreeSet<String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| row.get("armed").and_then(serde_json::Value::as_bool) == Some(true))
+            .filter_map(|row| row.get(name).and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    };
+    Doorbell {
+        state: "fresh",
+        participants: armed("bindings", "participant"),
+        rooms: armed("residents", "room"),
+    }
 }
 
 fn mail_counts(

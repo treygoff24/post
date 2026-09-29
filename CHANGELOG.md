@@ -8,6 +8,28 @@
 - `post-doorbell mute --channel <name>` and `unmute --channel <name>` apply to panes and residents. A muted channel rings for nothing, mentions included, and membership is unchanged. Subscribed means everything, the default means mentions only, and muted means nothing. Mute wins over subscribe. A prefs file with no `muted` field means nothing is muted, and `status` lists the muted channels.
 
 ### Changed
+- Surface and deploy fixes (2026-09-28 fix wave). `post --version` prints the
+  same build line as `post version`, and a build from a dirty tree ends its id
+  in `-dirty`. `scripts/install-post.sh` refuses a commit no branch on `origin`
+  contains (`--allow-unreachable` overrides), and the install smoke asserts
+  `post who` answers within 2 s and that the installed binary is the commit
+  being installed. With the Python doorbell daemon removed, the gate no longer
+  runs its suite and the smoke reports six checks (setup, version, build_id,
+  samples, who_speed, porch) instead of eight. `scripts/gate.sh` puts a time
+  limit on `cargo test` (`GATE_TEST_TIMEOUT`, default 1200 s). `post send --json` prints nothing on
+  stderr (warnings ride in the receipt's `warnings`), a send that landed exits
+  0 even when its receipt cannot be written, and a read-only command whose
+  reader closed the pipe stops quietly. `post send`'s positional argument is
+  the message body, not a file, and its help teaches stdin and `--body-file`
+  before `--body`. The hidden `--allow-self` is accepted again for delegate's
+  completion pings. `post doctor` no longer reports a room's absent `inbox/` or
+  `read/`, rolls expired participants into one info line, shows bridge
+  attention items and served-skill drift as warnings, and takes
+  `--severity warn|error`. `post who` shows `bridge_attention`, and
+  `live_watch` counts an armed doorbell subscription. `bridge` is hidden from
+  top-level help. `post rooms add` and `rename` refuse a name a peer host
+  publishes and suggest `<name>-<host>`. `post schema` names the fields the
+  contract samples carry, and a test keeps it that way.
 - Bridge v2 channel sync is on by default (post-xiy; Trey ruling
   2026-09-24). A `bridge/config.json` with no `channels` key now means
   `{"mode": "all"}`: every channel publishes and imports between hosts

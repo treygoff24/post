@@ -267,7 +267,13 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "participant",
         &schema.output_shapes.participant,
-        ["show/bind/touch/end:", "list:", "notice:"]
+        [
+            "show/bind/touch/end:",
+            "list:",
+            "notice:",
+            "participant_missing",
+            "gc"
+        ]
     );
     assert_shape!(
         "identity",
@@ -309,7 +315,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "participant",
             "pending",
             "participant_fix",
-            "participant_error"
+            "participant_error",
+            "participant_missing",
+            "severity_filter"
         ]
     );
     assert_shape!(
@@ -325,7 +333,10 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "unread_count",
             "pending",
             "pending_by_address",
-            "held"
+            "held",
+            "bound",
+            "bound_now",
+            "hint"
         ]
     );
     assert_shape!(
@@ -338,7 +349,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "body",
             "own",
             "pending",
-            "already_read"
+            "already_read",
+            "bound",
+            "bound_now"
         ]
     );
     assert_shape!(
@@ -415,7 +428,14 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "send_json",
         &schema.output_shapes.send_json,
-        ["ok", "envelope", "archived", "delivery"]
+        [
+            "ok",
+            "envelope",
+            "archived",
+            "delivery",
+            "bound_now",
+            "warnings"
+        ]
     );
     assert_shape!(
         "chat_join",
@@ -429,13 +449,23 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "backlog_ignored",
             "event_id",
             "history_before_join",
-            "history_hint"
+            "history_hint",
+            "bound_now",
+            "normalized_from"
         ]
     );
     assert_shape!(
         "chat_send",
         &schema.output_shapes.chat_send,
-        ["ok", "message", "cross_host"]
+        [
+            "ok",
+            "message",
+            "cross_host",
+            "bound_now",
+            "crossed",
+            "skipped",
+            "warnings"
+        ]
     );
     assert_shape!(
         "chat_read",
@@ -452,7 +482,10 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "has_more",
             "selected_count",
             "byte_limit",
-            "omitted"
+            "omitted",
+            "bound",
+            "bound_now",
+            "skipped_files"
         ]
     );
     assert_shape!(
@@ -513,7 +546,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "selected_count",
             "has_more",
             "byte_limit",
-            "omitted"
+            "omitted",
+            "bound_now",
+            "skipped"
         ]
     );
     assert_shape!(
@@ -530,7 +565,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "results",
             "count",
             "limit",
-            "truncated"
+            "truncated",
+            "bound",
+            "skipped"
         ]
     );
     assert_shape!(
@@ -542,7 +579,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "count",
             "archived_hidden",
             "participant",
-            "pending"
+            "pending",
+            "bound",
+            "skipped"
         ]
     );
     assert_shape!(
@@ -564,7 +603,10 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "participants",
             "legacy_rooms",
             "activity_note",
-            "count"
+            "count",
+            "bridge_attention",
+            "doorbell",
+            "participant_missing"
         ]
     );
     assert_eq!(

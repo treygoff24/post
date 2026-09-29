@@ -19,11 +19,13 @@ const MAX_SUBJECT_BYTES: usize = 1024;
 /// with the read; the empty-body check stays after target resolution.
 pub(super) fn read_send_body(args: &mut SendArgs) -> AppResult<String> {
     let fix_prefix = send_fix_prefix(args);
-    let inline = args.body.take();
-    read_body(BodySource {
+    let inline = args.take_inline_body();
+    // Quiet: the watch-NDJSON note travels in the receipt on stdout (see
+    // `body_warnings`), not on stderr where 36% of callers discard it.
+    read_body_quiet(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: args.file.as_deref(),
+        file: None,
         fix_prefix,
         oversize: args.oversize,
     })
@@ -164,16 +166,22 @@ where
         } else {
             SenderProvenance::ParticipantBinding
         };
-        if identity.pin.is_some() {
-            eprintln!(
-                "post: sending as '{}' (POST_FROM pin; bound participant {})",
-                actor.from, actor.participant.id
-            );
-        } else {
-            eprintln!(
-                "post: sending as '{}' (bound participant {})",
-                actor.from, actor.participant.id
-            );
+        // Text mode tells a person which identity is about to send. Under
+        // --json there is no banner at all: the receipt's envelope already
+        // names the sender, and a stderr line merged into stdout (`2>&1 | jq`)
+        // breaks the parse of a send that has in fact landed.
+        if !json_output {
+            if identity.pin.is_some() {
+                eprintln!(
+                    "post: sending as '{}' (POST_FROM pin; bound participant {})",
+                    actor.from, actor.participant.id
+                );
+            } else {
+                eprintln!(
+                    "post: sending as '{}' (bound participant {})",
+                    actor.from, actor.participant.id
+                );
+            }
         }
         (actor.from.clone(), provenance)
     };
@@ -233,7 +241,8 @@ where
             // supersedes the exact_fix this branch used to publish for
             // invocations whose flags all mapped across.
             let guidance = format!(
-                "Channels take a different verb: run `post chat {} --send`, re-supplying the body with --body '<text>' or --body-file <path> (the original stdin stream is not preserved in a correction) and the subject with --subject '<text>'. `post send`'s --kind and --from have no channel equivalent: a channel carries no message kind, and `post chat` sends as the current bound participant. No corrected command is offered because none can carry this invocation's kind, sender, and body source.",
+                "Channels take a different verb: run `post chat {} --send`, re-supplying the body on stdin (a heredoc: `post chat {} --send <<'EOF'`, then the text, then EOF) or with --body-file <path> (the original stdin stream is not preserved in a correction), and the subject with --subject '<text>'; --body is for a short single-quoted line only. `post send`'s --kind and --from have no channel equivalent: a channel carries no message kind, and `post chat` sends as the current bound participant. No corrected command is offered because none can carry this invocation's kind, sender, and body source.",
+                shell_quote(channel_candidate),
                 shell_quote(channel_candidate)
             );
             return Err(AppError::new(
@@ -268,14 +277,33 @@ where
         }
         return Err(error);
     }
-    let target = resolved_target.expect("known target was checked above");
+    let mut target = resolved_target.expect("known target was checked above");
+    // `--allow-self`: a room send never reaches its own sender (workspace and
+    // lineage fan-out exclude them), so a session that pings the room it is
+    // bound to hears nothing. Delegate's completion notices are exactly that
+    // ping. With the flag, a target that names the sender's own room or
+    // lineage is delivered to the sender's own participant inbox instead. Any
+    // other target is untouched: the flag widens nothing.
+    let mut notes = Vec::new();
+    if args.allow_self {
+        if let Some(own) = own_participant_address(&actor, &target) {
+            notes.push(format!(
+                "--allow-self: {}:{} would skip you as its own sender, so this went to your participant inbox ({}:{})",
+                target.kind.as_str(),
+                target.name,
+                own.kind.as_str(),
+                own.name
+            ));
+            target = own;
+        }
+    }
 
     validate_subject(&args.subject)?;
-    let inline = args.body.take();
+    let inline = args.take_inline_body();
     let body = read_body(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: args.file.as_deref(),
+        file: None,
         fix_prefix: fix_prefix.clone(),
         oversize: args.oversize,
     })?;
@@ -377,15 +405,18 @@ where
 
     // The canonical mail and archive copy are already committed. A receipt
     // failure deliberately leaves the message pending so the next admitted
-    // writer can recover it without a duplicate send.
+    // writer can recover it without a duplicate send. The failure is reported
+    // in the receipt on stdout: this send landed, so it must not read as one
+    // that did not.
+    let mut warnings = body_warnings(&body);
     let receipt = match crate::cursor_state::routing::route_message(context, &target, &envelope.id)
     {
         Ok(receipt) => receipt,
         Err(error) => {
-            eprintln!(
-                "post: warning: mail {} was delivered but remains pending because routing failed: {}",
+            warnings.push(format!(
+                "mail {} was delivered but remains pending because routing failed: {}",
                 envelope.id, error.message
-            );
+            ));
             None
         }
     };
@@ -404,11 +435,12 @@ where
                 envelope,
                 archived: true,
                 delivery: None,
+                warnings,
             },
             pretty,
         )?
     } else {
-        format!(
+        let mut text = format!(
             "post: sent {} {} {} -> {}\npost: canonical message retained at {}:{}; {delivery_status}\npost: read it back with: post read {}\n",
             envelope.kind,
             envelope.id,
@@ -417,10 +449,51 @@ where
             target.kind.as_str(),
             target.name,
             crate::mailbox::shell_quote(&envelope.id),
-        )
+        );
+        for note in &notes {
+            text.push_str(&format!("post: {note}\n"));
+        }
+        for warning in &warnings {
+            text.push_str(&format!("post: warning: {warning}\n"));
+        }
+        text
     };
-    Ok(CommandResult::committed(rendered))
+    // The mail is on disk. Whatever happens to stdout now, this send must not
+    // exit nonzero: a caller that sees a failure retries, and the retry is a
+    // second copy (the 2026-09-23 double-send). The receipt is the only thing
+    // a closed pipe can cost.
+    Ok(CommandResult::committed(rendered).registration_committed())
 }
+
+/// The sender's own participant address, when `target` is the room or lineage
+/// the sender is a member of (the two fan-outs that skip their own sender).
+/// None for every other target, including an explicit `participant:` one.
+fn own_participant_address(
+    actor: &crate::participant::Sender,
+    target: &crate::participant::Address,
+) -> Option<crate::participant::Address> {
+    use crate::participant::AddressKind;
+    let is_own = match target.kind {
+        AddressKind::Workspace => actor.participant.workspace.as_deref() == Some(&target.name),
+        AddressKind::Lineage => actor.lineage.as_deref() == Some(&target.name),
+        AddressKind::Participant => false,
+    };
+    is_own.then(|| crate::participant::Address {
+        kind: AddressKind::Participant,
+        name: actor.participant.id.clone(),
+    })
+}
+
+/// Surprising-but-sent conditions in the body itself, for the receipt.
+fn body_warnings(body: &str) -> Vec<String> {
+    if body.lines().any(is_watch_event_line) {
+        vec![WATCH_NDJSON_WARNING.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+const WATCH_NDJSON_WARNING: &str = "message body contains Post watch-event NDJSON; shell command substitution may have inserted watch output. The body is sent as written; use --body-file or a stdin heredoc for prose containing shell syntax.";
 
 /// Everything a host-qualified send carries past sender resolution.
 struct RemoteSend<'a> {
@@ -511,11 +584,11 @@ where
         }
     }
     validate_subject(&args.subject)?;
-    let inline = args.body.take();
+    let inline = args.take_inline_body();
     let body = read_body(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: args.file.as_deref(),
+        file: None,
         fix_prefix: fix_prefix.clone(),
         oversize: args.oversize,
     })?;
@@ -601,6 +674,7 @@ where
             "Retry the same send command; if this repeats, run `post doctor`.",
         )
     })?;
+    let warnings = body_warnings(&body);
     let rendered = if json_output {
         output::json(
             &SendOutput {
@@ -611,19 +685,25 @@ where
                     state: "queued".to_owned(),
                     host,
                 }),
+                warnings,
             },
             pretty,
         )?
     } else {
-        format!(
+        let mut text = format!(
             "post: sent {} {} {} -> {address}\npost: queued for {host}; not yet delivered.\npost: check it with: post delivery {}\n",
             envelope.kind,
             envelope.id,
             envelope.from,
             crate::mailbox::shell_quote(&envelope.id),
-        )
+        );
+        for warning in &warnings {
+            text.push_str(&format!("post: warning: {warning}\n"));
+        }
+        text
     };
-    Ok(CommandResult::committed(rendered))
+    // Queued in the archive: as committed as a local delivery (see `run`).
+    Ok(CommandResult::committed(rendered).registration_committed())
 }
 
 /// Local rules for a remote recipient, whose workspace this host cannot see:
@@ -733,10 +813,17 @@ pub(super) fn send_fix_prefix(args: &SendArgs) -> String {
     if args.oversize {
         prefix.push_str(" --oversize");
     }
+    // A retry that dropped --allow-self would silently change who hears it.
+    if args.allow_self {
+        prefix.push_str(" --allow-self");
+    }
     prefix
 }
 
-pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
+/// `read_body` for callers that report the body's surprises in their own
+/// output: same checks, no stderr note. `post send` uses it and carries the
+/// note in the receipt.
+pub(super) fn read_body_quiet(source: BodySource<'_>) -> AppResult<String> {
     let oversize = source.oversize;
     let body = read_body_unchecked(source)?;
     if !oversize && body.len() > MAX_BODY_BYTES {
@@ -751,10 +838,15 @@ pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
         .input("message body")
         .reason(format!("body exceeds {MAX_BODY_BYTES}-byte safety limit")));
     }
+    Ok(body)
+}
+
+/// The body checks plus the stderr note for a body that carries watch-event
+/// NDJSON (chat still reports it there; send carries it in its receipt).
+pub(super) fn read_body(source: BodySource<'_>) -> AppResult<String> {
+    let body = read_body_quiet(source)?;
     if body.lines().any(is_watch_event_line) {
-        eprintln!(
-            "post: warning: message body contains Post watch-event NDJSON; shell command substitution may have inserted watch output. Sending anyway; use --body-file for prose containing shell syntax."
-        );
+        eprintln!("post: warning: {WATCH_NDJSON_WARNING}");
     }
     Ok(body)
 }
@@ -796,7 +888,7 @@ fn read_body_unchecked(source: BodySource<'_>) -> AppResult<String> {
                 );
                 return Err(AppError::new(
                     ErrorCode::InvalidArgument,
-                    "--body is inline text, but its value is an existing file path",
+                    "the inline body (--body, or the bare body argument) is an existing file path, not message text",
                     format!(
                         "Run `{fix}` to send the file's contents, or pipe the literal text on stdin."
                     ),
@@ -906,7 +998,7 @@ fn read_body_file(path: &std::path::Path, fix_prefix: &str) -> AppResult<String>
                 "the message body argument is {} bytes long, too long to be a file name; that argument is a path to a body FILE, not inline message text",
                 display.len()
             ),
-            "Send the text with `--body '<text>'`, or pipe it on stdin, instead of a positional path.",
+            "Put the text on stdin (a heredoc: `<<'EOF'`, the text, then EOF) or, for a short plain line, pass it with --body; this argument must be a file path.",
         )
         .reason(error.to_string())
         .operation("read UTF-8 message body file")),
@@ -983,7 +1075,8 @@ mod tests {
                 body: None,
                 body_file: None,
                 oversize: false,
-                file: None,
+                text: None,
+                allow_self: false,
             },
             false,
             false,
@@ -1029,7 +1122,8 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                file: None,
+                text: None,
+                allow_self: false,
             },
             false,
             false,
@@ -1072,7 +1166,8 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                file: None,
+                text: None,
+                allow_self: false,
             },
             false,
             false,
@@ -1128,7 +1223,8 @@ mod tests {
                 body: Some("new delivery".to_owned()),
                 body_file: None,
                 oversize: false,
-                file: None,
+                text: None,
+                allow_self: false,
             },
             false,
             false,
@@ -1171,7 +1267,8 @@ mod tests {
                 body: Some("new mail".to_owned()),
                 body_file: None,
                 oversize: false,
-                file: None,
+                text: None,
+                allow_self: false,
             },
             false,
             false,
@@ -1213,7 +1310,8 @@ mod tests {
                 body: Some("body".to_owned()),
                 body_file: None,
                 oversize: false,
-                file: None,
+                text: None,
+                allow_self: false,
             },
             true,
             false,

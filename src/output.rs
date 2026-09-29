@@ -553,6 +553,12 @@ pub struct SendOutput {
     /// bridge, and this receipt never claims remote delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<SendDelivery>,
+    /// Sent, but something about it deserves a second look (a routing
+    /// receipt that could not be written, a body that looks like pasted
+    /// watch output). Absent when there is nothing to say. Never an error:
+    /// the letter landed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Delivery state at send time for a host-qualified letter: always `queued`.
@@ -1070,10 +1076,15 @@ pub struct ChannelsOutput {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WhoRoom {
     pub room: String,
+    /// True when a `post watch` heartbeat is fresh or the doorbell
+    /// supervisor has this room armed as a resident (`doorbell_armed`).
     pub live_watch: bool,
     /// Unix-seconds stamp from the room's watch.heartbeat, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<String>,
+    /// The doorbell supervisor has this room armed. Present only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub doorbell_armed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1117,9 +1128,17 @@ pub struct WhoParticipant {
     pub unread: BTreeMap<String, usize>,
     #[serde(default)]
     pub pending: BTreeMap<String, usize>,
+    /// True when a `post watch` heartbeat is fresh or the doorbell
+    /// supervisor has this participant armed (`doorbell_armed`): either way
+    /// something is watching the participant's mail.
     pub live_watch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_last_seen: Option<String>,
+    /// The doorbell supervisor has this participant armed. Present only when
+    /// true; with a fresh supervisor health file, it also makes `live_watch`
+    /// true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub doorbell_armed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1131,6 +1150,19 @@ pub struct WhoOutput {
     pub count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_note: Option<String>,
+    /// How many items the bridge's health file lists under `attention`
+    /// (stuck or refused letters, collisions). Present only when nonzero;
+    /// `post doctor` lists them with their fixes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bridge_attention: usize,
+    /// What `live_watch` could see of the doorbell supervisor, present only
+    /// when its health file exists (strict consumers already broke once on an
+    /// unconditional additive key): `fresh` (current, so armed subscriptions
+    /// count), `stale` (the supervisor stopped refreshing it: ignored), or
+    /// `unreadable`. Absent means no supervisor file, and `live_watch` is the
+    /// `post watch` heartbeat alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doorbell: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1902,6 +1934,10 @@ pub struct DoctorOutput {
     pub count: usize,
     pub fixed: Vec<String>,
     pub exit_codes: Vec<ExitSchema>,
+    /// Present only under `--severity`: the threshold that trimmed `checks`,
+    /// so a filtered "healthy" is never mistaken for an unfiltered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_filter: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2101,6 +2137,34 @@ pub(crate) fn sanitize_text_body(value: &str) -> String {
         .chars()
         .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
         .collect()
+}
+
+/// The human form of an error, for commands whose caller asked for the
+/// human rendering (`--text`, `--brief`): prose on stderr, never a JSON
+/// object, so a person reading a terminal is not handed a machine envelope.
+/// The code stays in brackets and the runnable fix on its own line.
+pub(crate) fn render_error_text(error: &AppError) -> String {
+    let mut text = format!("post: {} [{}]\n", error.message, error.code.as_str());
+    if !error.suggested_fix.is_empty() {
+        text.push_str(&format!("fix: {}\n", error.suggested_fix));
+    }
+    if let Some(command) = error.details.exact_fix.as_deref() {
+        // The suggested fix usually names this command already; print it
+        // separately only when the prose does not carry it.
+        if !error.suggested_fix.contains(command) {
+            text.push_str(&format!("run: {command}\n"));
+        }
+    }
+    if error.retryable {
+        text.push_str("retryable: yes\n");
+    }
+    text
+}
+
+pub(crate) fn write_error_text(error: &AppError) {
+    let stderr = io::stderr();
+    let mut output = stderr.lock();
+    let _ = output.write_all(render_error_text(error).as_bytes());
 }
 
 pub(crate) fn write_error(error: &AppError, pretty: bool) {

@@ -1,6 +1,6 @@
 use crate::channel::{channel_state_path, parse_channel_message, ChannelPaths, CHANNELS_DIR};
 use crate::channel_state;
-use crate::cli::DoctorArgs;
+use crate::cli::{DoctorArgs, DoctorSeverityFilter};
 use crate::command_result::CommandResult;
 use crate::commands::schema::doctor_exit_codes;
 use crate::cursor_state::{CURSORS_FILE, CURSORS_LOCK_FILE};
@@ -36,13 +36,13 @@ pub(super) fn run(context: &Context, args: DoctorArgs, pretty: bool) -> AppResul
             }];
             let mut checks = checks;
             let projection = project(context, &mut checks);
-            let output = report(context, checks, fixed);
+            let output = report(context, checks, fixed, args.severity);
             return finish(output, projection, args.brief, pretty, 3);
         }
     }
     let mut checks = detect(context);
     let projection = project(context, &mut checks);
-    let output = report(context, checks, fixed);
+    let output = report(context, checks, fixed, args.severity);
     let exit_code = if output.count == 0 { 0 } else { 1 };
     finish(output, projection, args.brief, pretty, exit_code)
 }
@@ -195,7 +195,21 @@ fn brief_line(output: &DoctorOutput) -> String {
     }
 }
 
-fn report(context: &Context, checks: Vec<DoctorCheck>, fixed: Vec<String>) -> DoctorOutput {
+fn report(
+    context: &Context,
+    mut checks: Vec<DoctorCheck>,
+    fixed: Vec<String>,
+    threshold: Option<DoctorSeverityFilter>,
+) -> DoctorOutput {
+    // The threshold trims the report itself, so `ok`, `status`, `count`, and
+    // the exit code all describe exactly what is shown (`severity_filter`
+    // names the threshold, so a filtered "healthy" is never read as a full one).
+    if let Some(threshold) = threshold {
+        checks.retain(|check| match threshold {
+            DoctorSeverityFilter::Warn => check.severity != DoctorSeverity::Info,
+            DoctorSeverityFilter::Error => check.severity == DoctorSeverity::Error,
+        });
+    }
     // Info checks (owner state etc.) are surface, not findings: they never
     // flip ok/status/count, so a healthy configured mailbox still exits 0.
     let findings = checks
@@ -220,6 +234,7 @@ fn report(context: &Context, checks: Vec<DoctorCheck>, fixed: Vec<String>) -> Do
         checks,
         fixed,
         exit_codes: doctor_exit_codes(),
+        severity_filter: threshold.map(|threshold| threshold.as_str().to_owned()),
     }
 }
 
@@ -245,6 +260,8 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_participant_lifecycle(context, &mut checks);
     detect_routing_receipts(context, &mut checks);
     detect_rename_journal(context, &mut checks);
+    detect_bridge_attention(context, &mut checks);
+    detect_skill_drift(context, &mut checks);
 
     // owner.json is the trust anchor: a broken one makes every
     // badge-computing chat read fail closed (A0a Decision 3), so doctor
@@ -395,17 +412,11 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
                     "Correct the room path in rooms.json by hand.",
                 )),
             }
-            let room_dir = context.root.join(&name);
-            detect_dir(
-                &room_dir.join("inbox"),
-                &format!("room.{name}.inbox_missing"),
-                &mut checks,
-            );
-            detect_dir(
-                &room_dir.join("read"),
-                &format!("room.{name}.read_missing"),
-                &mut checks,
-            );
+            // A room's inbox/ is created by the first send to it and its
+            // legacy read/ is history only, so an absent directory is the
+            // normal state of a room nobody has written to yet, not a fault.
+            // Doctor used to flag both as errors, which kept every healthy
+            // store "broken" and taught agents to ignore the report.
             detect_cursor_state(context, &name, &mut checks);
         }
     }
@@ -509,36 +520,32 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
             return;
         }
     };
+    // One line for all of them. A store that has run for weeks holds
+    // hundreds of expired sessions (1,217 of the Mac's 1,335 checks were one
+    // Info line per stale participant), and none of them is a fault.
+    let mut expired = 0usize;
+    let mut no_lease = 0usize;
     for participant in participants {
         if participant.state(now) != crate::participant::ParticipantState::Stale {
             continue;
         }
-        let (suffix, message, suggested_fix) = if participant.last_seen.is_none() {
-            (
-                "no_lease_record",
-                format!(
-                    "participant '{}' has no lease record and is inactive for new recipient selection; mail already frozen to it is not reassigned",
-                    participant.id
-                ),
-                "Run `post participant bind` or `post participant touch` only from that live session.",
-            )
+        if participant.last_seen.is_none() {
+            no_lease += 1;
         } else {
-            (
-                "stale",
-                format!(
-                    "participant '{}' is stale; mail already frozen to it is not reassigned when its lease expires",
-                    participant.id
-                ),
-                "Use `post participant touch` only from that live session, or `post participant end` when ending it explicitly.",
-            )
-        };
+            expired += 1;
+        }
+    }
+    let total = expired + no_lease;
+    if total > 0 {
         checks.push(check(
-            &format!("participant.{}.{suffix}", participant.id),
+            "participants.stale",
             DoctorSeverity::Info,
-            &participant.dir.join("participant.json"),
-            &message,
+            &root,
+            &format!(
+                "{total} participant(s) are inactive for new recipient selection ({expired} with an expired lease, {no_lease} with no lease record); mail already frozen to them is kept, not reassigned"
+            ),
             false,
-            suggested_fix,
+            "Nothing to repair. `post participant gc` previews which of them can be pruned (a dry run; `--apply` acts, and mail that is unread or pending keeps its participant).",
         ));
     }
 }
@@ -1185,35 +1192,17 @@ fn check_archive_copy(context: &Context, delivered: &Path, checks: &mut Vec<Doct
 
 fn apply_fixes(context: &Context, fixed: &mut Vec<String>) -> Result<(), AppError> {
     create_dir(&context.root, fixed)?;
-    // --fix creates `<root>/<room>/{inbox,read}` for every registered name:
-    // hold the shared rename lock so a rename cannot move a room under it.
-    let _rename_lock = context.lock_rename(false)?;
     if context.write_default_if_missing("rooms.json", DEFAULT_ROOMS_JSON)? {
         fixed.push(context.root.join("rooms.json").display().to_string());
     }
     if context.write_default_if_missing("rules.json", DEFAULT_RULES_JSON)? {
         fixed.push(context.root.join("rules.json").display().to_string());
     }
+    // Room mailboxes are not created here any more: doctor no longer reports
+    // a missing `<room>/{inbox,read}` (the first send creates the inbox), and
+    // a repair that materializes empty directories nobody asked for would
+    // also race a concurrent `rooms rename` for no benefit.
     create_dir(&context.root.join("archive"), fixed)?;
-    // A room an interrupted rename names is skipped, not recreated: its
-    // mailbox may already have moved, and the rename.interrupted check
-    // names the resume command.
-    // An unreadable journal skips every room: it cannot say which one.
-    let journal = crate::mailbox::read_rename_journal(context);
-    let mid_rename = |name: &str| match &journal {
-        Ok(None) => false,
-        Ok(Some(journal)) => journal.old == name || journal.new == name,
-        Err(_) => true,
-    };
-    if let Ok(rooms) = context.load_rooms() {
-        for name in rooms.keys() {
-            if mid_rename(name) {
-                continue;
-            }
-            create_dir(&context.root.join(name).join("inbox"), fixed)?;
-            create_dir(&context.root.join(name).join("read"), fixed)?;
-        }
-    }
     Ok(())
 }
 
@@ -1384,6 +1373,155 @@ fn detect_owner_surface(
                 ));
             }
         }
+    }
+}
+
+/// One "something is stuck" item from the bridge's `bridge/health.json`
+/// `attention` list: a letter it refused or could not relay, an inbound letter
+/// it quarantined, a name collision. The bridge writes the fix with the item.
+pub(super) struct BridgeAttention {
+    pub kind: String,
+    pub id: Option<String>,
+    pub summary: String,
+    pub fix: String,
+}
+
+/// How much of `bridge/health.json` doctor and `who` will read.
+const BRIDGE_HEALTH_MAX_BYTES: u64 = 1 << 20;
+
+/// The bridge's attention items, or none when there is no bridge, no health
+/// file, an unreadable or malformed one, or no `attention` key (an older
+/// bridge). Every failure to read is silence, never an error: a host without
+/// a bridge is healthy, and doctor already has other places to be loud.
+pub(super) fn bridge_attention_items(context: &Context) -> Vec<BridgeAttention> {
+    let path = crate::bridge_topology::bridge_dir(context).join("health.json");
+    let Ok(Some(bytes)) = crate::bridge_topology::read_regular(&path, BRIDGE_HEALTH_MAX_BYTES)
+    else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    let Some(items) = value.get("attention").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let text = |item: &serde_json::Value, key: &str| {
+        item.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    items
+        .iter()
+        .filter(|item| item.is_object())
+        .map(|item| {
+            let kind = text(item, "kind").unwrap_or_else(|| "unknown".to_owned());
+            BridgeAttention {
+                summary: text(item, "summary").unwrap_or_else(|| kind.clone()),
+                id: text(item, "id"),
+                fix: text(item, "fix").unwrap_or_default(),
+                kind,
+            }
+        })
+        .collect()
+}
+
+/// At most this many attention items become individual warnings; the rest are
+/// one summary line, so a bridge with hundreds of stuck letters cannot bury
+/// the rest of the report.
+const ATTENTION_SHOWN: usize = 25;
+
+fn detect_bridge_attention(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let items = bridge_attention_items(context);
+    if items.is_empty() {
+        return;
+    }
+    let path = crate::bridge_topology::bridge_dir(context).join("health.json");
+    let total = items.len();
+    for item in items.into_iter().take(ATTENTION_SHOWN) {
+        let id = match &item.id {
+            Some(id) => format!("bridge.attention.{}.{id}", item.kind),
+            None => format!("bridge.attention.{}", item.kind),
+        };
+        let fix = if item.fix.trim().is_empty() {
+            "The bridge gave no fix for this item; read bridge/health.json and run `post-bridge status` on this host."
+                .to_owned()
+        } else {
+            item.fix
+        };
+        checks.push(check(
+            &id,
+            DoctorSeverity::Warning,
+            &path,
+            &item.summary,
+            false,
+            &fix,
+        ));
+    }
+    if total > ATTENTION_SHOWN {
+        checks.push(check(
+            "bridge.attention.more",
+            DoctorSeverity::Warning,
+            &path,
+            &format!(
+                "{} more bridge attention item(s) are not listed here",
+                total - ATTENTION_SHOWN
+            ),
+            false,
+            "Read the `attention` list in bridge/health.json for the rest.",
+        ));
+    }
+}
+
+/// The served skill checkout, where the installer puts it by default.
+const SERVED_SKILL: &str = ".agents/skill-library/post";
+
+/// Compare the served skill with the copy this binary was built against
+/// (`post contract skill-manifest --verify`). Drift means the agents' prose
+/// and hooks disagree with the installed binary: they document flags the
+/// binary lacks, or miss ones it has. An absent served path is not a finding
+/// (a host without the skill installed), and neither is a rendered copy the
+/// binary cannot fully verify.
+fn detect_skill_drift(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let served = context.home.join(SERVED_SKILL);
+    if fs::symlink_metadata(&served).is_err() {
+        return;
+    }
+    match super::contract::verify_served(&served) {
+        Ok(verdict) if verdict.verdict == "drift" => {
+            let mut detail = Vec::new();
+            if !verdict.mismatched.is_empty() {
+                detail.push(format!("changed: {}", verdict.mismatched.join(", ")));
+            }
+            if !verdict.missing.is_empty() {
+                detail.push(format!("missing: {}", verdict.missing.join(", ")));
+            }
+            if !verdict.extra.is_empty() {
+                detail.push(format!("extra: {}", verdict.extra.join(", ")));
+            }
+            checks.push(check(
+                "skill.drift",
+                DoctorSeverity::Warning,
+                &served,
+                &format!(
+                    "the served post skill differs from the one this binary was built with ({})",
+                    detail.join("; ")
+                ),
+                false,
+                "The skill and the binary come from different commits. Sync the served skill checkout to the commit `post --version` reports, or install the newer binary with scripts/install-post.sh <commit>, whichever is behind.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => checks.push(check(
+            "skill.unverifiable",
+            DoctorSeverity::Info,
+            &served,
+            &format!(
+                "the served post skill could not be checked: {}",
+                error.message
+            ),
+            false,
+            "Check that the path is a readable directory or a symlink to one.",
+        )),
     }
 }
 

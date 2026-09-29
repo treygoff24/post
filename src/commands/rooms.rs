@@ -91,6 +91,23 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .reason("duplicate room name under ASCII case folding"));
     }
 
+    if let Some(published) = peer_published_room(context, &args.name) {
+        return Err(peer_published_error(PeerPublished {
+            context,
+            rooms: &rooms,
+            requested: &args.name,
+            published,
+            fix_for: &|candidate| {
+                format!(
+                    "post rooms add {} {}",
+                    shell_quote(candidate),
+                    shell_quote(&args.path)
+                )
+            },
+            retry: "`post rooms add`",
+        }));
+    }
+
     let (expanded, canonical) = validate_workspace_path(context, &args.path)?;
     let warnings =
         ensure_workspace_unclaimed(context, &rooms, &expanded, &canonical, &args.path, None)?;
@@ -310,6 +327,26 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
         )
         .input(args.new)
         .reason("room names cannot collide with existing lineages"));
+    }
+    // An interrupted rename of this same pair resumes even if a peer has since
+    // published the name: refusing would strand a half-moved store.
+    if !resuming {
+        if let Some(published) = peer_published_room(context, &args.new) {
+            return Err(peer_published_error(PeerPublished {
+                context,
+                rooms: &rooms,
+                requested: &args.new,
+                published,
+                fix_for: &|candidate| {
+                    format!(
+                        "post rooms rename {} {}",
+                        shell_quote(&args.old),
+                        shell_quote(candidate)
+                    )
+                },
+                retry: "`post rooms rename`",
+            }));
+        }
     }
     let rules = context.load_rules(&rooms)?;
     if let Some(rule) = rules.blocked.iter().find(|rule| rule.targets(&args.new)) {
@@ -693,6 +730,158 @@ fn resume_committed_rename(
     Ok(result.registration_committed())
 }
 
+/// A room name a peer host publishes on the bridge, with the publisher.
+struct PublishedRoom {
+    name: String,
+    host: String,
+}
+
+/// Bytes read from one bridge room-publication file before it is distrusted.
+const PEER_ROOMS_MAX_BYTES: u64 = 256 * 1024;
+
+/// The peer host that publishes `name` (ASCII case-insensitive), if this host
+/// is bridged and a peer's rooms publication or the ownership memory names
+/// it. Reads `bridge/rooms/peers/<host>.json` (`{"v":1,"host":..,"rooms":[..]}`)
+/// and `bridge/rooms/owners.json` (`{"<room>":{"host":..}}`), both written by
+/// the bridge. Those files are advisory here: an absent, oversize, or
+/// malformed one is skipped, never an error, so a broken bridge cannot stop
+/// `post rooms add` from working.
+fn peer_published_room(context: &Context, name: &str) -> Option<PublishedRoom> {
+    let own_host = bridge_host_id(context)?;
+    let rooms_dir = crate::bridge_topology::bridge_dir(context).join("rooms");
+    let peers_dir = rooms_dir.join("peers");
+    let mut files: Vec<PathBuf> = fs::read_dir(&peers_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    for path in files {
+        let Some(host) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if host == own_host || !crate::bridge_topology::valid_host(host) {
+            continue;
+        }
+        let Ok(Some(bytes)) = crate::bridge_topology::read_regular(&path, PEER_ROOMS_MAX_BYTES)
+        else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        // The file must vouch for itself: a stray `owners.json` or a copy under
+        // another host's name is not a publication by `host`.
+        if value.get("host").and_then(serde_json::Value::as_str) != Some(host) {
+            continue;
+        }
+        let published = value
+            .get("rooms")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .find(|room| room.eq_ignore_ascii_case(name));
+        if let Some(room) = published {
+            return Some(PublishedRoom {
+                name: room.to_owned(),
+                host: host.to_owned(),
+            });
+        }
+    }
+    let owners =
+        crate::bridge_topology::read_regular(&rooms_dir.join("owners.json"), PEER_ROOMS_MAX_BYTES)
+            .ok()
+            .flatten()?;
+    let owners: serde_json::Value = serde_json::from_slice(&owners).ok()?;
+    owners.as_object()?.iter().find_map(|(room, record)| {
+        let host = record.get("host")?.as_str()?;
+        (room.eq_ignore_ascii_case(name)
+            && host != own_host
+            && crate::bridge_topology::valid_host(host))
+        .then(|| PublishedRoom {
+            name: room.clone(),
+            host: host.to_owned(),
+        })
+    })
+}
+
+/// Everything `peer_published_error` needs about one refused name.
+struct PeerPublished<'a> {
+    context: &'a Context,
+    rooms: &'a RoomMap,
+    requested: &'a str,
+    published: PublishedRoom,
+    fix_for: &'a dyn Fn(&str) -> String,
+    retry: &'a str,
+}
+
+/// The refusal for a name a peer host publishes on the bridge: a local room of
+/// the same name would be a second claimant for the peer's room, and letters
+/// for it would go to whichever side the bridge decided owned it. The fix is
+/// the `<name>-<suffix>` convention `remote_duplicate_error` uses.
+fn peer_published_error(dup: PeerPublished) -> AppError {
+    let placeholders = placeholder_hosts(dup.context, dup.rooms);
+    let candidate = suffixed_candidate_for(dup.context, dup.rooms, &placeholders, dup.requested);
+    let PublishedRoom {
+        name: published_name,
+        host,
+    } = dup.published;
+    let mut error = AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "room '{}' is published by peer host '{host}' on the bridge (as '{published_name}'): a checkout on this machine needs its own name",
+            dup.requested
+        ),
+        match &candidate {
+            Some(candidate) => {
+                format!("This checkout needs its own name; run `{}`.", (dup.fix_for)(candidate))
+            }
+            None => format!(
+                "This checkout needs its own name (the estate convention is `<name>-<host-suffix>`), but no suffixed candidate is free or derivable here; pick one and retry {}.",
+                dup.retry
+            ),
+        },
+    )
+    .input(dup.requested.to_owned())
+    .room(published_name)
+    .host(host)
+    .reason("room name is published by a peer host on the bridge");
+    if let Some(candidate) = candidate {
+        error = error.exact_fix((dup.fix_for)(&candidate));
+    }
+    error
+}
+
+/// The `<name>-<suffix>` candidate `add` and `rename` would accept for a
+/// refused name. A suggestion must survive every check they run on a new name,
+/// or the exact_fix runs and then refuses. A store that cannot be read proves
+/// nothing, so the candidate is not offered.
+fn suffixed_candidate_for(
+    context: &Context,
+    rooms: &RoomMap,
+    placeholders: &BTreeMap<String, String>,
+    name: &str,
+) -> Option<String> {
+    let rules = context.load_rules(rooms).ok();
+    let is_free = |candidate: &str| {
+        matches!(crate::lineage::load(context, candidate), Ok(None))
+            && rules
+                .as_ref()
+                .is_some_and(|rules| !rules.blocked.iter().any(|rule| rule.targets(candidate)))
+            && peer_published_room(context, candidate).is_none()
+    };
+    suffixed_room_candidate(
+        rooms,
+        placeholders,
+        bridge_host_id(context).as_deref(),
+        name,
+        &is_free,
+    )
+}
+
 /// Everything `remote_duplicate_error` needs about one refused collision.
 /// `fix_for` renders the runnable command for a chosen candidate; `retry`
 /// names the command in prose when no candidate is derivable.
@@ -715,23 +904,7 @@ fn remote_duplicate_error(dup: RemoteDuplicate) -> AppError {
     // `set-path` refuses placeholders, so the local-duplicate hint can never
     // work here. The estate's naming rule gives the fix instead — this
     // checkout takes a `<name>-<suffix>` of its own.
-    // A suggestion must survive every check `add` and `rename` run on a new
-    // name, or the exact_fix runs and then refuses. A store that cannot be
-    // read proves nothing, so the candidate is not offered.
-    let rules = dup.context.load_rules(dup.rooms).ok();
-    let is_free = |candidate: &str| {
-        matches!(crate::lineage::load(dup.context, candidate), Ok(None))
-            && rules
-                .as_ref()
-                .is_some_and(|rules| !rules.blocked.iter().any(|rule| rule.targets(candidate)))
-    };
-    let candidate = suffixed_room_candidate(
-        dup.rooms,
-        dup.placeholders,
-        bridge_host_id(dup.context).as_deref(),
-        dup.requested,
-        &is_free,
-    );
+    let candidate = suffixed_candidate_for(dup.context, dup.rooms, dup.placeholders, dup.requested);
     let mut error = AppError::new(
         ErrorCode::InvalidArgument,
         format!(
