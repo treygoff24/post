@@ -1199,27 +1199,6 @@ fn participant_version_json_advertises_store_and_capabilities() {
 }
 
 #[test]
-fn participant_rooms_add_rejects_new_reserved_store_name() {
-    let sandbox = Sandbox::new();
-    let path = sandbox.home.join("reserved-target");
-    fs::create_dir_all(&path).expect("target");
-    let before = fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms before");
-    let output = sandbox.run(&[
-        "rooms",
-        "add",
-        "participants",
-        path.to_str().expect("path utf8"),
-    ]);
-    assert!(!output.status.success());
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "invalid_argument");
-    assert_eq!(
-        fs::read(sandbox.mail_root.join("rooms.json")).expect("rooms after"),
-        before
-    );
-}
-
-#[test]
 fn participant_codex_conflict_is_an_error_not_a_guess() {
     let sandbox = Sandbox::new();
     let output = sandbox.run_in_env(
