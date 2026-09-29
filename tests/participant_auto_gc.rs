@@ -387,44 +387,79 @@ fn doctor_reports_the_last_automatic_cleanup() {
     );
 }
 
-/// The schema names the switch.
+/// The schema's environment list documents the switch: one entry names
+/// `POST_AUTO_GC` and says `=0` turns the cleanup off.
 #[test]
 fn the_schema_documents_the_switch() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&["schema"]);
     assert_success(&output);
-    let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(text.contains("POST_AUTO_GC"), "schema environment list");
+    let schema: Value = from_stdout(&output);
+    let entries: Vec<&str> = schema["environment"]
+        .as_array()
+        .expect("schema environment list")
+        .iter()
+        .map(|entry| entry.as_str().expect("environment entries are strings"))
+        .filter(|entry| entry.starts_with("POST_AUTO_GC:"))
+        .collect();
+    assert_eq!(entries.len(), 1, "one POST_AUTO_GC entry: {entries:?}");
+    assert!(
+        entries[0].contains("=0 disables the automatic participant cleanup"),
+        "{}",
+        entries[0]
+    );
 }
 
 /// The stamp, lock, and log at the store root are not rooms, participants, or
-/// doctor findings.
+/// doctor findings: the same store, before and after an automatic run has left
+/// them, reports the same rooms and the same doctor checks.
 #[test]
 fn the_bookkeeping_files_are_invisible_to_rooms_and_doctor() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run(&["doctor", "--json"]);
-    let before: Value = from_stdout(&output);
+    // An active participant, bound with cleanup off: no bookkeeping files yet,
+    // and nothing stale, so doctor has no cleanup line whose text would change.
+    assert_success(&bind_with(&sandbox, "auto-live", &[("POST_AUTO_GC", "0")]));
+    assert!(!stamp_path(&sandbox).exists());
+    let rooms_json = |sandbox: &Sandbox| -> Value {
+        let output = sandbox.run(&["rooms", "--json"]);
+        assert_success(&output);
+        from_stdout(&output)
+    };
+    // (id, path, severity) of every check, in a stable order.
+    let checks = |sandbox: &Sandbox| -> Vec<Value> {
+        let report: Value = from_stdout(&sandbox.run(&["doctor", "--json"]));
+        let mut checks: Vec<Value> = report["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .map(|check| json!([check["id"], check["path"], check["severity"]]))
+            .collect();
+        checks.sort_by_key(|check| check.to_string());
+        checks
+    };
+    let rooms_before = rooms_json(&sandbox);
+    let checks_before = checks(&sandbox);
+    assert!(
+        !checks_before
+            .iter()
+            .any(|check| check[0] == "participants.stale"),
+        "fixture: an active participant is not stale: {checks_before:?}"
+    );
+
+    // The same participant binds again with cleanup on, a day past due.
     set_stamp_age(&sandbox, 3 * DAY);
     assert_success(&bind_with(&sandbox, "auto-live", &[]));
     assert!(stamp_path(&sandbox).exists());
     assert!(sandbox.mail_root.join(".auto-gc.lock").exists());
     assert!(log_path(&sandbox).exists());
-    let after: Value = from_stdout(&sandbox.run(&["doctor", "--json"]));
-    let ids = |report: &Value| -> Vec<String> {
-        report["checks"]
-            .as_array()
-            .expect("checks")
-            .iter()
-            .map(|check| check["id"].as_str().expect("id").to_owned())
-            .collect()
-    };
-    let new: Vec<String> = ids(&after)
-        .into_iter()
-        .filter(|id| !ids(&before).contains(id))
-        .collect();
+
+    assert_eq!(rooms_json(&sandbox), rooms_before, "rooms");
+    let checks_after = checks(&sandbox);
+    assert_eq!(checks_after, checks_before, "doctor checks");
     assert!(
-        new.iter().all(|id| id.starts_with("participant")),
-        "{new:?}"
+        !checks_after
+            .iter()
+            .any(|check| check[1].as_str().unwrap_or("").contains(".auto-gc")),
+        "{checks_after:?}"
     );
-    assert!(!new.iter().any(|id| id.contains("auto-gc")), "{new:?}");
 }

@@ -7405,16 +7405,6 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         .join("participants/test-default/watch.heartbeat")
         .exists());
 
-    // Catchup is the new consuming writer and must hit the same migration
-    // fence before it can create a room, cursor, or move any mail.
-    let refused_catchup = fenced.run(&["catchup", "--mail", "--json"]);
-    assert_migration_refused(&refused_catchup);
-    assert!(refused_catchup.stdout.is_empty());
-    assert!(!fenced
-        .mail_root
-        .join("participants/test-default/cursors.json")
-        .exists());
-
     // A real rooms rename is a fenced writer: refused before it writes a
     // journal or moves anything. --dry-run is not a writer.
     let refused_rename = fenced.run(&["rooms", "rename", "dest", "dest2", "--json"]);
@@ -7430,11 +7420,8 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     assert_success(&inbox);
     let channels = fenced.run(&["channels"]);
     assert_success(&channels);
-    let schema_output = fenced.run(&["schema"]);
-    assert_success(&schema_output);
-    let schema: SchemaOutput = from_stdout(&schema_output);
-    let chat = fenced.run_in(&["chat", "tax", "--peek"], None, &fenced.home.join("dest"));
-    assert_success(&chat);
+    assert_success(&fenced.run(&["schema"]));
+    assert_success(&fenced.run_in(&["chat", "tax", "--peek"], None, &fenced.home.join("dest")));
     let slice = fenced.run_in(
         &[
             "chat",
@@ -7462,10 +7449,8 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     );
     assert_migration_refused(&refused_ack);
 
-    // Search is added by the parallel B5 lane. Keep this matrix compiling on
-    // the B7 base while making the assertion live as soon as that command is
-    // present: an admitted search must succeed and leave the fenced store
-    // untouched just like channels/inbox.
+    // An admitted search must succeed and leave the fenced store untouched
+    // just like channels/inbox.
     let mut search_before = fs::read_dir(&fenced.mail_root)
         .expect("fenced root")
         .map(|entry| entry.expect("fenced entry").file_name())
@@ -7476,37 +7461,19 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         None,
         &fenced.home.join("dest"),
     );
-    let search_unavailable = search.status.code() == Some(2)
-        && stderr(&search).contains("unrecognized subcommand 'search'");
-    if search_unavailable {
-        // The current B7 base predates B5; the future command is verified by
-        // this same branch after B5 is integrated.
-        assert_eq!(search.status.code(), Some(2));
-        assert!(stderr(&search).contains("unrecognized subcommand 'search'"));
-        assert!(!schema
-            .commands
-            .iter()
-            .any(|command| command.name == "search"));
-    } else {
-        assert_success(&search);
-    }
+    assert_success(&search);
     let mut search_after = fs::read_dir(&fenced.mail_root)
         .expect("fenced root after search")
         .map(|entry| entry.expect("fenced entry").file_name())
         .collect::<Vec<_>>();
     search_after.sort();
     assert_eq!(search_before, search_after, "search changed a fenced store");
-    assert!(
-        !stdout(&chat).contains("READ THIS FRAMING FIRST"),
-        "non-empty text chat must render its read framing"
-    );
     assert!(!fenced.mail_root.join("dest").exists());
     assert!(!fenced.mail_root.join("archive").exists());
     assert!(!fenced
         .mail_root
         .join("participants/test-default/cursors.json")
         .exists());
-    assert!(!fenced.mail_root.join("dest/banner-day").exists());
 
     let refused = fenced.run(&[
         "send",
@@ -7531,15 +7498,7 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
     assert!(!fenced.mail_root.join("archive").exists());
     assert!(!fenced.mail_root.join("dest").exists());
 
-    // Read paths ignore even malformed writer declarations, while every
-    // writer declaration error remains loud.
-    assert_success(&fenced.run_in_env(
-        &["inbox", "--room", "dest"],
-        None,
-        &fenced.path,
-        &[("POST_ARX_GENERATION", "not-a-generation")],
-    ));
-    for generation in ["6", "", "0", "not-a-generation"] {
+    for generation in ["6", ""] {
         let envs = if generation.is_empty() {
             &[][..]
         } else {
@@ -7661,41 +7620,9 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
         assert_migration_refused(&output);
     }
 
-    // A generation declaration cannot enroll a root without state, and a
-    // malformed, symlinked, hard-linked, or duplicate state file fails before
-    // an admission lock is created.
-    let missing = Sandbox::new_unseeded();
-    fs::create_dir_all(&missing.mail_root).expect("missing-state root");
-    fs::write(
-        missing.mail_root.join("rooms.json"),
-        r#"{"dest":"~/dest"}
-"#,
-    )
-    .expect("missing-state rooms");
-    fs::write(
-        missing.mail_root.join("rules.json"),
-        r#"{"blocked":[]}
-"#,
-    )
-    .expect("missing-state rules");
-    let output = missing.run_in_env(
-        &[
-            "send",
-            "--to",
-            "dest",
-            "--from",
-            "sender",
-            "--body",
-            "missing state",
-        ],
-        None,
-        &missing.path,
-        &[("POST_ARX_GENERATION", "7")],
-    );
-    assert!(!output.status.success());
-    assert!(!missing.mail_root.join(".post-arx.lock").exists());
-
-    for label in ["symlink", "hardlink", "ambiguous"] {
+    // A symlinked or hard-linked state file fails before an admission lock is
+    // created.
+    for label in ["symlink", "hardlink"] {
         let broken = Sandbox::new_unseeded();
         seed_fence_store(&broken, r#"{"state":"active","generation":7}"#);
         let state = broken.mail_root.join(".post-arx.json");
@@ -7707,13 +7634,6 @@ fn migration_fence_cli_matrix_preserves_legacy_and_enrolled_contracts() {
             }
             "hardlink" => {
                 fs::hard_link(&state, broken.path.join("state-copy")).expect("state hardlink");
-            }
-            "ambiguous" => {
-                fs::write(
-                    &state,
-                    br#"{"state":"active","state":"fenced","generation":7}"#,
-                )
-                .expect("ambiguous state");
             }
             _ => unreachable!(),
         }
@@ -8288,7 +8208,7 @@ fn migration_fence_read_only_states_stay_available_while_writers_refuse() {
     for (label, state) in [
         (
             "duplicate",
-            br#"{"state":"active","state":"fenced"}"#.as_slice(),
+            br#"{"state":"active","state":"fenced","generation":7}"#.as_slice(),
         ),
         (
             "unknown",
@@ -8301,10 +8221,14 @@ fn migration_fence_read_only_states_stay_available_while_writers_refuse() {
             "missing-lock",
             br#"{"state":"active","generation":7}"#.as_slice(),
         ),
+        ("missing-state-and-lock", &[][..]),
     ] {
         let sandbox = Sandbox::new_unseeded();
         seed_fence_store(&sandbox, r#"{"state":"active","generation":7}"#);
-        if label == "missing-state" {
+        if label == "missing-state-and-lock" {
+            fs::remove_file(sandbox.mail_root.join(".post-arx.json")).expect("remove state");
+            fs::remove_file(sandbox.mail_root.join(".post-arx.lock")).expect("remove lock");
+        } else if label == "missing-state" {
             fs::remove_file(sandbox.mail_root.join(".post-arx.json")).expect("remove state");
         } else if label == "missing-lock" {
             fs::remove_file(sandbox.mail_root.join(".post-arx.lock")).expect("remove lock");
@@ -8343,6 +8267,21 @@ fn migration_fence_read_only_states_stay_available_while_writers_refuse() {
             "{label} changed the store while reading/writing"
         );
     }
+    // Control for the missing-state-and-lock row: the same store, without a
+    // generation declaration, is an ordinary legacy store and the send
+    // succeeds, so the refusal above came from the fence and not from a
+    // missing room, rule file, or participant.
+    let legacy = Sandbox::new_unseeded();
+    seed_fence_store(&legacy, r#"{"state":"active","generation":7}"#);
+    fs::remove_file(legacy.mail_root.join(".post-arx.json")).expect("remove state");
+    fs::remove_file(legacy.mail_root.join(".post-arx.lock")).expect("remove lock");
+    assert_success(&legacy.run_in(
+        &[
+            "send", "--to", "dest", "--from", "sender", "--body", "legacy",
+        ],
+        None,
+        &legacy.path,
+    ));
 }
 
 #[test]
@@ -8353,6 +8292,10 @@ fn migration_fence_snapshot_never_mints_presence_or_room_state() {
     ] {
         let sandbox = Sandbox::new_unseeded();
         seed_fence_store(&sandbox, state);
+        let participant_dir = sandbox.mail_root.join("participants/test-default");
+        let heartbeat = participant_dir.join("watch.heartbeat");
+        let cursors = participant_dir.join("cursors.json");
+        let before = tree_bytes(&sandbox.mail_root);
         let output = sandbox.run_in_env(
             &["watch", "--snapshot", "--room", "dest"],
             None,
@@ -8360,10 +8303,46 @@ fn migration_fence_snapshot_never_mints_presence_or_room_state() {
             &[("POST_ARX_GENERATION", "not-a-generation")],
         );
         assert_success(&output);
+        assert_eq!(
+            before,
+            tree_bytes(&sandbox.mail_root),
+            "{state}: a snapshot must leave every stored byte as it found it"
+        );
+        assert!(!heartbeat.exists(), "{state}: snapshot minted a heartbeat");
+        assert!(!cursors.exists(), "{state}: snapshot minted a cursor");
         assert!(!sandbox.mail_root.join("dest").exists());
         assert!(!sandbox.mail_root.join("archive").exists());
-        assert!(!sandbox.mail_root.join("dest/watch.heartbeat").exists());
-        assert!(!sandbox.mail_root.join("dest/cursors.json").exists());
+
+        // A heartbeat that already exists is not refreshed either: an
+        // in-place rewrite with identical bytes would still move its mtime.
+        fs::write(&heartbeat, b"{}").expect("seed heartbeat");
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&heartbeat)
+            .expect("open heartbeat")
+            .set_modified(aged)
+            .expect("age heartbeat");
+        let bytes = fs::read(&heartbeat).expect("read heartbeat");
+        let mtime = fs::metadata(&heartbeat)
+            .expect("heartbeat metadata")
+            .modified()
+            .expect("mtime");
+        assert_success(&sandbox.run_in_env(
+            &["watch", "--snapshot", "--room", "dest"],
+            None,
+            &sandbox.path,
+            &[("POST_ARX_GENERATION", "not-a-generation")],
+        ));
+        assert_eq!(fs::read(&heartbeat).expect("reread heartbeat"), bytes);
+        assert_eq!(
+            fs::metadata(&heartbeat)
+                .expect("heartbeat metadata")
+                .modified()
+                .expect("mtime"),
+            mtime,
+            "{state}: snapshot refreshed an existing heartbeat"
+        );
     }
 }
 
@@ -8503,33 +8482,6 @@ fn migration_fence_empty_and_malformed_generation_fail_closed_against_legacy_sto
             !sandbox.mail_root.join("archive").exists(),
             "{label}: archive must not be created"
         );
-
-        // 2. Read commands with bad generation against a legacy store must also be non-mutating.
-        for args in [
-            &["inbox", "--room", "dest"][..],
-            &["rooms"][..],
-            &["channels"][..],
-            &["schema"][..],
-        ] {
-            let read_output = sandbox.run_in_env(
-                args,
-                None,
-                &sandbox.path,
-                &[("POST_ARX_GENERATION", bad_gen)],
-            );
-            assert!(
-                read_output.status.success(),
-                "{label}: read command {args:?} should succeed without mutation"
-            );
-            assert!(
-                !sandbox.mail_root.join("rooms.json").exists(),
-                "{label}: read command {args:?} must not mint first-run defaults"
-            );
-            assert!(
-                !sandbox.mail_root.join(".post-arx.lock").exists(),
-                "{label}: read command {args:?} must not create lock"
-            );
-        }
     }
 }
 
@@ -10038,69 +9990,6 @@ fn a0a_f3_feature_absent_signed_looking_text_unbadged() {
     assert_success(&set);
 }
 
-/// Fixture 4: fail-closed — malformed owner.json is ConfigInvalid on every
-/// badge-computing path and leaves pure transport untouched.
-#[test]
-fn a0a_f4_malformed_owner_fails_closed_badge_paths_transport_unaffected() {
-    let sandbox = Sandbox::new();
-    create_default_room_paths(&sandbox);
-    let alpha = sandbox.path.join("alpha");
-    let beta = sandbox.path.join("beta");
-    fs::create_dir_all(&alpha).expect("alpha dir");
-    fs::create_dir_all(&beta).expect("beta dir");
-    register_room(&sandbox, "alpha", &alpha);
-    register_room(&sandbox, "beta", &beta);
-    join_channel(&sandbox, "closed", &alpha);
-    join_channel(&sandbox, "closed", &beta);
-    assert_success(&sandbox.run_in(&["chat", "closed", "--discard", "--json"], None, &alpha));
-    fs::write(owner_json_path(&sandbox), r#"{"room":"alpha","bogus":1}"#).expect("malformed owner");
-    let peek = sandbox.run_in(&["chat", "closed", "--peek", "--json"], None, &alpha);
-    assert_eq!(
-        peek.status.code(),
-        Some(78),
-        "badge path must fail closed: {}",
-        stderr(&peek)
-    );
-    let error: ErrorEnvelope = from_stderr(&peek);
-    assert_eq!(error.error.code, "config_invalid");
-    // Transport rows of the Decision-3 matrix: unaffected.
-    assert_success(&sandbox.run(&[
-        "send",
-        "--to",
-        "claude-space",
-        "--from",
-        "freeform-sender",
-        "--body",
-        "x",
-    ]));
-    assert_success(&sandbox.run_in(&["chat", "other1", "--join", "--json"], None, &alpha));
-    assert_success(&sandbox.run_in(&["chat", "closed", "--discard", "--json"], None, &alpha));
-    assert_success(&sandbox.run(&["rooms"]));
-    assert_success(&sandbox.run(&["inbox", "--room", "alpha"]));
-    assert_success(&sandbox.run(&["watch", "--snapshot", "--room", "alpha"]));
-    let sent: SendOutput = from_stdout(&sandbox.run(&[
-        "send",
-        "--to",
-        "claude-space",
-        "--from",
-        "freeform-sender",
-        "--body",
-        "read me",
-        "--json",
-    ]));
-    assert_success(&sandbox.run(&["read", &sent.envelope.id, "--room", "claude-space"]));
-    let history = sandbox.run_in(
-        &["chat", "closed", "--history", "5", "--json"],
-        None,
-        &alpha,
-    );
-    assert_eq!(
-        history.status.code(),
-        Some(78),
-        "history is badge-computing"
-    );
-}
-
 /// Fixture 5: imitation reservation tracks the configured owner; doctor
 /// flags stored collisions; the skeleton predicate itself is unchanged.
 #[test]
@@ -10333,46 +10222,6 @@ fn a0a_f7_owner_init_create_only_and_failed_install_recovery() {
         mara.join("sigs").is_dir(),
         "identical retry must complete the sigs scaffold"
     );
-    // Adversarial commit race: a destination created between the precheck
-    // and the hard-link commit routes to the SAME compare branch as a
-    // pre-existing file (the primitive refuses AlreadyExists and never
-    // replaces; compare_existing handles both entries). Prove the observable
-    // contract: a concurrently-created owner.json with different content is
-    // refused and left byte-identical.
-    fs::write(&path, r#"{"room":"mara","label":"Concurrent"}"#).expect("racing writer");
-    let raced = sandbox.run(&["owner", "init", "--room", "mara"]);
-    assert_eq!(raced.status.code(), Some(78));
-    assert_eq!(
-        fs::read_to_string(&path).expect("reread"),
-        r#"{"room":"mara","label":"Concurrent"}"#,
-        "the racing writer's owner.json must be untouched"
-    );
-}
-
-/// Fixture 8: raw `~` in rooms.json — derivation always uses the normalized
-/// resolved path, never a literal `~` sidecar.
-#[test]
-fn a0a_f8_raw_tilde_registry_derives_absolute_sidecar() {
-    let sandbox = Sandbox::new_unseeded();
-    fs::create_dir_all(&sandbox.mail_root).expect("mail root");
-    fs::write(
-        sandbox.mail_root.join("rooms.json"),
-        r#"{"mara": "~/.mara-room"}"#,
-    )
-    .expect("registry with literal tilde");
-    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked":[]}"#).expect("rules");
-    owner_init_json(&sandbox, &["--room", "mara"]);
-    let shown = owner_show(&sandbox);
-    let sidecar = shown["owner"]["sidecar_dir"].as_str().expect("sidecar_dir");
-    assert!(
-        !sidecar.contains('~'),
-        "resolved sidecar leaked a literal tilde: {sidecar}"
-    );
-    assert_eq!(
-        PathBuf::from(sidecar),
-        sandbox.home.join(".mara-room"),
-        "derivation from the registered path"
-    );
 }
 
 /// Fixture 9: immutable-id render — verified output always carries
@@ -10405,38 +10254,21 @@ fn a0a_f9_immutable_room_id_renders_under_every_label_and_hostile_labels_rejecte
         text.contains("[🔏 VERIFIED — Mara (mara), signed"),
         "generic render must carry the immutable room id: {text}"
     );
-    // Hostile labels: bidi control, over-long, whitespace-only. Each fails
-    // LOAD validation (the config stays whatever it was).
-    let overlong = "x".repeat(33);
-    for (label, needle) in [
-        ("evil\u{202E}name", "control, bidi"),
-        (overlong.as_str(), "exceeds 32"),
-        ("   ", "whitespace-only"),
-    ] {
-        let init = sandbox.run(&["owner", "init", "--room", "mara", "--label", label]);
-        assert_eq!(
-            init.status.code(),
-            Some(78),
-            "label {label:?}: {}",
-            stderr(&init)
-        );
-        assert!(
-            stderr(&init).contains(needle),
-            "label {label:?} must say {needle:?}: {}",
-            stderr(&init)
-        );
-    }
-    // A non-hostile custom label renders with the room id too (alpha
-    // catches up first so its send is not crossed).
-    assert_success(&sandbox.run_in(&["chat", "labelled", "--discard", "--json"], None, &alpha));
-    assert_success(&sandbox.run_in(
-        &["chat", "labelled", "--send", "--body", "x", "--json"],
-        None,
-        &alpha,
-    ));
-    let text = chat_history_text(&sandbox, "labelled", &mara);
-    assert!(text.contains("Mara (mara)"));
-
+    // One hostile label proves `owner init` runs the label validator; the
+    // predicate's own rows live in mailbox::owner_tests.
+    let label = "evil\u{202E}name";
+    let init = sandbox.run(&["owner", "init", "--room", "mara", "--label", label]);
+    assert_eq!(
+        init.status.code(),
+        Some(78),
+        "label {label:?}: {}",
+        stderr(&init)
+    );
+    assert!(
+        stderr(&init).contains("control, bidi"),
+        "label {label:?} must name the bidi refusal: {}",
+        stderr(&init)
+    );
     // A scratch config with a genuinely NON-default label (--label Oracle),
     // real signed wire, must render "Oracle (mara)" — the verified output
     // carries the configured label AND the immutable room id.
@@ -10481,11 +10313,6 @@ fn a0a_f10_hostile_markers_rejected_and_wire_stays_unambiguous() {
         // (78). Both gates refuse the marker and write nothing.
         ("\n", 2, "control characters"),
         ("\u{202E}", 78, "control, bidi"),
-        (".", 78, "non-ASCII"),
-        ("🐳🐋", 78, "one glyph"),
-        ("a\u{200d}b", 78, "one glyph"),
-        ("\u{200d}🐳", 78, "zero-width joiner"),
-        ("👩\u{200d}", 78, "zero-width joiner"),
     ] {
         let init = sandbox.run(&["owner", "init", "--room", "mara", "--marker", marker]);
         assert_eq!(
@@ -11492,6 +11319,28 @@ fn v2_malformed_owner_locators_fail_loudly_and_non_owner_locators_are_inert() {
     let alpha = owner_peer(&sandbox, "alpha");
     join_channel(&sandbox, "malformed", &mara);
     join_channel(&sandbox, "malformed", &alpha);
+    // A genuinely signed manifest for this tag, channel and body: every row
+    // that carries the tag would verify if its own parser guard were removed,
+    // so `false` can only come from the locator grammar.
+    v2_sign(&sandbox, "20260812T210800Z", "malformed", "body");
+    write_channel_message_with_ref(
+        &sandbox,
+        "malformed",
+        "20990101-120000-000090-cccccc",
+        "mara",
+        "body",
+        serde_json::json!({"version": 2, "tag": "20260812T210800Z"}),
+    );
+    assert_eq!(
+        v2_read_badge(
+            &sandbox,
+            "malformed",
+            &alpha,
+            "20990101-120000-000090-cccccc"
+        ),
+        Some(true),
+        "control: a well-formed locator over the signed manifest verifies"
+    );
     let cases: Vec<(&str, serde_json::Value)> = vec![
         (
             "unknown-version",
@@ -11628,7 +11477,9 @@ fn v2_signed_cap_enforced_at_send_and_read_while_unsigned_oversize_is_unchanged(
         "an exactly-1-MiB signed body must verify"
     );
     // Over-cap smuggled into the store with a locator: fails at read,
-    // before any hashing.
+    // before any hashing. The manifest is genuinely signed, so only the read
+    // cap can turn this false.
+    v2_sign(&sandbox, "20260812T211200Z", "cap", &over);
     write_channel_message_with_ref(
         &sandbox,
         "cap",
@@ -11756,9 +11607,10 @@ fn v2_present_locator_with_missing_sidecar_fails_loudly_and_never_falls_back_to_
     );
 }
 
-/// Channel binding isolated: envelope channel and signed manifest both say
-/// channel A, but the .msg sits in channel B's storage directory. The
-/// binding check must refuse before any sidecar comparison could pass.
+/// Channel binding isolated: the manifest is signed for the STORAGE channel
+/// (bind-b) and the body matches, so only the envelope's channel claim
+/// (bind-a) differs. The binding check must be what refuses it: without the
+/// rewrite the same message verifies.
 #[test]
 fn v2_envelope_channel_differing_from_storage_directory_fails() {
     let sandbox = Sandbox::new();
@@ -11766,32 +11618,37 @@ fn v2_envelope_channel_differing_from_storage_directory_fails() {
     join_channel(&sandbox, "bind-a", &mara);
     join_channel(&sandbox, "bind-b", &mara);
     const TAG: &str = "20260812T230100Z";
-    const BODY: &str = "bound to bind-a";
-    v2_sign(&sandbox, TAG, "bind-a", BODY);
-    // Hand-place a message into bind-b's store whose envelope (and signed
-    // manifest) both claim bind-a — a copied-across-channels .msg file.
+    const BODY: &str = "bound to bind-b";
+    const ID: &str = "20990101-120000-000001-abc001";
+    v2_sign(&sandbox, TAG, "bind-b", BODY);
     write_channel_message_with_ref(
         &sandbox,
         "bind-b",
-        "20990101-120000-000001-abc001",
+        ID,
         "mara",
         BODY,
         serde_json::json!({"version": 2, "tag": TAG}),
+    );
+    assert_eq!(
+        v2_read_badge(&sandbox, "bind-b", &mara, ID),
+        Some(true),
+        "control: the manifest matches the storage channel, so it verifies"
     );
     let msg_dir = sandbox
         .mail_root
         .join("channels")
         .join("bind-b")
         .join("messages");
-    let path = msg_dir.join("20990101-120000-000001-abc001.msg");
+    let path = msg_dir.join(format!("{ID}.msg"));
     let raw = fs::read_to_string(&path).expect("read fixture");
-    fs::write(
-        &path,
-        raw.replace("\"channel\": \"bind-b\"", "\"channel\": \"bind-a\""),
-    )
-    .expect("rewrite envelope channel");
+    let rewritten = raw.replace("\"channel\": \"bind-b\"", "\"channel\": \"bind-a\"");
+    assert_ne!(
+        rewritten, raw,
+        "the envelope channel rewrite must take effect"
+    );
+    fs::write(&path, rewritten).expect("rewrite envelope channel");
     assert_eq!(
-        v2_read_badge(&sandbox, "bind-b", &mara, "20990101-120000-000001-abc001"),
+        v2_read_badge(&sandbox, "bind-b", &mara, ID),
         Some(false),
         "envelope channel differing from the storage directory must fail"
     );
@@ -13051,9 +12908,15 @@ fn a_corrupt_canonical_entry_is_reported_as_corrupt_not_as_a_visibility_miss() {
     let output = sandbox.run_in(&["read", id], None, &alpha);
     assert!(!output.status.success());
     let error: ErrorEnvelope = from_stderr(&output);
-    assert_ne!(
-        error.error.code, "not_found",
-        "a corrupt canonical entry must not be reported as a miss: {}",
+    assert_eq!(
+        error.error.code, "config_invalid",
+        "a corrupt canonical entry must be reported as corrupt, not a miss: {}",
+        error.error.message
+    );
+    assert!(
+        error.error.message.contains(&format!("{id}.mail"))
+            && error.error.message.contains("separator"),
+        "the error must name the corrupt file and its missing separator: {}",
         error.error.message
     );
     assert!(

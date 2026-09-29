@@ -948,16 +948,30 @@ fn participant_restore_brings_an_archived_record_back_whole_and_is_idempotent() 
 }
 
 /// A tier-1 record held no state; restoring it recreates the same participant
-/// (id, lease, workspace, display name) and its session mapping.
+/// (id, lease, workspace and its path, ephemeral flag, display name) and its
+/// session mapping.
 #[test]
 fn participant_restore_recreates_a_deleted_record_under_its_own_id() {
     let sandbox = Sandbox::new();
     let id = bound_idle(&sandbox, "claude", "restore-deleted", 40);
+    // Every field the tombstone must carry is set to a non-default value before
+    // collection, so a field it drops comes back as its default and differs.
     patch(&sandbox, &id, |record| {
         record["display_name"] = json!("Ember");
         record["lease_hours"] = json!(12);
+        record["workspace"] = json!("alpha");
+        record["workspace_path"] = json!("/projects/alpha");
+        record["ephemeral"] = json!(true);
     });
     let original = record(&sandbox, &id);
+    assert_eq!(original["workspace"], "alpha", "fixture: {original}");
+    assert_eq!(
+        original["workspace_path"], "/projects/alpha",
+        "fixture: {original}"
+    );
+    assert_eq!(original["ephemeral"], true, "fixture: {original}");
+    assert_eq!(original["lease_hours"], 12, "fixture: {original}");
+    assert_eq!(original["display_name"], "Ember", "fixture: {original}");
     assert_eq!(gc(&sandbox, true)["deleted"], json!([id]));
     assert!(!record_path(&sandbox, &id).exists());
     assert_eq!(
@@ -977,6 +991,7 @@ fn participant_restore_recreates_a_deleted_record_under_its_own_id() {
         "conversation_key_digest",
         "created",
         "workspace",
+        "workspace_path",
         "display_name",
         "lease_hours",
         "ephemeral",
