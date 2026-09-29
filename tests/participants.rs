@@ -1835,6 +1835,74 @@ fn participant_missing_dangling_session_index_is_loud_and_diagnosable() {
     assert_success(&sandbox.run_as_claude(&["inbox"], "dangling-key", &sandbox.path));
 }
 
+/// In text mode a claim that names no record leaves a `missing` line on stderr
+/// with the error's own fix, never the `unbound` line: its bare `bind` fix is
+/// wrong when a stale `POST_PARTICIPANT` would keep winning over the new
+/// binding. A session with no claim at all is still `unbound`, and `--json`
+/// carries the state as a field instead of a stderr line.
+#[test]
+fn a_missing_claim_is_missing_not_unbound_in_text_mode() {
+    let sandbox = Sandbox::new_unseeded();
+    let stale = [("POST_PARTICIPANT", "missing-test-participant")];
+    let stale_with_key = [
+        ("POST_PARTICIPANT", "missing-test-participant"),
+        ("CLAUDE_CODE_SESSION_ID", "ambient-key"),
+    ];
+    for (envs, fix) in [
+        (&stale[..], "post participant bind --new"),
+        (
+            &stale_with_key[..],
+            "unset POST_PARTICIPANT && post participant bind",
+        ),
+    ] {
+        let output = sandbox.run_in_env(&["participant", "list"], None, &sandbox.path, envs);
+        assert_success(&output);
+        let text = common::stderr(&output);
+        assert!(
+            text.lines()
+                .any(|line| line == format!("participant: missing (run: {fix})")),
+            "{text}"
+        );
+        assert!(!text.contains("participant: unbound"), "{text}");
+    }
+
+    let bound = sandbox.bind_claude("dangling-text-key", &sandbox.path, None);
+    let record = sandbox
+        .mail_root
+        .join("participants")
+        .join(participant_id(&bound));
+    fs::remove_dir_all(&record).expect("remove the record but leave the index");
+    let output =
+        sandbox.run_as_claude(&["participant", "list"], "dangling-text-key", &sandbox.path);
+    assert_success(&output);
+    let text = common::stderr(&output);
+    assert!(
+        text.lines()
+            .any(|line| line == "participant: missing (run: post participant bind)"),
+        "{text}"
+    );
+    assert!(!text.contains("participant: unbound"), "{text}");
+
+    let json = sandbox.run_in_env(
+        &["participant", "list", "--json"],
+        None,
+        &sandbox.path,
+        &stale,
+    );
+    assert_success(&json);
+    assert!(!common::stderr(&json).contains("participant:"));
+
+    let none = sandbox.run_without_identity(&["participant", "list"], &sandbox.path);
+    assert_success(&none);
+    let text = common::stderr(&none);
+    assert!(
+        text.lines()
+            .any(|line| line == "participant: unbound (run: post participant bind)"),
+        "{text}"
+    );
+    assert!(!text.contains("participant: missing"), "{text}");
+}
+
 #[test]
 fn participant_review_existing_colon_and_reserved_rooms_load_but_doctor_reports_them() {
     let sandbox = Sandbox::new();

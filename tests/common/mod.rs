@@ -868,6 +868,7 @@ pub fn is_identity_notice(line: &str) -> bool {
         || line.contains("(bound participant ")
         || line.contains("(participant binding)")
         || line.starts_with("participant: unbound")
+        || line.starts_with("participant: missing")
         || line.starts_with("participant resolution error:")
 }
 

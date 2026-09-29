@@ -274,7 +274,7 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         // The marker on stdout is what an agent sees; stderr keeps the human
         // line for text mode only, and never appears under --json.
         if !json {
-            eprintln!("participant: unbound (run: post participant bind)");
+            eprintln!("{}", unbound_stderr_line(resolution_error.as_ref()));
         }
         match resolution_error.as_ref() {
             Some(error) => {
@@ -358,6 +358,24 @@ fn participant_registry_write(command: &Command) -> bool {
             }) | crate::cli::ParticipantCommand::Restore(_),
         })
     )
+}
+
+/// The status line a text-mode run leaves on stderr when nothing answers to
+/// its identity. A claim that names no record is `missing`, not `unbound`, and
+/// its fix is the error's own (`unset POST_PARTICIPANT && post participant
+/// bind`, not a bare `bind`, which the stale claim would keep winning over).
+fn unbound_stderr_line(resolution_error: Option<&AppError>) -> String {
+    match resolution_error.filter(|error| error.code == ErrorCode::ParticipantMissing) {
+        Some(error) => format!(
+            "participant: missing (run: {})",
+            error
+                .details
+                .exact_fix
+                .as_deref()
+                .unwrap_or(&error.suggested_fix)
+        ),
+        None => "participant: unbound (run: post participant bind)".to_owned(),
+    }
 }
 
 /// The one line an unbound session is told, and the fix that suits it: a
