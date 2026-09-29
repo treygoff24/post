@@ -450,17 +450,17 @@ where
     };
 
     // A room homed on another host is reached through the bridge: say so, so
-    // the sender knows to check `post delivery`. Read after the commit; a
-    // registry that cannot be read here changes nothing about the send.
-    let cross_host = match (target.kind, output::room_home(context, &target.name)) {
-        (crate::participant::AddressKind::Workspace, Ok(output::RoomHome::Placeholder(host))) => {
-            Some(output::SendCrossHost {
-                status: "queued".to_owned(),
-                host,
-            })
-        }
-        _ => None,
-    };
+    // the sender knows to check `post delivery`. Derived from `rooms`, the one
+    // registry snapshot this send resolved and route-checked against, never a
+    // second read of rooms.json after the write.
+    let cross_host = (target.kind == crate::participant::AddressKind::Workspace)
+        .then(|| rooms.get(&target.name))
+        .flatten()
+        .and_then(|stored| output::stored_path_remote_host_of(context, stored))
+        .map(|host| output::SendCrossHost {
+            status: "queued".to_owned(),
+            host,
+        });
     let rendered = if json_output {
         output::json(
             &SendOutput {

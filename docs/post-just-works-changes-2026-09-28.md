@@ -55,7 +55,7 @@ Status: code is on Forgejo `main`. The new binary is being installed on the Mac 
 - Delivered is final: a letter the receiver already delivered is never later quarantined or bounced.
 - `post bridge deliver` to a gc-collected participant restores it first.
 - The bridge accepts post 0.9.x.
-- A workspace letter to a room on another host now has a delivery state. The send receipt carries `cross_host: {status: queued, host}`; the sending bridge records the receiver's verdict in `bridge/room-acked/<id>.json` before it retires the outbox entry (delivered, or rejected with the reason once the bounce is sent); and `post delivery <id>` reports `queued | published | received | rejected` instead of the false "delivered locally". Like the `published` markers, the records are never pruned.
+- A workspace letter to a room on another host now has a delivery state. The send receipt carries `cross_host: {status: queued, host}`; the sending bridge records the receiver's verdict in `bridge/room-acked/<id>.json` before it retires the outbox entry (delivered, or rejected with the reason once the bounce is sent); and `post delivery <id>` reports `queued | published | received | rejected` instead of the false "delivered locally". Like the `published` markers, the records are never pruned. Letters the bridge settled before this change have no recorded verdict and stay `published`. A verdict record already on disk that disagrees with the letter keeps its outbox entry and logs `room_ack_conflict`. With no bridge record, `queued` needs the letter still waiting in the room's inbox; otherwise it is `unsupported`.
 
 ## Diagnostics
 
