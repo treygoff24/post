@@ -144,7 +144,9 @@ The bridge relays between enrolled hosts, and its operators can read relayed
 mail: keep secrets out. A room on another host is a placeholder in `post rooms
 --json`: send to it like any workspace, and reply at its `reply_to_shared`
 room. `participant:<id>@<host>` needs you bound to a real local room; its
-receipt says `queued`, and `post delivery <mail-id>` tracks it. A send's
+receipt says `queued`, and `post delivery <mail-id>` tracks it. So does a
+send to a room on another host (`cross_host: {status: queued, host}`): it
+reports `queued`, `published`, `received`, or `rejected`. A chat send's
 `cross_host.status` is `queued` (wait), `local_only` (a lasting reason it stays
 here), or `unconfirmed` (do not resend; run `post doctor`). A clash on a room
 name quarantines your mail while your send still says `ok`:

@@ -226,6 +226,15 @@ class BounceTest(TerminalFixture):
                          "participant:" + participant)
         self.assertEqual(len(self.actions(self.fc, "outbox_bounced", mail_id)), 1)
         self.assertEqual(self.health(self.fc)["attention"], [])
+        ack = json.loads(
+            (self.fc.root / "bridge" / "room-acked" / (mail_id + ".json")).read_text()
+        )
+        self.assertEqual(
+            {k: ack[k] for k in ("v", "id", "host", "room", "status", "reason")},
+            {"v": 1, "id": mail_id, "host": "trey", "room": "atlasos",
+             "status": "rejected", "reason": "unknown_room"},
+        )
+        self.assertRegex(ack["sha256"], r"^[0-9a-f]{64}$")
 
         # The notice reads with the ordinary commands.
         notices = self.undeliverable(self.fc, "garden", "hello atlasos")

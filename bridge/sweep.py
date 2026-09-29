@@ -1749,6 +1749,38 @@ def parse_receipt(data, expected_host, expected_room, expected_id, expected_sha)
     return value
 
 
+def record_room_ack(settings, host, room, mail_id, status, reason, sha256, logger):
+    """Keep the receiver's verdict on a room letter after its outbox entry is
+    gone, so ``post delivery`` can still answer. First writer wins; a record
+    already there is never replaced. Returns False when it could not be
+    written, and the caller then keeps the entry and tries again next tick.
+    Like the ``published`` marker, these records are never pruned."""
+    record = {
+        "v": 1,
+        "id": mail_id,
+        "host": host,
+        "room": room,
+        "status": status,
+        "reason": reason,
+        "sha256": sha256,
+        "at": utc_now(),
+    }
+    content = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    path = destination(settings.root, "bridge", "room-acked", mail_id + ".json")
+    try:
+        publish_marker(settings, path, content)
+        # publish_marker reads any FileExistsError as "already published",
+        # which a file standing where the directory belongs also raises.
+        if path.is_symlink() or not path.is_file():
+            raise ConfigError("room-acked record is not a regular file")
+    except (ConfigError, OSError) as error:
+        logger.emit(
+            "room_ack_failed", host=host, room=room, id=mail_id, reason=str(error)
+        )
+        return False
+    return True
+
+
 def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
     """Retire outbox entries the receiver has settled.
 
@@ -1865,6 +1897,11 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
                             )
                         )
                 continue
+            if not record_room_ack(
+                settings, host, room, mail_id, "rejected", receipt["reason"],
+                sha256, logger,
+            ):
+                continue
             git.run(["rm", "--quiet", "--", relative])
             pruned += 1
             mismatched.pop(mail_id, None)
@@ -1884,6 +1921,10 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
                 reason=receipt["reason"],
                 age_seconds=mail_age_seconds(mail_id),
             )
+            continue
+        if not record_room_ack(
+            settings, host, room, mail_id, "delivered", None, sha256, logger
+        ):
             continue
         git.run(["rm", "--quiet", "--", relative])
         pruned += 1

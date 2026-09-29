@@ -15,6 +15,12 @@
 //! - `bridge/pmail-conflicts/<id>.json`: present when a later receipt
 //!   disagreed with the first; reported as `conflict: true`.
 //!
+//! A workspace letter to a room homed on another host is answered from
+//! `bridge/room-acked/<id>.json` (the sending bridge's record of the
+//! receiver's verdict), then the plain-text `bridge/published/<id>` marker,
+//! then the room's current registration as a placeholder (`queued`); see
+//! `workspace_letter`.
+//!
 //! Precedence: a receipt (it may outrun the published marker), then the
 //! marker, then queued. Any evidence file that exists but does not validate
 //! makes the answer `unknown`, naming the file and the error: never a guess.
@@ -45,6 +51,9 @@ struct DeliveryOutput {
     participant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
+    /// The room a workspace letter was sent to (workspace letters only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
     conflict: bool,
@@ -80,6 +89,7 @@ impl DeliveryOutput {
             state,
             participant: None,
             host: None,
+            room: None,
             sha256: None,
             conflict: false,
             reason: None,
@@ -147,6 +157,9 @@ pub(super) fn run(
     if !crate::output::mail_authored_locally_by(context, &actor.id, envelope) {
         return Err(not_found());
     }
+    if envelope.address_kind.as_deref() == Some("workspace") {
+        return workspace_letter(context, &id, &bytes, &envelope.to, json_output, pretty);
+    }
     let (Some(host), Some("participant")) =
         (envelope.to_host.clone(), envelope.address_kind.as_deref())
     else {
@@ -182,6 +195,164 @@ pub(super) fn run(
         output.evidence_error = Some(corrupt.error);
     }
     render(&output, json_output, pretty)
+}
+
+/// A workspace letter: the bridge carries it only when the room is homed on
+/// another host. Evidence is read regardless of the room's current
+/// registration (a room may have been rehomed since); only with no evidence
+/// does the registration decide between `queued` and `unsupported`.
+fn workspace_letter(
+    context: &Context,
+    id: &str,
+    bytes: &[u8],
+    room: &str,
+    json_output: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let mut output = DeliveryOutput::new(id, "queued");
+    output.room = Some(room.to_owned());
+    output.sha256 = Some(hex_sha256(bytes));
+    let bridge = bridge_dir(context);
+    match decide_workspace(context, id, room, &bridge, &mut output) {
+        Ok(true) => {}
+        Ok(false) => {
+            output.state = "unsupported";
+            output.sha256 = None;
+            output.host = None;
+            output.room = None;
+        }
+        Err(corrupt) => {
+            output.state = "unknown";
+            output.reason = None;
+            output.evidence_file = Some(corrupt.file.display().to_string());
+            output.evidence_error = Some(corrupt.error);
+        }
+    }
+    render(&output, json_output, pretty)
+}
+
+/// `Ok(false)` means this letter has no delivery state (`output.reason` says
+/// why); `Ok(true)` means `output.state` and its fields are set.
+fn decide_workspace(
+    context: &Context,
+    id: &str,
+    room: &str,
+    bridge: &Path,
+    output: &mut DeliveryOutput,
+) -> Result<bool, Corrupt> {
+    let acked = bridge.join("room-acked").join(format!("{id}.json"));
+    if let Some(record) = read_object(&acked)? {
+        let sha256 = output.sha256.clone().unwrap_or_default();
+        let (host, status, reason, at) =
+            validate_room_ack(&record, id, room, &sha256).map_err(|error| Corrupt {
+                file: acked.clone(),
+                error,
+            })?;
+        output.state = if status == "delivered" {
+            "received"
+        } else {
+            "rejected"
+        };
+        output.host = Some(host);
+        output.reason = reason;
+        output.acked_at = Some(at);
+        return Ok(true);
+    }
+    let registered = crate::output::room_home(context, room);
+    let host = match &registered {
+        Ok(crate::output::RoomHome::Placeholder(host)) => Some(host.clone()),
+        _ => None,
+    };
+    let marker = bridge.join("published").join(id);
+    if let Some(bytes) = read_regular(&marker, EVIDENCE_MAX_BYTES).map_err(|error| Corrupt {
+        file: marker.clone(),
+        error,
+    })? {
+        let text = String::from_utf8_lossy(&bytes);
+        let commit = text.trim();
+        let hex = commit.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !(hex && (commit.len() == 40 || commit.len() == 64)) {
+            return Err(Corrupt {
+                file: marker,
+                error: "not a commit hash".to_owned(),
+            });
+        }
+        output.state = "published";
+        output.commit = Some(commit.to_owned());
+        output.host = host;
+        return Ok(true);
+    }
+    match registered {
+        Ok(crate::output::RoomHome::Placeholder(_)) => {
+            output.state = "queued";
+            output.host = host;
+            Ok(true)
+        }
+        Ok(crate::output::RoomHome::Local) => {
+            output.reason = Some(format!(
+                "delivered locally: '{room}' is a room on this host"
+            ));
+            Ok(false)
+        }
+        Ok(crate::output::RoomHome::Unregistered) => {
+            output.reason = Some(format!(
+                "'{room}' is not registered on this host and the bridge holds no record of this letter"
+            ));
+            Ok(false)
+        }
+        Err(error) => Err(Corrupt {
+            file: context.root.join("rooms.json"),
+            error,
+        }),
+    }
+}
+
+/// The bridge's room verdict: exactly `{v, id, host, room, status, reason,
+/// sha256, at}`; returns (host, status, reason, at).
+fn validate_room_ack(
+    record: &Map<String, Value>,
+    id: &str,
+    room: &str,
+    sha256: &str,
+) -> Result<(String, &'static str, Option<String>, String), String> {
+    let mut keys: Vec<&str> = record.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let exact = [
+        "at", "host", "id", "reason", "room", "sha256", "status", "v",
+    ];
+    if keys != exact {
+        return Err(format!(
+            "record keys are {keys:?}, expected exactly {exact:?}"
+        ));
+    }
+    check_version(record)?;
+    expect("id", string(record, "id")?, id)?;
+    let recorded_room = string(record, "room")?;
+    if !recorded_room.eq_ignore_ascii_case(room) {
+        return Err(format!("room is {recorded_room}, expected {room}"));
+    }
+    let host = string(record, "host")?;
+    if host.is_empty() {
+        return Err("host is empty".to_owned());
+    }
+    let recorded = string(record, "sha256")?;
+    if !valid_sha256(recorded) {
+        return Err("sha256 is not 64 lowercase hex characters".to_owned());
+    }
+    expect("sha256", recorded, sha256)?;
+    let at = string(record, "at")?;
+    if crate::participant::parse_rfc3339(at).is_none() {
+        return Err("at is not RFC 3339".to_owned());
+    }
+    let reason = optional_string(record, "reason")?;
+    let status = match (string(record, "status")?, reason.as_deref()) {
+        ("delivered", None) => "delivered",
+        ("delivered", Some(_)) => return Err("a delivered record carries no reason".to_owned()),
+        ("rejected", Some(reason)) if !reason.is_empty() => "rejected",
+        ("rejected", _) => return Err("a rejected record needs a reason".to_owned()),
+        (other, _) => return Err(format!("status {other} is not delivered or rejected")),
+    };
+    Ok((host.to_owned(), status, reason, at.to_owned()))
 }
 
 /// What every evidence file must agree with.
@@ -444,6 +615,15 @@ fn render(output: &DeliveryOutput, json_output: bool, pretty: bool) -> AppResult
             sanitize(participant),
             sanitize(host)
         ));
+    } else if let Some(room) = &output.room {
+        match &output.host {
+            Some(host) => text.push_str(&format!(
+                " (workspace:{}@{})",
+                sanitize(room),
+                sanitize(host)
+            )),
+            None => text.push_str(&format!(" (workspace:{})", sanitize(room))),
+        }
     }
     text.push('\n');
     let mut line = |label: &str, value: &Option<String>| {

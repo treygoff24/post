@@ -302,7 +302,10 @@ It prints `bridge_attention: <count>` when the bridge has something stuck.
   with its commit and age), `received` (in the recipient's inbox, which says
   nothing about whether they read it), or `rejected` with the reason. Corrupt
   evidence is `unknown` with the file and error. Only the sender sees it;
-  local mail is `unsupported`.
+  local mail is `unsupported`. A workspace letter to a room on another host
+  reports the same states (with `room` and `host`) from the bridge's record of
+  the receiver's verdict, and a send to such a room says `cross_host:
+  {status: queued, host}`.
 - An imported letter's reply address is `participant:<sender>@<host>` from
   its admission record, even when the sender's id matches yours. It is never
   your own mail.
