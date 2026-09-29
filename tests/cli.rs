@@ -9060,14 +9060,38 @@ fn snapshot_does_not_leave_a_live_heartbeat() {
     let sandbox = Sandbox::new();
     let (alpha, _) = register_alpha_beta(&sandbox);
     assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
+    let alpha_id = sandbox.test_participant("alpha");
+    let participants_dir = sandbox.mail_root.join("participants");
+    let alpha_heartbeat = participants_dir.join(&alpha_id).join("watch.heartbeat");
+    let alpha_record = participants_dir.join(&alpha_id).join("participant.json");
+    assert!(!alpha_heartbeat.exists(), "precondition: no heartbeat yet");
+    let record_before = fs::read(&alpha_record).expect("participant record");
+
     assert_success(&sandbox.run(&["watch", "--room", "alpha", "--snapshot"]));
+
     let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    let row = who
+        .participants
+        .iter()
+        .find(|row| row.id == alpha_id)
+        .expect("alpha's participant row");
     assert!(
-        !who.legacy_rooms[0].live_watch,
-        "snapshot must not mint a live presence heartbeat"
+        !row.live_watch,
+        "snapshot must not mint a live participant heartbeat"
     );
-    let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
-    assert!(!hb.exists(), "snapshot must not create watch.heartbeat");
+    assert!(row.watch_last_seen.is_none(), "no heartbeat stamp is read");
+    assert!(
+        !alpha_heartbeat.exists(),
+        "snapshot must not create participants/<id>/watch.heartbeat"
+    );
+    assert_eq!(
+        fs::read(&alpha_record).expect("participant record"),
+        record_before,
+        "snapshot must not renew the participant's lease"
+    );
+    // Legacy room presence stays a compatibility guard.
+    assert!(!who.legacy_rooms[0].live_watch);
+    assert!(!sandbox.mail_root.join("alpha/watch.heartbeat").exists());
 }
 
 #[test]
