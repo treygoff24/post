@@ -8,8 +8,9 @@
 // at (or silently edits) a live config. Recommended target:
 // ~/.grok/hooks/post-mail.json — a dedicated file so cmux-session.json and
 // config.toml are left alone. Grok merges every ~/.grok/hooks/*.json.
-// The reviewed adapter is copied to ~/.grok/hooks/post-grok-mail.mjs (and
-// watch-notice.mjs alongside it). Command is a single string (never Claude
+// The reviewed adapter is copied to ~/.grok/hooks/post-grok-mail.mjs (with
+// mail-hook-core.mjs, which it imports, and watch-notice.mjs alongside it).
+// Command is a single string (never Claude
 // exec-form args): Grok's Claude-compat loader drops `args`.
 
 import fs from "node:fs";
@@ -23,9 +24,12 @@ import { stableNodePath } from "./stable-node-path.mjs";
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.join(DIR, "grok-mail.mjs");
 const NOTICE_SOURCE = path.join(DIR, "watch-notice.mjs");
+const CORE_SOURCE = path.join(DIR, "mail-hook-core.mjs");
 const INSTALL_DIR =
   process.env.POST_GROK_HOOK_INSTALL_DIR || path.join(os.homedir(), ".grok", "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-grok-mail.mjs");
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(INSTALL_DIR, "mail-hook-core.mjs");
 const NOTICE = path.join(INSTALL_DIR, "post-watch-notice.mjs");
 // Pin an absolute Node that survives package-manager upgrades: process.execPath
 // is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
@@ -150,7 +154,7 @@ function writeFileAtomic(file, content, mode) {
   }
 }
 
-function copyScript(source, dest) {
+function copyScript(source, dest, mode = 0o755) {
   const bytes = fs.readFileSync(source);
   let changed = true;
   try {
@@ -158,9 +162,9 @@ function copyScript(source, dest) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  if (changed) writeFileAtomic(dest, bytes, 0o755);
-  const modeChanged = (fs.statSync(dest).mode & 0o777) !== 0o755;
-  if (modeChanged) fs.chmodSync(dest, 0o755);
+  if (changed) writeFileAtomic(dest, bytes, mode);
+  const modeChanged = (fs.statSync(dest).mode & 0o777) !== mode;
+  if (modeChanged) fs.chmodSync(dest, mode);
   return changed || modeChanged;
 }
 
@@ -198,6 +202,8 @@ if (fs.existsSync(target)) {
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
+// The adapter imports ./mail-hook-core.mjs, so the core goes in before it.
+const coreChanged = copyScript(CORE_SOURCE, CORE, 0o644);
 const adapterChanged = copyScript(SOURCE, ADAPTER);
 
 const canonicalHook = () => ({ type: "command", command: COMMAND, timeout: 10 });
@@ -263,10 +269,10 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || noticeChanged
+  configChanged || adapterChanged || coreChanged || noticeChanged
     ? [
         configChanged && "hooks updated",
-        adapterChanged && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
         noticeChanged && "watch-notice updated",
       ]
         .filter(Boolean)

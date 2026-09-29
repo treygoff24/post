@@ -17,6 +17,8 @@ const INSTALLER = path.join(
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-claude-install-test-"));
 const INSTALL_DIR = path.join(ROOT, "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-claude-mail.mjs");
+const CORE_SOURCE = path.join(path.dirname(INSTALLER), "mail-hook-core.mjs");
+const CORE = path.join(INSTALL_DIR, "mail-hook-core.mjs");
 
 // Preflight stubs: a fixed post that mints nothing, and a stale one that
 // reproduces the pre-0.2.0 junk-mailbox bug.
@@ -89,6 +91,7 @@ test("preflight refuses a stale binary that mints unroomed mailboxes, touching n
   assert.equal(result.status, 1);
   assert.match(result.stderr, /mints a mailbox/);
   assert.ok(!fs.existsSync(target), "a failed preflight must not write the settings file");
+  assert.ok(!fs.existsSync(CORE), "a failed preflight must not copy the shared core");
 });
 
 test("preflight refuses an unrunnable binary", () => {
@@ -114,6 +117,36 @@ test("creates a fresh settings file with lifecycle events and copies the adapter
   }
   assert.ok(fs.existsSync(ADAPTER), "adapter copy must exist");
   assert.equal(fs.statSync(ADAPTER).mode & 0o777, 0o755);
+});
+
+test("installs the shared core beside the adapter, and the installed adapter runs on its own", () => {
+  const target = freshSettings();
+  assert.equal(run(target).status, 0);
+  assert.deepEqual(fs.readFileSync(CORE), fs.readFileSync(CORE_SOURCE));
+  assert.equal(fs.statSync(CORE).mode & 0o777, 0o644);
+  // The adapter imports ./mail-hook-core.mjs; a missing core would crash it
+  // before it printed anything.
+  const ran = spawnSync(process.execPath, [ADAPTER], { input: "{}", encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, "{}");
+  // A stale or damaged core is replaced on re-run.
+  fs.writeFileSync(CORE, "// stale\n");
+  const rerun = run(target);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /adapter updated/);
+  assert.deepEqual(fs.readFileSync(CORE), fs.readFileSync(CORE_SOURCE));
+});
+
+test("a malformed settings file leaves neither the adapter nor the core behind", () => {
+  const dir = path.join(ROOT, "hooks-malformed");
+  const target = freshSettings("{not-json");
+  const result = spawnSync(process.execPath, [INSTALLER, target], {
+    encoding: "utf8",
+    env: { ...process.env, POST_CLAUDE_HOOK_INSTALL_DIR: dir, POST_CLAUDE_HOOK_BIN: GOOD_POST },
+  });
+  assert.notEqual(result.status, 0);
+  assert.ok(!fs.existsSync(path.join(dir, "post-claude-mail.mjs")));
+  assert.ok(!fs.existsSync(path.join(dir, "mail-hook-core.mjs")));
 });
 
 test("is idempotent and preserves unrelated hooks byte-identical", () => {

@@ -8,9 +8,10 @@
 // at (or silently edits) a live config. Run it against the intended settings
 // file (user-level ~/.claude/settings.json, or a profile variant) deliberately.
 // Safe to re-run: an existing claude-mail entry is updated in place, never
-// duplicated. The reviewed adapter is copied to ~/.claude/hooks/ and that
-// private copy is what future Claude sessions execute, so later repo edits do
-// not silently change live hook behavior.
+// duplicated. The reviewed adapter and the shared mail-hook-core.mjs it imports
+// are copied to ~/.claude/hooks/ and that private copy is what future Claude
+// sessions execute, so later repo edits do not silently change live hook
+// behavior.
 //
 // Registration uses the exec form (command + args array): no shell, exact
 // argv, and Claude Code deduplicates identical command+args registrations
@@ -23,12 +24,16 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "claude-mail.mjs");
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE = path.join(HERE, "claude-mail.mjs");
+const CORE_SOURCE = path.join(HERE, "mail-hook-core.mjs");
 // POST_CLAUDE_HOOK_INSTALL_DIR is a test override; live installs use the default.
 const ADAPTER = path.join(
   process.env.POST_CLAUDE_HOOK_INSTALL_DIR || path.join(os.homedir(), ".claude", "hooks"),
   "post-claude-mail.mjs"
 );
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(path.dirname(ADAPTER), "mail-hook-core.mjs");
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
 
 const USAGE = "usage: node install-claude-hooks.mjs <path-to-settings.json>";
@@ -153,18 +158,26 @@ function writeFileAtomic(file, bytes, mode) {
   }
 }
 
-const source = fs.readFileSync(SOURCE);
-let adapterChanged = true;
-try {
-  adapterChanged = !source.equals(fs.readFileSync(ADAPTER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
+// Copy a reviewed file into place if its bytes or mode differ. Returns whether
+// anything changed.
+function installFile(from, to, mode) {
+  const bytes = fs.readFileSync(from);
+  let changed = true;
+  try {
+    changed = !bytes.equals(fs.readFileSync(to));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (changed) writeFileAtomic(to, bytes, mode);
+  const modeChanged = (fs.statSync(to).mode & 0o777) !== mode;
+  if (modeChanged) fs.chmodSync(to, mode);
+  return changed || modeChanged;
 }
-if (adapterChanged) {
-  writeFileAtomic(ADAPTER, source, 0o755);
-}
-const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
-if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
+
+// The adapter imports ./mail-hook-core.mjs, so the core goes in first and the
+// two always travel together.
+const coreChanged = installFile(CORE_SOURCE, CORE, 0o644);
+const adapterChanged = installFile(SOURCE, ADAPTER, 0o755);
 
 const canonicalHook = () => ({ type: "command", command: "node", args: [ADAPTER], timeout: 10 });
 
@@ -215,10 +228,10 @@ if (configChanged) {
   fs.renameSync(tmp, target);
 }
 console.log(
-  configChanged || adapterChanged || adapterModeChanged
+  configChanged || adapterChanged || coreChanged
     ? [
         configChanged && "hooks updated",
-        (adapterChanged || adapterModeChanged) && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
       ]
         .filter(Boolean)
         .join("\n")

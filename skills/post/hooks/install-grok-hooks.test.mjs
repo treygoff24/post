@@ -25,6 +25,8 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-grok-install-test-"));
 const INSTALL_DIR = path.join(ROOT, "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-grok-mail.mjs");
 const NOTICE = path.join(INSTALL_DIR, "post-watch-notice.mjs");
+const CORE_SOURCE = path.join(DIR, "mail-hook-core.mjs");
+const CORE = path.join(INSTALL_DIR, "mail-hook-core.mjs");
 
 // Preflight stubs: a fixed post that mints nothing, and a stale one that
 // reproduces the pre-0.2.0 junk-mailbox bug.
@@ -98,6 +100,7 @@ test("preflight refuses a stale binary that mints unroomed mailboxes, touching n
   assert.match(result.stderr, /mints a mailbox/);
   assert.ok(!fs.existsSync(target), "a failed preflight must not write the hooks file");
   assert.ok(!fs.existsSync(ADAPTER), "a failed preflight must not copy the adapter");
+  assert.ok(!fs.existsSync(CORE), "a failed preflight must not copy the shared core");
 });
 
 test("preflight refuses an unrunnable binary", () => {
@@ -107,6 +110,7 @@ test("preflight refuses an unrunnable binary", () => {
   assert.match(result.stderr, /could not run the post binary/);
   assert.ok(!fs.existsSync(target));
   assert.ok(!fs.existsSync(ADAPTER));
+  assert.ok(!fs.existsSync(CORE));
 });
 
 test("creates a fresh hooks file with UserPromptSubmit and copies the adapter", () => {
@@ -129,6 +133,24 @@ test("creates a fresh hooks file with UserPromptSubmit and copies the adapter", 
   assert.equal(fs.statSync(ADAPTER).mode & 0o777, 0o755);
   assert.ok(fs.existsSync(NOTICE), "watch-notice copy must exist");
   assert.equal(fs.statSync(NOTICE).mode & 0o777, 0o755);
+});
+
+test("installs the shared core beside the adapter, and the installed adapter runs on its own", () => {
+  const target = freshTarget();
+  assert.equal(run(target).status, 0);
+  assert.deepEqual(fs.readFileSync(CORE), fs.readFileSync(CORE_SOURCE));
+  assert.equal(fs.statSync(CORE).mode & 0o777, 0o644);
+  // The adapter imports ./mail-hook-core.mjs; a missing core would crash it
+  // before it printed anything.
+  const ran = spawnSync(process.execPath, [ADAPTER], { input: "{}", encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, "{}");
+  // A stale or damaged core is replaced on re-run.
+  fs.writeFileSync(CORE, "// stale\n");
+  const rerun = run(target);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /adapter updated/);
+  assert.deepEqual(fs.readFileSync(CORE), fs.readFileSync(CORE_SOURCE));
 });
 
 test("copies the adapter privately and writes through hook-config symlinks", () => {
@@ -243,6 +265,7 @@ test("malformed target JSON fails before copying the adapter", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /not valid JSON/);
   assert.ok(!fs.existsSync(adapter), "adapter must not be copied on malformed JSON");
+  assert.ok(!fs.existsSync(path.join(installDir, "mail-hook-core.mjs")), "core must not be copied on malformed JSON");
   assert.equal(fs.readFileSync(target, "utf8"), "{not-json");
 });
 

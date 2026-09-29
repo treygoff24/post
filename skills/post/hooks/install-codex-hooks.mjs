@@ -7,9 +7,10 @@
 // The target path is a required argument on purpose: this script never guesses
 // at (or silently edits) a live config. Run it against ~/.codex/hooks.json
 // deliberately. Safe to re-run: an existing codex-mail entry is updated in
-// place, never duplicated. The reviewed adapter is sourced from this
-// installer's own directory and copied to ~/.codex/hooks/; that private copy
-// is what future Codex sessions execute.
+// place, never duplicated. The reviewed adapter and the shared
+// mail-hook-core.mjs it imports are sourced from this installer's own directory
+// and copied to ~/.codex/hooks/; that private copy is what future Codex
+// sessions execute.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -23,11 +24,15 @@ import { stableNodePath } from "./stable-node-path.mjs";
 // the installed skill rather than a guessed location (~/.codex/skills).
 // POST_CODEX_HOOK_INSTALL_DIR is a test override; live installs use the
 // default.
-const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE = path.join(HERE, "codex-mail.mjs");
+const CORE_SOURCE = path.join(HERE, "mail-hook-core.mjs");
 const ADAPTER = path.join(
   process.env.POST_CODEX_HOOK_INSTALL_DIR || path.join(os.homedir(), ".codex", "hooks"),
   "post-codex-mail.mjs"
 );
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(path.dirname(ADAPTER), "mail-hook-core.mjs");
 // Pin an absolute Node that survives package-manager upgrades: process.execPath
 // is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
 // at the next `brew upgrade node` (see stable-node-path.mjs). Shell-quote both args.
@@ -198,18 +203,27 @@ if (fs.existsSync(target)) {
 }
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
-const source = fs.readFileSync(SOURCE);
-let adapterChanged = true;
-try {
-  adapterChanged = !source.equals(fs.readFileSync(ADAPTER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
+
+// Copy a reviewed file into place if its bytes or mode differ. Returns whether
+// anything changed.
+function installFile(from, to, mode) {
+  const bytes = fs.readFileSync(from);
+  let changed = true;
+  try {
+    changed = !bytes.equals(fs.readFileSync(to));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (changed) writeFileAtomic(to, bytes, mode);
+  const modeChanged = (fs.statSync(to).mode & 0o777) !== mode;
+  if (modeChanged) fs.chmodSync(to, mode);
+  return changed || modeChanged;
 }
-if (adapterChanged) {
-  writeFileAtomic(ADAPTER, source, 0o755);
-}
-const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
-if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
+
+// The adapter imports ./mail-hook-core.mjs, so the core goes in first and the
+// two always travel together.
+const coreChanged = installFile(CORE_SOURCE, CORE, 0o644);
+const adapterChanged = installFile(SOURCE, ADAPTER, 0o755);
 
 const canonicalHook = () => ({ type: "command", command: COMMAND, timeout: 5 });
 
@@ -275,10 +289,10 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || adapterModeChanged
+  configChanged || adapterChanged || coreChanged
     ? [
         configChanged && "hooks updated",
-        (adapterChanged || adapterModeChanged) && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
       ]
         .filter(Boolean)
         .join("\n")

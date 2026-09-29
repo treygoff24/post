@@ -97,6 +97,7 @@ function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv
       POST_CODEX_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
+      DELEGATE_RUN_ID: "", // a delegate child is not minted at start; these tests are not one
       ...extraEnv,
     },
   });
@@ -395,7 +396,6 @@ test("malformed or unknown nonempty snapshot output fails closed", () => {
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [
     ["bad json", "not-json\n"],
-    ["unknown event", '{"event":"future","id":"x"}\n'],
     ["malformed mail", '{"event":"mail","room":"codex","id":"forged"}\n'],
     ["mail missing reason", JSON.stringify(mailNoReason) + "\n"],
     ["channel bad reason", JSON.stringify({ ...CHAN_B, reason: "mail" }) + "\n"],
@@ -731,6 +731,7 @@ test("SessionStart binds before snapshot with the session cwd", () => {
   const calls = allStubCalls().slice(before);
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
+    ["rooms", "--json"], // is this cwd a registered room? An unreadable answer means mint as usual
     ["participant", "bind", "--harness", "codex", "--key", "bind-order", "--json"],
     ["participant", "notice", "--claim", "<adapter-pid>", "--json"],
     ["watch", "--snapshot"],

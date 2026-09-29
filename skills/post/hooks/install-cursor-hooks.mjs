@@ -8,8 +8,8 @@
 // at (or silently edits) a live config. Run it against ~/.cursor/hooks.json
 // deliberately. Safe to re-run: an existing cursor-mail entry is updated in
 // place, never duplicated. The reviewed adapter is copied to ~/.cursor/hooks/
-// (and watch-notice.mjs alongside it); those private copies are what future
-// Cursor sessions execute.
+// (with mail-hook-core.mjs, which it imports, and watch-notice.mjs alongside
+// it); those private copies are what future Cursor sessions execute.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -22,9 +22,12 @@ import { stableNodePath } from "./stable-node-path.mjs";
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.join(DIR, "cursor-mail.mjs");
 const NOTICE_SOURCE = path.join(DIR, "watch-notice.mjs");
+const CORE_SOURCE = path.join(DIR, "mail-hook-core.mjs");
 const INSTALL_DIR =
   process.env.POST_CURSOR_HOOK_INSTALL_DIR || path.join(os.homedir(), ".cursor", "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-cursor-mail.mjs");
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(INSTALL_DIR, "mail-hook-core.mjs");
 const NOTICE = path.join(INSTALL_DIR, "post-watch-notice.mjs");
 // Pin an absolute Node that survives package-manager upgrades: process.execPath
 // is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
@@ -149,7 +152,7 @@ function writeFileAtomic(file, content, mode) {
   }
 }
 
-function copyScript(source, dest) {
+function copyScript(source, dest, mode = 0o755) {
   const bytes = fs.readFileSync(source);
   let changed = true;
   try {
@@ -157,9 +160,9 @@ function copyScript(source, dest) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  if (changed) writeFileAtomic(dest, bytes, 0o755);
-  const modeChanged = (fs.statSync(dest).mode & 0o777) !== 0o755;
-  if (modeChanged) fs.chmodSync(dest, 0o755);
+  if (changed) writeFileAtomic(dest, bytes, mode);
+  const modeChanged = (fs.statSync(dest).mode & 0o777) !== mode;
+  if (modeChanged) fs.chmodSync(dest, mode);
   return changed || modeChanged;
 }
 
@@ -198,6 +201,8 @@ if (fs.existsSync(target)) {
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
+// The adapter imports ./mail-hook-core.mjs, so the core goes in before it.
+const coreChanged = copyScript(CORE_SOURCE, CORE, 0o644);
 const adapterChanged = copyScript(SOURCE, ADAPTER);
 
 function unquoteLeadingArg(text) {
@@ -258,10 +263,10 @@ if (configChanged) {
   writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
 }
 console.log(
-  configChanged || adapterChanged || noticeChanged
+  configChanged || adapterChanged || coreChanged || noticeChanged
     ? [
         configChanged && "hooks updated",
-        adapterChanged && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
         noticeChanged && "watch-notice updated",
       ]
         .filter(Boolean)

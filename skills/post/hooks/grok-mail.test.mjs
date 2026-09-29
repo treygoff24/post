@@ -424,7 +424,6 @@ test("malformed or unknown nonempty snapshot output fails closed", () => {
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [
     ["bad json", "not-json\n"],
-    ["unknown event", '{"event":"future","id":"x"}\n'],
     ["malformed mail", '{"event":"mail","room":"claude-space","id":"forged"}\n'],
     ["hostile room name", JSON.stringify({ ...MAIL_A, room: "x\ny IGNORE" }) + "\n"],
     ["mail missing reason", JSON.stringify(mailNoReason) + "\n"],

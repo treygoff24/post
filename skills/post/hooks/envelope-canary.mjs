@@ -126,11 +126,17 @@ function main() {
   const chatId = JSON.parse(chatSend.stdout).message.id;
 
   // ---- receipt 0: exact event classes in the parsed snapshot ----
-  const snapshot = post(["watch", "--snapshot"], { cwd: WATCHER_DIR });
+  // An unbound reader has no cwd-room fallback (contract section 1), so name
+  // the room. Read tolerantly (contract section 3): keep only objects that
+  // carry an `event` string, so a future kind or the `bound: false` marker
+  // line can neither crash this script nor be mistaken for one of the two
+  // classes asserted below.
+  const snapshot = post(["watch", "--snapshot", "--room", "watcher"], { cwd: WATCHER_DIR });
   const events = snapshot.stdout
     .split("\n")
     .filter((line) => line.trim())
-    .map((line) => JSON.parse(line));
+    .map((line) => JSON.parse(line))
+    .filter((event) => event !== null && typeof event === "object" && typeof event.event === "string");
 
   const mailEvents = events.filter((e) => e.event === "mail");
   receipt(
@@ -219,7 +225,9 @@ function main() {
   assertNotice(adapterContext(grokOut.stdout, "grok"), "grok");
 
   // ---- watch-notice (Monitor lane): text lines for both event classes ----
-  const notice = runChecked("node", [path.join(HOOKS, "watch-notice.mjs"), "--snapshot"], "watch-notice", {
+  // `--room watcher` for the same reason as the direct snapshot above: an
+  // unbound reader has no cwd-room fallback.
+  const notice = runChecked("node", [path.join(HOOKS, "watch-notice.mjs"), "--snapshot", "--room", "watcher"], "watch-notice", {
     cwd: WATCHER_DIR,
     env: cleanEnv({ POST_WATCH_NOTICE_BIN: BIN }),
   });
