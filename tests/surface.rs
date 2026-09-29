@@ -5,9 +5,10 @@
 mod common;
 
 use common::{
-    assert_success, from_stdout, post_command, register_alpha_beta, stderr, stdout, Sandbox,
+    assert_success, from_stdout, post_command, register_alpha_beta, stderr, stdout, InboxView,
+    Sandbox,
 };
-use post::output::{InboxOutput, SendOutput};
+use post::output::SendOutput;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -118,7 +119,7 @@ fn without_allow_self_a_room_ping_skips_its_own_sender() {
         .collect();
     assert_success(&sandbox.run_as_participant(&argv, &coordinator, &alpha));
 
-    let inbox: InboxOutput =
+    let inbox: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &coordinator, &alpha));
     assert_eq!(inbox.count, 0, "the control: no flag, no self-delivery");
 }
@@ -145,10 +146,10 @@ fn allow_self_widens_nothing_beyond_the_senders_own_room() {
         "no retargeting note for a room the sender is not in: {}",
         stdout(&sent)
     );
-    let own: InboxOutput =
+    let own: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &coordinator, &alpha));
     assert_eq!(own.count, 0);
-    let theirs: InboxOutput =
+    let theirs: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &peer, &beta));
     assert_eq!(theirs.count, 1);
 }
@@ -178,10 +179,10 @@ fn allow_self_covers_the_senders_own_lineage_and_only_the_sender() {
     assert_success(&sent);
     assert!(stdout(&sent).contains("--allow-self"), "{}", stdout(&sent));
 
-    let own: InboxOutput =
+    let own: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &coordinator, &alpha));
     assert_eq!(own.count, 1, "the sender hears its own lineage ping");
-    let theirs: InboxOutput =
+    let theirs: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &peer, &beta));
     assert_eq!(theirs.count, 0, "the flag reaches the sender, nobody else");
 }

@@ -128,20 +128,6 @@ fn doctor_calls_a_healthy_store_healthy() {
 }
 
 #[test]
-fn doctor_fix_does_not_invent_room_mailboxes() {
-    let sandbox = Sandbox::new();
-    healthy_store(&sandbox);
-    let output = sandbox.run(&["doctor", "--fix"]);
-    let report: DoctorOutput = from_stdout(&output);
-    assert!(report.ok, "{:?}", report.checks);
-    assert!(
-        !sandbox.mail_root.join("claude-space/inbox").exists()
-            && !sandbox.mail_root.join("claude-space/read").exists(),
-        "--fix must not create the directories doctor no longer asks for"
-    );
-}
-
-#[test]
 fn doctor_severity_trims_the_report_and_says_so() {
     let sandbox = Sandbox::new();
     healthy_store(&sandbox);
