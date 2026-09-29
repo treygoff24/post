@@ -1134,7 +1134,10 @@ fn a_blocked_route_letter_leaves_an_archived_recipient_archived() {
     assert_outcome(&value, "rejected", Some("blocked_route"));
     assert_eq!(value["replay"], json!(false));
     assert!(
-        !rig.root().join("participants").join(&rig.recipient).exists(),
+        !rig.root()
+            .join("participants")
+            .join(&rig.recipient)
+            .exists(),
         "a refused letter restored the archived recipient"
     );
     assert!(

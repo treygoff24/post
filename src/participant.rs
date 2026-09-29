@@ -624,16 +624,14 @@ pub(crate) fn peek_locked(context: &Context, id: &str) -> AppResult<Option<Parti
     }
     match gc::holder(context, id)? {
         gc::Holder::Nobody => Ok(None),
-        gc::Holder::Archived { .. } => {
-            load_in(gc::archived_dir(context, id), id)?
-                .map(Some)
-                .ok_or_else(|| {
-                    AppError::config(
-                        &gc::archived_dir(context, id),
-                        "archived participant record is unreadable",
-                    )
-                })
-        }
+        gc::Holder::Archived { .. } => load_in(gc::archived_dir(context, id), id)?
+            .map(Some)
+            .ok_or_else(|| {
+                AppError::config(
+                    &gc::archived_dir(context, id),
+                    "archived participant record is unreadable",
+                )
+            }),
         gc::Holder::Tombstone { .. } => {
             let tombstone = held_tombstone(context, id)?;
             let dir = context.root.join(PARTICIPANTS_DIR).join(id);
