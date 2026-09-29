@@ -138,6 +138,8 @@ class DeliveredIsFinalTest(TerminalFixture):
             {"host": "mac"},
             {"status": "rejected", "reason": "unknown_room"},
             {"extra": 1},
+            {"at": "invalid"},
+            {"at": "2026-09-29"},
         ]
         mail_id, relative = self.deliver_one()
         for changes in disagreements:

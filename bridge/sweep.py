@@ -1749,6 +1749,12 @@ def parse_receipt(data, expected_host, expected_room, expected_id, expected_sha)
     return value
 
 
+# The `at` a room verdict carries, as utc_now writes it and as `post delivery`
+# accepts it. An existing record with any other `at` is a conflict: pruning on
+# it would leave `post delivery` answering `unknown` for good.
+ROOM_ACK_AT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})")
+
+
 def record_room_ack(settings, host, room, mail_id, status, reason, sha256, logger):
     """Keep the receiver's verdict on a room letter after its outbox entry is
     gone, so ``post delivery`` can still answer. First writer wins; a record
@@ -1787,6 +1793,7 @@ def record_room_ack(settings, host, room, mail_id, status, reason, sha256, logge
         and all(existing.get(k) == record[k] for k in (
             "v", "id", "host", "room", "status", "reason", "sha256"))
         and isinstance(existing.get("at"), str)
+        and ROOM_ACK_AT.fullmatch(existing["at"]) is not None
         and set(existing) == set(record)
     )
     if not same:
