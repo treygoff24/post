@@ -876,3 +876,337 @@ fn a_stray_positional_after_the_channel_is_refused_and_names_the_body_forms() {
         .count();
     assert_eq!(before, after, "a refused positional sends nothing");
 }
+
+// ---------------------------------------------------------------------------
+// Review round 1 follow-ups: case never splits a channel, joins are decided
+// under the lock, and corrupt files cannot crowd out a bounded read.
+// ---------------------------------------------------------------------------
+
+/// The names of the channel directories on disk (those holding a channel.json).
+fn channel_dirs(sandbox: &Sandbox) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(sandbox.mail_root.join("channels"))
+        .expect("channels dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("channel.json").is_file())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_join_never_splits_a_channel_that_differs_only_by_letter_case() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    // A channel stored with a capital letter, the way an older store or another
+    // machine's spelling leaves one.
+    write_bad_channel(
+        &sandbox,
+        "Ops",
+        Some("{}"),
+        true,
+        r#"{"name":"Ops","created":"2026-09-22 16:34:23 +0000","created_by":"beta"}"#,
+    );
+
+    // `--create` overrides look-alikes, never a case difference; without it the
+    // answer is the same. Every spelling lands in the stored `Ops`.
+    let check = |typed: &str, joined: &Value| {
+        assert_eq!(
+            joined["channel"], "Ops",
+            "{typed}: the join is recorded under the stored spelling: {joined}"
+        );
+        assert_eq!(joined["created"], false, "{typed}: {joined}");
+        assert_eq!(joined["normalized_from"], typed, "{typed}: {joined}");
+    };
+    let with_create = ok_json(
+        &sandbox,
+        &["chat", "ops", "--join", "--create", "--json"],
+        &alpha,
+    );
+    check("ops", &with_create);
+    let without_create = ok_json(&sandbox, &["chat", "OPS", "--join", "--json"], &beta);
+    check("OPS", &without_create);
+
+    // One channel, whatever the filesystem's case rules: compare lowercase, not
+    // by asking the disk (a case-sensitive store would show two directories).
+    let dirs = channel_dirs(&sandbox);
+    assert_eq!(
+        dirs.iter()
+            .filter(|dir| dir.to_lowercase() == "ops")
+            .count(),
+        1,
+        "exactly one ops channel on disk: {dirs:?}"
+    );
+    assert_eq!(dirs, vec!["Ops".to_owned()]);
+
+    // Messages and membership agree on that one spelling.
+    let listing = ok_json(&sandbox, &["channels"], &alpha);
+    assert_eq!(
+        listing["channels"].as_array().expect("channels").len(),
+        1,
+        "{listing}"
+    );
+    let members = channel_row(&listing, "Ops")["members"].to_string();
+    assert!(
+        members.contains("alpha") && members.contains("beta"),
+        "both rooms are members of the stored channel: {listing}"
+    );
+    let events = fs::read_dir(sandbox.mail_root.join("channels/Ops/messages"))
+        .expect("Ops messages")
+        .count();
+    assert_eq!(events, 2, "each join left one event in the stored channel");
+}
+
+#[test]
+fn concurrent_joins_of_look_alike_names_create_one_channel() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    // The look-alike check reads the directory and the join then creates the
+    // channel: those must be one critical section, or two agents joining
+    // `night-porch-N` and `nightporchN` at once both find nothing and each
+    // make a channel. Race many fresh pairs so one bad interleaving shows.
+    for round in 0..14 {
+        let first = format!("night-porch-{round}");
+        let second = format!("nightporch{round}");
+        let start = std::sync::Barrier::new(2);
+        let (a, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                start.wait();
+                run(
+                    &sandbox,
+                    &["chat", first.as_str(), "--join", "--json"],
+                    &alpha,
+                )
+            });
+            let b = scope.spawn(|| {
+                start.wait();
+                run(
+                    &sandbox,
+                    &["chat", second.as_str(), "--join", "--json"],
+                    &beta,
+                )
+            });
+            (a.join().expect("alpha join"), b.join().expect("beta join"))
+        });
+
+        let mut codes = [a.status.code(), b.status.code()];
+        codes.sort();
+        assert_eq!(
+            codes,
+            [Some(0), Some(2)],
+            "round {round}: exactly one join creates the channel and the other is told it looks like it\nalpha: {} {}\nbeta: {} {}",
+            stdout(&a),
+            stderr(&a),
+            stdout(&b),
+            stderr(&b)
+        );
+        let refused = if a.status.code() == Some(2) { &a } else { &b };
+        let error: ErrorEnvelope = from_stderr(refused);
+        assert!(
+            error.error.message.contains("did you mean #"),
+            "round {round}: {}",
+            error.error.message
+        );
+        let want = format!("nightporch{round}");
+        let made: Vec<String> = channel_dirs(&sandbox)
+            .into_iter()
+            .filter(|name| {
+                name.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    == want
+            })
+            .collect();
+        assert_eq!(made.len(), 1, "round {round}: one channel, not {made:?}");
+    }
+}
+
+/// Unreadable message files with distinct ids, sorted after the good ones.
+fn write_many_corrupt(sandbox: &Sandbox, channel: &str, count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| {
+            let id = format!("20260922-163424-{index:06}-c0ffee");
+            write_corrupt_message(sandbox, channel, &id);
+            id
+        })
+        .collect()
+}
+
+#[test]
+fn a_bounded_read_caps_its_skipped_list_and_never_loses_a_message_to_it() {
+    let (sandbox, _alpha, beta) = ops_room();
+    write_channel_message(&sandbox, "ops", A, "alpha", "", "hello from alpha");
+    write_channel_message(&sandbox, "ops", B, "alpha", "", "second from alpha");
+
+    // What a read of just the two good messages costs, JSON and text.
+    let json_base = stdout(&run(&sandbox, &["chat", "ops", "--peek", "--json"], &beta)).len();
+    let text_base = stdout(&run(&sandbox, &["chat", "ops", "--peek"], &beta)).len();
+
+    let corrupt = write_many_corrupt(&sandbox, "ops", 60);
+
+    // Every corrupt file listed would run to several times this budget. A
+    // bounded read reports a count and the first few, and still shows both
+    // messages.
+    let roomy = json_base + 1_500;
+    let bounded = run(
+        &sandbox,
+        &[
+            "chat",
+            "ops",
+            "--peek",
+            "--json",
+            "--max-bytes",
+            &roomy.to_string(),
+        ],
+        &beta,
+    );
+    assert_success(&bounded);
+    assert!(stdout(&bounded).len() <= roomy, "{}", stdout(&bounded));
+    let read: Value = from_stdout(&bounded);
+    assert_eq!(message_ids(&read), vec![A, B], "{read}");
+    let shown: Vec<&str> = read["skipped_files"]
+        .as_array()
+        .expect("skipped_files")
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(
+        shown,
+        corrupt[..3].to_vec(),
+        "only the first few are listed"
+    );
+    assert_eq!(read["skipped_files_total"], 60, "{read}");
+    let hint = read["skipped_files_hint"].as_str().expect("hint");
+    assert!(hint.contains("--history"), "{hint}");
+
+    // The named command really lists every one of them.
+    let all = sandbox.run_fix(hint, &beta);
+    assert_success(&all);
+    let all: Value = from_stdout(&all);
+    let listed: Vec<&str> = all["skipped_files"]
+        .as_array()
+        .expect("skipped_files")
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(listed, corrupt, "the hint lists all sixty");
+
+    // A budget too tight for the listed form still shows both messages: the
+    // report shrinks to a count before it would push a message out.
+    let tight = json_base + 300;
+    let squeezed = run(
+        &sandbox,
+        &[
+            "chat",
+            "ops",
+            "--peek",
+            "--json",
+            "--max-bytes",
+            &tight.to_string(),
+        ],
+        &beta,
+    );
+    assert_success(&squeezed);
+    assert!(stdout(&squeezed).len() <= tight, "{}", stdout(&squeezed));
+    let read: Value = from_stdout(&squeezed);
+    assert_eq!(message_ids(&read), vec![A, B], "{read}");
+    assert_eq!(read["skipped_files_total"], 60, "{read}");
+    assert!(read["skipped_files_hint"].is_string(), "{read}");
+
+    // Text mode: the same line, capped, still naming how to see the rest.
+    let text_budget = text_base + 400;
+    let text = run(
+        &sandbox,
+        &[
+            "chat",
+            "ops",
+            "--peek",
+            "--max-bytes",
+            &text_budget.to_string(),
+        ],
+        &beta,
+    );
+    assert_success(&text);
+    let text = stdout(&text);
+    assert!(text.len() <= text_budget, "{text}");
+    assert!(
+        text.contains("hello from alpha") && text.contains("second from alpha"),
+        "both messages arrive: {text}"
+    );
+    assert!(
+        text.contains("skipped 60 unreadable message file(s)") && text.contains("--history"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&corrupt[10]),
+        "the text line lists only the first few: {text}"
+    );
+}
+
+#[test]
+fn a_bounded_catchup_caps_its_skipped_list_and_never_loses_a_message_to_it() {
+    // Catchup consumes what it shows, so each scenario gets its own store.
+    let prepare = |corrupt: usize| {
+        let (sandbox, _alpha, beta) = ops_room();
+        write_channel_message(&sandbox, "ops", A, "alpha", "", "hello from alpha");
+        write_channel_message(&sandbox, "ops", B, "alpha", "", "second from alpha");
+        let ids = write_many_corrupt(&sandbox, "ops", corrupt);
+        (sandbox, beta, ids)
+    };
+    let (clean, clean_beta, _) = prepare(0);
+    let base = stdout(&run(&clean, &["catchup", "--json"], &clean_beta)).len();
+
+    let (sandbox, beta, corrupt) = prepare(60);
+    let budget = base + 1_500;
+    let bounded = run(
+        &sandbox,
+        &["catchup", "--json", "--max-bytes", &budget.to_string()],
+        &beta,
+    );
+    assert_success(&bounded);
+    assert!(stdout(&bounded).len() <= budget, "{}", stdout(&bounded));
+    let caught: Value = from_stdout(&bounded);
+    let ops = caught["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["channel"] == "ops")
+        .expect("ops target");
+    assert_eq!(ops["count"], 2, "both messages arrive: {caught}");
+    assert_eq!(
+        caught["skipped"].as_array().expect("skipped").len(),
+        3,
+        "{caught}"
+    );
+    assert_eq!(caught["skipped"][0]["id"], corrupt[0].as_str());
+    assert_eq!(caught["skipped_total"], 60, "{caught}");
+    let hint = caught["skipped_hint"].as_str().expect("hint");
+    let all = sandbox.run_fix(hint, &beta);
+    assert_success(&all);
+    let all: Value = from_stdout(&all);
+    assert_eq!(
+        all["skipped"].as_array().expect("skipped").len(),
+        60,
+        "the hint lists every skipped file: {all}"
+    );
+
+    // A budget too tight for the listed form still delivers both messages.
+    let (sandbox, beta, _) = prepare(60);
+    let tight = base + 300;
+    let squeezed = run(
+        &sandbox,
+        &["catchup", "--json", "--max-bytes", &tight.to_string()],
+        &beta,
+    );
+    assert_success(&squeezed);
+    assert!(stdout(&squeezed).len() <= tight, "{}", stdout(&squeezed));
+    let caught: Value = from_stdout(&squeezed);
+    let ops = caught["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["channel"] == "ops")
+        .expect("ops target");
+    assert_eq!(ops["count"], 2, "{caught}");
+    assert_eq!(caught["skipped_total"], 60, "{caught}");
+}

@@ -776,38 +776,50 @@ fn read(
                         )
                     })
                     .collect::<AppResult<Vec<_>>>()?;
-                let admission = super::byte_budget::admit_prefix_measured(
+                // The skipped-file list grows with the number of corrupt files
+                // and the budget does not: a bounded read carries a count and
+                // the first few ids, never the whole list.
+                let list_all = skipped_files_command(&args.name);
+                let admission = super::byte_budget::admit_with_skipped_detail(
+                    !skipped_files.is_empty(),
                     selected_count,
-                    max_bytes,
-                    |count| {
-                        measure_budgeted_chat_json(
-                            &args,
-                            &room,
-                            &messages,
-                            count,
-                            skipped,
-                            &skipped_files,
-                            framing,
+                    |detail| {
+                        let report =
+                            channel::BoundedSkipped::new(&skipped_files, detail, &list_all);
+                        super::byte_budget::admit_prefix_measured(
+                            selected_count,
                             max_bytes,
-                            pretty,
-                            &array_sizes,
-                            &mention_suffix,
-                            &continuations,
-                        )
-                    },
-                    |count| {
-                        render_budgeted_chat_json(
-                            &args,
-                            &room,
-                            &messages,
-                            count,
-                            skipped,
-                            &skipped_files,
-                            framing,
-                            max_bytes,
-                            pretty,
-                            &mention_suffix,
-                            &continuations,
+                            |count| {
+                                measure_budgeted_chat_json(
+                                    &args,
+                                    &room,
+                                    &messages,
+                                    count,
+                                    skipped,
+                                    &report,
+                                    framing,
+                                    max_bytes,
+                                    pretty,
+                                    &array_sizes,
+                                    &mention_suffix,
+                                    &continuations,
+                                )
+                            },
+                            |count| {
+                                render_budgeted_chat_json(
+                                    &args,
+                                    &room,
+                                    &messages,
+                                    count,
+                                    skipped,
+                                    &report,
+                                    framing,
+                                    max_bytes,
+                                    pretty,
+                                    &mention_suffix,
+                                    &continuations,
+                                )
+                            },
                         )
                     },
                 )?;
@@ -877,47 +889,57 @@ fn read(
                     })
                     .collect::<AppResult<Vec<_>>>()?;
                 // The skipped-files line rides in front of the body, so it is
-                // charged to the byte budget in both the measure and the render.
-                let notice = channel::skipped_notice(&skipped_files).unwrap_or_default();
-                let admission = super::byte_budget::admit_prefix_measured(
+                // charged to the byte budget in both the measure and the render,
+                // and it shrinks before it would cost a message.
+                let list_all = skipped_files_command(&args.name);
+                let admission = super::byte_budget::admit_with_skipped_detail(
+                    !skipped_files.is_empty(),
                     selected_count,
-                    max_bytes,
-                    |count| {
-                        Ok(notice.len().saturating_add(measure_budgeted_chat_text(
-                            context,
-                            &args,
-                            &room,
-                            &batch,
-                            count,
-                            skipped,
-                            framing,
+                    |detail| {
+                        let notice =
+                            channel::bounded_skipped_notice(&skipped_files, detail, &list_all)
+                                .unwrap_or_default();
+                        super::byte_budget::admit_prefix_measured(
+                            selected_count,
                             max_bytes,
-                            &prefix_sizes,
-                            &mention_suffix,
-                            show_wall,
-                            &continuations,
-                        )))
-                    },
-                    |count| {
-                        Ok(format!(
-                            "{notice}{}",
-                            render_budgeted_chat_text(
-                                context,
-                                &args,
-                                &room,
-                                &batch,
-                                &signed_statuses,
-                                &message_ids,
-                                count,
-                                skipped,
-                                framing,
-                                owner.as_ref(),
-                                max_bytes,
-                                &mention_suffix,
-                                show_wall,
-                                &continuations,
-                            )
-                        ))
+                            |count| {
+                                Ok(notice.len().saturating_add(measure_budgeted_chat_text(
+                                    context,
+                                    &args,
+                                    &room,
+                                    &batch,
+                                    count,
+                                    skipped,
+                                    framing,
+                                    max_bytes,
+                                    &prefix_sizes,
+                                    &mention_suffix,
+                                    show_wall,
+                                    &continuations,
+                                )))
+                            },
+                            |count| {
+                                Ok(format!(
+                                    "{notice}{}",
+                                    render_budgeted_chat_text(
+                                        context,
+                                        &args,
+                                        &room,
+                                        &batch,
+                                        &signed_statuses,
+                                        &message_ids,
+                                        count,
+                                        skipped,
+                                        framing,
+                                        owner.as_ref(),
+                                        max_bytes,
+                                        &mention_suffix,
+                                        show_wall,
+                                        &continuations,
+                                    )
+                                ))
+                            },
+                        )
                     },
                 )?;
                 (admission.rendered, admission.count)
@@ -1097,14 +1119,29 @@ struct ChatReadBudgetView<'a> {
     count: usize,
     #[serde(skip_serializing_if = "is_zero")]
     skipped: usize,
-    /// Message files that could not be parsed and were left out.
+    /// Message files that could not be parsed and were left out: the first few
+    /// only, with the full count and the command that lists them all beside it
+    /// (a bounded read cannot afford an unbounded list).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     skipped_files: &'a [channel::SkippedFile],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_files_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_files_hint: Option<&'a str>,
     has_more: bool,
     selected_count: usize,
     byte_limit: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     omitted: Option<output::ByteOmission>,
+}
+
+/// The cursorless command that prints every skipped file of `channel` in full:
+/// a bounded read carries only the first few.
+fn skipped_files_command(channel: &str) -> String {
+    format!(
+        "post chat {} --history 1 --json",
+        crate::mailbox::shell_quote(channel)
+    )
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -1118,7 +1155,7 @@ fn render_budgeted_chat_json(
     messages: &[output::ChatMessageItem],
     count: usize,
     skipped: usize,
-    skipped_files: &[channel::SkippedFile],
+    skipped_files: &channel::BoundedSkipped,
     framing: crate::cli::FramingMode,
     max_bytes: usize,
     pretty: bool,
@@ -1136,7 +1173,9 @@ fn render_budgeted_chat_json(
             messages: &messages[..count],
             count,
             skipped,
-            skipped_files,
+            skipped_files: &skipped_files.shown,
+            skipped_files_total: skipped_files.total,
+            skipped_files_hint: skipped_files.hint.as_deref(),
             has_more: skipped > 0 || omitted.is_some(),
             selected_count: messages.len(),
             byte_limit: max_bytes,
@@ -1153,7 +1192,7 @@ fn measure_budgeted_chat_json(
     messages: &[output::ChatMessageItem],
     count: usize,
     skipped: usize,
-    skipped_files: &[channel::SkippedFile],
+    skipped_files: &channel::BoundedSkipped,
     framing: crate::cli::FramingMode,
     max_bytes: usize,
     pretty: bool,
@@ -1172,7 +1211,9 @@ fn measure_budgeted_chat_json(
             messages: &messages[..0],
             count,
             skipped,
-            skipped_files,
+            skipped_files: &skipped_files.shown,
+            skipped_files_total: skipped_files.total,
+            skipped_files_hint: skipped_files.hint.as_deref(),
             has_more: skipped > 0 || omitted.is_some(),
             selected_count: messages.len(),
             byte_limit: max_bytes,
@@ -2118,28 +2159,30 @@ fn join(
     let backlog = args.backlog;
     let rooms = context.load_rooms()?;
     let (acting, provenance) = channel::acting_room(context, &rooms)?;
-    // Which channel this join means, before anything is written: an existing
-    // channel as named, otherwise the normalized spelling -- and never a second
-    // channel next to a look-alike unless --create says so.
-    let target = channel::plan_join(
+    // Which channel this join means is decided inside `channel::join`, under the
+    // channels lock and before anything is written: an existing channel as
+    // named (or as stored, when only the letter case differs), otherwise the
+    // normalized spelling -- and never a second channel next to a look-alike
+    // unless --create says so. The banner waits for that answer so it names the
+    // channel actually joined; the receipt already carries identity, so JSON
+    // output stays pure: no banner on stderr.
+    let (target, outcome) = channel::join(
         context,
         &args.name,
-        channel::JoinIntent {
-            create: args.create,
-            backlog,
-            has_description: description.is_some(),
+        description,
+        backlog,
+        args.create,
+        |target| {
+            if !json_output {
+                eprintln!(
+                    "post: joining #{} as room '{acting}' ({})",
+                    target.name,
+                    acting_notice(provenance)
+                );
+            }
         },
     )?;
     let name = target.name.as_str();
-    // The receipt already carries identity, so JSON output stays pure: no banner
-    // on stderr.
-    if !json_output {
-        eprintln!(
-            "post: joining #{name} as room '{acting}' ({})",
-            acting_notice(provenance)
-        );
-    }
-    let outcome = channel::join(context, name, description, backlog)?;
     // An explicit member keeps its recorded start, so `--backlog` changes
     // nothing; say so rather than report a silent success.
     let backlog_ignored = backlog && outcome.already_member;
@@ -2159,10 +2202,14 @@ fn join(
         .normalized_from
         .as_deref()
         .map(|given| {
-            format!(
-                " (channel names are lowercase with hyphens; you typed '{}')",
-                output::sanitize_text_header(given)
-            )
+            let typed = output::sanitize_text_header(given);
+            if channel::normalize_channel_name(name).0 == name {
+                format!(" (channel names are lowercase with hyphens; you typed '{typed}')")
+            } else {
+                // An older channel whose stored spelling is not the normalized
+                // one, reached by another case: name what it is really called.
+                format!(" (the channel is stored as '{name}'; you typed '{typed}')")
+            }
         })
         .unwrap_or_default();
     let rendered = if json_output {

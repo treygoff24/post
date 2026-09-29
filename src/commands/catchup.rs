@@ -134,67 +134,88 @@ pub(super) fn run(
             Some(max_bytes) => {
                 let remainders =
                     CatchupRemainderIndex::new(context, &participant, &targets, &room, max_bytes)?;
+                // The skipped-file list grows with the number of corrupt files and
+                // the budget does not: a bounded read carries a count and the
+                // first few ids, and names the command that lists them all.
+                let list_all = "post channels --json";
                 let admission = if json_output {
                     let json_sizes = CatchupJsonSizes::new(&targets, framing, pretty)?;
-                    super::byte_budget::admit_prefix_measured(
+                    super::byte_budget::admit_with_skipped_detail(
+                        !skipped.is_empty(),
                         selected_count,
-                        max_bytes,
-                        |count| {
-                            measure_budgeted_catchup_json(
-                                &room,
-                                &targets,
-                                count,
+                        |detail| {
+                            let report =
+                                crate::channel::BoundedSkipped::new(&skipped, detail, list_all);
+                            super::byte_budget::admit_prefix_measured(
+                                selected_count,
                                 max_bytes,
-                                pretty,
-                                &json_sizes,
-                                &remainders,
-                                &skipped,
-                            )
-                        },
-                        |count| {
-                            render_budgeted_catchup_json(
-                                &room,
-                                &targets,
-                                count,
-                                framing,
-                                max_bytes,
-                                pretty,
-                                &remainders,
-                                &skipped,
+                                |count| {
+                                    measure_budgeted_catchup_json(
+                                        &room,
+                                        &targets,
+                                        count,
+                                        max_bytes,
+                                        pretty,
+                                        &json_sizes,
+                                        &remainders,
+                                        &report,
+                                    )
+                                },
+                                |count| {
+                                    render_budgeted_catchup_json(
+                                        &room,
+                                        &targets,
+                                        count,
+                                        framing,
+                                        max_bytes,
+                                        pretty,
+                                        &remainders,
+                                        &report,
+                                    )
+                                },
                             )
                         },
                     )?
                 } else {
                     let text_sizes = CatchupTextSizes::new(&targets);
                     // The skipped-files line rides in front of the body, so it
-                    // is charged to the byte budget in measure and render alike.
-                    let notice = crate::channel::skipped_notice(&skipped).unwrap_or_default();
-                    super::byte_budget::admit_prefix_measured(
+                    // is charged to the byte budget in measure and render alike,
+                    // and it shrinks before it would cost a message.
+                    super::byte_budget::admit_with_skipped_detail(
+                        !skipped.is_empty(),
                         selected_count,
-                        max_bytes,
-                        |count| {
-                            Ok(notice.len().saturating_add(measure_budgeted_catchup_text(
-                                &room,
-                                &targets,
-                                count,
-                                framing,
+                        |detail| {
+                            let notice =
+                                crate::channel::bounded_skipped_notice(&skipped, detail, list_all)
+                                    .unwrap_or_default();
+                            super::byte_budget::admit_prefix_measured(
+                                selected_count,
                                 max_bytes,
-                                &text_sizes,
-                                &remainders,
-                            )))
-                        },
-                        |count| {
-                            Ok(format!(
-                                "{notice}{}",
-                                render_budgeted_catchup_text(
-                                    &room,
-                                    &targets,
-                                    count,
-                                    framing,
-                                    max_bytes,
-                                    &remainders,
-                                )
-                            ))
+                                |count| {
+                                    Ok(notice.len().saturating_add(measure_budgeted_catchup_text(
+                                        &room,
+                                        &targets,
+                                        count,
+                                        framing,
+                                        max_bytes,
+                                        &text_sizes,
+                                        &remainders,
+                                    )))
+                                },
+                                |count| {
+                                    Ok(format!(
+                                        "{notice}{}",
+                                        render_budgeted_catchup_text(
+                                            &room,
+                                            &targets,
+                                            count,
+                                            framing,
+                                            max_bytes,
+                                            &remainders,
+                                        )
+                                    ))
+                                },
+                            )
                         },
                     )?
                 };
@@ -292,9 +313,15 @@ struct CatchupBudgetView<'a> {
     byte_limit: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     omitted: Option<output::ByteOmission>,
-    /// Message files that could not be parsed and were left out.
+    /// Message files that could not be parsed and were left out: the first few
+    /// only, with the full count and the command that lists them all beside it
+    /// (a bounded read cannot afford an unbounded list).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     skipped: &'a [crate::channel::SkippedFile],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_hint: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -423,7 +450,7 @@ fn render_budgeted_catchup_json(
     max_bytes: usize,
     pretty: bool,
     remainders: &CatchupRemainderIndex,
-    skipped: &[crate::channel::SkippedFile],
+    skipped: &crate::channel::BoundedSkipped,
 ) -> AppResult<String> {
     output::json(
         &catchup_budget_view(
@@ -448,7 +475,7 @@ fn measure_budgeted_catchup_json(
     pretty: bool,
     sizes: &CatchupJsonSizes,
     remainders: &CatchupRemainderIndex,
-    skipped: &[crate::channel::SkippedFile],
+    skipped: &crate::channel::BoundedSkipped,
 ) -> AppResult<usize> {
     let selected_count = targets.iter().map(CatchupTarget::count).sum();
     let omitted = remainders.omission(admitted_count);
@@ -462,7 +489,9 @@ fn measure_budgeted_catchup_json(
             has_more: admitted_count < selected_count,
             byte_limit: max_bytes,
             omitted,
-            skipped,
+            skipped: &skipped.shown,
+            skipped_total: skipped.total,
+            skipped_hint: skipped.hint.as_deref(),
         },
         pretty,
     )
@@ -476,7 +505,7 @@ fn catchup_budget_view<'a>(
     framing: FramingMode,
     max_bytes: usize,
     remainders: &CatchupRemainderIndex,
-    skipped: &'a [crate::channel::SkippedFile],
+    skipped: &'a crate::channel::BoundedSkipped,
 ) -> CatchupBudgetView<'a> {
     let admitted = prefix_counts(targets, admitted_count);
     let views = targets
@@ -495,7 +524,9 @@ fn catchup_budget_view<'a>(
         has_more: admitted_count < selected_count,
         byte_limit: max_bytes,
         omitted,
-        skipped,
+        skipped: &skipped.shown,
+        skipped_total: skipped.total,
+        skipped_hint: skipped.hint.as_deref(),
     }
 }
 

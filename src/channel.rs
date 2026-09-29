@@ -335,9 +335,19 @@ pub(crate) struct JoinTarget {
 ///
 /// An existing channel is used exactly as named, whatever its spelling: stores
 /// that already hold `Night Porch` keep working. A new name is normalized; if
-/// that lands on an existing channel it joins it, and if it merely looks like
-/// one it is refused with the join that was probably meant and the `--create`
-/// that forces the new channel.
+/// that lands on an existing channel, or on one that differs only by letter
+/// case, it joins that channel under its STORED spelling, and if it merely
+/// looks like one it is refused with the join that was probably meant and the
+/// `--create` that forces the new channel.
+///
+/// Letter case is never a reason to create: the Mac filesystem treats `ops` and
+/// `Ops` as one directory, so a channel written under one spelling and recorded
+/// under the other splits its own membership from its messages, and a
+/// case-sensitive filesystem would grow two channels. `--create` therefore
+/// overrides only genuine look-alikes, never a case difference.
+///
+/// The caller holds the channels lock (see [`join`]): the directory scan here
+/// and the creation that follows must not interleave with another join.
 pub(crate) fn plan_join(
     context: &Context,
     given: &str,
@@ -387,12 +397,24 @@ pub(crate) fn plan_join(
         return Err(error);
     }
     validate_channel_name(&wanted)?;
-    if existing_names.contains(&wanted) {
+    // The exact spelling wins; failing that, the stored spelling that differs
+    // only by case. Compared by lowercase text, not by asking the filesystem,
+    // so a case-sensitive store resolves exactly as a case-insensitive one.
+    let stored = existing_names
+        .iter()
+        .find(|name| **name == wanted)
+        .or_else(|| {
+            existing_names
+                .iter()
+                .find(|name| name.to_lowercase() == wanted)
+        });
+    if let Some(stored) = stored {
         // A different spelling of a channel that exists is that channel: two
         // agents told to join `Night Porch` both land in #night-porch. Nothing
-        // is created, so there is nothing to ask about.
+        // is created, so there is nothing to ask about, and `--create` has
+        // nothing to override.
         return Ok(JoinTarget {
-            name: wanted,
+            name: stored.clone(),
             normalized_from: Some(given.to_owned()),
         });
     }
@@ -610,7 +632,38 @@ pub(crate) struct JoinOutcome {
     pub history_before_join: Option<usize>,
 }
 
+/// Join the channel `given` means. Which channel that is (an existing one, a
+/// normalized spelling, a refusal because it looks like another) is decided
+/// UNDER the channels lock, in the same critical section that creates it:
+/// deciding first and locking after let two joins of look-alike names both find
+/// nothing and create two channels. `announce` runs once the name is settled and
+/// before anything is written.
 pub(crate) fn join(
+    context: &Context,
+    given: &str,
+    description: Option<&str>,
+    backlog: bool,
+    create: bool,
+    announce: impl FnOnce(&JoinTarget),
+) -> AppResult<(JoinTarget, JoinOutcome)> {
+    let _lock = lock_channels(context)?;
+    let target = plan_join(
+        context,
+        given,
+        JoinIntent {
+            create,
+            backlog,
+            has_description: description.is_some(),
+        },
+    )?;
+    announce(&target);
+    let outcome = join_resolved(context, &target.name, description, backlog)?;
+    Ok((target, outcome))
+}
+
+/// The membership and channel writes of a join, with the channels lock held by
+/// the caller.
+fn join_resolved(
     context: &Context,
     channel: &str,
     description: Option<&str>,
@@ -620,7 +673,6 @@ pub(crate) fn join(
     let (room, provenance) = acting_room(context, &rooms)?;
     let actor = context.sender()?;
     let paths = ChannelPaths::new(context, channel)?;
-    let _lock = lock_channels(context)?;
 
     if let Some(description) = description {
         validate_description(description)?;
@@ -1015,9 +1067,85 @@ fn one_line(text: &str, cap: usize) -> String {
 /// The single stdout line a text-mode command prints when it skipped files, or
 /// `None` when it skipped nothing.
 pub(crate) fn skipped_notice(skipped: &[SkippedFile]) -> Option<String> {
-    const SHOWN: usize = 3;
+    notice_line(skipped, SkippedDetail::Listed, "--json lists all")
+}
+
+/// How much of the skipped-file list a byte-bounded read carries.
+///
+/// The list grows with the number of corrupt files and the budget does not, so
+/// a bounded read can never afford the whole list: with enough corrupt files
+/// the list alone would exceed `--max-bytes` and the read would fail with no
+/// output, letting corrupt files block the readable messages beside them. A
+/// bounded read carries the count and the first few ids, and names the command
+/// that lists the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkippedDetail {
+    /// Up to [`BOUNDED_SKIPPED_SHOWN`] entries, each with a short reason.
+    Listed,
+    /// The count only: for a budget too tight to afford even the listed form
+    /// without dropping a message.
+    CountOnly,
+}
+
+/// Entries a bounded read lists before reporting the rest as a count.
+pub(crate) const BOUNDED_SKIPPED_SHOWN: usize = 3;
+const BOUNDED_REASON_CHARS: usize = 60;
+
+/// The skipped-file report of one byte-bounded JSON read. Serialize `shown`
+/// as the list, `total` and `hint` beside it when present.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BoundedSkipped {
+    pub shown: Vec<SkippedFile>,
+    /// How many files were skipped in all. Set only when `shown` is not the
+    /// whole list, so an unabridged report reads exactly like an unbounded one.
+    pub total: Option<usize>,
+    /// The runnable command that lists every skipped file. Set with `total`.
+    pub hint: Option<String>,
+}
+
+impl BoundedSkipped {
+    pub(crate) fn new(all: &[SkippedFile], detail: SkippedDetail, list_all_with: &str) -> Self {
+        let take = match detail {
+            SkippedDetail::Listed => BOUNDED_SKIPPED_SHOWN,
+            SkippedDetail::CountOnly => 0,
+        };
+        let shown: Vec<SkippedFile> = all
+            .iter()
+            .take(take)
+            .map(|file| SkippedFile {
+                reason: one_line(&file.reason, BOUNDED_REASON_CHARS),
+                ..file.clone()
+            })
+            .collect();
+        let abridged = shown.len() < all.len();
+        Self {
+            total: abridged.then_some(all.len()),
+            hint: abridged.then(|| list_all_with.to_owned()),
+            shown,
+        }
+    }
+}
+
+/// [`skipped_notice`] for a byte-bounded text read: at most the first few
+/// files, and the command that lists all of them.
+pub(crate) fn bounded_skipped_notice(
+    skipped: &[SkippedFile],
+    detail: SkippedDetail,
+    list_all_with: &str,
+) -> Option<String> {
+    notice_line(skipped, detail, &format!("`{list_all_with}` lists all"))
+}
+
+fn notice_line(skipped: &[SkippedFile], detail: SkippedDetail, lists_all: &str) -> Option<String> {
+    const SHOWN: usize = BOUNDED_SKIPPED_SHOWN;
     if skipped.is_empty() {
         return None;
+    }
+    if detail == SkippedDetail::CountOnly {
+        return Some(format!(
+            "post: skipped {} unreadable message file(s); {lists_all}.\n",
+            skipped.len()
+        ));
     }
     let mut parts = Vec::new();
     for file in skipped.iter().take(SHOWN) {
@@ -1033,12 +1161,12 @@ pub(crate) fn skipped_notice(skipped: &[SkippedFile]) -> Option<String> {
     }
     let more = skipped.len().saturating_sub(SHOWN);
     let tail = if more > 0 {
-        format!(", and {more} more (--json lists all)")
+        format!(", and {more} more ({lists_all})")
     } else {
         String::new()
     };
     Some(format!(
-        "post: skipped {} unreadable message file(s): {}{tail}; everything else is shown. Move the file aside or restore it.\n",
+        "post: skipped {} unreadable message file(s): {}{tail}; other messages are unaffected. Move the file aside or restore it.\n",
         skipped.len(),
         parts.join(", ")
     ))
