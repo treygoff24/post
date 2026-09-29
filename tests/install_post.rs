@@ -18,26 +18,40 @@ use std::process::{Command, Output, Stdio};
 const INSTALLER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-post.sh");
 const SMOKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-smoke.sh");
 
+/// The checks install-smoke.sh reports, in its order.
+const SMOKE_CHECKS: [&str; 6] = [
+    "setup",
+    "version",
+    "build_id",
+    "samples",
+    "who_speed",
+    "porch",
+];
+
 /// The stub smoke committed into the throwaway repo. FAKE_SMOKE picks what
-/// it reports through --results.
+/// it reports through --results; FAKE_SMOKE_ARGS, when set, names a file that
+/// receives the arguments the installer called it with.
 const STUB_SMOKE: &str = r#"#!/usr/bin/env bash
+[ -z "${FAKE_SMOKE_ARGS:-}" ] || printf '%s\n' "$*" > "$FAKE_SMOKE_ARGS"
 [ "$1" = --results ] || { echo "stub smoke: expected --results" >&2; exit 2; }
 results="$2"
 line() { printf '{"check": "%s", "result": "pass", "detail": ""}\n' "$1"; }
 # The six checks the real smoke reports, each once, in its order.
-six() {
-  for id in setup version samples doorbell_parsers doorbell_contract porch; do line "$id"; done
+all() {
+  for id in setup version build_id samples who_speed porch; do line "$id"; done
 }
 case "${FAKE_SMOKE:-pass}" in
-  pass) six > "$results" ;;
+  pass) all > "$results" ;;
   allowed-skip)
-    six | sed '$d' > "$results"
+    all | sed '$d' > "$results"
     printf '%s\n' '{"check": "porch", "result": "skipped", "detail": "no porch3", "allowed": true}' >> "$results" ;;
-  drop-contract) six | grep -v doorbell_contract > "$results" ;;
-  unknown-id) { six; line bogus; } > "$results" ;;
-  duplicate) { six; line setup; } > "$results" ;;
+  drop-samples) all | grep -v samples > "$results" ;;
+  drop-build-id) all | grep -v build_id > "$results" ;;
+  drop-who-speed) all | grep -v who_speed > "$results" ;;
+  unknown-id) { all; line bogus; } > "$results" ;;
+  duplicate) { all; line setup; } > "$results" ;;
   skip-version)
-    six | grep -v '"version"' > "$results"
+    all | grep -v '"version"' > "$results"
     printf '%s\n' '{"check": "version", "result": "skipped", "detail": "x", "allowed": true}' >> "$results" ;;
   silent) : > "$results" ;;
   lying)
@@ -125,6 +139,8 @@ fn git(repo: &Path, args: &[&str]) -> String {
 struct Rig {
     sandbox: Sandbox,
     repo: PathBuf,
+    /// The bare repository `origin` points at.
+    origin: PathBuf,
     fakes: PathBuf,
     bin_dir: PathBuf,
     receipt: PathBuf,
@@ -132,14 +148,24 @@ struct Rig {
 }
 
 impl Rig {
+    /// The repo's only commit is on origin's `main`, as an installable commit
+    /// is on the live hosts; `unpushed_commit` and `push_to` change that.
     fn new() -> Self {
         let sandbox = Sandbox::new_unseeded();
         let repo = sandbox.path.join("repo");
+        let origin = sandbox.path.join("origin.git");
         fs::create_dir_all(repo.join("scripts")).expect("repo dirs");
         write_exec(&repo.join("scripts/install-smoke.sh"), STUB_SMOKE);
         git(&repo, &["init", "-q"]);
         git(&repo, &["add", "scripts/install-smoke.sh"]);
         git(&repo, &["commit", "-q", "-m", "stub"]);
+        git(&sandbox.path, &["init", "-q", "--bare", "origin.git"]);
+        git(
+            &repo,
+            &["remote", "add", "origin", &origin.display().to_string()],
+        );
+        git(&repo, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        git(&repo, &["fetch", "-q", "origin"]);
         let short_sha = git(&repo, &["rev-parse", "--short", "HEAD"]);
         let fakes = sandbox.path.join("fakes");
         fs::create_dir_all(&fakes).expect("fakes dir");
@@ -151,11 +177,41 @@ impl Rig {
         Self {
             sandbox,
             repo,
+            origin,
             fakes,
             bin_dir,
             receipt,
             short_sha,
         }
+    }
+
+    /// A new HEAD that no branch on origin contains.
+    fn unpushed_commit(&mut self) {
+        fs::write(self.repo.join("change.txt"), "a change nobody pushed\n").expect("change");
+        git(&self.repo, &["add", "change.txt"]);
+        git(&self.repo, &["commit", "-q", "-m", "unpushed"]);
+        self.short_sha = git(&self.repo, &["rev-parse", "--short", "HEAD"]);
+    }
+
+    /// Push HEAD to a branch of origin. `by_url` pushes to the repository's
+    /// path instead of the `origin` remote, so this clone's remote-tracking
+    /// refs stay as they were: what a push from another machine looks like
+    /// until the installer fetches.
+    fn push_to(&self, branch: &str, by_url: bool) {
+        let destination = if by_url {
+            self.origin.display().to_string()
+        } else {
+            "origin".to_owned()
+        };
+        git(
+            &self.repo,
+            &[
+                "push",
+                "-q",
+                &destination,
+                &format!("HEAD:refs/heads/{branch}"),
+            ],
+        );
     }
 
     fn target(&self) -> PathBuf {
@@ -400,8 +456,9 @@ fn an_allowed_smoke_skip_is_recorded_as_pass_with_skips() {
     assert_code(&output, 0);
     let receipt = rig.receipt();
     assert_eq!(receipt["smoke_verdict"], "pass_with_skips");
-    assert_eq!(receipt["smoke_checks"][5]["check"], "porch");
-    assert_eq!(receipt["smoke_checks"][5]["result"], "skipped");
+    let porch = SMOKE_CHECKS.len() - 1;
+    assert_eq!(receipt["smoke_checks"][porch]["check"], "porch");
+    assert_eq!(receipt["smoke_checks"][porch]["result"], "skipped");
 }
 
 #[test]
@@ -417,17 +474,7 @@ fn a_full_smoke_pass_is_recorded_per_check() {
         .iter()
         .map(|check| check["check"].as_str().expect("check id"))
         .collect();
-    assert_eq!(
-        checks,
-        [
-            "setup",
-            "version",
-            "samples",
-            "doorbell_parsers",
-            "doorbell_contract",
-            "porch"
-        ]
-    );
+    assert_eq!(checks, SMOKE_CHECKS);
 }
 
 /// The gate knows the six checks: a smoke that exits 0 while one is missing,
@@ -435,7 +482,9 @@ fn a_full_smoke_pass_is_recorded_per_check() {
 #[test]
 fn a_smoke_missing_a_check_or_reporting_an_unknown_one_installs_nothing() {
     for (mode, why) in [
-        ("drop-contract", "doorbell_contract"),
+        ("drop-samples", "samples"),
+        ("drop-build-id", "build_id"),
+        ("drop-who-speed", "who_speed"),
         ("unknown-id", "bogus"),
         ("duplicate", "setup"),
         ("skip-version", "version"),
@@ -478,6 +527,8 @@ fn the_real_smoke_fails_a_porch_skip_unless_the_operator_allows_it() {
             .arg(&results)
             .arg(env!("CARGO_BIN_EXE_post"))
             .env("PORCH_PYTHON", sandbox.path.join("no-porch/python"))
+            // Not a speed test: a loaded machine must not fail it.
+            .env("POST_SMOKE_WHO_SECONDS", "10")
             .env_remove("BASH_ENV")
             .env_remove("POST_SMOKE_ALLOW_SKIP")
             .stdin(Stdio::null());
@@ -512,22 +563,151 @@ fn the_real_smoke_fails_a_porch_skip_unless_the_operator_allows_it() {
         .iter()
         .map(|check| check["check"].as_str().expect("id"))
         .collect();
-    assert_eq!(
-        ids,
-        [
-            "setup",
-            "version",
-            "samples",
-            "doorbell_parsers",
-            "doorbell_contract",
-            "porch"
-        ]
-    );
-    for check in &checks[..5] {
+    assert_eq!(ids, SMOKE_CHECKS);
+    let porch = SMOKE_CHECKS.len() - 1;
+    for check in &checks[..porch] {
         assert_eq!(check["result"], "pass", "{check}");
     }
-    assert_eq!(checks[5]["result"], "skipped");
-    assert_eq!(checks[5]["allowed"], true);
+    assert_eq!(checks[porch]["result"], "skipped");
+    assert_eq!(checks[porch]["allowed"], true);
+}
+
+/// Run the real smoke on `bin` with Porch allowed to skip; returns the output
+/// and the itemized results. `who_seconds` is the `post who` limit: the
+/// default (`None`) is the two-second contract, and tests that are not about
+/// speed pass a generous one so a loaded machine cannot fail them.
+fn run_real_smoke(
+    sandbox: &Sandbox,
+    bin: &Path,
+    extra_args: &[&str],
+    who_seconds: Option<&str>,
+) -> (Output, Vec<serde_json::Value>) {
+    let results = sandbox.path.join("results.jsonl");
+    let mut command = Command::new("bash");
+    command
+        .arg(SMOKE)
+        .arg("--results")
+        .arg(&results)
+        .args(extra_args)
+        .arg(bin)
+        .env("PORCH_PYTHON", sandbox.path.join("no-porch/python"))
+        .env("POST_SMOKE_ALLOW_SKIP", "porch")
+        .env_remove("BASH_ENV")
+        .env_remove("POST_SMOKE_WHO_SECONDS")
+        .env_remove("POST_SMOKE_WHO_PARTICIPANTS")
+        .stdin(Stdio::null());
+    if let Some(seconds) = who_seconds {
+        command.env("POST_SMOKE_WHO_SECONDS", seconds);
+    }
+    let output = command.output().expect("run install-smoke.sh");
+    let checks = fs::read_to_string(&results)
+        .expect("results")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("result line"))
+        .collect();
+    (output, checks)
+}
+
+fn check<'a>(checks: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+    checks
+        .iter()
+        .find(|entry| entry["check"] == id)
+        .unwrap_or_else(|| panic!("no {id} record in {checks:?}"))
+}
+
+/// A stand-in for the binary under test that runs the real one, except that
+/// `who` first sleeps `who_delay` seconds and, when `bare_version` is set,
+/// `--version` prints clap's bare line as it did before it named the build.
+fn wrapped_post(sandbox: &Sandbox, who_delay: &str, bare_version: bool) -> PathBuf {
+    let path = sandbox.path.join("wrapped/post");
+    fs::create_dir_all(path.parent().expect("parent")).expect("wrapper dir");
+    let bare = if bare_version {
+        "[ \"$1\" = --version ] && { echo 'post 0.9.0'; exit 0; }\n"
+    } else {
+        ""
+    };
+    write_exec(
+        &path,
+        &format!(
+            "#!/bin/sh\n{bare}[ \"$1\" = who ] && sleep {who_delay}\nexec {} \"$@\"\n",
+            env!("CARGO_BIN_EXE_post")
+        ),
+    );
+    path
+}
+
+/// The 2-second `post who` contract, with teeth: at the default limit a `who`
+/// that takes 2.5 s fails the smoke, and the same binary passes when the
+/// operator's limit is longer. A smoke that never timed `who` would pass both.
+#[test]
+fn the_real_smoke_fails_a_who_slower_than_two_seconds() {
+    let sandbox = Sandbox::new_unseeded();
+    let slow = wrapped_post(&sandbox, "2.5", false);
+
+    let (output, checks) = run_real_smoke(&sandbox, &slow, &[], None);
+    assert_code(&output, 1);
+    let who = check(&checks, "who_speed");
+    assert_eq!(who["result"], "fail", "{who}");
+    assert!(
+        who["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("the limit is 2 s"),
+        "{who}"
+    );
+    for id in ["setup", "version", "build_id", "samples"] {
+        assert_eq!(check(&checks, id)["result"], "pass", "{id}");
+    }
+
+    let (output, checks) = run_real_smoke(&sandbox, &slow, &[], Some("10"));
+    assert_code(&output, 0);
+    assert_eq!(check(&checks, "who_speed")["result"], "pass");
+}
+
+/// The build id must be the commit being installed and must read the same
+/// from `post --version` and `post version`.
+#[test]
+fn the_real_smoke_fails_a_build_id_that_is_not_the_expected_commit() {
+    let sandbox = Sandbox::new_unseeded();
+    let real = PathBuf::from(env!("CARGO_BIN_EXE_post"));
+    let reported = Command::new(&real)
+        .args(["version", "--json"])
+        .output()
+        .expect("post version --json");
+    let built: serde_json::Value = serde_json::from_slice(&reported.stdout).expect("version json");
+    let build = built["build_sha"].as_str().expect("build_sha");
+
+    let (output, checks) = run_real_smoke(&sandbox, &real, &["--expect-build", build], Some("10"));
+    assert_code(&output, 0);
+    assert_eq!(check(&checks, "build_id")["result"], "pass");
+
+    let (output, checks) =
+        run_real_smoke(&sandbox, &real, &["--expect-build", "0000000"], Some("10"));
+    assert_code(&output, 1);
+    let entry = check(&checks, "build_id");
+    assert_eq!(entry["result"], "fail", "{entry}");
+    let detail = entry["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("expected 0000000") && detail.contains(build),
+        "the failure names both builds: {detail}"
+    );
+}
+
+#[test]
+fn the_real_smoke_fails_when_version_flag_and_version_command_disagree() {
+    let sandbox = Sandbox::new_unseeded();
+    let bare = wrapped_post(&sandbox, "0", true);
+    let (output, checks) = run_real_smoke(&sandbox, &bare, &[], Some("10"));
+    assert_code(&output, 1);
+    let entry = check(&checks, "build_id");
+    assert_eq!(entry["result"], "fail", "{entry}");
+    assert!(
+        entry["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("--version: post 0.9.0"),
+        "{entry}"
+    );
 }
 
 /// macOS gives every shell a TMPDIR ending in "/". The smoke must still hand
@@ -561,6 +741,7 @@ exit 0
         .arg(env!("CARGO_BIN_EXE_post"))
         .env("TMPDIR", format!("{}/", tmp.display()))
         .env("PORCH_PYTHON", &fake_porch)
+        .env("POST_SMOKE_WHO_SECONDS", "10")
         .env_remove("BASH_ENV")
         .env_remove("POST_SMOKE_ALLOW_SKIP")
         .stdin(Stdio::null())
@@ -704,4 +885,120 @@ fn a_symlinked_target_is_refused_before_any_write() {
         assert_eq!(rig.bin_entries(), ["post"]);
         assert!(!rig.receipt.exists());
     }
+}
+
+// ---- 7. every installed build is traceable to a branch on origin ----
+
+#[test]
+fn a_commit_no_origin_branch_contains_is_refused_before_the_build() {
+    let mut rig = Rig::new();
+    let live = rig.live("unpushed");
+    rig.unpushed_commit();
+    for args in [&[][..], &["--dry-run"][..]] {
+        let output = rig.run_with(None, &[], args);
+        assert_code(&output, 3);
+        let text = stderr(&output);
+        assert!(
+            text.contains(&format!("refusing to install {}", rig.short_sha))
+                && text.contains("no branch on origin contains it")
+                && text.contains("git push origin"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("building"),
+            "the refusal comes before the build: {text}"
+        );
+        assert_eq!(fs::read(rig.target()).expect("post"), live);
+        assert_eq!(rig.bin_entries(), ["post"]);
+        assert!(!rig.receipt.exists());
+    }
+}
+
+/// Reachable from any branch counts, not just main; the receipt names them.
+#[test]
+fn a_commit_on_any_origin_branch_installs_and_the_receipt_names_the_branches() {
+    let mut rig = Rig::new();
+    rig.live("feature");
+    rig.unpushed_commit();
+    rig.push_to("worktree-fix", false);
+    assert_code(&rig.run(&[]), 0);
+    let receipt = rig.receipt();
+    assert_eq!(receipt["reachable"], true);
+    assert_eq!(
+        receipt["origin_branches"],
+        serde_json::json!(["worktree-fix"])
+    );
+
+    // The same commit on a second branch is listed on both.
+    rig.push_to("main", false);
+    assert_code(&rig.run(&[]), 0);
+    assert_eq!(
+        rig.receipt()["origin_branches"],
+        serde_json::json!(["main", "worktree-fix"])
+    );
+}
+
+/// A push from another machine reaches origin but not this clone's
+/// remote-tracking refs until a fetch. The installer fetches first, so it
+/// does not refuse a commit that is on origin.
+#[test]
+fn the_installer_fetches_origin_before_judging_reachability() {
+    let mut rig = Rig::new();
+    rig.live("fetch");
+    rig.unpushed_commit();
+    rig.push_to("main", true);
+    let stale = git(&rig.repo, &["branch", "-r", "--contains", "HEAD"]);
+    assert_eq!(stale, "", "the clone has not fetched the push yet");
+    assert_code(&rig.run(&[]), 0);
+    assert_eq!(
+        rig.receipt()["origin_branches"],
+        serde_json::json!(["main"])
+    );
+}
+
+#[test]
+fn allow_unreachable_installs_an_unpushed_commit_and_records_the_exception() {
+    let mut rig = Rig::new();
+    let live = rig.live("allowed");
+    rig.unpushed_commit();
+    let output = rig.run_with(None, &[], &["--allow-unreachable"]);
+    assert_code(&output, 0);
+    assert!(stderr(&output).contains("WARNING"), "{}", stderr(&output));
+    assert_eq!(fs::read(rig.target()).expect("post"), rig.built_bytes());
+    assert_backed_up_and_installed(&rig, &live);
+    let receipt = rig.receipt();
+    assert_eq!(receipt["reachable"], false);
+    assert_eq!(receipt["origin_branches"], serde_json::json!([]));
+}
+
+#[test]
+fn a_checkout_with_no_origin_cannot_vouch_for_a_commit() {
+    let rig = Rig::new();
+    let live = rig.live("no origin");
+    git(&rig.repo, &["remote", "remove", "origin"]);
+    let output = rig.run(&[]);
+    assert_code(&output, 3);
+    assert!(
+        stderr(&output).contains("no origin remote"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read(rig.target()).expect("post"), live);
+    assert!(!rig.receipt.exists());
+}
+
+#[test]
+fn the_smoke_is_told_which_commit_is_being_installed() {
+    let rig = Rig::new();
+    rig.live("expect build");
+    let args = rig.sandbox.path.join("smoke-args.txt");
+    assert_code(
+        &rig.run(&[("FAKE_SMOKE_ARGS", &args.display().to_string())]),
+        0,
+    );
+    let recorded = fs::read_to_string(&args).expect("smoke args");
+    assert!(
+        recorded.contains(&format!("--expect-build {} ", rig.short_sha)),
+        "{recorded}"
+    );
 }

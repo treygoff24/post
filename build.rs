@@ -9,9 +9,24 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// True when tracked files differ from HEAD: the binary was built from code
+/// no commit contains, so its short sha alone would name the wrong source.
+/// Untracked files do not count (they never affect a cargo build unless a
+/// tracked file references them, and `target/` litter must not read dirty).
+fn tree_is_dirty() -> bool {
+    git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|out| !out.is_empty())
+}
+
 fn main() {
     let sha = git(&["rev-parse", "--short", "HEAD"])
         .filter(|value| !value.is_empty())
+        .map(|value| {
+            if tree_is_dirty() {
+                format!("{value}-dirty")
+            } else {
+                value
+            }
+        })
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=POST_BUILD_SHA={sha}");
 
@@ -22,6 +37,15 @@ fn main() {
         .and_then(|reference| git(&["rev-parse", "--git-path", &reference]))
     {
         println!("cargo:rerun-if-changed={reference}");
+    }
+    // The dirty flag must follow edits and staging, not only new commits.
+    // Rerunning this script is cheap and cargo recompiles the crate only when
+    // the emitted value actually changes.
+    if let Some(index) = git(&["rev-parse", "--git-path", "index"]) {
+        println!("cargo:rerun-if-changed={index}");
+    }
+    for tracked in ["src", "Cargo.toml", "Cargo.lock", "build.rs", "tests"] {
+        println!("cargo:rerun-if-changed={tracked}");
     }
 
     skill_manifest();

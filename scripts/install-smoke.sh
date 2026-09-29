@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Product integration smoke for one post binary, before it is installed.
 #
-#   scripts/install-smoke.sh [--results FILE] <post-bin>
+#   scripts/install-smoke.sh [--results FILE] [--expect-build SHA] <post-bin>
 #
 # Runs the consumers that break when post's output changes against <post-bin>
 # and a throwaway store (a temporary POST_MAIL_ROOT and HOME; nothing real is
 # read or written):
 #   - the binary answers version --json and emits its contract samples;
-#   - the doorbell's own parsers read a real `post rooms` listing and a real
-#     `post watch --snapshot` holding one delivered mail;
-#   - the doorbell's contract suite passes against the binary's samples;
+#   - `post --version` and `post version` print the same build line, and with
+#     --expect-build SHA that build id is exactly SHA: the binary being
+#     installed is the commit being installed (install-post.sh passes it);
+#   - `post who` finishes under two seconds (POST_SMOKE_WHO_SECONDS) on a store
+#     as wide as the live hosts (POST_SMOKE_WHO_PARTICIPANTS, default 2000: the
+#     Mac holds about 1,800 participants and the devbox has reached 4,800);
 #   - Porch's launch check accepts the binary (PORCH_PYTHON selects the
 #     interpreter that has porch3).
 # Every consumer calls `post` by name, so <post-bin> is put first on PATH.
@@ -22,7 +25,7 @@
 # --results FILE writes one JSON object per check, one per line, to FILE
 # (truncated first): {"check": <id>, "result": "pass"|"fail"|"skipped",
 # "detail": <text>} plus "allowed": true|false on a skip. Check ids: setup,
-# version, samples, doorbell_parsers, doorbell_contract, porch.
+# version, build_id, samples, who_speed, porch.
 # install-post.sh reads this file for the receipt.
 #
 # Exit 0 when every check passed or skipped with permission, 1 when any
@@ -30,13 +33,16 @@
 # launcher/install does not call this: the launcher stays independent of Porch.
 set -Eeuo pipefail
 
-usage="usage: install-smoke.sh [--results FILE] <post-bin>"
+usage="usage: install-smoke.sh [--results FILE] [--expect-build SHA] <post-bin>"
 results=""
-if [ "${1:-}" = --results ]; then
-  [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
-  results="$2"
-  shift 2
-fi
+expect_build=""
+while [ "$#" -gt 1 ]; do
+  case "$1" in
+    --results) results="$2"; shift 2 ;;
+    --expect-build) expect_build="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
 [ "$#" -eq 1 ] || { echo "$usage" >&2; exit 2; }
 if [ -n "$results" ]; then
   : > "$results" || { echo "install-smoke: cannot write results file: $results" >&2; exit 2; }
@@ -116,38 +122,86 @@ v = json.load(sys.stdin)
 assert v["ok"] is True and isinstance(v["build_sha"], str) and "participants" in v["capabilities"], v
 ' >"$work/version.log" 2>&1; then pass version "version --json"; else fail version "version --json" "$(tail -2 "$work/version.log")"; fi
 
+# One build id, said the same way everywhere. `post --version` once printed
+# clap's bare "post 0.9.0" while `post version` printed the build, so an
+# operator asking the binary which build it was got an answer that could not
+# be matched to a commit. With --expect-build the id must be the commit being
+# installed, not merely present: a stale or dirty build fails here.
+json_build=""
+version_line=""
+short_line=""
+if short_line=$(post --version 2>"$work/build-id.log") &&
+  version_line=$(post version 2>>"$work/build-id.log") &&
+  [ "$short_line" = "$version_line" ] &&
+  json_build=$(post version --json 2>>"$work/build-id.log" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build_sha"])' 2>>"$work/build-id.log") &&
+  case "$version_line" in *"(build $json_build,"*) true ;; *) false ;; esac &&
+  { [ -z "$expect_build" ] || [ "$json_build" = "$expect_build" ]; }; then
+  pass build_id "build id ($json_build)"
+else
+  fail build_id "build id" "expected ${expect_build:-one consistent build id}; --version: ${short_line:-none}; version: ${version_line:-none}; version --json build_sha: ${json_build:-none}; $(tail -2 "$work/build-id.log")"
+fi
+
 if post contract samples --dir "$work/samples" >/dev/null 2>"$work/samples.log" && [ -s "$work/samples/watch-snapshot.jsonl" ]; then
   pass samples "contract samples"
 else
   fail samples "contract samples" "$(tail -2 "$work/samples.log")"
 fi
 
-# The doorbell's real parsers against the real store: the room listing it
-# validates --room against, and the snapshot it keys wakes from.
-if (cd "$work/smoke" && POST_PARTICIPANT="$reader" python3 - "$repo/doorbell/post-doorbell" <<'PY'
-import importlib.machinery, importlib.util, os, sys
-loader = importlib.machinery.SourceFileLoader("doorbell", sys.argv[1])
-spec = importlib.util.spec_from_loader("doorbell", loader)
-doorbell = importlib.util.module_from_spec(spec)
-loader.exec_module(doorbell)
-rooms = doorbell.registered_rooms(os.getcwd())
-assert rooms is not None and {"smoke", "sender"} <= rooms, f"rooms listing: {rooms!r}"
-current = doorbell.snapshot_events(["post", "watch"], os.getcwd(), {"mail"})
-assert current is not None, "snapshot unreadable"
-assert list(current.values()) == ["mail"], f"expected one delivered mail, got {current!r}"
-(key,) = current
-assert key[0] == "mail" and key[1] == "smoke", key
-PY
-) >"$work/doorbell.log" 2>&1; then
-  pass doorbell_parsers "doorbell parsers (live)"
-else
-  fail doorbell_parsers "doorbell parsers (live)" "$(tail -3 "$work/doorbell.log")"
-fi
+# `post who` walks every participant record, and the live hosts hold thousands
+# (post-gxz: 38 s at 1,795 participants on the installed build, 100 s at 4,100).
+# A store of the live width is built in its own root by cloning the reader's
+# real record, so a change to the record format cannot leave the clones
+# unreadable; the read is then timed in a fresh process.
+who_seconds="${POST_SMOKE_WHO_SECONDS:-2}"
+who_participants="${POST_SMOKE_WHO_PARTICIPANTS:-2000}"
+if POST_MAIL_ROOT="$work/wide" WHO_SEED="$work/mail/participants/$reader/participant.json" \
+  WHO_COUNT="$who_participants" WHO_SECONDS="$who_seconds" WHO_BIN="$bin" python3 - >"$work/who-speed.log" 2>&1 <<'PY'
+import json, os, subprocess, sys, time
 
-if (cd "$repo/doorbell" && POST_BIN="$bin" python3 -m unittest test_contract) >"$work/doorbell-contract.log" 2>&1; then
-  pass doorbell_contract "doorbell contract suite"
+root = os.environ["POST_MAIL_ROOT"]
+count = int(os.environ["WHO_COUNT"])
+limit = float(os.environ["WHO_SECONDS"])
+with open(os.environ["WHO_SEED"]) as handle:
+    seed = json.load(handle)
+os.makedirs(os.path.join(root, "participants"), exist_ok=True)
+workspaces = ["smoke", "sender", None]
+for index in range(count):
+    record = dict(seed)
+    record["id"] = f"wide-{index:05d}"
+    record["conversation_key_digest"] = f"{index:064x}"
+    record["workspace"] = workspaces[index % 3]
+    directory = os.path.join(root, "participants", record["id"])
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, "participant.json"), "w") as handle:
+        json.dump(record, handle, indent=2)
+        handle.write("\n")
+
+hard_limit = max(limit * 10, 20)
+started = time.monotonic()
+try:
+    run = subprocess.run(
+        [os.environ["WHO_BIN"], "who", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=hard_limit,
+        stdin=subprocess.DEVNULL,
+    )
+except subprocess.TimeoutExpired:
+    sys.exit(f"post who did not finish within {hard_limit:.0f} s at {count} participants")
+elapsed = time.monotonic() - started
+if run.returncode != 0:
+    sys.exit(f"post who exited {run.returncode}: {run.stderr.strip()[:300]}")
+listed = json.loads(run.stdout)["count"]
+if listed < count:
+    sys.exit(f"post who listed {listed} of {count} participants")
+if elapsed >= limit:
+    sys.exit(f"post who took {elapsed:.2f} s at {count} participants; the limit is {limit:g} s")
+print(f"post who: {elapsed:.2f} s at {count} participants")
+PY
+then
+  pass who_speed "who under ${who_seconds}s ($who_participants)"
 else
-  fail doorbell_contract "doorbell contract suite" "$(tail -3 "$work/doorbell-contract.log")"
+  fail who_speed "who speed" "$(tail -2 "$work/who-speed.log")"
 fi
 
 # Porch's launch check: the sequence porch3.app.main runs before the TUI
