@@ -1,12 +1,18 @@
 """Fixed workload and CPU accounting for the test speed climb (stdlib only)."""
 import json
+import os
 import re
 import resource
+import shutil
 import subprocess
 import sys
 import time
 
 holdout = sys.argv[1:] == ["gate"]
+if shutil.which("estate-build-cache"):
+    os.environ["CARGO_TARGET_DIR"] = subprocess.check_output(
+        ["estate-build-cache", "path"], text=True
+    ).strip()
 command = ["bash", "scripts/test.sh", "gate" if holdout else "rust"]
 if not holdout:
     command += ["--test", "cli"]
