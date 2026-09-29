@@ -191,6 +191,21 @@ fn bind_activation_notice_is_once_per_participant_not_process_or_channel() {
             "--json",
         ]);
         assert_success(&result);
+        // A JSON answer carries the notice in the document, never on stderr.
+        assert_eq!(String::from_utf8_lossy(&result.stderr), "");
+        let answer: serde_json::Value =
+            serde_json::from_slice(&result.stdout).expect("bind answers with JSON");
+        assert_eq!(
+            answer.get("notice").and_then(|n| n.as_str()) == Some(NOTICE),
+            expected
+        );
+    }
+    // The text bootstrap prints one `export` line on stdout, so its notice
+    // goes to stderr, still once per participant.
+    for (key, expected) in [("third", true), ("third", false)] {
+        let result = sandbox.run(&["participant", "bind", "--harness", "shell", "--key", key]);
+        assert_success(&result);
+        assert!(String::from_utf8_lossy(&result.stdout).starts_with("export POST_PARTICIPANT="));
         assert_eq!(
             String::from_utf8_lossy(&result.stderr).contains(NOTICE),
             expected

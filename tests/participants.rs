@@ -115,7 +115,16 @@ fn roomless_channel_send_reports_when_it_stays_local() {
     assert_eq!(receipt["message"]["from"], id);
     assert_eq!(receipt["cross_host"]["status"], "local_only");
     assert_eq!(receipt["cross_host"]["reason"], "no bridge config");
-    assert!(common::stderr(&sent).contains("sent locally only: no bridge config"));
+    // Under --json the receipt carries the relay state and stderr stays empty;
+    // the stderr line is for a reader of text.
+    assert_eq!(common::stderr(&sent), "", "--json keeps stderr empty");
+    let text = sandbox.run_as_participant(
+        &["chat", "local-only", "--body", "hello again"],
+        id,
+        &sandbox.path,
+    );
+    assert!(text.status.success(), "{}", common::stderr(&text));
+    assert!(common::stderr(&text).contains("sent locally only: no bridge config"));
 
     let bridge = sandbox.mail_root.join("bridge");
     fs::create_dir_all(&bridge).expect("bridge directory");
@@ -142,7 +151,7 @@ fn roomless_channel_send_reports_when_it_stays_local() {
         receipt["cross_host"]["reason"],
         "channel is denied by this host"
     );
-    assert!(common::stderr(&denied).contains("sent locally only: channel is denied by this host"));
+    assert_eq!(common::stderr(&denied), "", "--json keeps stderr empty");
 
     fs::write(
         bridge.join("config.json"),
@@ -191,7 +200,7 @@ fn roomless_channel_send_reports_when_it_stays_local() {
         "bridge has not reported recently; the post relays on the bridge's next tick if it is running"
     );
     assert_eq!(receipt["cross_host"]["status"], "unconfirmed");
-    assert!(common::stderr(&no_tick).contains("relay not confirmed:"));
+    assert_eq!(common::stderr(&no_tick), "", "--json keeps stderr empty");
 }
 
 #[test]
@@ -273,7 +282,15 @@ fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
         unsupported["cross_host"]["reason"],
         "this host's bridge predates roomless relay; the post relays after the bridge is upgraded; do not resend"
     );
-    assert!(stderr.contains("relay not confirmed: this host's bridge predates roomless relay"));
+    assert_eq!(stderr, "", "--json keeps stderr empty");
+    let text = sandbox.run_as_participant(
+        &["chat", "relay-state", "--body", "text probe"],
+        &roomless,
+        &sandbox.path,
+    );
+    assert!(text.status.success(), "{}", common::stderr(&text));
+    assert!(common::stderr(&text)
+        .contains("relay not confirmed: this host's bridge predates roomless relay"));
 
     let (room, _) = send(&room_sender, &alpha, "relay-state");
     assert_eq!(room["cross_host"]["status"], "queued");
@@ -289,7 +306,7 @@ fn channel_send_receipt_distinguishes_relay_state_and_reserved_names() {
         .as_str()
         .unwrap()
         .contains("not reported recently"));
-    assert!(stderr.contains("relay not confirmed:"));
+    assert_eq!(stderr, "", "--json keeps stderr empty");
 
     write_health(&fresh, &["roomless-channel-v1"], None);
     let (missing_interval, _) = send(&roomless, &sandbox.path, "relay-state");

@@ -76,20 +76,28 @@ pub(crate) fn release_notice(participant: &Participant, pid: u32) -> AppResult<(
 
 /// Serialize direct CLI delivery so concurrent binds cannot repeat the notice.
 /// Adapters use the query/ack protocol instead, committing only after injection.
+///
+/// Returns whether this call is the one that delivers the notice. With
+/// `to_stderr` the notice is written here; otherwise the caller carries it in
+/// the JSON document it prints, because a JSON answer keeps stderr empty.
 pub(crate) fn emit_activation_notice(
     context: &Context,
     participant: &Participant,
-) -> AppResult<()> {
+    to_stderr: bool,
+) -> AppResult<bool> {
     use std::io::Write;
     let _lock = lock(context)?;
     if notice_pending(participant) && claim_notice(participant, std::process::id())? {
-        writeln!(std::io::stderr().lock(), "[post] {ACTIVATION_NOTICE}").map_err(|error| {
-            AppError::io("write activation notice", Path::new("<stderr>"), error)
-        })?;
+        if to_stderr {
+            writeln!(std::io::stderr().lock(), "[post] {ACTIVATION_NOTICE}").map_err(|error| {
+                AppError::io("write activation notice", Path::new("<stderr>"), error)
+            })?;
+        }
         acknowledge_notice(participant)?;
         release_notice(participant, std::process::id())?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

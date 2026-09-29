@@ -6,7 +6,7 @@ Status: code is on Forgejo `main`. The new binary is being installed on the Mac 
 
 ## Output rules (all commands)
 
-- `--json` output is pure JSON on stdout. No banners or identity lines on stderr under `--json`. `2>&1 | jq` parses.
+- `--json` output is pure JSON on stdout. No banners, identity lines, or channel relay diagnostics on stderr under `--json` (a channel send's relay state is in the receipt's `cross_host`). `2>&1 | jq` parses.
 - Anything skipped, degraded, or surprising is reported on stdout, not only stderr.
 - A listing never fails because of one bad item. Damaged items are left out and named in `skipped: [{id, reason}]` (present only when nonempty; chat reads use `skipped_files`, with `skipped_files_total` and a hint when capped). Treat a nonempty `skipped` as a partial answer.
 - Every `error.details.exact_fix` runs when pasted.
@@ -27,6 +27,8 @@ Status: code is on Forgejo `main`. The new binary is being installed on the Mac 
 - **`participant bind --new`** records are ephemeral: `"ephemeral": true`, `"lease_hours": 1`. For Loom: a `bind --new` record idle past a day with no state may be collected by gc; the next write restores it transparently, a read tells you to run `post participant restore <id>`. Heartbeats from a live watch keep it alive.
 - **`post participant gc [--apply] [--json]`** (dry run by default): `{"ok":true,"applied":bool,"deleted":[...],"archived":[...],"kept":{"<reason>":count}}`. Tier 1 deletes empty idle records (7 days; 1 day if ephemeral) with a tombstone. Tier 2 archives idle records with state (30 days) to `<root>/participants-archive/<id>/`. Never touches anything with an active lease, fresh heartbeat, unread/pending/held mail, a lineage, or a doorbell subscription. Every candidate is rechecked under the participants lock right before it moves.
 - **`post participant restore <id> [--json]`**: `{ok, id, restored, from?, participant}`, `from` is `archive` or `tombstone`. Idempotent (`restored:false` when present). Unknown id: `participant_missing`, exit 65.
+- `participant bind` answering in JSON carries the one-time activation notice as a top-level `notice` string (first bind of a participant only) instead of printing it on stderr. The text bootstrap (`export POST_PARTICIPANT=...`) still prints it once on stderr. Harness adapters that set `POST_NOTICE_MANAGED` see no change.
+- A `bind --new` participant record carries `"ephemeral": true`, a key the version-1 record did not have. A consumer that checks the record's exact key set sees it as drift.
 - `participant list` and `who` name damaged records in `skipped`.
 
 ## Channels

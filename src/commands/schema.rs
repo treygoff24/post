@@ -579,7 +579,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "POST_SENDER_ADDRESS: opaque per-launch instance address (harness.repo.uuid); recorded verbatim on envelopes as sender_address, never synthesized, non-routable; <=256 bytes, no control/whitespace characters",
             "POST_PARTICIPANT: explicit acting participant id; highest resolution precedence and never mints a missing record",
             "POST_PARTICIPANT_LEASE_HOURS: optional positive integer lease override applied to the acting participant by bind/touch and writer activity; when unset, refreshes preserve an existing recorded lease and only a new record defaults to 24; peer records are never reclassified",
-            "POST_NOTICE_MANAGED: adapter-only switch suppressing direct bind stderr notice; adapters query participant notice and acknowledge with --ack only after successful context delivery.",
+            "POST_NOTICE_MANAGED: adapter-only switch suppressing the direct bind notice (without it, a bind answering in JSON carries the activation notice once per participant as a top-level notice field and keeps stderr empty; the text bootstrap prints it once on stderr); adapters query participant notice and acknowledge with --ack only after successful context delivery.",
             "CLAUDE_CODE_SESSION_ID: Claude conversation key used by post participant bind",
             "CODEX_THREAD_ID / CODEX_SESSION_ID: Codex conversation key (both present and different is an error, never a guess)",
             "CLAUDE_PID: marks a Claude ancestor when nested Claude/Codex harness keys are both inherited; nearest harness ancestor wins and unresolved ancestry fails naming POST_PARTICIPANT",

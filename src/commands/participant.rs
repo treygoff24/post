@@ -29,6 +29,11 @@ struct ParticipantOutput {
     /// `participant show` is a diagnostic surface and exits 0 either way.
     #[serde(skip_serializing_if = "Option::is_none")]
     participant_missing: Option<MissingReport>,
+    /// `participant bind` only, the one time a participant is told what Post
+    /// is: the activation notice, carried here so a JSON answer keeps stderr
+    /// empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<&'static str>,
 }
 
 /// `participant_missing`, as a diagnostic surface reports it.
@@ -183,10 +188,18 @@ pub(super) fn run(
                 args.fresh,
             )?;
             crate::cursor_state::routing::route_for_participant(context, &participant)?;
-            if std::env::var_os("POST_NOTICE_MANAGED").is_none() {
-                participant::emit_activation_notice(context, &participant)?;
-            }
-            if bootstrap.is_some() && !json {
+            // Only the bootstrap's text form (one `export` line) is not a JSON
+            // document; every other bind answer is, and carries the notice.
+            let text_export = bootstrap.is_some() && !json;
+            let notice = if std::env::var_os("POST_NOTICE_MANAGED").is_none()
+                && participant::emit_activation_notice(context, &participant, text_export)?
+                && !text_export
+            {
+                Some(participant::ACTIVATION_NOTICE)
+            } else {
+                None
+            };
+            if text_export {
                 return Ok(CommandResult::success(format!(
                     "export POST_PARTICIPANT={}\n",
                     participant.id
@@ -211,6 +224,7 @@ pub(super) fn run(
                     fix: None,
                     participant_error: None,
                     participant_missing: None,
+                    notice,
                 },
                 pretty,
             )
@@ -258,6 +272,7 @@ fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandRes
             fix: None,
             participant_error: None,
             participant_missing: None,
+            notice: None,
         },
         pretty,
     )
@@ -315,6 +330,7 @@ fn unbound_output(status: &'static str, fix: Option<String>) -> ParticipantOutpu
         fix,
         participant_error: None,
         participant_missing: None,
+        notice: None,
     }
 }
 
@@ -329,6 +345,7 @@ fn bound_output(participant: Participant, provenance: &'static str) -> Participa
         fix: None,
         participant_error: None,
         participant_missing: None,
+        notice: None,
     }
 }
 
@@ -342,6 +359,7 @@ fn missing_output(error: &AppError) -> ParticipantOutput {
             .or_else(|| Some(UNBOUND_FIX.to_owned())),
         participant_error: Some(error.message.clone()),
         participant_missing: Some(report),
+        notice: None,
         ..unbound_output("missing", None)
     }
 }

@@ -2339,16 +2339,18 @@ fn send(
         &message.channel,
         message.from_participant.as_deref() == Some(message.from.as_str()),
     );
-    // Delivery state, not identity: the receipt's cross_host block carries it
-    // for readers of stdout, and the stderr line stays for humans (it says not to
-    // resend). Only the identity banners above are dropped under --json.
-    match &relay_status {
-        crate::bridge_topology::ChannelRelayStatus::Queued => {}
-        crate::bridge_topology::ChannelRelayStatus::LocalOnly(reason) => {
-            eprintln!("post: #{} sent locally only: {reason}", message.channel);
-        }
-        crate::bridge_topology::ChannelRelayStatus::Unconfirmed(reason) => {
-            eprintln!("post: #{} relay not confirmed: {reason}", message.channel);
+    // Delivery state for a reader of text. Under --json the receipt's
+    // cross_host block (status and reason) says the same thing, and stderr
+    // stays empty so `2>&1 | jq` parses the receipt.
+    if !json_output {
+        match &relay_status {
+            crate::bridge_topology::ChannelRelayStatus::Queued => {}
+            crate::bridge_topology::ChannelRelayStatus::LocalOnly(reason) => {
+                eprintln!("post: #{} sent locally only: {reason}", message.channel);
+            }
+            crate::bridge_topology::ChannelRelayStatus::Unconfirmed(reason) => {
+                eprintln!("post: #{} relay not confirmed: {reason}", message.channel);
+            }
         }
     }
     // The message is committed; a failed seen-mark must not turn the send
