@@ -35,7 +35,7 @@ class LocalHeldTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = run([POST, "--version"], check=False)
-        if version.returncode != 0 or version.stdout.strip() != PINNED_POST_VERSION:
+        if version.returncode != 0 or not SWEEPER.post_version_accepted(version.stdout):
             raise RuntimeError(
                 f"tests require {PINNED_POST_VERSION!r}; got {version.stdout.strip()!r}"
             )

@@ -15,6 +15,7 @@ calling the real post binary named by POST_BIN.
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -107,7 +108,7 @@ class PmailTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = run([POST, "--version"], check=False)
-        if version.returncode != 0 or version.stdout.strip() != PINNED_POST_VERSION:
+        if version.returncode != 0 or not SWEEPER.post_version_accepted(version.stdout):
             raise RuntimeError(
                 f"tests require {PINNED_POST_VERSION!r}; got {version.stdout.strip()!r}"
             )
@@ -981,6 +982,68 @@ class PmailTest(unittest.TestCase):
         self.sweep(self.trey, PATH=path)
         self.assert_delivered(self.trey, self.fc, trey_pid, mail_id, data)
         self.assertEqual(self.health(self.trey)["pmail"]["retry"], {})
+
+    @needs_deliver
+    def test_letter_for_an_archived_participant_waits_and_is_flagged(self):
+        # `post participant gc` (tier 2) moves a long-idle record whole to
+        # <root>/participants-archive/<id>/. post cannot find such a
+        # participant and rejects a letter for it for good, so the bridge holds
+        # the letter, says so in health.json's attention list with the restore
+        # command, writes nothing into the missing directory, and delivers
+        # once the record is back.
+        self.bootstrap()
+        trey_pid = self.trey.participant("hq")
+        live = self.trey.root / "participants" / trey_pid
+        archived = self.trey.root / "participants-archive" / trey_pid
+        archived.parent.mkdir()
+        live.rename(archived)
+
+        mail_id, data = self.letter(self.fc, "garden", self.trey, trey_pid)
+        self.sweep(self.fc)
+        self.sweep(self.trey)
+        self.sweep(self.trey)
+
+        self.assertIsNone(self.receipt_bytes(self.trey, self.fc, trey_pid, mail_id))
+        self.assertFalse(os.path.lexists(live), "the bridge wrote into a missing record")
+        self.assertEqual(
+            self.actions(self.trey, "pmail_retry")[0]["reason"], "participant_archived"
+        )
+        pmail_health = self.health(self.trey)["pmail"]
+        self.assertEqual(pmail_health["retry_reasons"], {"participant_archived": 1})
+        self.assertEqual(pmail_health["rejected"], 0)
+        items = [
+            entry
+            for entry in self.health(self.trey)["attention"]
+            if entry["kind"] == "archived_participant"
+        ]
+        self.assertEqual([entry["id"] for entry in items], [trey_pid])
+        self.assertIn(mail_id, items[0]["summary"])
+        # The sender neither got a receipt nor a bounce: the letter is queued.
+        self.sweep(self.fc)
+        self.assertIsNone(self.state(self.fc, "pmail-acked", mail_id))
+        self.assertEqual(
+            self.tree(self.fc, "origin/machines/fc",
+                      self.pmail_path(self.trey, trey_pid, mail_id)),
+            [self.pmail_path(self.trey, trey_pid, mail_id)],
+        )
+
+        # The fix the item names is exact: run it as written.
+        command = re.search(r"mv '[^']+' '[^']+'", items[0]["fix"])
+        self.assertIsNotNone(command, items[0]["fix"])
+        run(["sh", "-c", command.group(0)])
+        self.assertTrue(live.is_dir())
+        self.sweep(self.trey)
+        self.assert_delivered(self.trey, self.fc, trey_pid, mail_id, data)
+        self.assertEqual(
+            [
+                entry
+                for entry in self.health(self.trey)["attention"]
+                if entry["kind"] == "archived_participant"
+            ],
+            [],
+        )
+        self.sweep(self.fc)
+        self.assert_acked(self.fc, self.trey, trey_pid, mail_id)
 
     # -- visible queued states and outbound exclusion ------------------------
 

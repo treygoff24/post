@@ -444,6 +444,10 @@ def build_snapshot(
         for room, host in placeholders.items()
         if host is not None and (host, _FoldedName(room)) not in active
     )
+    # ``denied_names`` is a room-level privacy list. The bridge passes none:
+    # config.channels.deny names channels, and used to double as a room deny,
+    # so denying a channel silently unpublished a same-named room and every
+    # peer then logged that room as retired on every tick.
     denied = {
         common.fold_name(name) if isinstance(name, str) else name
         for name in denied_names
@@ -556,8 +560,6 @@ def ensure_placeholders(
             registered = os.path.realpath(os.path.expanduser(rooms[room]))
             if registered == str(expected.resolve(strict=False)):
                 common.ensure_dir(settings.root, expected)
-                common.ensure_dir(settings.root, common.destination(settings.root, room, "inbox"))
-                common.ensure_dir(settings.root, common.destination(settings.root, room, "read"))
                 continue
             if common.fold_name(room) in {
                 common.fold_name(name) for name in snapshot.pins.get(host, frozenset())
@@ -610,10 +612,10 @@ def ensure_placeholders(
             )
             rooms.update(current)
             continue
-        # A crash before these lines is repaired by the registered branch
-        # above on the next tick.
-        common.ensure_dir(settings.root, common.destination(settings.root, room, "inbox"))
-        common.ensure_dir(settings.root, common.destination(settings.root, room, "read"))
+        # <root>/<room>/{inbox,read} are post's own mailbox: `post send`
+        # creates them the first time it writes there. Creating them here,
+        # every tick for every peer room, left empty directories behind after
+        # a rename or an owner release (post-6ep).
         logger.emit("room_registered", host=host, room=room, path=str(expected))
         rooms[room] = str(expected)
     return _post_rooms(settings)

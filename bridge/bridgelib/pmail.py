@@ -85,6 +85,12 @@ POST_OUTPUT_MALFORMED = "post_output_malformed"
 INVALID_INVOCATION = "invalid_invocation"
 # Retryable: the relay entry could not be read this tick (Grok G2).
 OBJECT_UNREADABLE = "object_unreadable"
+# Retryable: `post participant gc` moved the addressee's record aside to
+# <root>/participants-archive/<id>/. post finds no such participant and would
+# reject the letter for good (unknown_participant), so the bridge does not ask.
+PARTICIPANT_ARCHIVED = "participant_archived"
+PARTICIPANTS_DIR = "participants"
+PARTICIPANTS_ARCHIVE_DIR = "participants-archive"
 
 # What the destination can know about one relay entry (Grok G2).
 ENTRY_LETTER = "letter"  # bytes read and hashed
@@ -382,6 +388,25 @@ def post_supports_deliver(settings):
     return result.returncode == 0
 
 
+def archived_participant_dir(settings, participant):
+    """The archive directory holding ``participant``'s record, or None.
+
+    ``post participant gc`` (tier 2) moves a long-idle record whole from
+    ``participants/<id>/`` to ``participants-archive/<id>/``; a session's next
+    ``post participant bind`` moves it back. Until then post cannot find the
+    participant. No post command restores by id, and the bridge never writes
+    inside post's participant store, so a letter for an archived id waits and
+    health.json's attention list carries the restore command.
+    """
+    live = destination(settings.root, PARTICIPANTS_DIR, participant)
+    if os.path.lexists(str(live)):
+        return None
+    archived = destination(settings.root, PARTICIPANTS_ARCHIVE_DIR, participant)
+    if archived.is_dir() and not archived.is_symlink():
+        return archived
+    return None
+
+
 def call_deliver(settings, deadline, participant, source_host, mail_id, sha256, data):
     tmp_root = destination(settings.root, "bridge", "tmp")
     ensure_dir(settings.root, tmp_root)
@@ -597,6 +622,30 @@ class RetryLedger:
                 path.unlink()
             except FileNotFoundError:
                 pass
+
+    def waiting(self, peers, reason):
+        """``{participant: [(host, mail_id), ...]}`` for letters retrying for ``reason``.
+
+        The records are the source (r5.6): a letter that was delivered, or
+        that its sender withdrew, is released or settled away and drops out.
+        """
+        found = {}
+        base = destination(self.root, "bridge", self.namespace)
+        try:
+            hosts = sorted(os.listdir(str(base)))
+        except FileNotFoundError:
+            return found
+        for host in hosts:
+            directory = base / host
+            if host not in peers or not directory.is_dir() or directory.is_symlink():
+                continue
+            for path in sorted(directory.rglob("*.json")):
+                parts = path.relative_to(directory).parts
+                value = self._read(path)
+                if len(parts) != 2 or value is None or value.get("reason") != reason:
+                    continue
+                found.setdefault(parts[0], []).append((host, parts[1][:-5]))
+        return found
 
     def summary(self, peers, now=None, prune=True):
         """Per-host count and age, and per-reason counts; a non-peer's
@@ -854,6 +903,18 @@ def import_pmail(settings, git, snapshot, logger, deadline, fence):
                 continue
             if fence():
                 raise TickError("fenced")
+            archived = archived_participant_dir(settings, participant)
+            if archived is not None:
+                ledger.note(
+                    host, participant, mail_id, PARTICIPANT_ARCHIVED,
+                    f"participant record is archived at {archived}", logger,
+                )
+                waiting.add((participant, mail_id))
+                stats.retried += 1
+                stats.reasons[PARTICIPANT_ARCHIVED] = (
+                    stats.reasons.get(PARTICIPANT_ARCHIVED, 0) + 1
+                )
+                continue
             if supported is None:
                 supported = post_supports_deliver(settings)
                 if not supported:

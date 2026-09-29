@@ -187,6 +187,9 @@ class Machine:
                 "repo": self.repo,
                 "host": self.host,
                 "max_mail_bytes": 1024 * 1024,
+                # Per-call re-judgement, as before decided markers existed;
+                # the decided-marker tests build their own settings.
+                "decided_recheck_seconds": 0,
             },
         )()
 

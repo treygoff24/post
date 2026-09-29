@@ -125,6 +125,40 @@ class TickV2Test(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("post 0.9.0", result.stdout)
 
+    def check_config_with_version_line(self, line):
+        fake = Path(self.temporary.name) / "annotated-post"
+        fake.write_text(f"#!/bin/sh\nprintf '%s\\n' '{line}'\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        return run(
+            [sys.executable, SWEEP, "--check-config"],
+            env=self.fc.env(POST_BIN=fake),
+            check=False,
+        )
+
+    def test_check_config_accepts_a_build_annotated_post_version(self):
+        # `post --version` gains build metadata after the semver; the bridge
+        # pins the semver, not the annotation, or a rebuilt post would stop
+        # every tick on the host it was installed to.
+        for line in (
+            "post 0.9.0 (build abc1234, 2026-09-28)",
+            "post 0.9.0 (build abc1234-dirty)",
+        ):
+            result = self.check_config_with_version_line(line)
+            self.assertEqual(result.returncode, 0, line + result.stdout + result.stderr)
+
+    def test_check_config_refuses_other_semvers_and_malformed_annotations(self):
+        for line in (
+            "post 0.9.1",
+            "post 0.10.0 (build abc1234)",
+            "post 0.9.0 build abc1234",
+            "post 0.9.0 (build abc) trailing",
+            "post 0.9.0-rc1",
+            "post 0.9.0 (build (nested))",
+        ):
+            result = self.check_config_with_version_line(line)
+            self.assertEqual(result.returncode, 2, line + result.stdout + result.stderr)
+            self.assertIn("post 0.9.0", result.stdout)
+
     def test_check_config_refuses_a_missing_or_non_executable_post_bin(self):
         """SPEC-v2 §Onboarding: POST_BIN must exist and be executable.
 
@@ -1109,6 +1143,8 @@ class TickV2Test(unittest.TestCase):
                 "local_held",
                 "quiet",
                 "quiet_streak",
+                # Task 3: what needs a person, separate from `ok`.
+                "attention",
             },
         )
         self.assertTrue(health["channels"]["diverged"])

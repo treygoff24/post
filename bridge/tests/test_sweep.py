@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -190,6 +191,11 @@ PARTICIPANT_ENV = (
 # Commands that never act as a participant in these fixtures: room
 # registration and doctor are store-level, `participant` manages itself.
 STORE_LEVEL_COMMANDS = {"rooms", "doctor", "participant", "schema", "version"}
+# post creates <room>/{inbox,read} on first write, and the bridge no longer
+# pre-creates them for every peer room (papercut post-6ep). A doctor that
+# still lists that absence as an error is not a bridge fault; the fix wave
+# drops the check, and this filter then matches nothing.
+LAZY_MAILBOX_CHECK = re.compile(r"room\..+\.(inbox|read)_missing")
 
 
 def post_env(root):
@@ -367,6 +373,12 @@ class Machine:
                 # Services always set it (install.sh renders the timer's
                 # interval; macOS launchd runs at 60 s).
                 "BRIDGE_INTERVAL_SECONDS": "60",
+                # Decided markers (bridgelib/decided.py) let a tick skip a
+                # letter it has already judged. The guard, hold and health
+                # tests below assert per-tick re-judgement, which is what a
+                # recheck window of 0 means; the decided-marker tests set the
+                # real default explicitly (BRIDGE_DECIDED_RECHECK_SECONDS=None).
+                "BRIDGE_DECIDED_RECHECK_SECONDS": "0",
             }
         )
         for key, value in updates.items():
@@ -410,6 +422,23 @@ class Machine:
             env=env,
             check=check,
         )
+
+    def doctor_errors(self):
+        """Ids of `post doctor` error checks, minus the lazy mailbox ones."""
+        doctor = self.post("doctor", "--json", check=False)
+        try:
+            report = json.loads(doctor.stdout)
+        except ValueError:
+            raise AssertionError(doctor.stdout + doctor.stderr)
+        errors = [
+            check["id"]
+            for check in report["checks"]
+            if check["severity"] == "error"
+            and not LAZY_MAILBOX_CHECK.fullmatch(check["id"])
+        ]
+        if not errors and doctor.returncode not in (0, 1):
+            raise AssertionError(doctor.stdout + doctor.stderr)
+        return errors
 
     def send(self, sender, recipient, body, allow_self=False):
         # post 0.9.0 dropped --allow-self: workspace fan-out suppresses only
@@ -550,7 +579,7 @@ class SweeperTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = run([POST, "--version"], check=False)
-        if version.returncode != 0 or version.stdout.strip() != PINNED_POST_VERSION:
+        if version.returncode != 0 or not SWEEPER.post_version_accepted(version.stdout):
             raise RuntimeError(
                 f"tests require {PINNED_POST_VERSION!r}; got stdout={version.stdout.strip()!r} stderr={version.stderr.strip()!r}"
             )
@@ -720,6 +749,7 @@ class SweeperTest(unittest.TestCase):
             lock_path.unlink()
             lock_path.touch(mode=0o600)
 
+            logged = len(self.trey.logs())
             busy = self.trey.sweep()
 
             self.assertEqual(busy.returncode, 0, busy.stdout + busy.stderr)
@@ -728,7 +758,9 @@ class SweeperTest(unittest.TestCase):
             )
             self.assertTrue(health["ok"])
             self.assertEqual(health["busy_streak"], 1)
-            self.assertIn('"action":"busy"', busy.stdout)
+            self.assertIn(
+                "busy", [record["action"] for record in self.trey.logs()[logged:]]
+            )
             self.assertNotIn(mail_id, self.trey.inbox_ids("hq"))
             self.assertFalse(
                 (
@@ -778,8 +810,7 @@ class SweeperTest(unittest.TestCase):
         for host, rooms in (("trey", ("hq", "atlasos")), ("mac", ("porch",))):
             for room in rooms:
                 self.assertFalse((self.fc.root / "remote" / host / room).exists())
-        records = [json.loads(line) for line in result.stdout.splitlines()]
-        self.assertIn("fenced", [record["action"] for record in records])
+        self.assertIn("fenced", [record["action"] for record in self.fc.logs()])
         health = json.loads((self.fc.root / "bridge" / "health.json").read_text())
         self.assertFalse(health["ok"])
         self.assertEqual(health["reason"], "fenced")
@@ -934,8 +965,7 @@ class SweeperTest(unittest.TestCase):
             self.assertEqual(archive.read_bytes(), before)
 
         for machine in self.topology.machines:
-            doctor = machine.post("doctor", "--json", check=False)
-            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+            self.assertEqual(machine.doctor_errors(), [])
 
     def assert_delivery_invariant(self, machine, room, mail_id, expected):
         inbox = machine.root / room / "inbox" / (mail_id + ".mail")
@@ -1004,10 +1034,7 @@ class SweeperTest(unittest.TestCase):
                         ]
                     )
                     self.assertEqual(json.loads(remote_receipt.stdout)["sha256"], sha256)
-                    doctor = self.trey.post("doctor", "--json", check=False)
-                    self.assertEqual(
-                        doctor.returncode, 0, doctor.stdout + doctor.stderr
-                    )
+                    self.assertEqual(self.trey.doctor_errors(), [])
                     if not consumed:
                         self.trey.read("hq", mail_id)
                     self.assertEqual(
@@ -1058,8 +1085,7 @@ class SweeperTest(unittest.TestCase):
         self.assertFalse(
             (self.fc.repo / "outbox" / "trey" / "hq" / (mail_id + ".mail")).exists()
         )
-        doctor = self.trey.post("doctor", "--json", check=False)
-        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertEqual(self.trey.doctor_errors(), [])
 
     def test_outbound_reconciles_every_crash_boundary_and_prune(self):
         self.bootstrap()
@@ -1104,8 +1130,7 @@ class SweeperTest(unittest.TestCase):
                 )
                 expected = (self.fc.root / "archive" / (mail_id + ".mail")).read_bytes()
                 self.assert_delivery_invariant(self.trey, "hq", mail_id, expected)
-                doctor = self.trey.post("doctor", "--json", check=False)
-                self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+                self.assertEqual(self.trey.doctor_errors(), [])
                 self.trey.read("hq", mail_id)
                 self.assertEqual(directory_hash(self.fc.root / "archive"), archive_hash)
                 prune_crash = self.fc.sweep(BRIDGE_CRASH_AFTER="outbound-o5-prune")
@@ -1933,9 +1958,13 @@ class SweeperTest(unittest.TestCase):
             self.assertEqual(health["standing"].get("quarantined"), 1)
             self.assertEqual(health["standing"].get("forensic"), 1)
         self.assertEqual(len(self.condition_lines(self.trey, "forensic", mail_id)), 1)
-        # Stdout carries the same dedupe: the third tick said nothing of it.
-        last = self.full_sweep(self.trey)
-        self.assertNotIn(mail_id, last.stdout)
+        # The third tick logged nothing of it (log.jsonl is the only sink).
+        logged = len(self.trey.logs())
+        self.full_sweep(self.trey)
+        self.assertGreater(len(self.trey.logs()), logged)  # it did log its health
+        self.assertNotIn(
+            mail_id, json.dumps(self.trey.logs()[logged:]), "the standing condition re-logged"
+        )
         # A changed reason is a new condition and logs again, once.
         self.fc.inject(relative, b"not an envelope")
         for _ in range(2):
@@ -2051,8 +2080,12 @@ class SweeperTest(unittest.TestCase):
         self.full_sweep(self.trey)
         self.fc.git("push", "-q", "origin", ":refs/heads/machines/fc")
         self.trey.git("update-ref", "-d", "refs/remotes/origin/machines/fc")
-        missing = self.full_sweep(self.trey)
-        self.assertIn('"action":"peer_branch_missing"', missing.stdout)
+        logged = len(self.trey.logs())
+        self.full_sweep(self.trey)
+        self.assertIn(
+            "peer_branch_missing",
+            [record["action"] for record in self.trey.logs()[logged:]],
+        )
         self.assertEqual(self.condition_lines(self.trey, "condition_cleared", mail_id), [])
         self.fc.git("push", "-q", "origin", "HEAD:refs/heads/machines/fc")
         self.full_sweep(self.trey)
@@ -2754,8 +2787,10 @@ class SweeperTest(unittest.TestCase):
         first = self.fc.sweep(POST_BIN=wrapper)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         for placeholder in ("hq", "atlasos", "porch"):
-            self.assertTrue((self.fc.root / placeholder / "inbox").is_dir())
-            self.assertTrue((self.fc.root / placeholder / "read").is_dir())
+            # post creates <root>/<room>/{inbox,read} on first use; the bridge
+            # no longer makes empty ones for every peer room (post-6ep).
+            self.assertFalse((self.fc.root / placeholder / "inbox").exists())
+            self.assertFalse((self.fc.root / placeholder / "read").exists())
         rooms_before = (self.fc.root / "rooms.json").read_bytes()
         second = self.fc.sweep(POST_BIN=wrapper)
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
@@ -3147,8 +3182,7 @@ class SweeperTest(unittest.TestCase):
                         if record["action"] == "ledger_only_repaired"
                     }
                     self.assertIn(mail_id, repaired)
-                doctor = self.trey.post("doctor", "--json", check=False)
-                self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+                self.assertEqual(self.trey.doctor_errors(), [])
                 (self.trey.root / "rules.json").write_text(
                     '{"blocked":[]}\n', encoding="utf-8"
                 )
@@ -3224,8 +3258,7 @@ class SweeperTest(unittest.TestCase):
         self.assert_delivery_invariant(self.trey, "hq", mail_id, original)
         ledger = self.trey.root / "bridge" / "delivered" / "mac" / "hq" / mail_id
         self.assertEqual(ledger.read_text().strip(), sha_original)
-        doctor = self.trey.post("doctor", "--json", check=False)
-        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertEqual(self.trey.doctor_errors(), [])
 
     def test_concurrent_busy_probes_increment_streak_exactly(self):
         import fcntl
@@ -3543,12 +3576,13 @@ class SweeperTest(unittest.TestCase):
             self.assertEqual(holder.stdout.readline().strip(), "ready")
             lock_path.unlink()
             lock_path.touch()
+            logged = len(self.trey.logs())
             busy = self.trey.sweep()
             self.assertEqual(busy.returncode, 0, busy.stdout + busy.stderr)
             self.assertTrue(
                 any(
-                    json.loads(line).get("action") == "busy"
-                    for line in busy.stdout.splitlines()
+                    record.get("action") == "busy"
+                    for record in self.trey.logs()[logged:]
                 )
             )
             self.assertFalse(
@@ -3649,8 +3683,7 @@ class SweeperTest(unittest.TestCase):
                     self.assertIn(mail_id, archive_only_ids)
                 else:
                     self.assertEqual(sum(path.exists() for path in (inbox, read)), 1)
-                doctor = self.trey.post("doctor", "--json", check=False)
-                self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+                self.assertEqual(self.trey.doctor_errors(), [])
 
     def test_same_id_from_another_host_or_room_is_quarantined(self):
         self.bootstrap()
@@ -4244,10 +4277,11 @@ class SweeperTest(unittest.TestCase):
             encoding="utf-8",
         )
         (wrapper_dir / "git").chmod(0o755)
+        logged = len(self.fc.logs())
         failed = self.fc.sweep(PATH=f"{wrapper_dir}{os.pathsep}{os.environ['PATH']}")
         self.assertTrue(fired.exists(), "wrapper never fired")
         self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
-        records = [json.loads(line) for line in failed.stdout.splitlines()]
+        records = self.fc.logs()[logged:]
         actions = [r["action"] for r in records]
         self.assertNotIn("git_failed", actions)
         failures = [r for r in records if r["action"] == "stray_untrack_failed"]

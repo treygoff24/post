@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Dict, FrozenSet, List, Optional, Set
 
-from . import common, pmail
+from . import common, decided, pmail
 from .snapshot import (
     FORGED_SELF,
     LOCAL,
@@ -2028,11 +2028,27 @@ def _local_failure_reason(error: Exception) -> str:
     return text
 
 
-def publish_channels(settings, cfg, snapshot, logger, deadline) -> ChannelStats:
-    """Publish validated locally-authored channel messages to the worktree."""
+def publish_channels(
+    settings, cfg, snapshot, logger, deadline, tracked=None
+) -> ChannelStats:
+    """Publish validated locally-authored channel messages to the worktree.
+
+    Only ids this host has not settled are opened (bridgelib/decided.py):
+    ``tracked`` is the set of relay paths already committed on this host's
+    branch (``channels/<name>/messages/<id>.msg``), and a message in it is
+    published for good, so it is skipped unopened. The messages that stay
+    local for good (imported from a peer, or authored under a name that is
+    not a local room) leave a ``bridge/chan-decided/<name>/<id>`` marker
+    after their first judgement and are re-judged only after the recheck
+    window. Byte-comparison against the worktree copy therefore guards the
+    one tick between copying a message and committing it; committed history
+    is immutable in Git itself.
+    """
     stats = ChannelStats()
     if cfg is None:
         return stats
+    recheck = decided.recheck_seconds(settings)
+    now = time.time()
     channels_root = common.destination(settings.root, "channels")
     try:
         local_channels = sorted(
@@ -2079,6 +2095,9 @@ def publish_channels(settings, cfg, snapshot, logger, deadline) -> ChannelStats:
         except FileNotFoundError:
             worktree_names = set()
         local_messages = Path(channel_entry.path) / "messages"
+        settled = decided.names_with_mtime(
+            common.destination(settings.root, "bridge", "chan-decided", name)
+        )
         try:
             metadata = local_messages.lstat()
             if not stat.S_ISDIR(metadata.st_mode) or local_messages.is_symlink():
@@ -2096,6 +2115,13 @@ def publish_channels(settings, cfg, snapshot, logger, deadline) -> ChannelStats:
             if not entry.name.endswith(".msg"):
                 continue
             message_id = entry.name[:-4]
+            if tracked is not None and (
+                f"channels/{name}/messages/{entry.name}" in tracked
+            ):
+                continue
+            stamp = settled.get(message_id)
+            if stamp is not None and recheck > 0 and 0 <= now - stamp < recheck:
+                continue
             try:
                 _validate_channel_id(message_id)
                 data = common.open_regular(Path(entry.path), settings.max_mail_bytes)
@@ -2111,9 +2137,11 @@ def publish_channels(settings, cfg, snapshot, logger, deadline) -> ChannelStats:
             if received.exists() or received.is_symlink():
                 if envelope["from"] in snapshot.real_rooms:
                     logger.emit("chan_self_conflict", channel=name, id=message_id)
+                decided.mark_channel(settings, name, message_id)
                 continue
             if envelope["from"] not in snapshot.real_rooms:
                 if not _roomless_sender(envelope):
+                    decided.mark_channel(settings, name, message_id)
                     continue
                 try:
                     pmail.validate_participant(envelope["from"], "roomless sender")

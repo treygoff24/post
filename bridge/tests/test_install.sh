@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+# install.sh reads POST_BIN when --post-bin is absent. A gate that exports it
+# for the Python suites must not redirect this script's fake post.
+unset POST_BIN
 # macOS mktemp hands back a /var symlink path; the sweeper requires canonical roots.
 TMP=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$TMP"' EXIT
@@ -113,14 +116,36 @@ if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" "${INSTALL_ARGS[@]}" --post-
   printf '%s\n' 'old Post version was accepted' >&2
   exit 1
 fi
-grep -Fq 'post version must be exactly post 0.9.0; got post 0.6.0' "$TMP/old.err"
+grep -Fq "post version must be post 0.9.0, optionally followed by ' (build ...)'; got post 0.6.0" "$TMP/old.err"
 [ ! -e "$CLONE" ] || { printf '%s\n' 'version refusal cloned the relay' >&2; exit 1; }
+# A build-annotated version is the same semver and is accepted; another semver
+# or a malformed annotation is not. Each variant gets its own fake post.
+for variant in 'post 0.9.0 (build abc1234, 2026-09-28)' 'post 0.9.0 (build abc1234-dirty)'; do
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$variant" >"$BIN/post-annotated"
+  chmod 0755 "$BIN/post-annotated"
+  env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-annotated" --host cell-a \
+    --ssh-key "$KEY" --config "$CONFIG" --post-bin "$BIN/post-annotated" >"$TMP/annotated.out" 2>"$TMP/annotated.err" \
+    || { printf 'annotated version %s was refused: %s\n' "$variant" "$(cat "$TMP/annotated.err")" >&2; exit 1; }
+  env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --uninstall --clone-dir "$TMP/clone-annotated" >/dev/null
+  rm -rf "$TMP/clone-annotated" "$MAIL_ROOT/bridge/config.json"
+done
+for variant in 'post 0.9.1' 'post 0.10.0 (build abc1234)' 'post 0.9.0 build abc1234' 'post 0.9.0 (build abc) trailing' 'post 0.9.0-rc1' 'post 0.9.0 (build (nested))'; do
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$variant" >"$BIN/post-annotated"
+  chmod 0755 "$BIN/post-annotated"
+  if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-annotated" --host cell-a \
+    --ssh-key "$KEY" --config "$CONFIG" --post-bin "$BIN/post-annotated" >/dev/null 2>&1; then
+    printf 'version %s was accepted\n' "$variant" >&2
+    exit 1
+  fi
+  [ ! -e "$TMP/clone-annotated" ] || { printf 'version refusal cloned the relay: %s\n' "$variant" >&2; exit 1; }
+done
+rm -f "$BIN/post-annotated"
 
 env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" "${INSTALL_ARGS[@]}" 2> >(tee "$TMP/first.err" >&2)
 # A config with no channels key syncs every channel; the installer says so
 # and points at the template that carries the estate deny list.
 grep -Fq 'has no "channels" key, so this host will publish and import every channel' "$TMP/first.err" || { printf '%s\n' 'no-channels config gave no warning' >&2; exit 1; }
-grep -Fq 'post-bridge/config.template.json' "$TMP/first.err" || { printf '%s\n' 'no-channels warning does not name the template' >&2; exit 1; }
+grep -Fq 'bridge/config.template.json' "$TMP/first.err" || { printf '%s\n' 'no-channels warning does not name the template' >&2; exit 1; }
 
 DATA="$HOME_DIR/.local/lib/post-bridge"
 LAUNCHER="$HOME_DIR/.local/bin/post-bridge-sweep"
@@ -132,6 +157,9 @@ cmp -s "$ROOT/bridge/sweep.py" "$DATA/sweep.py"
 for module in "$ROOT"/bridge/bridgelib/*.py; do
   cmp -s "$module" "$DATA/bridgelib/$(basename -- "$module")"
 done
+# The install records the post repo commit it came from, next to the package.
+[ -f "$DATA/BUILD" ] || { printf '%s\n' 'installed BUILD file is missing' >&2; exit 1; }
+grep -Fqx "commit=$(git -C "$ROOT" rev-parse HEAD)" "$DATA/BUILD" || { printf 'BUILD does not name the source commit: %s\n' "$(cat "$DATA/BUILD")" >&2; exit 1; }
 [ -x "$LAUNCHER" ] || { printf '%s\n' 'launcher is missing or not executable' >&2; exit 1; }
 grep -Fqx "exec python3 \"$DATA/sweep.py\" \"\$@\"" "$LAUNCHER"
 grep -Fqx "Environment=\"POST_BIN=$BIN/post\"" "$SERVICE"
@@ -329,5 +357,43 @@ if grep -Fq 'has no "channels" key' "$TMP/ch.err"; then
   printf '%s\n' 'config with channels still warned' >&2
   exit 1
 fi
+
+# BUILD is deterministic and honest about what it came from. A source repo
+# with a known commit, a dirty edit, and a copied tree (no Git) each install
+# under their own HOME.
+build_install() {
+  local name=$1 source=$2
+  local home="$TMP/home-build-$name"
+  mkdir -p "$home" "$TMP/mail-build-$name"
+  env HOME="$home" XDG_CONFIG_HOME="$TMP/config-build-$name" POST_MAIL_ROOT="$TMP/mail-build-$name" \
+    PATH="$BIN:$PATH" POST_BRIDGE_SYSTEMCTL_LOG="$TMP/systemctl-build-$name.log" \
+    "$source/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-build-$name" --host cell-a \
+    --ssh-key "$KEY" --config "$CONFIG" >"$TMP/build-$name.out" 2>"$TMP/build-$name.err"
+  BUILD_FILE="$home/.local/lib/post-bridge/BUILD"
+}
+SRC_REPO="$TMP/src-repo"
+mkdir -p "$SRC_REPO"
+cp -R "$ROOT/bridge" "$SRC_REPO/bridge"
+git init -q -b main "$SRC_REPO"
+git -C "$SRC_REPO" add -- bridge
+git -C "$SRC_REPO" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm 'bridge source'
+SRC_COMMIT=$(git -C "$SRC_REPO" rev-parse HEAD)
+build_install clean "$SRC_REPO/bridge"
+[ "$(cat "$BUILD_FILE")" = "$(printf 'commit=%s\ndirty=no' "$SRC_COMMIT")" ] || { printf 'clean BUILD: %s\n' "$(cat "$BUILD_FILE")" >&2; exit 1; }
+# Same source, same bytes: the record carries no timestamp.
+FIRST_BUILD=$(cat "$BUILD_FILE")
+sleep 1
+build_install clean "$SRC_REPO/bridge"
+[ "$(cat "$BUILD_FILE")" = "$FIRST_BUILD" ] || { printf '%s\n' 'BUILD changed with no source change' >&2; exit 1; }
+printf '\n# local edit\n' >>"$SRC_REPO/bridge/sweep.py"
+build_install dirty "$SRC_REPO/bridge"
+[ "$(cat "$BUILD_FILE")" = "$(printf 'commit=%s\ndirty=yes' "$SRC_COMMIT")" ] || { printf 'dirty BUILD: %s\n' "$(cat "$BUILD_FILE")" >&2; exit 1; }
+# A copy of the tree that sits inside some other Git checkout (untracked
+# there) is not "from" that checkout's commit.
+COPIED="$SRC_REPO/vendored"
+mkdir -p "$COPIED"
+cp -R "$ROOT/bridge" "$COPIED/bridge"
+build_install copied "$COPIED/bridge"
+[ "$(cat "$BUILD_FILE")" = "$(printf 'commit=unknown\ndirty=unknown')" ] || { printf 'copied-tree BUILD: %s\n' "$(cat "$BUILD_FILE")" >&2; exit 1; }
 
 printf '%s\n' 'test_install: PASS'

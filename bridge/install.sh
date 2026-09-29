@@ -3,6 +3,19 @@ set -euo pipefail
 
 PINNED_POST_VERSION='post 0.9.0'
 
+# `post --version` prints the pinned semver, optionally followed by build
+# metadata: `post 0.9.0 (build abc1234, ...)`. Same rule as sweep.py's
+# post_version_accepted, which --check-config applies again below.
+post_version_accepted() {
+  local text=$1 build_re='^ \(build [^()]*\)$'
+  case $text in
+    *$'\n'*) return 1 ;;
+  esac
+  [ "$text" = "$PINNED_POST_VERSION" ] && return 0
+  [ "${text:0:${#PINNED_POST_VERSION}}" = "$PINNED_POST_VERSION" ] || return 1
+  [[ ${text:${#PINNED_POST_VERSION}} =~ $build_re ]]
+}
+
 usage() {
   cat <<'EOF'
 Usage: install.sh --repo-url <ssh-url> --host <name> --ssh-key <path> --config <path> [options]
@@ -232,7 +245,7 @@ fi
 [ -f "$POST_BIN" ] && [ -x "$POST_BIN" ] || die "post binary is not an executable file: $POST_BIN"
 POST_BIN=$(CDPATH='' cd -- "$(dirname -- "$POST_BIN")" && printf '%s/%s\n' "$PWD" "$(basename -- "$POST_BIN")")
 POST_VERSION=$("$POST_BIN" --version 2>&1) || die "cannot run $POST_BIN --version"
-[ "$POST_VERSION" = "$PINNED_POST_VERSION" ] || die "post version must be exactly $PINNED_POST_VERSION; got $POST_VERSION"
+post_version_accepted "$POST_VERSION" || die "post version must be $PINNED_POST_VERSION, optionally followed by ' (build ...)'; got $POST_VERSION"
 
 [ -n "$REPO_URL" ] || die '--repo-url is required for installation'
 [ -n "$SSH_KEY" ] || die '--ssh-key is required for installation'
@@ -315,8 +328,27 @@ for source_module in "$SOURCE_BRIDGELIB"/*.py; do
   [ -f "$source_module" ] || die "bridgelib contains no Python modules: $SOURCE_BRIDGELIB"
   cp -f "$source_module" "$package_tmp/bridgelib/"
 done
+# Record which post repo commit this package came from, next to the install
+# ($DATA_DIR/BUILD), so "what is deployed" has an answer that is not a guess
+# from file dates. No timestamp: an unchanged source reinstalls as a no-op.
+# `dirty=yes` means bridge/ had uncommitted changes, so the commit alone does
+# not reproduce the package; `unknown` means the source is not a Git checkout
+# of this repo (a copied tree).
+build_commit=unknown
+build_dirty=unknown
+if git -C "$SOURCE_DIR" ls-files --error-unmatch -- sweep.py >/dev/null 2>&1; then
+  build_commit=$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null) || build_commit=unknown
+  if build_status=$(git -C "$SOURCE_DIR" status --porcelain -- . 2>/dev/null); then
+    if [ -n "$build_status" ]; then
+      build_dirty=yes
+    else
+      build_dirty=no
+    fi
+  fi
+fi
+printf 'commit=%s\ndirty=%s\n' "$build_commit" "$build_dirty" >"$package_tmp/BUILD"
 chmod 0755 "$package_tmp" "$package_tmp/bridgelib"
-chmod 0644 "$package_tmp/sweep.py" "$package_tmp/bridgelib"/*.py
+chmod 0644 "$package_tmp/sweep.py" "$package_tmp/bridgelib"/*.py "$package_tmp/BUILD"
 # Stop the timer before the package swap, so no tick of the new package runs
 # before --init-held-sentinel below writes the local-held floors (review 4,
 # finding 2). enable --now restarts it once the checks pass; a failure before
@@ -339,6 +371,7 @@ else
   rm -rf "$package_tmp"
 fi
 trap timer_stopped_notice EXIT
+say "installed the bridge package from post repo commit $build_commit (dirty=$build_dirty), recorded in $DATA_DIR/BUILD"
 
 launcher_tmp=$(mktemp "$HOME/.local/bin/.post-bridge-sweep.XXXXXX")
 # macOS launchd captures stdout in $POST_MAIL_ROOT/bridge/launchd.log (the
@@ -393,7 +426,7 @@ fi
 # refuse: sync-all is a legitimate default, but a new host should normally
 # start from config.template.json, which carries the estate deny list.
 if ! python3 -c 'import json, sys; sys.exit(0 if "channels" in json.load(open(sys.argv[1])) else 1)' "$CONFIG_DEST" 2>/dev/null; then
-  warn "$CONFIG_DEST has no \"channels\" key, so this host will publish and import every channel. Deny only works at the publisher: start from post-bridge/config.template.json to carry the estate deny list, or set \"channels\" deliberately."
+  warn "$CONFIG_DEST has no \"channels\" key, so this host will publish and import every channel. Deny only works at the publisher: start from bridge/config.template.json to carry the estate deny list, or set \"channels\" deliberately."
 fi
 
 render_template "$SOURCE_SERVICE" "$SERVICE_FILE"

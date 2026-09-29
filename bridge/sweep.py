@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -23,7 +24,17 @@ from pathlib import Path, PurePosixPath
 # directory on sys.path before importing bridgelib.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bridgelib import channels, localheld, logdedupe, pmail, rooms, tick  # noqa: E402
+from bridgelib import (  # noqa: E402
+    attention,
+    bounce,
+    channels,
+    decided,
+    localheld,
+    logdedupe,
+    pmail,
+    rooms,
+    tick,
+)
 from bridgelib.common import (  # noqa: E402
     blocked_reason,
     load_rules,
@@ -82,6 +93,17 @@ from bridgelib.snapshot import (  # noqa: E402
 )
 
 PINNED_POST_VERSION = "post 0.9.0"
+# `post --version` may carry build metadata after the semver
+# (`post 0.9.0 (build abc1234, ...)`); the semver itself stays pinned.
+_POST_VERSION_RE = re.compile(re.escape(PINNED_POST_VERSION) + r"(?: \(build [^()\n]*\))?")
+
+
+def post_version_accepted(text):
+    """True when ``post --version`` printed the pinned semver, with or
+    without a trailing ``(build ...)`` annotation."""
+    return _POST_VERSION_RE.fullmatch(text.strip()) is not None
+
+
 # Relay worktree namespaces the bridge owns; pmail/preceipts are F3.
 RELAY_NAMESPACES = ("outbox", "receipts", "channels", "pmail", "preceipts")
 RELAY_PATHS = (*RELAY_NAMESPACES, "rooms.json")
@@ -104,12 +126,22 @@ class Deadline:
 
 
 class Logger:
-    def __init__(self, root):
+    def __init__(self, root, echo=False):
         self.root = root
+        # A tick logs to log.jsonl only: launchd and journald used to capture
+        # a second copy of every line from stdout. The operator commands
+        # (--init-held-sentinel, --seed-local-holds) pass echo=True because
+        # their stdout is their result.
+        self.echo = echo
         self.bridge = destination(root, "bridge")
         ensure_dir(root, self.bridge)
         self.path = destination(root, "bridge", "log.jsonl")
         self.conditions = None
+        # What this tick saw, for health.json's attention list. Recorded
+        # before the dedupe below, so a standing condition whose line was
+        # suppressed is still reported.
+        self.quarantines = []
+        self.unrelayables = {}
 
     def track_conditions(self):
         # Full ticks only: a standing per-letter condition is logged when it
@@ -139,6 +171,10 @@ class Logger:
             self.conditions.host_unread(host)
 
     def emit(self, action, **fields):
+        if action in ("quarantined", "quarantined_path"):
+            self.quarantines.append(dict(fields))
+        elif action == "outbound_ignored" and isinstance(fields.get("id"), str):
+            self.unrelayables[fields["id"]] = str(fields.get("reason", "unreadable"))
         # During a full tick, any action named in logdedupe.CONDITION_ACTIONS
         # is deduped, whichever module emits it (see that constant).
         if self.conditions is not None and not self.conditions.should_log(
@@ -148,7 +184,10 @@ class Logger:
         record = {"ts": utc_now(), "action": action}
         record.update(fields)
         line = json.dumps(record, sort_keys=True, separators=(",", ":"))
-        print(line, flush=True)
+        # A tick's one sink is log.jsonl; stderr carries what could not be
+        # persisted below.
+        if self.echo:
+            print(line, flush=True)
         try:
             if self.path.exists() and self.path.stat().st_size >= LOG_ROTATE_BYTES:
                 rotated = self.path.with_name("log.jsonl.1")
@@ -166,6 +205,7 @@ class Logger:
                 os.close(descriptor)
         except OSError as error:
             print(f"post-bridge: cannot persist log: {error}", file=sys.stderr)
+            print(line, file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -180,6 +220,9 @@ class Settings:
     fetch_grace_seconds: int
     # Health's interval_s (F3 capability guard); never fatal when unparseable.
     interval_seconds: "int | None" = None  # a string: Python 3.9 is supported
+    # Seconds a decided marker is trusted before its letter is re-judged
+    # (bridgelib/decided.py); 0 re-judges every tick.
+    decided_recheck_seconds: int = decided.DEFAULT_RECHECK_SECONDS
 
 
 @dataclass
@@ -372,6 +415,9 @@ def load_settings():
         deadline_seconds=deadline_seconds,
         fetch_grace_seconds=fetch_grace,
         interval_seconds=pmail.interval_seconds(os.environ.get("BRIDGE_INTERVAL_SECONDS")),
+        decided_recheck_seconds=decided.parse_recheck_seconds(
+            os.environ.get("BRIDGE_DECIDED_RECHECK_SECONDS")
+        ),
     )
 
 
@@ -441,9 +487,10 @@ def validate_post_version(settings):
         )
     except OSError as error:
         raise ConfigError(f"POST_BIN --version failed: {error}")
-    if result.returncode != 0 or result.stdout.strip() != PINNED_POST_VERSION:
+    if result.returncode != 0 or not post_version_accepted(result.stdout):
         raise ConfigError(
             f"POST_BIN --version must print exactly {PINNED_POST_VERSION!r}"
+            " (optionally followed by ' (build ...)')"
         )
 
 
@@ -1403,6 +1450,18 @@ def select_outbound(
     is routed; a held letter is never selected. Without a ``guard`` the
     selection builds its own, so no caller can skip it. A tick that ends
     with a store-level guard fault selects no workspace letter at all.
+
+    Decided ids (bridgelib/decided.py) are recognised from directory
+    listings and never opened: received, delivered and published letters,
+    held letters whose marker is inside its recheck window, and letters
+    already judged unrelayable whose file has not changed. A letter is opened
+    only when it is new, its verdict is stale, or its verdict cannot be
+    permanent (no route yet).
+
+    A letter whose envelope is invalid is flagged unrelayable only when its
+    recipient routes to a peer. One that only ever reaches a local room
+    (free-form ``from`` on a probe letter) never needed relaying, so it is
+    left alone instead of being reported forever.
     """
     if guard is None:
         guard = local_held_guard(settings, real_rooms, snapshot, logger)
@@ -1412,6 +1471,7 @@ def select_outbound(
     if not archive_root.is_dir():
         checkpoint("outbound-o1-select")
         return selected, unrelayable
+    index = decided.ArchiveIndex(settings)
     for path in sorted(archive_root.iterdir()):
         deadline.check()
         if path.suffix != ".mail":
@@ -1423,20 +1483,36 @@ def select_outbound(
             logger.emit("outbound_ignored", id=mail_id, reason=str(error))
             unrelayable.append(mail_id)
             continue
-        if marker_exists(settings, "received", mail_id) or delivered_id_exists(
-            settings, mail_id
-        ):
+        if index.marked(mail_id):
             continue
-        if marker_exists(settings, "published", mail_id):
+        if index.held_trusted(mail_id):
+            guard.carry_decided(mail_id)
             continue
+        if mail_id in index.unrelayable:
+            record = decided.unrelayable_still_true(settings, mail_id, path)
+            if record is not None:
+                logger.unrelayables[mail_id] = record["reason"]
+                unrelayable.append(mail_id)
+                continue
         if pmail.typed_skip_known(settings, mail_id):
             continue
+        before = None
         try:
+            before = path.lstat()
             data = open_regular(path, settings.max_mail_bytes)
             header = outbound_header(data)
         except (ConfigError, OSError) as error:
-            logger.emit("outbound_ignored", id=mail_id, reason=str(error))
-            unrelayable.append(mail_id)
+            # Only a verdict about the file's content is remembered. A read
+            # that failed on I/O (permissions, a vanished file) is retried
+            # every tick, because the file may be perfectly fine.
+            flag_unrelayable(
+                settings,
+                logger,
+                unrelayable,
+                mail_id,
+                str(error),
+                before if isinstance(error, ConfigError) else None,
+            )
             continue
         if not workspace_addressed(header):
             pmail.note_typed(settings, mail_id, header, logger)
@@ -1446,10 +1522,18 @@ def select_outbound(
         try:
             envelope = parse_envelope(data, mail_id, header.get("to"), logger)
         except ConfigError as error:
-            logger.emit("outbound_ignored", id=mail_id, reason=str(error))
-            unrelayable.append(mail_id)
+            if routes_to_peer(header.get("to"), snapshot, placeholders):
+                flag_unrelayable(
+                    settings, logger, unrelayable, mail_id, str(error), before
+                )
             continue
         if guard.held(mail_id, data, envelope):
+            if guard.last_hold_valid:
+                # The guard's record and index line are already written; the
+                # marker only records that they verified.
+                checkpoint("decided-d0-before-marker")
+                decided.mark_held(settings, mail_id)
+                checkpoint("decided-d1-marked")
             continue
         recipient = envelope["to"]
         sender = envelope["from"]
@@ -1486,6 +1570,31 @@ def select_outbound(
         selected = []
     checkpoint("outbound-o1-select")
     return selected, unrelayable[:20]
+
+
+def routes_to_peer(recipient, snapshot, placeholders):
+    """Whether ``recipient`` (an envelope ``to``, not yet validated) is a room
+    some peer host owns, so a letter to it would leave this host."""
+    if not isinstance(recipient, str):
+        return False
+    if snapshot is not None:
+        return snapshot.route_for(recipient) is not None
+    return placeholders.get(recipient) is not None
+
+
+def flag_unrelayable(settings, logger, unrelayable, mail_id, reason, archive_stat):
+    """Report a letter that cannot be relayed and remember the verdict.
+
+    The marker is written after the log line, so a crash between them logs
+    the letter again next tick and never leaves it undecided-and-silent.
+    """
+    logger.emit("outbound_ignored", id=mail_id, reason=reason)
+    unrelayable.append(mail_id)
+    if archive_stat is not None:
+        try:
+            decided.mark_unrelayable(settings, mail_id, reason, archive_stat)
+        except (ConfigError, OSError):
+            pass  # a lost marker costs one re-read next tick
 
 
 def local_held_guard(settings, real_rooms, snapshot, logger):
@@ -1563,11 +1672,19 @@ def parse_receipt(data, expected_host, expected_room, expected_id, expected_sha)
     return value
 
 
-def prune_outbox(settings, config, git, logger, snapshot=None):
+def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
+    """Retire outbox entries the receiver has settled.
+
+    A ``delivered`` receipt prunes the entry. A terminal refusal (bridgelib/
+    bounce.py) tells the sending participant with a system letter and then
+    retires the entry the same way; ``refusals`` collects the attention items
+    for refusals that could not be bounced this tick.
+    """
     root = destination(settings.repo, "outbox")
     if not root.exists():
         checkpoint("outbound-o5-prune")
         return 0
+    real_rooms = snapshot.real_rooms if snapshot is not None else {}
     pruned = 0
     for path in sorted(root.glob("*/*/*.mail")):
         relative = path.relative_to(settings.repo).as_posix()
@@ -1635,6 +1752,30 @@ def prune_outbox(settings, config, git, logger, snapshot=None):
             logger.emit(
                 "receipt_ignored", host=host, room=room, id=mail_id, reason=str(error)
             )
+            continue
+        if bounce.is_terminal(receipt, time.time()):
+            try:
+                bounce.notify(
+                    settings, host, room, mail_id, data, receipt, logger, real_rooms
+                )
+            except (ConfigError, OSError) as error:
+                logger.emit(
+                    "bounce_failed", host=host, room=room, id=mail_id, reason=str(error)
+                )
+                if refusals is not None:
+                    refusals.append(
+                        attention.refused_bounce_failed(
+                            mail_id, host, room, receipt["reason"], error
+                        )
+                    )
+                continue
+            git.run(["rm", "--quiet", "--", relative])
+            pruned += 1
+            logger.emit(
+                "outbox_bounced", host=host, room=room, id=mail_id,
+                reason=receipt["reason"],
+            )
+            checkpoint("outbound-o6-bounced")
             continue
         if receipt["status"] != "delivered":
             logger.emit(
@@ -1888,6 +2029,7 @@ def write_health(
     sender_not_homed=None,
     pmail_stats=None,
     local_held=None,
+    attention_items=None,
     quiet=False,
 ):
     # Every health.json write is a read-modify-write under .health.lock, and
@@ -1942,6 +2084,9 @@ def write_health(
         if local_held is None:
             local_held = prior.get("local_held")
         local_held = localheld.bounded_health(local_held)
+        if attention_items is None:
+            attention_items = prior.get("attention")
+        attention_items = attention.bounded(attention_items)
         # First, so a standing room collision cannot mask it.
         if ok and localheld.store_faulted(local_held):
             ok, reason = False, "local_held_store_fault"
@@ -1984,6 +2129,9 @@ def write_health(
             "sender_not_homed": sender_not_homed,
             "pmail": pmail_stats,
             "local_held": local_held,
+            # What is stuck and needs an agent or a human; `ok` above stays
+            # a liveness flag (bridgelib/attention.py).
+            "attention": attention_items,
             "quiet": bool(quiet),
             "quiet_streak": 0,
         }
@@ -1995,6 +2143,104 @@ def write_health(
             settings.root,
         )
         return value
+
+
+def committed_channel_messages(git):
+    """Relay paths of the channel messages already committed on this host's
+    branch, or ``None`` when they cannot be listed (publication then compares
+    every message with the worktree copy, as before). One ``ls-tree`` per
+    tick replaces opening every local message to learn it was published."""
+    try:
+        entries = git.ls_tree("HEAD", "channels/")
+    except GitReadError:
+        return None
+    return {
+        entry["path"]
+        for entry in entries
+        if entry["path"] is not None
+        and entry["type"] == "blob"
+        and entry["mode"] == "100644"
+    }
+
+
+def build_attention(settings, logger, snapshot, refusals, prior, read_failures):
+    """This full tick's attention list (bridgelib/attention.py).
+
+    Everything here is recomputed from what the tick saw, so an item leaves
+    the list on the first full tick after its cause is gone. The one carry is
+    for inbound quarantines of a peer this tick could not read.
+    """
+    root = settings.root
+    dead_letters = []
+    try:
+        listed = sorted(decided.names(bounce.dead_letter_dir(settings)))
+    except ConfigError:
+        listed = []
+    for name in listed:
+        if name.endswith(".mail"):
+            dead_letters.append(
+                attention.refused_dead_letter(
+                    name[: -len(".mail")], bounce.dead_letter_dir(settings) / name
+                )
+            )
+    unrelayable = []
+    ids = sorted(logger.unrelayables)
+    retired = destination(root, "bridge", "unrelayable-retired")
+    for mail_id in ids[: attention.MAX_UNRELAYABLE]:
+        unrelayable.append(
+            attention.unrelayable(
+                mail_id,
+                logger.unrelayables[mail_id],
+                destination(root, "archive", mail_id + ".mail"),
+                retired,
+            )
+        )
+    if len(ids) > attention.MAX_UNRELAYABLE:
+        unrelayable.append(
+            attention.unrelayable_overflow(len(ids) - attention.MAX_UNRELAYABLE)
+        )
+    inbound = []
+    for entry in logger.quarantines:
+        host, room, mail_id = entry.get("host"), entry.get("room"), entry.get("id")
+        forensic = None
+        if all(isinstance(value, str) for value in (host, room, mail_id)):
+            forensic = destination(
+                root, "bridge", "quarantine", host, room, mail_id + ".mail"
+            )
+        inbound.append(
+            attention.quarantined_inbound(
+                host, room if room is not None else "?", mail_id,
+                str(entry.get("reason", "unknown")), forensic,
+            )
+        )
+    if read_failures:
+        inbound.extend(
+            entry
+            for entry in attention.bounded(prior.get("attention"))
+            if entry["kind"] == "quarantined_inbound"
+        )
+    collisions = [
+        attention.name_collision(collision, settings.host)
+        for collision in rooms.rooms_health(snapshot).get("collisions", [])
+    ]
+    # Participant mail held for an archived record: the retry records are the
+    # source, so a peer this tick could not read keeps its entries.
+    archived = []
+    waiting = pmail.RetryLedger(root).waiting(
+        set(snapshot.peers), pmail.PARTICIPANT_ARCHIVED
+    )
+    for participant in sorted(waiting):
+        archived.append(
+            attention.archived_participant(
+                participant,
+                waiting[participant],
+                destination(root, pmail.PARTICIPANTS_ARCHIVE_DIR, participant),
+                destination(root, pmail.PARTICIPANTS_DIR, participant),
+            )
+        )
+    return attention.assemble(
+        [refusals, dead_letters, unrelayable, inbound, archived, collisions]
+    )
 
 
 def interval_of(settings):
@@ -2075,6 +2321,7 @@ def write_busy_health(settings):
             "sender_not_homed": bounded_hold_summary(prior.get("sender_not_homed", {})),
             "pmail": pmail.bounded_health(prior.get("pmail")),
             "local_held": local_held,
+            "attention": attention.bounded(prior.get("attention")),
             "quiet": prior.get("quiet", False),
             "quiet_streak": prior.get("quiet_streak", 0),
         }
@@ -2098,6 +2345,7 @@ def write_quiet_health(settings):
         value["ts"] = utc_now()
         value["pmail"] = pmail.bounded_health(value.get("pmail"))
         value["local_held"] = localheld.bounded_health(value.get("local_held"))
+        value["attention"] = attention.bounded(value.get("attention"))
         # A quiet tick is a tick: it re-states the capabilities, so a health
         # file last written by an older bridge never vouches for this one.
         # An unknown interval is omitted, so the prior tick's value must not
@@ -2167,6 +2415,7 @@ def write_fatal_health(root, reason):
             "sender_not_homed": bounded_hold_summary(prior.get("sender_not_homed", {})),
             "pmail": pmail.bounded_health(prior.get("pmail")),
             "local_held": localheld.bounded_health(prior.get("local_held")),
+            "attention": attention.bounded(prior.get("attention")),
             "quiet": False,
             "quiet_streak": 0,
         }
@@ -2291,8 +2540,9 @@ def execute(check_config=False):
             settings, git, prior_health
         )
         if quiet:
-            health = write_quiet_health(settings)
-            logger.emit("quiet", streak=health["quiet_streak"])
+            # No log line: health.json's ts and quiet_streak are the
+            # heartbeat, and a line per quiet tick was ~4,000 a day per host.
+            write_quiet_health(settings)
             return 0
         if fence_present(settings):
             logger.emit("fenced", root=str(settings.root))
@@ -2313,7 +2563,6 @@ def execute(check_config=False):
         checkpoint("after-fetch")
         oids = pin_remote_oids(git)
         post_rooms = run_post_rooms(settings)
-        denied_names = config.channels.deny if config.channels is not None else ()
         # SPEC-v2 §Unpublished senders keys on the peer's own publication
         # history, not on the registry branch: snapshot.v2_peers is that set
         # and binding_verdict consumes it directly. §Registry's "none ever =>
@@ -2325,7 +2574,6 @@ def execute(check_config=False):
             oids,
             post_rooms,
             logger,
-            denied_names=denied_names,
         )
         ignored_branches(config, git, logger, snapshot.peers)
         # Step 8's archive check lives inside import_channels, which owns it
@@ -2393,7 +2641,10 @@ def execute(check_config=False):
         derive_published_and_tidy(
             settings, config, git, registered_rooms, logger, fetched_ref, tidy=True
         )
-        prune_outbox(settings, config, git, logger, snapshot=snapshot)
+        refusals = []
+        prune_outbox(
+            settings, config, git, logger, snapshot=snapshot, refusals=refusals
+        )
         typed = []
         # r6.1: the local-held stamp runs inside selection, per letter,
         # before that letter can be routed.
@@ -2426,7 +2677,12 @@ def execute(check_config=False):
         if fence_present(settings):
             raise TickError("fenced")
         published = channels.publish_channels(
-            settings, config.channels, snapshot, logger, deadline
+            settings,
+            config.channels,
+            snapshot,
+            logger,
+            deadline,
+            tracked=committed_channel_messages(git),
         )
         imported.published += published.published
         imported.unpublishable += published.unpublishable
@@ -2467,6 +2723,9 @@ def execute(check_config=False):
             ),
             pmail_stats=pmail_health,
             local_held=local_guard.health(),
+            attention_items=build_attention(
+                settings, logger, snapshot, refusals, prior_health, git.read_failures
+            ),
             quiet=False,
         )
         # A tick that skipped a peer's read did not see every condition.
@@ -2718,7 +2977,7 @@ def seed_local_holds(manifest_arg, accept_lost_records=False):
     """
     settings = load_settings()
     load_config(settings)
-    logger = Logger(settings.root)
+    logger = Logger(settings.root, echo=True)
     try:
         data = open_regular(Path(manifest_arg), localheld.MANIFEST_MAX_BYTES)
     except (FileNotFoundError, ConfigError, OSError) as error:
@@ -2898,7 +3157,7 @@ def init_held_sentinel(attempts=INIT_SENTINEL_LOCK_ATTEMPTS, interval=1.0):
     """
     settings = load_settings()
     load_config(settings)
-    logger = Logger(settings.root)
+    logger = Logger(settings.root, echo=True)
     lock_descriptor = None
     for attempt in range(attempts):
         lock_descriptor = acquire_tick_lock(settings)

@@ -135,6 +135,10 @@ def quiet_candidate(settings, git, prior_health):
     fingerprint, heads = probe(settings, git)
     if fingerprint is None or prior_health.get("ok") is not True:
         return fingerprint, heads, False
+    if "attention" not in prior_health:
+        # Written by a bridge that predates the attention list: run one full
+        # tick so an upgrade acts on standing conditions (a bounce) at once.
+        return fingerprint, heads, False
     streak = prior_health.get("quiet_streak", 0)
     if not isinstance(streak, int) or streak >= 3:
         return fingerprint, heads, False

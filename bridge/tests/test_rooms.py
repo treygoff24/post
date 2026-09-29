@@ -675,8 +675,12 @@ class RoomsTest(unittest.TestCase):
         )
         expected = self.local.root / "remote" / "h1" / "new-room"
         self.assertEqual(Path(result["new-room"]).resolve(), expected.resolve())
-        self.assertTrue((self.local.root / "new-room" / "inbox").is_dir())
-        self.assertTrue((self.local.root / "new-room" / "read").is_dir())
+        # <root>/<room>/{inbox,read} are post's own mailbox, created by
+        # `post send` on first use. The bridge used to create them for every
+        # peer room on every tick, leaving empty directories behind after a
+        # rename or an owner release (post-6ep).
+        self.assertFalse((self.local.root / "new-room" / "inbox").exists())
+        self.assertFalse((self.local.root / "new-room" / "read").exists())
         self.assertEqual(json.loads(rules_path.read_text()), {"blocked": []})
         registered_before = len(self.logger.actions("room_registered"))
         rooms.ensure_placeholders(
@@ -690,6 +694,9 @@ class RoomsTest(unittest.TestCase):
         self.assertEqual(
             len(self.logger.actions("room_registered")), registered_before
         )
+        # The registered branch used to re-create them on every later tick.
+        self.assertFalse((self.local.root / "new-room" / "inbox").exists())
+        self.assertFalse((self.local.root / "new-room" / "read").exists())
         self.assertEqual(len(self.logger.actions("room_retired")), 2)
 
         conflict_path = self.local.base / "rooms" / "conflict"

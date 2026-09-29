@@ -747,6 +747,10 @@ class Guard:
         )
         self.expected = self.index | manifested
         self.holds = 0
+        # Whether the last held() call returned True because a record
+        # verified (not because of a fault): the only hold selection may
+        # remember as decided (bridgelib/decided.py).
+        self.last_hold_valid = False
         # Ids of valid holds this tick; the floor counts them even when their
         # index line could not be appended.
         self.seen = set()
@@ -819,7 +823,18 @@ class Guard:
     def _is_contested(self, to):
         return self.contested is not None and fold_name(to) in self.contested
 
+    def carry_decided(self, mail_id):
+        """Count a hold selection skipped because its decided marker is still
+        trusted. The letter is held either way; this keeps ``holds`` and the
+        floor's ``seen`` set equal to what a full re-verification would have
+        counted. While a store fault stands nothing counts, as in held()."""
+        if self.store_faults():
+            return
+        self.holds += 1
+        self.seen.add(mail_id)
+
     def held(self, mail_id, data, envelope):
+        self.last_hold_valid = False
         if self.store_faults():
             # Fail closed: without its store the guard cannot know which
             # letters were delivered locally. Stamp and append nothing.
@@ -871,6 +886,7 @@ class Guard:
             self.logger.emit("local_held_index_repaired", appended=appended)
 
     def _valid(self, mail_id):
+        self.last_hold_valid = True
         self.holds += 1
         self.seen.add(mail_id)
         if mail_id not in self.index:

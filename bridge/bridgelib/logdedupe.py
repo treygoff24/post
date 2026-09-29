@@ -29,6 +29,8 @@ CONDITION_ACTIONS = frozenset(
         "outbound_ignored",
         "outbound_waiting",
         "route_contested",
+        "room_retired",
+        "bounce_failed",
         "receipt_ignored",
         "unknown_envelope_keys",
     }
