@@ -246,7 +246,7 @@ post identity voice add --body-file <f>
 post identity voice withdraw [--lineage <name>]
 post identity terms set --body-file <f>
 post chat <channel> --join [--description TEXT]
-post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> --send [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --limit N] [--max-bytes N] [--framing auto|full|compact]
 post chat <channel> --message <msg-id> [--offset B] [--length B] --max-bytes N
 post chat <channel> --ack <msg-id>
@@ -618,17 +618,19 @@ All body-bearing reads accept `--framing auto|full|compact`. The default `auto`
 is quiet; explicit `full` and `compact` request recurring banners. JSON keeps
 source/authority metadata and omits policy prose in auto mode.
 
-Crossed-send bounce (v0.4, narrowed in v0.7): on channel `--send`, unseen
-messages addressed to the sending room (an `@mention` of it, a reply to
-something it wrote, or any message from the owner room) refuse the send:
-exit nonzero with a structured `crossed_send` error previewing the targeted
-messages (first line each, capped at five) so the sender can revise. Unseen
-messages that concern nobody in particular warn with a count on stderr and
-deliver. `--anyway` delivers regardless, and every decision is appended to
-`<root>/crossed-send.jsonl`, including how long after a refusal an `--anyway`
-followed. Humans see incoming while typing; agents get the equivalent at the
-send point. Direct mail is unaffected. A TOCTOU window between check and
-append is accepted; corrupting the store is not.
+Crossed sends (v0.4; the refusal was removed in this wave): a channel
+`--send` always delivers. When unseen messages from others crossed it, the
+receipt carries a `crossed` block (`unseen`, `addressed_to_you`, and up to ten
+messages, newest last): the whole body for a message addressed to the sending
+room (an `@mention` of it, a reply to something it wrote, or any message from
+the owner room) and a 300-character preview otherwise. Text mode prints them
+after the sent line. The crossed messages stay unread, and every crossing is
+appended to `<root>/crossed-send.jsonl` (outcome `delivered_crossed`). The old
+`crossed_send` refusal and its `--anyway` flag went away because agents passed
+`--anyway` pre-emptively, so the refusal only cost a retry. Humans see incoming
+while typing; agents get the equivalent at the send point. Direct mail is
+unaffected. A TOCTOU window between check and append is accepted; corrupting
+the store is not.
 
 Mentions / threads / presence / receipts (v0.4): `@<room>` in a channel body
 (word-boundary match against registered rooms) stamps `mentions` and makes
