@@ -13051,9 +13051,15 @@ fn a_corrupt_canonical_entry_is_reported_as_corrupt_not_as_a_visibility_miss() {
     let output = sandbox.run_in(&["read", id], None, &alpha);
     assert!(!output.status.success());
     let error: ErrorEnvelope = from_stderr(&output);
-    assert_ne!(
-        error.error.code, "not_found",
-        "a corrupt canonical entry must not be reported as a miss: {}",
+    assert_eq!(
+        error.error.code, "config_invalid",
+        "a corrupt canonical entry must be reported as corrupt, not a miss: {}",
+        error.error.message
+    );
+    assert!(
+        error.error.message.contains(&format!("{id}.mail"))
+            && error.error.message.contains("separator"),
+        "the error must name the corrupt file and its missing separator: {}",
         error.error.message
     );
     assert!(

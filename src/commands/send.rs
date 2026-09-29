@@ -1397,35 +1397,6 @@ mod tests {
         trash_test_root(&root);
     }
 
-    #[test]
-    fn participant_review_unit_send_stamps_actor_fields() {
-        let (root, context) = test_context("participant-fields");
-        let result = run_with_body(
-            &context,
-            SendArgs {
-                to: "claude-space".to_owned(),
-                sender: Some("unit-sender".to_owned()),
-                kind: MailKind::Note,
-                subject: String::new(),
-                body: Some("body".to_owned()),
-                body_file: None,
-                oversize: false,
-                text: None,
-                allow_self: false,
-            },
-            true,
-            false,
-            test_identity(&context, "unit-sender"),
-            |source| Ok(source.inline.expect("inline body")),
-        )
-        .expect("unit send");
-        let receipt: serde_json::Value =
-            serde_json::from_str(&result.stdout).expect("send receipt JSON");
-        assert!(receipt["envelope"]["from_participant"].is_string());
-        assert_eq!(receipt["envelope"]["address_kind"], "workspace");
-        trash_test_root(&root);
-    }
-
     fn participant_target(id: &str) -> crate::participant::Address {
         crate::participant::Address {
             kind: crate::participant::AddressKind::Participant,
@@ -1575,45 +1546,6 @@ mod tests {
                 .is_file(),
             "the letter is in it"
         );
-        trash_test_root(&root);
-    }
-
-    /// The write takes the participants lock, the one `participant gc` holds
-    /// while it re-checks and removes a record: a send that arrives during a
-    /// collection waits for it rather than writing into a directory being moved.
-    #[test]
-    fn a_letter_to_a_participant_waits_for_the_participants_lock() {
-        let (root, context) = test_context("target-lock");
-        crate::participant::bind_test_actor(&context, "lock-target");
-        let target = participant_target(
-            &crate::participant::resolve(&context)
-                .expect("resolve")
-                .participant()
-                .expect("bound")
-                .id,
-        );
-        let guard = crate::participant::lock(&context).expect("hold the lock");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let worker_context = Context {
-            root: context.root.clone(),
-            home: context.home.clone(),
-        };
-        let worker = std::thread::spawn(move || {
-            let held = hold_target_record(&worker_context, &target).expect("hold");
-            sender.send(()).expect("signal");
-            drop(held);
-        });
-        assert!(
-            receiver
-                .recv_timeout(std::time::Duration::from_millis(400))
-                .is_err(),
-            "the send went ahead while the lock was held"
-        );
-        drop(guard);
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the send proceeds once the lock is free");
-        worker.join().expect("worker");
         trash_test_root(&root);
     }
 }

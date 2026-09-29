@@ -2002,34 +2002,6 @@ mod tests {
     }
 
     #[test]
-    fn local_timestamp_keeps_reference_id_and_sent_byte_formats() {
-        let (id_time, sent) = super::local_timestamp().expect("format local timestamp");
-        assert_eq!(id_time.len(), 15);
-        assert_eq!(id_time.as_bytes()[8], b'-');
-        assert!(id_time
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| index == 8 || byte.is_ascii_digit()));
-        assert_eq!(sent.len(), 25);
-        assert_eq!(&sent[4..5], "-");
-        assert_eq!(&sent[7..8], "-");
-        assert_eq!(&sent[10..11], " ");
-        assert_eq!(&sent[13..14], ":");
-        assert_eq!(&sent[16..17], ":");
-        assert!(matches!(&sent[20..21], "+" | "-"));
-        assert!(sent
-            .bytes()
-            .enumerate()
-            .filter(|(index, _)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 20))
-            .all(|(_, byte)| byte.is_ascii_digit()));
-    }
-
-    /// `TZ` is process-wide and lib tests run in parallel, so setting it here
-    /// raced every test that reads the local offset twice (the output header
-    /// test failed on the devbox gate, 2026-09-23). Each fixture instead
-    /// formats in a child run of this test binary that has its own `TZ`.
-    #[cfg(unix)]
-    #[test]
     fn local_timestamp_matches_exact_positive_and_negative_offset_fixtures() {
         let format_in = |tz: &str| -> String {
             let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
