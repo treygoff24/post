@@ -113,10 +113,12 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   it is admitted through the fence and refused without a matching
   generation.
 - The same read-only forms remain available without a participant binding and
-  never mint or initialize participant state. When a generic unbound notice is
-  emitted, it goes to stderr. `post participant show` carries its own unbound
-  payload; `post version` bypasses participant resolution. `post watch
-  --snapshot` stdout remains NDJSON or empty, never prose.
+  never mint or initialize participant state. An unbound session gets an
+  explicit answer on stdout (see "Identity states"); the human line on stderr
+  is text mode only and never appears under `--json`. `post participant show`
+  carries its own unbound payload; `post version` bypasses participant
+  resolution. `post watch --snapshot` stdout remains NDJSON or empty, never
+  prose except the text-mode unbound line.
 - Consuming reads, exact `--ack` forms, `catchup`, long-running `watch`, and
   every send or state change are admitted as writers and are refused without a
   matching generation. Admitted read-only forms create no root/room directory,
@@ -813,7 +815,8 @@ build from a tree with uncommitted tracked changes.
   state, or cursor locks, and never creates a room's `inbox/` or `read/`
   (they appear with the room's first mail, so their absence is neither
   reported nor repaired). Expired participants are one info check,
-  `participants.stale`, with a count and a pointer to `post participant gc`.
+  `participants.stale`, with a count, the delete and archive counts `post
+  participant gc` would act on, and a fix naming its dry run and `--apply`.
   Each item in `bridge/health.json`'s `attention` list is a warning
   `bridge.attention.<kind>[.<id>]` carrying the bridge's own fix. On a bridged
   host (`bridge/config.json` exists) a health file that is missing,
@@ -1026,6 +1029,68 @@ build from a tree with uncommitted tracked changes.
   access after its lease expires. Mail frozen to an abandoned session during
   its remaining lease is not reassigned at expiry; only later sends use the new
   active set. Participant-targeted mail remains durable regardless of state.
+
+## Identity states (amendment, 2026-09-28)
+
+- A session is bound, unbound, or claims a record that does not exist. These
+  are three different answers, and no command guesses a room from the working
+  directory for any of them.
+- **Missing claim.** An explicit claim (`POST_PARTICIPANT`, or a harness
+  session whose by-session index names a record that is gone) that resolves to
+  no record is the error `participant_missing`, exit 65, never "unbound" and
+  never an empty inbox. `details` carries `id`, `input` and `exact_fix`
+  (`unset POST_PARTICIPANT && post participant bind` when the session has a
+  harness key, else `post participant bind --new`; `post participant bind` for a
+  dangling session index). Every command that reads or writes as a participant
+  fails with it. The commands that diagnose or repair identity (`participant
+  show`, `who`, `doctor`, and the read-only listings) exit 0 and carry it as
+  fields instead: `bound: false` and `participant_missing: {claim=
+  POST_PARTICIPANT|session-index, id?, message, suggested_fix, exact_fix?}`.
+  `who` and `doctor` also report their `participant.status` as `missing` with
+  the repair in `fix`; doctor's status, count and exit code are unchanged (a
+  missing claim is a diagnosis, not a store fault), and `doctor --brief` names
+  it on its one line.
+- **Unbound reader.** With no claim at all (no `POST_PARTICIPANT`, and a harness
+  key with no record or no key), readers exit 0 with an explicit marker on
+  stdout. Readers that would otherwise guess a room (`chat` without a send or
+  join, `search`, `read --peek`, `profile` without a target) print JSON
+  `{"ok":true,"participant":null,"bound":false,"hint":"..."}` or one line of
+  text. Listings (`inbox`, `channels`, `who`, `doctor`, `rooms`, `owner`,
+  `participant list`, `schema`) keep their own shape and add `bound: false` and
+  `hint` (with `participant: null` unless they report a participant object of
+  their own). `watch --snapshot` with no `--room` prints one NDJSON line
+  `{"event":"unbound","participant":null,"bound":false,"hint":"..."}` (text
+  mode: the hint as prose). An explicit `--room` on `inbox` and `watch
+  --snapshot` still runs.
+- **Lazy bind.** A write (`send`, `chat --send`, `chat --join`, a consuming
+  `read`, `catchup`, `inbox --adopt`) run with a harness conversation key and no
+  record binds the session first, exactly as `participant bind --harness <h>
+  --key <key>` would (same deterministic id), then proceeds. Its JSON receipt
+  carries `bound_now: {id, workspace}` and a text receipt ends with `post:
+  bound this session as participant <id>`. Without a key the write fails
+  `no_participant` with the bind command in its fix.
+- **`participant show`.** `status` is `bound` (a record answers), `unbound` (no
+  claim; `bound: false`, `fix`), `missing` (as above, with `participant_error`
+  and `participant_missing`), or `archived` (`participant show --harness <h>
+  --key <key>` only: `participant gc` moved the record aside, and `post
+  participant bind` restores it).
+- **Ephemeral records.** A `participant bind --new` record carries `lease_hours:
+  1` and `"ephemeral": true` (absent on every other record), so it ages out
+  within the hour and `participant gc` collects it after 24 hours of idleness
+  instead of 7 days.
+- **`participant gc`** is a dry run unless `--apply`, from one plan, so the dry
+  run and the apply list the same ids. Output: `{"ok":true,"applied":bool,
+  "deleted":[ids],"archived":[ids],"kept":{reason:count}}`. Tier 1 deletes a
+  record that is not active, was last seen more than 7 days ago (24 hours when
+  ephemeral), holds only scaffolding, and that nothing names; a tombstone line
+  in `participants/archived.jsonl` keeps the id occupied for its key. Tier 2
+  moves a record last seen more than 30 days ago that has state but no unread,
+  pending or held mail to `participants-archive/<id>/`; `bind` restores it.
+  Never collected: an active lease, a fresh watch heartbeat, a lineage's holder,
+  a doorbell subscription, an in-flight outbound sender, or anyone with unread,
+  pending or held mail (frozen unread mail is retained, never rerouted).
+  `post doctor`'s `participants.stale` quotes the same plan's delete and archive
+  counts and names `post participant gc` (dry run) and `--apply`.
 
 ## Lineage voice withdrawal (amendment, 2026-09-16)
 

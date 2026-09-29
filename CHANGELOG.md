@@ -58,6 +58,25 @@
   only the maps keyed by data, and the schema gained the `framing`, send
   `envelope`, doctor participant, and participant record fields it found
   missing.
+- Identity states (2026-09-28). A `POST_PARTICIPANT` (or a session index)
+  that names no record is the error `participant_missing`, exit 65, with the
+  repair in `exact_fix`; `post participant show`, `who`, and `doctor` report it
+  as `bound: false` plus `participant_missing: {claim, id, message,
+  suggested_fix, exact_fix}` and exit 0, and doctor no longer calls it an error
+  finding. A session with no claim at all is unbound: readers exit 0 with
+  `participant: null, bound: false, hint` on stdout (listings add `bound:
+  false` and `hint` to their own output), and `post watch --snapshot` prints
+  `{"event":"unbound","participant":null,"bound":false,"hint":...}` instead of
+  guessing a room from the working directory. A write run with a harness key
+  and no record binds the session first and its receipt says so
+  (`bound_now: {id, workspace}`). `post participant show` answers `bound`,
+  `unbound`, `missing`, or `archived`. `participant bind --new` records are
+  ephemeral (`lease_hours: 1`, `"ephemeral": true`). `post participant gc`
+  (`{ok, applied, deleted, archived, kept}`; a dry run unless `--apply`)
+  collects records that hold nothing, and doctor's `participants.stale` line
+  quotes the same plan and names its dry run and `--apply`. `post schema` and
+  the contract document all of these shapes, and a live test keeps the schema
+  naming every field they print.
 - Bridge v2 channel sync is on by default (post-xiy; Trey ruling
   2026-09-24). A `bridge/config.json` with no `channels` key now means
   `{"mode": "all"}`: every channel publishes and imports between hosts

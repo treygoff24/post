@@ -37,13 +37,21 @@ pub(super) struct MissingReport {
     /// `POST_PARTICIPANT` or `session-index`.
     claim: &'static str,
     id: Option<String>,
-    message: String,
-    suggested_fix: String,
+    pub(super) message: String,
+    pub(super) suggested_fix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     exact_fix: Option<String>,
 }
 
 impl MissingReport {
+    /// The command that repairs the claim, as a `fix` field carries it: the
+    /// exact command when the error names one, else the general bind line.
+    pub(super) fn fix(&self) -> String {
+        self.exact_fix
+            .clone()
+            .unwrap_or_else(|| UNBOUND_FIX.to_owned())
+    }
+
     pub(super) fn from_error(error: &AppError) -> Self {
         let explicit = error
             .details

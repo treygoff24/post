@@ -295,6 +295,77 @@ fn the_schema_declares_the_fields_the_contract_names() {
     }
 }
 
+/// The identity states the wave added, read from live output: every field a
+/// missing claim, an unbound watch, `participant gc`, and a `bind --new` record
+/// print is named in the schema, and the status values `participant show`
+/// answers with are all listed.
+#[test]
+fn the_identity_states_are_documented_and_live() {
+    let sandbox = Sandbox::new();
+    let schema = schema(&sandbox);
+    let participant = shape(&schema, "participant");
+    for word in [
+        "bound",
+        "unbound",
+        "missing",
+        "archived",
+        "ephemeral",
+        "lease_hours",
+        "applied",
+    ] {
+        assert!(names(&participant, word), "participant shape lacks {word}");
+    }
+    let cwd = sandbox.path.clone();
+
+    // A claim that names no record: show, who, doctor.
+    let show = sandbox.run_unbound(&["participant", "show"], &cwd);
+    assert_success(&show);
+    let show: Value = from_stdout(&show);
+    assert_eq!(show["status"], "missing", "fixture: {show}");
+    assert_documented("participant", &participant, &show, "participant show");
+    let gc = sandbox.run_unbound(&["participant", "gc"], &cwd);
+    assert_success(&gc);
+    let gc: Value = from_stdout(&gc);
+    assert!(gc.get("applied").is_some(), "fixture: {gc}");
+    assert_documented("participant", &participant, &gc, "participant gc");
+    let who = sandbox.run_unbound(&["who"], &cwd);
+    let who: Value = from_stdout(&who);
+    assert!(who.get("participant_missing").is_some(), "fixture: {who}");
+    assert_documented("who", &shape(&schema, "who"), &who, "who, claim missing");
+    let doctor = sandbox.run_unbound(&["doctor", "--fix"], &cwd);
+    let doctor: Value = from_stdout(&doctor);
+    assert!(
+        doctor.get("participant_missing").is_some(),
+        "fixture: {doctor}"
+    );
+    assert_documented(
+        "doctor",
+        &shape(&schema, "doctor"),
+        &doctor,
+        "doctor, claim missing",
+    );
+
+    // No claim at all: the unbound snapshot line a hook reads.
+    let snapshot = sandbox.run_without_identity(&["watch", "--snapshot"], &cwd);
+    assert_success(&snapshot);
+    let line: Value = from_stdout(&snapshot);
+    assert_eq!(line["event"], "unbound", "fixture: {line}");
+    assert_documented("watch", &shape(&schema, "watch"), &line, "watch --snapshot");
+
+    // A `bind --new` record is ephemeral with a one-hour lease.
+    let bound = sandbox.run_in_env(&["participant", "bind", "--new", "--json"], None, &cwd, &[]);
+    assert_success(&bound);
+    let bound: Value = from_stdout(&bound);
+    assert_eq!(bound["participant"]["ephemeral"], true, "fixture: {bound}");
+    assert_eq!(bound["participant"]["lease_hours"], 1, "fixture: {bound}");
+    assert_documented(
+        "participant",
+        &participant,
+        &bound,
+        "participant bind --new",
+    );
+}
+
 /// The long options a command's `--help` lists, excluding the global flags.
 fn help_options(help: &str) -> BTreeSet<String> {
     let mut options = BTreeSet::new();

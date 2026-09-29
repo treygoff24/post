@@ -2,7 +2,7 @@ use crate::cli::WhoArgs;
 use crate::command_result::CommandResult;
 use crate::cursor_state::eligibility::MailCounts;
 use crate::cursor_state::ParticipantCursors;
-use crate::error::AppResult;
+use crate::error::{AppResult, ErrorCode};
 use crate::mailbox::Context;
 use crate::output::{
     self, WhoActingParticipant, WhoBridgeHealth, WhoOutput, WhoParticipant, WhoRoom,
@@ -71,9 +71,19 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     }
     legacy_rooms.sort_by(|a, b| a.room.cmp(&b.room));
 
-    let (resolved, resolution_failed) = match crate::participant::resolve(context) {
-        Ok(resolved) => (resolved, false),
-        Err(_) => (Resolved::Unbound, true),
+    // A claim that names no record is not "unbound" and not "no mail": who
+    // reports its participant as `missing` with the fix, and still lists
+    // everyone else. The `bound: false` and `participant_missing` fields
+    // beside it are added by the dispatcher, which resolves the same claim for
+    // every read-only listing.
+    let (resolved, resolution_failed, missing) = match crate::participant::resolve(context) {
+        Ok(resolved) => (resolved, false, None),
+        Err(error) if error.code == ErrorCode::ParticipantMissing => (
+            Resolved::Unbound,
+            true,
+            Some(super::participant::MissingReport::from_error(&error)),
+        ),
+        Err(_) => (Resolved::Unbound, true, None),
     };
     let acting_id = resolved
         .participant()
@@ -101,7 +111,12 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             }
         }
         Resolved::Unbound => WhoActingParticipant {
-            status: "unbound".to_owned(),
+            status: if missing.is_some() {
+                "missing"
+            } else {
+                "unbound"
+            }
+            .to_owned(),
             state: None,
             last_seen: None,
             id: None,
@@ -111,7 +126,10 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             lineage: None,
             unread: BTreeMap::new(),
             pending: BTreeMap::new(),
-            fix: Some("run: post participant bind".to_owned()),
+            fix: Some(match &missing {
+                Some(report) => format!("run: {}", report.fix()),
+                None => "run: post participant bind".to_owned(),
+            }),
         },
     };
     let participant_presence_context = Context {
@@ -159,7 +177,13 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     });
     if args.text {
         let mut rendered = String::new();
-        if acting.status == "unbound" {
+        if let Some(report) = &missing {
+            rendered.push_str(&format!(
+                "participant: missing ({}) Fix: {}\n",
+                output::sanitize_text_header(&report.message),
+                report.suggested_fix
+            ));
+        } else if acting.status == "unbound" {
             rendered.push_str("participant: unbound (run: post participant bind)\n");
         } else {
             rendered.push_str(&format!(
@@ -204,7 +228,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         {
             rendered.push_str(&format!("activity-note: {STALE_DELIVERY_NOTE}\n"));
         }
-        if acting.status != "unbound" || !participants.is_empty() {
+        if !matches!(acting.status.as_str(), "unbound" | "missing") || !participants.is_empty() {
             rendered.push_str(&format!("hint: {LEASE_NOT_ATTENTION_HINT}\n"));
         }
         for entry in &legacy_rooms {

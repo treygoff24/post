@@ -67,7 +67,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "participant",
             "post participant show | post participant bind [--workspace <room>] [--harness <slug> --key <conversation-key> | --new [--harness <slug>]] | post participant touch | post participant end | post participant list | post participant notice [--ack | --claim <pid> | --release <pid>]",
             "JSON",
-            "show/list are read-only; bind is the only participant minting path and refreshes last_seen, preserves an existing lease_hours unless POST_PARTICIPANT_LEASE_HOURS is explicit (new records default to 24), clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen and likewise preserves the recorded lease unless explicitly overridden; end sets ended_at idempotently",
+            "show/list are read-only; bind is the only participant minting path and refreshes last_seen, preserves an existing lease_hours unless POST_PARTICIPANT_LEASE_HOURS is explicit (new records default to 24; a `bind --new` record is ephemeral, with lease_hours 1 and ephemeral true, so it ages out and `participant gc` collects it after 24 hours instead of 7 days), clears ended_at, and commits participant.json before its by-session index under .participants.lock; touch refreshes last_seen and likewise preserves the recorded lease unless explicitly overridden; end sets ended_at idempotently",
         ),
         command(
             "identity",
@@ -186,10 +186,10 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     ];
     let output_shapes = OutputShapes {
         participant: fields(&[
-            "show/bind/touch/end: ok, status=bound|unbound|ended, id?, participant? (the record: version, id, harness, conversation_key_digest, created, last_seen?, lease_hours, workspace?, workspace_path?, lineage?, lineage_since?, ended_at?, ephemeral? for --new records), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
+            "show/bind/touch/end: ok, status=bound|unbound|missing|archived|ended (show answers bound; unbound when no record answers to the session and no claim was made; missing when a claim names a record that does not exist, together with participant_missing, still exit 0; archived when `participant gc` moved the record aside, which `post participant bind` restores; ended after `end`), bound? (show only: false unless a record answers), id?, participant? (the record: version, id, harness, conversation_key_digest, created, last_seen?, lease_hours (24 by default, 1 on a `bind --new` record), workspace?, workspace_path?, lineage?, lineage_since?, ended_at?, ephemeral? (true only on `bind --new` records; absent otherwise)), provenance? (explicit-bootstrap for --new/--key), fix?, participant_error?",
             PARTICIPANT_MISSING,
             "list: ok, participants, count",
-            "gc (post participant gc, a dry run unless --apply): deleted[] (ids removed, each leaving a tombstone line in participants/archived.jsonl), archived[] (ids moved to participants-archive/), kept{reason: count}",
+            "gc (post participant gc, a dry run unless --apply): ok, applied (false on the dry run), deleted[] (ids removed, each leaving a tombstone line in participants/archived.jsonl), archived[] (ids moved to participants-archive/), kept{reason: count; reasons: active, no_last_seen, recent, live_watch, lineage, subscribed, outbound_in_flight, named_by_receipt, pending_mail, unread_mail, unreadable_state, and changed (--apply only: the record changed between the plan and the apply)}; the dry run lists what --apply would do",
             "notice: ok, notice=string|null, busy; plain query is read-only; --claim PID reserves delivery under the registry lock (busy for a live competing owner), --release PID releases only that owner, --ack records delivery; all three flags are fenced writers; dead owner claims are reclaimable",
         ]),
         identity: fields(&[
@@ -215,10 +215,11 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "exit_codes[] (code, meaning)",
             "severity_filter?(warn|error; present only under --severity, which trims the listed checks but not status, count, or ok)",
             "filtered_out? (integer; present only under --severity: findings the filter hid, so count = findings listed in checks + filtered_out)",
-            "participant ({status=bound|unbound, id?, provenance?, workspace?, lineage?})",
+            "participant ({status=bound|unbound|missing, id?, provenance?, workspace?, lineage?, fix? (unbound and missing)})",
             "pending{address:count}",
             "participant_fix (when no participant is bound)",
             "participant_error (when ambient participant resolution failed)",
+            "bound? (false, present only together with participant_missing; the participant's status is then missing, and neither status, count, nor the exit code changes)",
             PARTICIPANT_MISSING,
         ]),
         inbox: fields(&[
@@ -436,6 +437,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (true when the acting participant's cursor state could not be read, so everything reads as unseen)",
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
             "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_host?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (as on mail)",
+            "unbound: event=unbound, participant=null, bound=false, hint (the single line `watch --snapshot` prints when the session has no participant and no --room is named, so a hook reading the stream gets an answer, never a cwd-derived room; text mode prints the hint as prose)",
             "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix), cursor_unusable? (as on mail)",
         ]),
         delivery: fields(&[
@@ -468,7 +470,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ]),
         who: fields(&[
             "ok",
-            "participant (status, state?, last_seen?, id?, harness?, provenance?, workspace?, lineage?, unread{address:count}, pending{address:count}, fix?)",
+            "participant (status=bound|unbound|missing, state?, last_seen?, id?, harness?, provenance?, workspace?, lineage?, unread{address:count}, pending{address:count}, fix?)",
             "participants (id, harness, state, last_seen?, lineage?, workspace?, unread{address:count}, pending{address:count}, live_watch (a fresh `post watch` heartbeat or an armed doorbell subscription), watch_last_seen?, doorbell_armed? (present and true only when the doorbell supervisor has this participant armed))",
             "legacy_rooms (room, live_watch, last_seen?, doorbell_armed? (present and true only when the doorbell supervisor has this room armed))",
             "activity_note? (stale-delivery crash gap: frozen mail is not reassigned)",
@@ -476,6 +478,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "bridge_attention? (integer: how many items bridge/health.json lists under attention; present only when nonzero, and `post doctor` lists each with its fix)",
             "bridge_health? ({reason, fix}; present only on a bridged host whose bridge/health.json is missing, malformed, or has no attention list, when the absent bridge_attention means nothing; `post doctor` reports it as bridge.health_unreadable)",
             "doorbell? (fresh|stale|unreadable: what live_watch could see of doorbell/health.json; present only when that file exists; stale and unreadable count for nothing)",
+            "bound? (false, present only together with participant_missing; the participant's status is then missing, with the repair in fix)",
             PARTICIPANT_MISSING,
         ]),
     };

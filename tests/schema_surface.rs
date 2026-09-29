@@ -316,6 +316,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "pending",
             "participant_fix",
             "participant_error",
+            "bound",
             "participant_missing",
             "severity_filter",
             "filtered_out"
@@ -594,7 +595,13 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "watch",
         &schema.output_shapes.watch,
-        ["mail:", "unreadable:", "channel_message:", "digest:"]
+        [
+            "mail:",
+            "unreadable:",
+            "channel_message:",
+            "unbound:",
+            "digest:"
+        ]
     );
     assert_shape!(
         "who",
@@ -609,6 +616,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "bridge_attention",
             "bridge_health",
             "doorbell",
+            "bound",
             "participant_missing"
         ]
     );
