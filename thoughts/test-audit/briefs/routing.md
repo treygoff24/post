@@ -1,0 +1,2 @@
+Working directory /home/trey-agent/Code/post-test-audit. Read thoughts/test-audit/sol-review-brief.md and follow it exactly. Your ledger: thoughts/test-audit/ledger-routing.md. Your output file: thoughts/test-audit/review-sol-routing.md. RUN NO TESTS, NO CARGO, NO BUILDS, NO PYTEST, NO NODE.
+Check the claim that the provenance lines under --framing full/compact (read.rs:1024-1037) have no positive test left, and whether eligibility.rs:464-471 and 506-513 are really dead.

@@ -1,0 +1,2 @@
+Working directory /home/trey-agent/Code/post-test-audit. Read thoughts/test-audit/sol-review-brief.md and follow it exactly. Your ledger: thoughts/test-audit/ledger-rooms.md. Your output file: thoughts/test-audit/review-sol-rooms.md. RUN NO TESTS, NO CARGO, NO BUILDS, NO PYTEST, NO NODE.
+Check that the reserved-names F repair derives its table from RESERVED_ROOM_NAMES rather than copying it, if feasible (a copied list is a junk pattern).

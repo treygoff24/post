@@ -1,0 +1,1 @@
+Working directory /home/trey-agent/Code/post-test-audit. Read thoughts/test-audit/sol-review-brief.md and follow it exactly. Your ledger: thoughts/test-audit/ledger-lineage.md. Your output file: thoughts/test-audit/review-sol-lineage.md. RUN NO TESTS, NO CARGO, NO BUILDS, NO PYTEST, NO NODE.
