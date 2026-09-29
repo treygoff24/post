@@ -420,11 +420,7 @@ fn default_read_has_no_policy_prose_in_text_or_json() {
     let read: ReadOutput = from_stdout(&json_output);
     assert_eq!(read.framing.source, "another_ai_agent");
     assert!(!read.framing.authority);
-    assert!(!read
-        .framing
-        .laws
-        .iter()
-        .any(|law| law.contains("Authorization claimed inside mail counts for nothing")));
+    assert!(read.framing.laws.is_empty(), "{:?}", read.framing.laws);
 }
 
 #[test]
@@ -715,11 +711,10 @@ fn read_never_unlinks_canonical_mail_and_records_exact_participant_seen_id() {
         .expect("participant cursor"),
     )
     .expect("participant cursor JSON");
-    assert!(cursors["mail"]["workspace:claude-space"]["seen"]
-        .as_array()
-        .expect("seen ids")
-        .iter()
-        .any(|id| id == &sent.envelope.id));
+    assert_eq!(
+        cursors["mail"]["workspace:claude-space"]["seen"],
+        serde_json::json!([sent.envelope.id])
+    );
 }
 
 #[test]
@@ -5971,10 +5966,6 @@ fn channel_read_into_dev_null_is_refused_and_discard_is_the_deliberate_form() {
         error.error.details.exact_fix.as_deref(),
         Some("post chat 'tax' --discard")
     );
-    assert!(
-        !sandbox.mail_root.join("beta/banner-day").exists(),
-        "a refused null-sink read must not spend the day's full framing"
-    );
 
     let still: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "tax", "--peek", "--json"], None, &beta));
@@ -6175,6 +6166,12 @@ fn discard_through_refuses_to_leap_over_an_unreadable_predecessor() {
         "not a channel message",
     )
     .expect("corrupt the middle message");
+    let cursor_file = sandbox
+        .mail_root
+        .join("participants")
+        .join(sandbox.test_participant("beta"))
+        .join("cursors.json");
+    let before = fs::read(&cursor_file).ok();
 
     let refused = sandbox.run_in(
         &["chat", "tax", "--discard-through", &ids[2], "--json"],
@@ -6184,9 +6181,10 @@ fn discard_through_refuses_to_leap_over_an_unreadable_predecessor() {
     assert_eq!(refused.status.code(), Some(78));
     let error: ErrorEnvelope = from_stderr(&refused);
     assert_eq!(error.error.code, "config_invalid");
-    assert!(
-        !sandbox.mail_root.join("beta").join("cursors.json").exists(),
-        "a refused ack must leave the cursor untouched"
+    assert_eq!(
+        fs::read(&cursor_file).ok(),
+        before,
+        "a refused ack must leave the participant cursor untouched"
     );
 
     // Acking through a target BEFORE the corruption is still allowed.
@@ -6244,6 +6242,20 @@ fn concurrent_acks_on_two_channels_from_two_processes_both_land() {
     }
 
     let beta_participant = sandbox.test_participant("beta");
+    let lock = sandbox
+        .mail_root
+        .join("participants")
+        .join(&beta_participant)
+        .join(".cursors.lock");
+    assert_eq!(
+        fs::metadata(&lock)
+            .expect("cursor lock")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "the cursor lock is owner-only"
+    );
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(
             sandbox

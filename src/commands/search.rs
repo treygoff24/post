@@ -550,7 +550,15 @@ mod tests {
     fn literal_matching_is_unicode_case_insensitive() {
         let pattern = LiteralPattern::new("Ä");
         assert!(pattern.matches("prefix ä suffix"));
-        assert!(!pattern.matches("prefix [a] suffix"));
+        assert!(LiteralPattern::new("ta[x]").matches("TA[X] due"));
+    }
+
+    #[test]
+    fn literal_matching_treats_metacharacters_as_text() {
+        let pattern = LiteralPattern::new("a.c");
+        assert!(pattern.matches("xA.Cx"));
+        assert!(!pattern.matches("abc"));
+        assert!(!LiteralPattern::new("[ab]").matches("a"));
     }
 
     #[test]
@@ -560,5 +568,12 @@ mod tests {
         assert_eq!(rendered.chars().count(), PREVIEW_LIMIT);
         assert!(rendered.ends_with('…'));
         assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn preview_keeps_a_body_of_exactly_the_cap_and_defangs_brackets() {
+        let exact = "x".repeat(PREVIEW_LIMIT);
+        assert_eq!(preview(&exact), exact);
+        assert_eq!(preview("see [a] and ]b["), "see ［a］ and ］b［");
     }
 }

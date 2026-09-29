@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    assert_success, from_stdout, register_alpha_beta, register_room, seed_channel_fixture,
-    seed_fence_store, write_bad_channel, write_channel_message, write_custom_mail, Sandbox,
+    assert_success, from_stdout, register_alpha_beta, seed_channel_fixture, seed_fence_store,
+    write_bad_channel, write_channel_message, write_custom_mail, Sandbox,
 };
 use post::output::{CatchupOutput, CatchupTarget, ChatReadOutput};
 use serde_json::json;
@@ -103,6 +103,27 @@ fn seen_ids(sandbox: &Sandbox, room: &str, channel: &str) -> Vec<String> {
     let state: Value =
         serde_json::from_slice(&fs::read(path).expect("read cursor")).expect("cursor JSON");
     state["channels"][channel]["seen"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn mail_seen_ids(sandbox: &Sandbox, room: &str) -> Vec<String> {
+    let participant = sandbox.test_participant(room);
+    let path = sandbox
+        .mail_root
+        .join("participants")
+        .join(participant)
+        .join("cursors.json");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let state: Value =
+        serde_json::from_slice(&fs::read(path).expect("read cursor")).expect("cursor JSON");
+    state["mail"][format!("workspace:{room}")]["seen"]
         .as_array()
         .into_iter()
         .flatten()
@@ -339,7 +360,6 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
     assert_eq!(bounded_json["count"], 0);
     assert!(bounded_json.get("body").is_none());
     assert_eq!(bounded_json["omitted"]["first_id"], ids[1]);
-    assert!(inbox.join(format!("{}.mail", ids[1])).exists());
 
     let mut offset = 0usize;
     let mut reconstructed = String::new();
@@ -373,7 +393,6 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
         }
     }
     assert_eq!(reconstructed.as_bytes(), body.as_bytes());
-    assert!(inbox.join(format!("{}.mail", ids[1])).exists());
 
     let ack = sandbox.run_as_participant(
         &["read", ids[1], "--room", "beta", "--ack", "--json"],
@@ -381,9 +400,6 @@ fn direct_mail_budget_slices_and_exact_ack_preserve_unrelated_unread_mail() {
         &beta,
     );
     assert_success(&ack);
-    assert!(inbox.join(format!("{}.mail", ids[1])).exists());
-    assert!(inbox.join(format!("{}.mail", ids[0])).exists());
-    assert!(inbox.join(format!("{}.mail", ids[2])).exists());
     let state: Value = serde_json::from_slice(
         &fs::read(
             sandbox
@@ -590,10 +606,7 @@ fn catchup_uses_one_budget_across_targets_and_consumes_only_complete_prefixes() 
     assert_eq!(value["omitted"]["source"], "channel");
     assert_eq!(value["omitted"]["channel"], "mixed");
     assert_eq!(value["omitted"]["first_id"], channel_ids[1]);
-    assert!(sandbox
-        .mail_root
-        .join(format!("beta/inbox/{mail_id}.mail"))
-        .exists());
+    assert_eq!(mail_seen_ids(&sandbox, "beta"), vec![mail_id]);
     assert_eq!(seen_ids(&sandbox, "beta", "mixed"), vec![channel_ids[0]]);
 
     let text = sandbox.run_in(
@@ -677,107 +690,106 @@ fn seed_pretty_catchup_fixture(sandbox: &Sandbox) -> std::path::PathBuf {
     beta
 }
 
+/// The smallest cap that admits the complete output: the output embeds its own
+/// byte limit, so iterate until the output length equals the cap it was run at.
+fn stable_full_size(mut run: impl FnMut(usize) -> std::process::Output) -> usize {
+    let mut cap = 100_000;
+    for _ in 0..8 {
+        let output = run(cap);
+        assert_success(&output);
+        if output.stdout.len() == cap {
+            return cap;
+        }
+        cap = output.stdout.len();
+    }
+    panic!("output length never settled on its own cap");
+}
+
 #[test]
 fn pretty_catchup_admits_mail_and_channel_messages_at_their_exact_full_size() {
-    let roomy = Sandbox::new();
-    let beta = seed_pretty_catchup_fixture(&roomy);
-    let full = roomy.run_in(
-        &[
-            "catchup",
-            "--all",
-            "--max-bytes",
-            "100000",
-            "--json",
-            "--pretty",
-        ],
-        None,
-        &beta,
-    );
-    assert_success(&full);
-    let full_json: Value = from_stdout(&full);
-    assert_eq!(full_json["count"], 2);
-    assert_eq!(full_json["targets"][0]["count"], 1);
-    assert_eq!(full_json["targets"][1]["count"], 1);
+    // Each run gets a fresh fixture because a catchup consumes what it admits.
+    let run = |cap: usize| {
+        let sandbox = Sandbox::new();
+        let beta = seed_pretty_catchup_fixture(&sandbox);
+        sandbox.run_in(
+            &[
+                "catchup",
+                "--all",
+                "--max-bytes",
+                &cap.to_string(),
+                "--json",
+                "--pretty",
+            ],
+            None,
+            &beta,
+        )
+    };
+    let exact = stable_full_size(run);
 
-    let tight = Sandbox::new();
-    let beta = seed_pretty_catchup_fixture(&tight);
-    let cap = full.stdout.len().to_string();
-    let exact = tight.run_in(
-        &[
-            "catchup",
-            "--all",
-            "--max-bytes",
-            &cap,
-            "--json",
-            "--pretty",
-        ],
-        None,
-        &beta,
-    );
-    assert_success(&exact);
-    assert!(exact.stdout.len() <= full.stdout.len());
-    let exact: Value = from_stdout(&exact);
-    assert_eq!(exact["count"], 2);
-    assert_eq!(exact["targets"][0]["count"], 1);
-    assert_eq!(exact["targets"][1]["count"], 1);
-    assert_eq!(exact["has_more"], false);
+    let full = run(exact);
+    assert_success(&full);
+    assert_eq!(full.stdout.len(), exact);
+    let full: Value = from_stdout(&full);
+    assert_eq!(full["count"], 2);
+    assert_eq!(full["targets"][0]["count"], 1);
+    assert_eq!(full["targets"][1]["count"], 1);
+    assert_eq!(full["has_more"], false);
+
+    let short = run(exact - 1);
+    assert_success(&short);
+    assert!(short.stdout.len() < exact);
+    let short: Value = from_stdout(&short);
+    assert!(short["count"].as_u64().expect("count") < 2, "{short}");
+    assert_eq!(short["has_more"], true);
 }
 
 #[test]
 fn budget_caps_json_pretty_and_text_after_utf8_and_escape_encoding() {
-    let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
-    channel_fixture(&sandbox, "formats", "beta");
-    let id = "20990906-120200-000001-eeeee1";
     let body = "ASCII é🙂 quote=\" slash=\\ tabs=\t newline=\n control=\u{1f}".repeat(8);
-    write_channel_message(&sandbox, "formats", id, "alpha", "formats", &body);
-
-    for args in [
-        vec!["chat", "formats", "--peek", "--max-bytes", "2500", "--json"],
-        vec![
-            "chat",
-            "formats",
-            "--peek",
-            "--max-bytes",
-            "3200",
-            "--json",
-            "--pretty",
-        ],
-        vec![
-            "chat",
-            "formats",
-            "--peek",
-            "--max-bytes",
-            "2200",
-            "--framing",
-            "compact",
-        ],
-    ] {
-        let cap = args
-            .iter()
-            .position(|arg| *arg == "--max-bytes")
-            .and_then(|index| args[index + 1].parse::<usize>().ok())
-            .expect("test cap");
-        let output = sandbox.run_in(&args, None, &beta);
-        assert_success(&output);
-        assert!(
-            output.stdout.len() <= cap,
-            "{} bytes exceeded cap {cap}: {}",
-            output.stdout.len(),
-            common::stdout(&output)
-        );
-        if args.contains(&"--json") {
-            let value: Value = from_stdout(&output);
-            assert_eq!(value["count"], 1);
-            assert_eq!(value["messages"][0]["body"], body);
+    let id = "20990906-120200-000001-eeeee1";
+    let seed = || {
+        let sandbox = Sandbox::new();
+        let (_alpha, beta) = register_alpha_beta(&sandbox);
+        channel_fixture(&sandbox, "formats", "beta");
+        write_channel_message(&sandbox, "formats", id, "alpha", "formats", &body);
+        (sandbox, beta)
+    };
+    let modes: [(&str, &[&str]); 3] = [
+        ("json", &["--json"]),
+        ("pretty", &["--json", "--pretty"]),
+        ("text", &["--framing", "compact"]),
+    ];
+    for (mode, flags) in modes {
+        let (sandbox, beta) = seed();
+        let run = |cap: usize| {
+            let cap = cap.to_string();
+            let mut args = vec!["chat", "formats", "--peek", "--max-bytes", cap.as_str()];
+            args.extend_from_slice(flags);
+            sandbox.run_in(&args, None, &beta)
+        };
+        let exact = stable_full_size(&run);
+        let full = run(exact);
+        assert_eq!(full.stdout.len(), exact, "{mode}");
+        let short = run(exact - 1);
+        assert_success(&short);
+        if mode == "text" {
+            let full = common::stdout(&full);
+            assert!(full.contains("ASCII é🙂 quote=\" slash=\\ tabs="), "{full}");
+            let short = common::stdout(&short);
+            assert!(!short.contains("ASCII é🙂"), "{mode}: {short}");
         } else {
-            assert!(common::stdout(&output).contains("ASCII é🙂"));
+            let value: Value = from_stdout(&full);
+            assert_eq!(value["count"], 1, "{mode}");
+            assert_eq!(value["messages"][0]["body"], body, "{mode}");
+            let short: Value = from_stdout(&short);
+            assert_eq!(short["count"], 0, "{mode}: {short}");
+            assert_eq!(short["omitted"]["first_id"], id, "{mode}");
         }
     }
 }
 
 #[test]
-fn auto_text_peeks_and_consuming_reads_never_stamp_banner_day() {
+fn auto_text_peeks_and_consuming_reads_stay_quiet_and_budgeted_consumption_marks_seen() {
     let sandbox = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&sandbox);
     channel_fixture(&sandbox, "banner-budget", "beta");
@@ -796,33 +808,11 @@ fn auto_text_peeks_and_consuming_reads_never_stamp_banner_day() {
     );
     assert_success(&first_peek);
     assert!(!common::stdout(&first_peek).contains("READ THIS FRAMING FIRST"));
-    assert!(
-        !sandbox.mail_root.join("beta/banner-day").exists(),
-        "cursorless budget inspection must not stamp banner-day"
-    );
 
     let ordinary_peek = sandbox.run_in(&["chat", "banner-budget", "--peek"], None, &beta);
     assert_success(&ordinary_peek);
     assert!(!common::stdout(&ordinary_peek).contains("READ THIS FRAMING FIRST"));
-    assert!(
-        !sandbox.mail_root.join("beta/banner-day").exists(),
-        "unbudgeted peeks are read-only too"
-    );
-    let today = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs()
-        / 86_400;
-    fs::create_dir_all(sandbox.mail_root.join("beta")).expect("seed beta state directory");
-    fs::write(sandbox.mail_root.join("beta/banner-day"), today.to_string())
-        .expect("seed same-day banner receipt");
-    let same_day_budget = sandbox.run_in(
-        &["chat", "banner-budget", "--peek", "--max-bytes", "3000"],
-        None,
-        &beta,
-    );
-    assert_success(&same_day_budget);
-    assert!(!common::stdout(&same_day_budget).contains("READ THIS FRAMING FIRST"));
+    assert!(seen_ids(&sandbox, "beta", "banner-budget").is_empty());
 
     let consuming = Sandbox::new();
     let (_alpha, beta) = register_alpha_beta(&consuming);
@@ -836,33 +826,20 @@ fn auto_text_peeks_and_consuming_reads_never_stamp_banner_day() {
     );
     assert_success(&read);
     assert!(!common::stdout(&read).contains("READ THIS FRAMING FIRST"));
-    assert!(!consuming.mail_root.join("beta/banner-day").exists());
     assert_eq!(seen_ids(&consuming, "beta", "banner-consume"), vec![id]);
 }
 
 #[test]
-fn fenced_auto_text_stays_quiet_and_preserves_old_stamp() {
+fn fenced_auto_text_stays_quiet_and_writes_nothing() {
     let sandbox = Sandbox::new_unseeded();
     seed_fence_store(&sandbox, r#"{"state":"fenced","generation":7}"#);
     seed_channel_fixture(&sandbox);
-    let room = sandbox.mail_root.join("dest");
-    fs::create_dir_all(&room).expect("fenced room state");
-    let today = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs()
-        / 86_400;
-    let banner = room.join("banner-day");
-    fs::write(&banner, today.to_string()).expect("existing banner stamp");
-    let before = fs::read(&banner).expect("banner before");
-    let modified = fs::metadata(&banner)
-        .expect("banner metadata")
-        .modified()
-        .expect("banner mtime");
+    let before = common::tree_snapshot(&sandbox.mail_root);
 
     let cwd = sandbox.home.join("dest");
     let ordinary = sandbox.run_in(&["chat", "tax", "--peek"], None, &cwd);
     assert_success(&ordinary);
+    assert!(common::stdout(&ordinary).contains("fixture"));
     assert!(!common::stdout(&ordinary).contains("READ THIS FRAMING FIRST"));
     let budgeted = sandbox.run_in(
         &["chat", "tax", "--peek", "--max-bytes", "3000"],
@@ -870,45 +847,9 @@ fn fenced_auto_text_stays_quiet_and_preserves_old_stamp() {
         &cwd,
     );
     assert_success(&budgeted);
+    assert!(common::stdout(&budgeted).contains("fixture"));
     assert!(!common::stdout(&budgeted).contains("READ THIS FRAMING FIRST"));
-    assert_eq!(fs::read(&banner).expect("banner after"), before);
-    assert_eq!(
-        fs::metadata(&banner)
-            .expect("banner metadata after")
-            .modified()
-            .expect("banner mtime after"),
-        modified
-    );
-    assert!(!room.join("cursors.json").exists());
-    assert!(!room.join(".cursors.lock").exists());
-}
-
-#[test]
-fn consuming_banner_state_uses_raw_room_identity_not_sanitized_display() {
-    let sandbox = Sandbox::new();
-    let (_alpha, _beta) = register_alpha_beta(&sandbox);
-    let raw_room = "alpha\u{200e}";
-    let raw_path = sandbox.path.join("raw-alpha");
-    fs::create_dir(&raw_path).expect("raw room workspace");
-    register_room(&sandbox, raw_room, &raw_path);
-    channel_fixture(&sandbox, "identity", raw_room);
-    write_channel_message(
-        &sandbox,
-        "identity",
-        "20990906-120255-000001-eeee23",
-        "beta",
-        "identity",
-        "body",
-    );
-
-    let output = sandbox.run_in(&["chat", "identity"], None, &raw_path);
-    assert_success(&output);
-    assert!(common::stdout(&output).contains("#identity"));
-    assert!(!sandbox.mail_root.join(raw_room).join("banner-day").exists());
-    assert!(
-        !sandbox.mail_root.join("alpha/banner-day").exists(),
-        "display sanitization must not redirect banner state to another room"
-    );
+    assert_eq!(common::tree_snapshot(&sandbox.mail_root), before);
 }
 
 #[test]
@@ -1361,7 +1302,7 @@ fn complete_budgeted_direct_read_consumes_after_full_body_output() {
     let value: Value = from_stdout(&output);
     assert_eq!(value["count"], 1);
     assert_eq!(value["body"], "complete");
-    assert!(inbox.join(format!("{id}.mail")).exists());
+    assert_eq!(mail_seen_ids(&sandbox, "beta"), vec![id]);
 }
 
 #[test]
@@ -1454,7 +1395,6 @@ fn failed_stdout_applies_no_budgeted_read_or_exact_ack_delta() {
         sandbox.run_in_broken_stdout(&["chat", "flush", "--max-bytes", "2000"], &beta);
     assert_stdout_io_failure(&failed_text);
     assert!(seen_ids(&sandbox, "beta", "flush").is_empty());
-    assert!(!sandbox.mail_root.join("beta/banner-day").exists());
     let failed_read =
         sandbox.run_in_broken_stdout(&["chat", "flush", "--max-bytes", "2000", "--json"], &beta);
     assert_stdout_io_failure(&failed_read);
@@ -1501,13 +1441,13 @@ fn failed_stdout_applies_no_budgeted_read_or_exact_ack_delta() {
         &beta,
     );
     assert_stdout_io_failure(&failed_mail_read);
-    assert!(inbox.join(format!("{mail_id}.mail")).exists());
+    assert!(mail_seen_ids(&sandbox, "beta").is_empty());
     let failed_mail_ack = sandbox.run_in_broken_stdout(
         &["read", mail_id, "--room", "beta", "--ack", "--json"],
         &beta,
     );
     assert_stdout_io_failure(&failed_mail_ack);
-    assert!(inbox.join(format!("{mail_id}.mail")).exists());
+    assert!(mail_seen_ids(&sandbox, "beta").is_empty());
     assert_eq!(
         fs::read(sandbox.read_only_stdout_path()).expect("stdout sentinel"),
         Sandbox::READ_ONLY_STDOUT_SENTINEL

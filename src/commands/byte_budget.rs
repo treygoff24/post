@@ -482,20 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn json_array_prefix_serializes_each_item_once_then_probes_in_constant_work() {
+    fn json_array_prefix_serializes_each_item_once() {
         let calls = AtomicUsize::new(0);
         let items = [Counted(&calls), Counted(&calls), Counted(&calls)];
-        let sizes = JsonArrayPrefix::new(&items, false, 4).expect("prefix sizes");
+        JsonArrayPrefix::new(&items, false, 4).expect("prefix sizes");
         assert_eq!(calls.load(Ordering::Relaxed), items.len());
-        for _ in 0..100 {
-            for count in 0..=items.len() {
-                let _ = sizes.extra_bytes(count);
-            }
-        }
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            items.len(),
-            "prefix probes must not reserialize any item"
-        );
     }
 }

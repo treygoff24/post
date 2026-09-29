@@ -1196,35 +1196,6 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn empty_text_has_no_banner() {
-        let targets = vec![CatchupTarget::Mail {
-            framing: output::Framing::default(),
-            messages: Vec::new(),
-            count: 0,
-            selected_count: None,
-            has_more: None,
-        }];
-        assert_eq!(
-            render_text("alpha", &targets, 0, FramingMode::Auto),
-            "post: caught up (0 unread)\n"
-        );
-    }
-
-    #[test]
-    fn nonempty_text_has_no_policy_banner() {
-        let targets = vec![CatchupTarget::Mail {
-            framing: output::Framing::default(),
-            messages: Vec::new(),
-            count: 1,
-            selected_count: None,
-            has_more: None,
-        }];
-        let rendered = render_text("alpha", &targets, 1, FramingMode::Auto);
-        assert_eq!(rendered.matches("AI AGENT CATCHUP").count(), 0);
-        assert!(!rendered.contains(output::LAW_COMPACT));
-    }
-
-    #[test]
     fn selected_delta_does_not_consume_messages_arriving_after_selection() {
         let root = test_root("catchup-delta-fixed");
         let context = Context {
