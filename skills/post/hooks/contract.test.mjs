@@ -302,6 +302,8 @@ async function runMail(adapter, post = {}) {
       [`${adapter.prefix}_BIN`]: POST_STUB,
       [`${adapter.prefix}_STATE_DIR`]: run.state,
       [`${adapter.prefix}_THROTTLE_MS`]: "0",
+      // Keeps the Claude adapter's doorbell turn marks out of the live mail root.
+      POST_MAIL_ROOT: path.join(run.dir, "mail"),
     },
   });
   assert.equal(result.status, 0, `${adapter.name} adapter must exit 0: ${result.stderr}`);
