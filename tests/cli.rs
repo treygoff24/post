@@ -3352,30 +3352,35 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
     assert!(error.error.suggested_fix.contains("`post rooms`"));
 }
 
-/// Identity is a directory, so the error has to name the directory. Naming only
-/// the inferred basename told the caller the one thing they already knew.
+/// A reader with no participant gets the unbound marker on stdout: it is never
+/// given a room guessed from its working directory, and nothing is created.
 #[test]
 fn unregistered_cwd_read_only_chat_reports_unbound_without_creating_identity() {
     let sandbox = Sandbox::new();
     let before = snapshot_tree(&sandbox.mail_root);
     let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
-    assert_eq!(output.status.code(), Some(66));
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "not_found");
-    assert!(error
-        .error
-        .message
-        .contains("channel 'some-channel' does not exist"));
-    assert!(error
-        .error
-        .suggested_fix
-        .contains("post chat 'some-channel' --join"));
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("not bound to a post participant"), "{text}");
+    assert!(text.contains("post participant bind"), "{text}");
+    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
+
+    let json =
+        sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &sandbox.path);
+    assert_success(&json);
+    let marker: serde_json::Value = from_stdout(&json);
+    assert_eq!(marker["ok"], true);
+    assert!(marker["participant"].is_null());
+    assert_eq!(marker["bound"], false);
+    assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
     assert_eq!(snapshot_tree(&sandbox.mail_root), before);
 }
 
-/// A cwd carrying shell metacharacters is a command injection into `exact_fix`
-/// unless every interpolation is quoted — the rule this repo already pins for
-/// channel names in crossed_send_exact_fix_shell_quotes_channel_metacharacters.
+/// A cwd carrying shell metacharacters must reach neither the store nor any
+/// output: the unbound marker names no directory, so there is no `exact_fix`
+/// to inject into (the rule this repo pins for channel names in
+/// crossed_send_exact_fix_shell_quotes_channel_metacharacters).
 #[test]
 fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
     for dirname in ["has space", "has;touch INJECTED", "has'quote"] {
@@ -3384,10 +3389,10 @@ fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
         fs::create_dir_all(&hostile).expect("create hostile cwd");
         let before = snapshot_tree(&sandbox.mail_root);
         let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
-        assert_eq!(output.status.code(), Some(66));
-        let error: ErrorEnvelope = from_stderr(&output);
-        assert_eq!(error.error.code, "not_found");
-        assert!(error.error.details.exact_fix.is_none());
+        assert_success(&output);
+        let text = stdout(&output);
+        assert!(!text.contains(dirname), "{text}");
+        assert!(!text.contains("exact_fix"), "{text}");
         assert_eq!(snapshot_tree(&sandbox.mail_root), before);
         assert!(!hostile.join("INJECTED").exists());
     }

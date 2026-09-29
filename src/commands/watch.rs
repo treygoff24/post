@@ -31,7 +31,6 @@ struct WatchTarget {
     /// everything, the safe direction for a doorbell.
     channel_seen: HashMap<String, BTreeSet<String>>,
     seen: HashSet<PathBuf>,
-    reported_unreadable: HashSet<PathBuf>,
     scan_failing: bool,
     route_pending: bool,
 }
@@ -495,84 +494,39 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         digest,
         reason: reasons,
     } = args;
-    // Target setup can create `<root>/<room>/{inbox,read}` by name (the
-    // legacy branch's `mailbox_dirs`) unless this is a read-only watch. Hold
-    // the shared rename lock through setup only: the long-running loop never
-    // creates a room directory (heartbeats are create-new files inside an
-    // existing one), and holding it for the watch's life would block every
-    // rename.
-    let rename_lock = if crate::mailbox::read_only_command() {
-        None
-    } else {
-        Some(context.lock_rename(false)?)
-    };
-    let rooms = context.load_rooms()?;
     let resolved = crate::participant::resolve(context)?;
-    let requested_rooms = if requested_rooms.is_empty() {
-        match &resolved {
-            Resolved::Bound { .. } => Vec::new(),
-            Resolved::Unbound => vec![context.resolved_room(None, &rooms)?],
+    // An unbound session has no addresses, so a watch has nothing to watch for
+    // it, and the working directory never stands in for one. Only a one-shot
+    // `--snapshot` reaches here unbound (a long watch needs a participant, and
+    // the dispatcher says so first); it answers with the marker, unless an
+    // explicit `--room` makes it a command sink for that room.
+    if matches!(resolved, Resolved::Unbound) {
+        if !snapshot {
+            return Err(AppError::no_participant(
+                crate::participant::bind_key_available()?,
+            ));
         }
-    } else {
-        requested_rooms
-            .into_iter()
-            .map(|room| context.resolved_room(Some(room), &rooms))
-            .collect::<AppResult<Vec<_>>>()?
-    };
-    let mut unique_rooms = HashSet::new();
-    let mut targets = Vec::new();
-    if let Resolved::Bound { participant, .. } = &resolved {
-        let mut addresses = super::inbox::visible_addresses(context, participant)?;
-        for room in &requested_rooms {
-            let address = Address {
-                kind: AddressKind::Workspace,
-                name: room.clone(),
-            };
-            if !addresses.contains(&address) {
-                addresses.push(address);
-            }
-        }
-        for address in addresses {
-            if address.kind == AddressKind::Workspace {
-                crate::mailbox::validate_room_name(&address.name).map_err(|reason| {
-                    AppError::invalid_argument(format!(
-                        "room '{}' is invalid: {reason}",
-                        address.name
-                    ))
-                })?;
-            }
-            let room = if address.kind == AddressKind::Workspace {
-                address.name.clone()
-            } else {
-                super::inbox::address_label(&address)
-            };
-            let inbox = crate::cursor_state::routing::inbox_path(context, &address);
-            if !snapshot
-                && crate::mailbox::read_only_command()
-                && !inbox.parent().is_some_and(Path::is_dir)
-            {
-                return Err(AppError::new(
-                    ErrorCode::NotFound,
-                    format!("watch address directory '{}' does not exist", inbox.display()),
-                    "Initialize the participant/workspace store before starting an enrolled long watch.",
-                ));
-            }
-            let dirs = participant_target_dirs(context, participant, &inbox);
-            targets.push(WatchTarget {
-                channel_seen: HashMap::new(),
-                room,
-                inbox,
-                participant: Some((**participant).clone()),
-                address: Some(address),
-                dirs,
-                seen: HashSet::new(),
-                reported_unreadable: HashSet::new(),
-                scan_failing: false,
-                route_pending: !snapshot,
-            });
+        if requested_rooms.is_empty() {
+            return unbound_snapshot_marker(text);
         }
     }
+    // Target setup never creates a room directory (`mailbox_dirs` is a pure
+    // path function), so it needs no rename lock.
+    let rooms = context.load_rooms()?;
+    let requested_rooms = requested_rooms
+        .into_iter()
+        .map(|room| context.resolved_room(Some(room), &rooms))
+        .collect::<AppResult<Vec<_>>>()?;
+    let mut unique_rooms = HashSet::new();
+    let mut targets = Vec::new();
+    let mut follow = None;
+    if let Resolved::Bound { participant, .. } = &resolved {
+        targets = bound_targets(context, participant, &requested_rooms, snapshot)?;
+        follow = Some(Follow::new(participant, requested_rooms.clone()));
+    }
     if matches!(resolved, Resolved::Unbound) {
+        // Only a snapshot with explicit rooms gets here: the command-sink scan
+        // (supervisor, hq) of rooms it names.
         for room in requested_rooms {
             if !unique_rooms.insert(room.clone()) {
                 continue;
@@ -582,27 +536,12 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 // unregistered room means "this directory has no mailbox", so scan
                 // nothing and, critically, create nothing (a machine-wide hook would
                 // otherwise mint a junk mailbox per project directory ever visited).
-                if snapshot {
-                    eprintln!(
+                eprintln!(
                     "post: warning: room {room:?} is not registered; snapshot scans nothing and creates nothing"
                 );
-                    continue;
-                }
-                // A typo'd --room silently watches a fresh empty mailbox forever, so
-                // unlike inbox (whose empty listing is immediately visible) watch warns.
-                eprintln!(
-                    "post: warning: room {room:?} is not registered; watching a new empty mailbox"
-                );
+                continue;
             }
             let (inbox, _) = context.mailbox_dirs(&room)?;
-            let room_dir = context.root.join(&room);
-            if !snapshot && crate::mailbox::read_only_command() && !room_dir.is_dir() {
-                return Err(AppError::new(
-                ErrorCode::NotFound,
-                format!("room directory '{}' does not exist", room_dir.display()),
-                "Enrolled long watch does not create mailboxes; create or initialize the room directory before watching.",
-            ));
-            }
             let dirs = target_dirs(context, &room, &inbox);
             targets.push(WatchTarget {
                 channel_seen: load_channel_seen(context, &room),
@@ -612,7 +551,6 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 address: None,
                 dirs,
                 seen: HashSet::new(),
-                reported_unreadable: HashSet::new(),
                 scan_failing: false,
                 route_pending: false,
             });
@@ -626,7 +564,6 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // three independent reviewers and a live reproduction all confirmed.
     // Ownership is therefore declared, never inferred from selection: the
     // default is empty, and the per-room rule below is unchanged.
-    drop(rename_lock);
     let owned_rooms: BTreeSet<String> = owned_rooms.into_iter().collect();
 
     // Ring for anything not yet handled. Load each channel's seen-set as a
@@ -640,6 +577,11 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
     // Grows for the life of the watch (like each target's seen set): bounded
     // by total channel messages, a few bytes each — deliberate, not a leak.
     let mut emitted_channel_ids = HashSet::new();
+    // Bad channel message files already reported by this process. One set for
+    // every target: a participant reaches the same channel through several
+    // watched addresses, and each file is reported once per watch, not once
+    // per address.
+    let mut reported_unreadable = HashSet::new();
     if matches!(from, Some(WatchFrom::Now)) {
         // `--from now` is deliberately process-local: one discarded scan
         // seeds the same suppression sets the normal scan uses, without
@@ -652,6 +594,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
             &mut targets,
             &owned_rooms,
             &mut emitted_channel_ids,
+            &mut reported_unreadable,
             false,
             // Priming only suppresses what is already there; the reconciliation
             // pass is what owes full validation.
@@ -674,6 +617,7 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
                 target,
                 &owned_rooms,
                 &mut emitted_channel_ids,
+                &mut reported_unreadable,
                 false,
                 ScanMode::Complete,
             )?);
@@ -744,7 +688,231 @@ pub(super) fn run(context: &Context, args: WatchArgs) -> AppResult<CommandResult
         slow_period,
         admission_warnings,
         warned_touch_failures,
+        &mut reported_unreadable,
+        follow,
     )
+}
+
+/// The marker a session that is not bound to a participant gets from
+/// `watch --snapshot` with no `--room`: one line, so a hook that reads the
+/// stream sees an answer rather than silence, and never a cwd-derived room.
+fn unbound_snapshot_marker(text: bool) -> AppResult<CommandResult> {
+    if text {
+        return Ok(CommandResult::success(format!(
+            "post: {}\n",
+            super::unbound_hint()
+        )));
+    }
+    #[derive(Serialize)]
+    struct UnboundEvent {
+        event: &'static str,
+        participant: Option<&'static str>,
+        bound: bool,
+        hint: &'static str,
+    }
+    let line = serde_json::to_string(&UnboundEvent {
+        event: "unbound",
+        participant: None,
+        bound: false,
+        hint: super::unbound_hint(),
+    })
+    .map_err(|error| AppError::invalid_argument(format!("render the unbound marker: {error}")))?;
+    Ok(CommandResult::success(format!("{line}\n")))
+}
+
+/// The watch targets of a bound participant: every address it can be reached
+/// at, plus any explicit extra rooms.
+fn bound_targets(
+    context: &Context,
+    participant: &Participant,
+    requested_rooms: &[String],
+    snapshot: bool,
+) -> AppResult<Vec<WatchTarget>> {
+    let mut addresses = super::inbox::visible_addresses(context, participant)?;
+    for room in requested_rooms {
+        let address = Address {
+            kind: AddressKind::Workspace,
+            name: room.clone(),
+        };
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    let mut targets = Vec::new();
+    for address in addresses {
+        if address.kind == AddressKind::Workspace {
+            crate::mailbox::validate_room_name(&address.name).map_err(|reason| {
+                AppError::invalid_argument(format!("room '{}' is invalid: {reason}", address.name))
+            })?;
+        }
+        let room = if address.kind == AddressKind::Workspace {
+            address.name.clone()
+        } else {
+            super::inbox::address_label(&address)
+        };
+        let inbox = crate::cursor_state::routing::inbox_path(context, &address);
+        if !snapshot
+            && crate::mailbox::read_only_command()
+            && !inbox.parent().is_some_and(Path::is_dir)
+        {
+            return Err(AppError::new(
+                ErrorCode::NotFound,
+                format!("watch address directory '{}' does not exist", inbox.display()),
+                "Initialize the participant/workspace store before starting an enrolled long watch.",
+            ));
+        }
+        let dirs = participant_target_dirs(context, participant, &inbox);
+        targets.push(WatchTarget {
+            channel_seen: HashMap::new(),
+            room,
+            inbox,
+            participant: Some(participant.clone()),
+            address: Some(address),
+            dirs,
+            seen: HashSet::new(),
+            scan_failing: false,
+            route_pending: !snapshot,
+        });
+    }
+    Ok(targets)
+}
+
+/// Who a running watch is for, as of its last look at the participant record.
+/// The record can change under a watch that never restarts: rebound to another
+/// workspace, given a lineage, ended, or collected.
+struct Follow {
+    id: String,
+    workspace: Option<String>,
+    lineage: Option<String>,
+    requested_rooms: Vec<String>,
+    warned_unresolvable: bool,
+}
+
+impl Follow {
+    fn new(participant: &Participant, requested_rooms: Vec<String>) -> Self {
+        Self {
+            id: participant.id.clone(),
+            workspace: participant.workspace.clone(),
+            lineage: participant.lineage.clone(),
+            requested_rooms,
+            warned_unresolvable: false,
+        }
+    }
+}
+
+/// Re-resolve the watch's participant on the slow pass. An unchanged record
+/// only refreshes each target's copy. A changed workspace, lineage, or id
+/// rebuilds the address targets (keeping what each surviving address already
+/// saw) and says so in one stderr line. A participant that has ended, or that
+/// no longer resolves at all, stops the watch with an error that names it, in
+/// place of a watch that runs on for an identity that is gone. Returns whether
+/// the targets were rebuilt, so the caller re-registers its filesystem watches.
+fn follow_identity(
+    context: &Context,
+    follow: &mut Follow,
+    targets: &mut Vec<WatchTarget>,
+) -> AppResult<bool> {
+    let resolved = match crate::participant::resolve(context) {
+        Ok(resolved) => resolved,
+        // The claim this watch started under now names no record: loud.
+        Err(error) if error.code == ErrorCode::ParticipantMissing => return Err(error),
+        Err(error) => {
+            // A record that cannot be read right now is not proof it is gone.
+            if !follow.warned_unresolvable {
+                follow.warned_unresolvable = true;
+                eprintln!(
+                    "post: warning: watch could not re-check participant {} (will keep watching): {}",
+                    follow.id, error.message
+                );
+            }
+            return Ok(false);
+        }
+    };
+    let participant = match resolved {
+        Resolved::Bound { participant, .. } => participant,
+        Resolved::Unbound => {
+            return Err(watch_stopped(
+                &follow.id,
+                "is no longer bound to this session",
+            ))
+        }
+    };
+    if participant.ended_at.is_some() {
+        return Err(watch_stopped(
+            &follow.id,
+            "has ended (`post participant end`)",
+        ));
+    }
+    follow.warned_unresolvable = false;
+    if participant.id == follow.id
+        && participant.workspace == follow.workspace
+        && participant.lineage == follow.lineage
+    {
+        for target in targets.iter_mut() {
+            if target.participant.is_some() {
+                target.participant = Some((*participant).clone());
+            }
+        }
+        return Ok(false);
+    }
+    let mut rebuilt = match bound_targets(context, &participant, &follow.requested_rooms, false) {
+        Ok(rebuilt) => rebuilt,
+        Err(error) => {
+            if !follow.warned_unresolvable {
+                follow.warned_unresolvable = true;
+                eprintln!(
+                    "post: warning: participant {} changed but its watch targets could not be rebuilt (will keep the old ones): {}",
+                    follow.id, error.message
+                );
+            }
+            return Ok(false);
+        }
+    };
+    let same_participant = participant.id == follow.id;
+    for target in &mut rebuilt {
+        let Some(old) = targets
+            .iter_mut()
+            .find(|old| same_participant && old.address == target.address)
+        else {
+            continue;
+        };
+        target.seen = std::mem::take(&mut old.seen);
+        target.channel_seen = std::mem::take(&mut old.channel_seen);
+        target.scan_failing = old.scan_failing;
+    }
+    let describe = |value: &Option<String>| value.clone().unwrap_or_else(|| "none".to_owned());
+    eprintln!(
+        "post: watch now follows participant {}: workspace {} (was {}), lineage {} (was {})",
+        participant.id,
+        describe(&participant.workspace),
+        describe(&follow.workspace),
+        describe(&participant.lineage),
+        describe(&follow.lineage),
+    );
+    *follow = Follow {
+        id: participant.id.clone(),
+        workspace: participant.workspace.clone(),
+        lineage: participant.lineage.clone(),
+        requested_rooms: std::mem::take(&mut follow.requested_rooms),
+        warned_unresolvable: false,
+    };
+    *targets = rebuilt;
+    Ok(true)
+}
+
+fn watch_stopped(id: &str, why: &str) -> AppError {
+    let error = AppError::new(
+        ErrorCode::NoParticipant,
+        format!("participant {id} {why}: this watch is stopping"),
+        "Bind this session again with `post participant bind`, then start a new watch.",
+    );
+    if crate::participant::bind_key_available().unwrap_or(false) {
+        error
+            .exact_fix("post participant bind")
+            .reason("watch participant is gone")
+    } else {
+        error.reason("watch participant is gone")
+    }
 }
 
 fn after_live_presence<T>(
@@ -770,7 +938,7 @@ fn after_live_presence<T>(
 #[allow(clippy::too_many_arguments)] // watch loop wiring; a param struct would add nothing
 fn run_watch_loop(
     context: &Context,
-    targets: &mut [WatchTarget],
+    targets: &mut Vec<WatchTarget>,
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
     interval_ms: u64,
@@ -782,6 +950,8 @@ fn run_watch_loop(
     slow_period: Duration,
     mut admission_warnings: AdmissionWarnings,
     mut warned_touch_failures: HashSet<String>,
+    reported_unreadable: &mut HashSet<PathBuf>,
+    mut follow: Option<Follow>,
 ) -> AppResult<CommandResult> {
     let (initial_admission, allow_writes) = watch_admission(context, &mut admission_warnings)?;
     if allow_writes {
@@ -792,6 +962,7 @@ fn run_watch_loop(
         targets,
         owned_rooms,
         emitted_channel_ids,
+        reported_unreadable,
         allow_writes,
         // The first pass is the arrival-gap scan: it re-reads every stored
         // message, so a corrupt file is reported even if it was consumed
@@ -867,6 +1038,7 @@ fn run_watch_loop(
                     targets,
                     owned_rooms,
                     emitted_channel_ids,
+                    reported_unreadable,
                     allow_writes,
                     ScanMode::Wake,
                     |target| target.dirs.iter().any(|dir| dirs.contains(dir)),
@@ -876,6 +1048,13 @@ fn run_watch_loop(
         // Slow pass: due whenever the wall clock says so, after EVERY wake.
         if Instant::now() >= slow_deadline {
             slow_deadline = Instant::now() + slow_period;
+            // Who is this watch for now? A rebind or lineage change rebuilds
+            // the address targets (the reconcile below re-registers their
+            // dirs); an ended or collected participant stops the watch with a
+            // message that names it.
+            if let Some(follow) = follow.as_mut() {
+                follow_identity(context, follow, targets)?;
+            }
             // Re-derive the watched-dir set (new channel dirs, dirs replaced
             // by rm+mkdir) and hand deltas to the backend before the
             // unconditional rescan (r2).
@@ -890,6 +1069,7 @@ fn run_watch_loop(
                 targets,
                 owned_rooms,
                 emitted_channel_ids,
+                reported_unreadable,
                 allow_writes,
                 // Reconciliation is the pass that owes complete validation:
                 // every stored message is read again, so corruption in an
@@ -1026,11 +1206,13 @@ fn touch_warning_for(
 /// bodies are opened), while a startup, `--once`, `--snapshot`, or periodic
 /// reconciliation pass (`ScanMode::Complete`) re-reads the whole channel so a
 /// corrupt message is found whether or not it was already consumed.
+#[allow(clippy::too_many_arguments)] // one scan pass's shared state; a param struct would add nothing
 fn scan_targets(
     context: &Context,
     targets: &mut [WatchTarget],
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
+    reported_unreadable: &mut HashSet<PathBuf>,
     allow_writes: bool,
     mode: ScanMode,
     selected: impl Fn(&WatchTarget) -> bool,
@@ -1042,6 +1224,7 @@ fn scan_targets(
             target,
             owned_rooms,
             emitted_channel_ids,
+            reported_unreadable,
             allow_writes,
             mode,
         ) {
@@ -1395,6 +1578,7 @@ fn scan_watch_target(
     target: &mut WatchTarget,
     owned_rooms: &BTreeSet<String>,
     emitted_channel_ids: &mut HashSet<(String, String)>,
+    reported_unreadable: &mut HashSet<PathBuf>,
     allow_writes: bool,
     mode: ScanMode,
 ) -> AppResult<Vec<WatchDelivery>> {
@@ -1530,7 +1714,7 @@ fn scan_watch_target(
                 &channel_watch_address,
                 &channel_context,
                 &channel,
-                &mut target.reported_unreadable,
+                reported_unreadable,
                 &mut batch,
             );
         }
@@ -1561,7 +1745,7 @@ fn scan_watch_target(
                     &channel_context,
                     &channel,
                     &mut target.seen,
-                    &mut target.reported_unreadable,
+                    reported_unreadable,
                     emitted_channel_ids,
                     &mut batch,
                 )?;
@@ -2299,7 +2483,6 @@ mod tests {
             dirs: BTreeSet::new(),
             channel_seen: HashMap::new(),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }
@@ -2314,6 +2497,7 @@ mod tests {
             context,
             target,
             &BTreeSet::new(),
+            &mut HashSet::new(),
             &mut HashSet::new(),
             false,
             mode,
@@ -2487,7 +2671,6 @@ mod tests {
             dirs: BTreeSet::new(),
             channel_seen: HashMap::new(),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }];
@@ -2516,7 +2699,6 @@ mod tests {
             dirs: BTreeSet::new(),
             channel_seen: HashMap::new(),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }];
@@ -2565,7 +2747,6 @@ mod tests {
             dirs: BTreeSet::new(),
             channel_seen: HashMap::new(),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }];
@@ -2618,7 +2799,6 @@ mod tests {
             dirs: BTreeSet::new(),
             channel_seen: HashMap::new(),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }];
@@ -3586,7 +3766,6 @@ body
             inbox: inbox.clone(),
             dirs: target_dirs(&context, "alpha", &inbox),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }];
@@ -3625,6 +3804,8 @@ body
             Duration::from_secs(3600),
             AdmissionWarnings::default(),
             HashSet::new(),
+            &mut HashSet::new(),
+            None,
         )
         .expect("loop emits and exits");
         assert!(
@@ -3676,7 +3857,6 @@ body
             inbox: inbox.clone(),
             dirs: target_dirs(&context, "alpha", &inbox),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         }];
@@ -3699,6 +3879,8 @@ body
             Duration::ZERO,
             AdmissionWarnings::default(),
             HashSet::new(),
+            &mut HashSet::new(),
+            None,
         )
         .expect("merged fast batch emits exactly once");
         trash_test_root(&root);
@@ -3742,7 +3924,6 @@ body
                 inbox: inbox.clone(),
                 dirs: target_dirs(&context, room, inbox),
                 seen: HashSet::new(),
-                reported_unreadable: HashSet::new(),
                 scan_failing: false,
                 route_pending: false,
             })
@@ -3785,6 +3966,8 @@ body
             Duration::from_secs(0),
             AdmissionWarnings::default(),
             HashSet::new(),
+            &mut HashSet::new(),
+            None,
         )
         .expect("deadline pass emits the starved room's mail");
         assert!(
@@ -4148,7 +4331,6 @@ body
             dirs: BTreeSet::new(),
             channel_seen: HashMap::new(),
             seen: HashSet::new(),
-            reported_unreadable: HashSet::new(),
             scan_failing: false,
             route_pending: false,
         };
@@ -4327,7 +4509,6 @@ body
                         dirs: BTreeSet::new(),
                         channel_seen: HashMap::new(),
                         seen: HashSet::new(),
-                        reported_unreadable: HashSet::new(),
                         scan_failing: false,
                         route_pending: false,
                     };
@@ -4348,5 +4529,192 @@ body
             );
             trash_test_root(&root);
         }
+    }
+}
+
+/// A running watch follows its participant: a rebind moves it, an end or a
+/// collection stops it with a message that names the participant.
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+    use crate::test_support::{test_root, trash_test_root};
+    use std::fs;
+
+    fn setup(label: &str) -> (PathBuf, Context, Participant) {
+        let root = test_root(label);
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        (root, context, participant)
+    }
+
+    /// Edit the participant's record on disk, as `participant bind
+    /// --workspace` or `participant end` in another process would.
+    fn edit_record(participant: &Participant, change: impl FnOnce(&mut serde_json::Value)) {
+        let path = participant.dir.join("participant.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read record")).expect("record JSON");
+        change(&mut record);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&record).expect("record bytes"),
+        )
+        .expect("write record");
+    }
+
+    fn address_names(targets: &[WatchTarget]) -> Vec<String> {
+        let mut names: Vec<String> = targets.iter().map(|target| target.room.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn unchanged_record_rebuilds_nothing() {
+        let (root, context, participant) = setup("watch-follow-unchanged");
+        let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
+        let mut follow = Follow::new(&participant, Vec::new());
+        let before = address_names(&targets);
+        assert!(!follow_identity(&context, &mut follow, &mut targets).expect("follow"));
+        assert_eq!(address_names(&targets), before);
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn a_rebind_moves_the_targets_and_keeps_what_the_survivors_had_seen() {
+        let (root, context, participant) = setup("watch-follow-rebind");
+        let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
+        assert!(address_names(&targets).contains(&"alpha".to_owned()));
+        let own_room = format!("participant:{}", participant.id);
+        let survivor = targets
+            .iter_mut()
+            .find(|target| target.room == own_room)
+            .expect("the participant's own address is watched");
+        survivor.seen.insert(PathBuf::from("already-emitted.mail"));
+        let mut follow = Follow::new(&participant, Vec::new());
+
+        edit_record(&participant, |record| {
+            record["workspace"] = serde_json::json!("beta");
+        });
+        assert!(follow_identity(&context, &mut follow, &mut targets).expect("follow"));
+        let names = address_names(&targets);
+        assert!(names.contains(&"beta".to_owned()), "{names:?}");
+        assert!(!names.contains(&"alpha".to_owned()), "{names:?}");
+        let survivor = targets
+            .iter()
+            .find(|target| target.room == own_room)
+            .expect("the participant's own address survives the rebind");
+        assert!(
+            survivor
+                .seen
+                .contains(&PathBuf::from("already-emitted.mail")),
+            "an address that survives keeps what it had emitted"
+        );
+        assert_eq!(follow.workspace.as_deref(), Some("beta"));
+        // Following again with nothing new changes nothing.
+        assert!(!follow_identity(&context, &mut follow, &mut targets).expect("follow"));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn an_ended_participant_stops_the_watch_and_names_itself() {
+        let (root, context, participant) = setup("watch-follow-ended");
+        let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
+        let mut follow = Follow::new(&participant, Vec::new());
+        edit_record(&participant, |record| {
+            record["ended_at"] = serde_json::json!("2026-09-28T00:00:00Z");
+        });
+        let error = follow_identity(&context, &mut follow, &mut targets)
+            .expect_err("an ended participant stops the watch");
+        assert_eq!(error.code, ErrorCode::NoParticipant);
+        assert!(error.message.contains(&participant.id), "{}", error.message);
+        assert!(error.message.contains("has ended"), "{}", error.message);
+        assert!(error.message.contains("this watch is stopping"));
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn a_collected_record_stops_the_watch_and_names_the_participant() {
+        let (root, context, participant) = setup("watch-follow-collected");
+        let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
+        let mut follow = Follow::new(&participant, Vec::new());
+        fs::remove_dir_all(&participant.dir).expect("collect the record");
+        let error = follow_identity(&context, &mut follow, &mut targets)
+            .expect_err("a collected participant stops the watch");
+        assert!(error.message.contains(&participant.id), "{}", error.message);
+        assert!(error.message.contains("stopping"), "{}", error.message);
+        trash_test_root(&root);
+    }
+
+    /// A wake source that runs one queued side effect per wait and reports a
+    /// poll tick, so a test scripts what happens to the record between passes.
+    /// A wait after the script ran out means the loop failed to stop.
+    struct Script {
+        steps: std::collections::VecDeque<Box<dyn FnOnce()>>,
+    }
+
+    impl WakeSource for Script {
+        fn wait(&mut self, _timeout: Duration) -> Option<Wake> {
+            let step = self
+                .steps
+                .pop_front()
+                .expect("the watch kept running after its participant ended");
+            step();
+            Some(Wake::TimedOut)
+        }
+    }
+
+    #[test]
+    fn the_slow_pass_follows_a_rebind_then_stops_when_the_participant_ends() {
+        let (root, context, participant) = setup("watch-follow-loop");
+        let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
+        let follow = Follow::new(&participant, Vec::new());
+        let rebind = participant.clone();
+        let end = participant.clone();
+        let mut wake: Box<dyn WakeSource> = Box::new(Script {
+            steps: std::collections::VecDeque::from([
+                Box::new(move || {
+                    edit_record(&rebind, |record| {
+                        record["workspace"] = serde_json::json!("beta");
+                    });
+                }) as Box<dyn FnOnce()>,
+                Box::new(move || {
+                    edit_record(&end, |record| {
+                        record["ended_at"] = serde_json::json!("2026-09-28T00:00:00Z");
+                    });
+                }),
+            ]),
+        });
+        let mut emitted_channel_ids = HashSet::new();
+        let owned_rooms = BTreeSet::new();
+        // `once` would return on the first emit; an ended participant is the
+        // only way out of this loop, so an Err proves the slow pass ran.
+        let Err(error) = run_watch_loop(
+            &context,
+            &mut targets,
+            &owned_rooms,
+            &mut emitted_channel_ids,
+            1000,
+            false,
+            false,
+            false,
+            &[],
+            &mut wake,
+            Duration::from_secs(0),
+            AdmissionWarnings::default(),
+            HashSet::new(),
+            &mut HashSet::new(),
+            Some(follow),
+        ) else {
+            panic!("the loop must stop when its participant ends");
+        };
+        assert!(error.message.contains("has ended"), "{}", error.message);
+        let names = address_names(&targets);
+        assert!(
+            names.contains(&"beta".to_owned()) && !names.contains(&"alpha".to_owned()),
+            "the rebind before the end moved the targets: {names:?}"
+        );
+        trash_test_root(&root);
     }
 }

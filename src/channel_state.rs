@@ -938,6 +938,7 @@ mod tests {
             created: "2026-09-16".to_owned(),
             last_seen: None,
             lease_hours: 24,
+            ephemeral: false,
             ended_at: None,
             workspace: Some("alpha".to_owned()),
             workspace_path: None,

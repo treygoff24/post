@@ -594,17 +594,25 @@ fn participant_read_only_unbound_commands_create_nothing() {
         &["channels"],
         &["schema"],
     ] {
-        let output = sandbox.run_unbound(args, &sandbox.path);
+        let output = sandbox.run_without_identity(args, &sandbox.path);
         assert!(
             output.status.success() || args[0] == "doctor",
             "{} failed unexpectedly: {}",
             args[0],
             common::stderr(&output)
         );
-        let combined = format!("{}{}", common::stdout(&output), common::stderr(&output));
+        // The unbound marker is on stdout, where the agent reads it.
+        let value: serde_json::Value = from_stdout(&output);
+        assert_eq!(
+            value["bound"], false,
+            "{} omitted the unbound marker: {value}",
+            args[0]
+        );
         assert!(
-            combined.contains("unbound"),
-            "{} omitted unbound: {combined}",
+            value["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("post participant bind")),
+            "{} hint does not name the fix: {value}",
             args[0]
         );
         assert_eq!(
@@ -616,23 +624,91 @@ fn participant_read_only_unbound_commands_create_nothing() {
     }
 }
 
+/// A session with no ambient harness key has nothing to bind to: a writer
+/// fails with the exact fix for a keyless session, and writes nothing.
 #[test]
-fn participant_unbound_send_fails_with_exact_bind_fix() {
+fn participant_keyless_send_fails_with_bootstrap_fix() {
     let sandbox = Sandbox::new_unseeded();
-    let output = sandbox.run_as_claude(
+    let output = sandbox.run_without_identity(
         &["send", "--to", "anywhere", "--body", "must not write"],
-        "unbound-but-bindable-key",
         &sandbox.path,
     );
     assert_eq!(output.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&output);
     assert_eq!(error.error.code, "no_participant");
-    assert_eq!(
-        error.error.details.exact_fix.as_deref(),
-        Some("post participant bind")
-    );
-    assert!(error.error.message.contains("run: post participant bind"));
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post participant bind --new"));
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("export POST_PARTICIPANT"));
     assert!(tree(&sandbox.mail_root).is_empty());
+}
+
+/// A session with an ambient harness key does not need to bind first: the
+/// first write mints the participant, same id `participant bind` would pick,
+/// and the receipt says so once.
+#[test]
+fn participant_keyed_send_binds_lazily_and_reports_bound_now() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let first = sandbox.run_as_claude(
+        &["send", "--json", "--to", "beta", "--body", "first words"],
+        "lazy-bind-key",
+        &alpha,
+    );
+    assert!(first.status.success(), "{}", common::stderr(&first));
+    let receipt: serde_json::Value = from_stdout(&first);
+    let bound = receipt["bound_now"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no bound_now in {receipt}"));
+    let id = bound["id"].as_str().expect("bound_now.id").to_owned();
+    assert!(id.starts_with("claude-"), "{id}");
+    assert_eq!(bound["workspace"], "alpha");
+    // The very same id an explicit bind of that key would name.
+    let explicit = sandbox.bind_claude("lazy-bind-key", &alpha, None);
+    assert_eq!(participant_id(&explicit), id);
+
+    let second = sandbox.run_as_claude(
+        &["send", "--json", "--to", "beta", "--body", "second words"],
+        "lazy-bind-key",
+        &alpha,
+    );
+    assert!(second.status.success(), "{}", common::stderr(&second));
+    let receipt: serde_json::Value = from_stdout(&second);
+    assert!(
+        receipt.get("bound_now").is_none(),
+        "bound_now is reported only by the command that bound: {receipt}"
+    );
+}
+
+/// Text mode says the same thing in one line, once.
+#[test]
+fn participant_keyed_send_text_receipt_names_the_lazy_bind() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let first = sandbox.run_as_claude(
+        &["send", "--to", "beta", "--body", "first words"],
+        "lazy-text-key",
+        &alpha,
+    );
+    assert!(first.status.success(), "{}", common::stderr(&first));
+    let text = common::stdout(&first);
+    assert_eq!(
+        text.matches("bound this session as participant claude-")
+            .count(),
+        1,
+        "{text}"
+    );
+    let second = sandbox.run_as_claude(
+        &["send", "--to", "beta", "--body", "second words"],
+        "lazy-text-key",
+        &alpha,
+    );
+    assert!(second.status.success(), "{}", common::stderr(&second));
+    assert!(!common::stdout(&second).contains("bound this session"));
 }
 
 #[test]
@@ -1070,7 +1146,7 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
             let output = if bound {
                 sandbox.run_as_participant(args, &actor, &alpha)
             } else {
-                sandbox.run_unbound(args, &alpha)
+                sandbox.run_without_identity(args, &alpha)
             };
             match expected {
                 None => assert_success(&output),
@@ -1079,12 +1155,17 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
                     let value: Value = from_stdout(&output);
                     assert_eq!(value["ok"], false, "{args:?}");
                 }
-                Some("missing_chat") => {
+                Some("missing_chat") if bound => {
                     let error: ErrorEnvelope = from_stderr(&output);
-                    assert_eq!(
-                        error.error.code,
-                        if bound { "not_a_member" } else { "not_found" },
-                        "{args:?}"
+                    assert_eq!(error.error.code, "not_a_member", "{args:?}");
+                }
+                Some("missing_chat" | "not_found") if !bound => {
+                    // An unbound reader is told so on stdout, whatever it asked for.
+                    assert_success(&output);
+                    assert!(
+                        common::stdout(&output).contains("not bound to a post participant"),
+                        "{args:?}: {}",
+                        common::stdout(&output)
                     );
                 }
                 Some(code) => {
@@ -1175,7 +1256,10 @@ fn participant_round4_unbound_streams_keep_stdout_protocol_and_budget() {
         baseline.stdout.len(),
         budgeted.stdout.len()
     );
-    assert!(common::stderr(&budgeted).contains("participant: unbound"));
+    // The marker is on stdout, inside the cap, where the reader looks.
+    let marker: Value = from_stdout(&budgeted);
+    assert_eq!(marker["bound"], false);
+    assert!(marker["participant"].is_null());
 
     let watched = sandbox.run_without_identity(&["watch", "--snapshot", "--room", "alpha"], &alpha);
     assert_success(&watched);
@@ -1523,7 +1607,7 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
 #[test]
 fn participant_review_no_key_diagnostic_names_real_bootstrap_sequence() {
     let sandbox = Sandbox::new_unseeded();
-    let output = sandbox.run_unbound(
+    let output = sandbox.run_without_identity(
         &["send", "--to", "nowhere", "--body", "body"],
         &sandbox.path,
     );
@@ -1532,18 +1616,105 @@ fn participant_review_no_key_diagnostic_names_real_bootstrap_sequence() {
     assert!(error.error.details.exact_fix.is_none());
     assert!(error.error.message.contains("post participant bind --new"));
     assert!(error.error.message.contains("export POST_PARTICIPANT="));
+}
 
-    let keyed = Sandbox::new_unseeded();
-    let output = keyed.run_as_claude(
-        &["send", "--to", "nowhere", "--body", "body"],
-        "usable-key",
-        &keyed.path,
+/// A claimed identity that names no record is its own error, never "unbound":
+/// a mistyped `POST_PARTICIPANT` must not read as an empty inbox.
+#[test]
+fn participant_missing_explicit_claim_is_a_typed_error_with_the_fix() {
+    let sandbox = Sandbox::new_unseeded();
+    for args in [
+        &["send", "--to", "nowhere", "--body", "body"] as &[&str],
+        &["inbox"],
+        &["chat", "anything", "--peek"],
+        &["read", "any-id", "--peek"],
+        &["watch", "--snapshot"],
+        &["search", "needle"],
+    ] {
+        let output = sandbox.run_unbound(args, &sandbox.path);
+        assert_eq!(output.status.code(), Some(65), "{args:?}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "participant_missing", "{args:?}");
+        assert!(
+            error.error.message.contains("missing-test-participant"),
+            "{args:?}: {}",
+            error.error.message
+        );
+        assert_eq!(
+            error.error.details.exact_fix.as_deref(),
+            Some("post participant bind --new"),
+            "{args:?}"
+        );
+        assert!(common::stdout(&output).is_empty(), "{args:?}");
+    }
+    assert!(tree(&sandbox.mail_root).is_empty());
+
+    // With an ambient harness key the fix is the two-step that works: drop the
+    // stale claim, bind by key.
+    let output = sandbox.run_in_env(
+        &["inbox"],
+        None,
+        &sandbox.path,
+        &[
+            ("POST_PARTICIPANT", "missing-test-participant"),
+            ("CLAUDE_CODE_SESSION_ID", "ambient-key"),
+        ],
     );
+    assert_eq!(output.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "participant_missing");
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("unset POST_PARTICIPANT && post participant bind")
+    );
+    assert!(tree(&sandbox.mail_root).is_empty());
+}
+
+/// An ambient session index that points at a record that is gone is the same
+/// state, reached without ever typing an id: it too is an error, with the plain
+/// `bind` fix, and the diagnostic surfaces report it as a field and still run.
+#[test]
+fn participant_missing_dangling_session_index_is_loud_and_diagnosable() {
+    let sandbox = Sandbox::new_unseeded();
+    let bound = sandbox.bind_claude("dangling-key", &sandbox.path, None);
+    let id = participant_id(&bound).to_owned();
+    let record = sandbox.mail_root.join("participants").join(&id);
+    assert!(record.join("participant.json").is_file());
+    fs::remove_dir_all(&record).expect("remove the record but leave the index");
+
+    let output = sandbox.run_as_claude(&["inbox"], "dangling-key", &sandbox.path);
+    assert_eq!(output.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "participant_missing");
     assert_eq!(
         error.error.details.exact_fix.as_deref(),
         Some("post participant bind")
     );
+
+    // Diagnostic surfaces carry it as a field and exit 0.
+    for args in [
+        &["who", "--json"] as &[&str],
+        &["participant", "show", "--json"],
+    ] {
+        let output = sandbox.run_as_claude(args, "dangling-key", &sandbox.path);
+        assert_success(&output);
+        let value: Value = from_stdout(&output);
+        assert_eq!(value["bound"], false, "{args:?}: {value}");
+        let missing = value
+            .get("participant_missing")
+            .or_else(|| value["participant"].get("participant_missing"))
+            .unwrap_or_else(|| panic!("{args:?} lacks participant_missing: {value}"));
+        assert_eq!(missing["claim"], "session-index", "{args:?}");
+        assert_eq!(missing["id"], id.as_str(), "{args:?}");
+        assert!(missing["exact_fix"].is_string(), "{args:?}");
+    }
+
+    // The fix it names works: a plain bind re-mints the very same id.
+    let rebound = sandbox.run_as_claude(&["participant", "bind"], "dangling-key", &sandbox.path);
+    assert_success(&rebound);
+    let rebound: Value = from_stdout(&rebound);
+    assert_eq!(participant_id(&rebound), id);
+    assert_success(&sandbox.run_as_claude(&["inbox"], "dangling-key", &sandbox.path));
 }
 
 #[test]
@@ -1968,9 +2139,12 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "--peek".to_owned(),
                 "--json".to_owned(),
             ],
-            None,
+            Some("marker"),
         ),
-        (vec!["profile".to_owned(), "show".to_owned()], None),
+        (
+            vec!["profile".to_owned(), "show".to_owned(), "--json".to_owned()],
+            Some("marker"),
+        ),
         (
             vec![
                 "search".to_owned(),
@@ -1979,7 +2153,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "round2-read".to_owned(),
                 "--json".to_owned(),
             ],
-            None,
+            Some("marker"),
         ),
         (
             vec![
@@ -1988,7 +2162,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "--peek".to_owned(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("marker"),
         ),
         (
             vec![
@@ -1998,7 +2172,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "1".to_owned(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("marker"),
         ),
         (
             vec![
@@ -2008,7 +2182,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 channel_id.clone(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("marker"),
         ),
         (
             vec![
@@ -2018,7 +2192,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 channel_id.clone(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("marker"),
         ),
         (
             vec![
@@ -2030,18 +2204,21 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "4096".to_owned(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("marker"),
         ),
     ];
     for (command, expected_error) in commands {
         let args = command.iter().map(String::as_str).collect::<Vec<_>>();
         let before = tree(&sandbox.mail_root);
         let output = sandbox.run_without_identity(&args, &alpha);
-        if let Some(expected) = expected_error {
-            let error: ErrorEnvelope = from_stderr(&output);
-            assert_eq!(error.error.code, expected, "{args:?}");
-        } else {
-            assert_success(&output);
+        assert_success(&output);
+        if expected_error.is_some() {
+            // A reader that has no participant is told so on stdout, and
+            // nothing is guessed from the working directory.
+            let marker: Value = from_stdout(&output);
+            assert_eq!(marker["bound"], false, "{args:?}");
+            assert!(marker["participant"].is_null(), "{args:?}");
+            assert!(marker["hint"].is_string(), "{args:?}");
         }
         assert_eq!(
             tree(&sandbox.mail_root),
@@ -2093,7 +2270,9 @@ fn participant_round2_unbound_annotation_keeps_ok_first() {
         "unexpected key order: {raw}"
     );
     let value: Value = serde_json::from_str(&raw).expect("annotated rooms JSON");
-    assert_eq!(value["participant"], "unbound");
+    assert!(value["participant"].is_null());
+    assert_eq!(value["bound"], false);
+    assert!(value["hint"].is_string());
 }
 
 #[test]
@@ -2842,4 +3021,111 @@ fn profile_list_agrees_with_the_sigil_uniqueness_refusal() {
         text.contains("note: sigil occupancy is lease-dependent"),
         "{text}"
     );
+}
+
+/// `participant show --harness <h> --key <key>` answers what a session-start
+/// hook asks: is there a participant for this key? It reads the key it is
+/// given, never the environment's claim, and never creates a record.
+#[test]
+fn participant_show_by_key_is_a_non_minting_lookup() {
+    let sandbox = Sandbox::new_unseeded();
+    let unknown = sandbox.run_without_identity(
+        &[
+            "participant",
+            "show",
+            "--harness",
+            "claude",
+            "--key",
+            "never-seen",
+            "--json",
+        ],
+        &sandbox.path,
+    );
+    assert_success(&unknown);
+    let unknown: Value = from_stdout(&unknown);
+    assert_eq!(unknown["status"], "unbound");
+    assert_eq!(unknown["bound"], false);
+    assert!(
+        !sandbox.mail_root.join("participants").exists(),
+        "a lookup must not mint anything"
+    );
+
+    let bound = sandbox.bind_claude("looked-up", &sandbox.path, None);
+    let id = participant_id(&bound).to_owned();
+    // The claim in the environment is another session's; the key decides.
+    let found = sandbox.run_as_participant(
+        &[
+            "participant",
+            "show",
+            "--harness",
+            "claude",
+            "--key",
+            "looked-up",
+            "--json",
+        ],
+        &id,
+        &sandbox.path,
+    );
+    assert_success(&found);
+    let found: Value = from_stdout(&found);
+    assert_eq!(found["status"], "bound");
+    assert_eq!(found["bound"], true);
+    assert_eq!(found["id"], id.as_str());
+
+    // A record removed out from under its session index is reported, not hidden.
+    fs::remove_dir_all(sandbox.mail_root.join("participants").join(&id))
+        .expect("remove the record but leave the index");
+    let before = tree(&sandbox.mail_root);
+    let dangling = sandbox.run_without_identity(
+        &[
+            "participant",
+            "show",
+            "--harness",
+            "claude",
+            "--key",
+            "looked-up",
+            "--json",
+        ],
+        &sandbox.path,
+    );
+    assert_success(&dangling);
+    let dangling: Value = from_stdout(&dangling);
+    assert_eq!(dangling["status"], "missing", "{dangling}");
+    assert_eq!(dangling["bound"], false);
+    assert_eq!(dangling["participant_missing"]["id"], id.as_str());
+    assert_eq!(tree(&sandbox.mail_root), before, "still creates nothing");
+}
+
+/// A one-shot snapshot from a session with no participant answers with one
+/// marker event rather than silence (a hook cannot tell silence from "nothing
+/// new"), and never with mail guessed from the working directory.
+#[test]
+fn participant_unbound_watch_snapshot_answers_with_one_marker_event() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let before = tree(&sandbox.mail_root);
+    let json = sandbox.run_without_identity(&["watch", "--snapshot"], &alpha);
+    assert_success(&json);
+    let lines: Vec<Value> = common::stdout(&json)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("NDJSON line"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["event"], "unbound");
+    assert!(lines[0]["participant"].is_null());
+    assert_eq!(lines[0]["bound"], false);
+    assert!(lines[0]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("post participant bind")));
+
+    let text = sandbox.run_without_identity(&["watch", "--snapshot", "--text"], &alpha);
+    assert_success(&text);
+    assert_eq!(common::stdout(&text).lines().count(), 1);
+    assert_eq!(tree(&sandbox.mail_root), before);
+
+    // A long watch needs a participant: it says so and does not watch a room.
+    let long = sandbox.run_without_identity(&["watch", "--once"], &alpha);
+    assert_eq!(long.status.code(), Some(65));
+    let error: ErrorEnvelope = from_stderr(&long);
+    assert_eq!(error.error.code, "no_participant");
 }

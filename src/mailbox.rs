@@ -393,16 +393,6 @@ impl Context {
         self.infer_from_cwd(rooms)
     }
 
-    pub(crate) fn resolved_mailbox_dirs(
-        &self,
-        explicit: Option<String>,
-    ) -> AppResult<(String, PathBuf, PathBuf)> {
-        let rooms = self.load_rooms()?;
-        let room = self.resolved_room(explicit, &rooms)?;
-        let (inbox, read) = self.mailbox_dirs(&room)?;
-        Ok((room, inbox, read))
-    }
-
     pub(crate) fn infer_from_cwd(&self, rooms: &RoomMap) -> AppResult<(String, SenderProvenance)> {
         let cwd = std::env::current_dir()
             .map_err(|error| AppError::io("resolve current directory", Path::new("."), error))?;
@@ -476,6 +466,10 @@ impl Context {
         .registered_path(expanded.display().to_string()))
     }
 
+    /// The inbox and read directories of a room, by name. A pure path
+    /// function: it validates the name and creates nothing, so a lookup never
+    /// mints a mailbox. A room's directories are made by `rooms add` and by
+    /// delivery, never by asking where they would be.
     pub(crate) fn mailbox_dirs(&self, room: &str) -> AppResult<(PathBuf, PathBuf)> {
         validate_room_name(room).map_err(|reason| {
             AppError::new(
@@ -485,17 +479,7 @@ impl Context {
             )
         })?;
         let directory = self.root.join(room);
-        let inbox = directory.join("inbox");
-        let read = directory.join("read");
-        if read_only_command() {
-            return Ok((inbox, read));
-        }
-        ensure_room_not_mid_rename(self, room)?;
-        fs::create_dir_all(&inbox)
-            .map_err(|error| AppError::io("create inbox directory", &inbox, error))?;
-        fs::create_dir_all(&read)
-            .map_err(|error| AppError::io("create read directory", &read, error))?;
-        Ok((inbox, read))
+        Ok((directory.join("inbox"), directory.join("read")))
     }
 }
 
@@ -966,19 +950,6 @@ where
         );
     }
     Ok(())
-}
-
-pub(crate) enum MoveError {
-    /// The destination link was never created; nothing changed on disk.
-    Link(std::io::Error),
-    /// The destination link exists but the source link could not be removed:
-    /// the mail is now visible in both directories.
-    Unlink(std::io::Error),
-}
-
-pub(crate) fn exclusive_move(source: &Path, destination: &Path) -> Result<(), MoveError> {
-    fs::hard_link(source, destination).map_err(MoveError::Link)?;
-    fs::remove_file(source).map_err(MoveError::Unlink)
 }
 
 fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1941,11 +1912,12 @@ mod tests {
         trash_test_root(&root);
     }
 
-    /// G1: a writer's `mailbox_dirs` refuses (creating nothing) for a room
-    /// the rename journal names as old or new, and serves any other room.
+    /// `mailbox_dirs` is a pure path function: it names a room's directories,
+    /// validates the name, and never creates anything, whatever the store's
+    /// state (a rename in flight, a room that does not exist).
     #[test]
-    fn mailbox_dirs_refuses_a_room_mid_rename() {
-        let root = test_root("mid-rename");
+    fn mailbox_dirs_names_paths_and_creates_nothing() {
+        let root = test_root("mailbox-dirs-pure");
         let context = super::Context {
             root: root.clone(),
             home: root.clone(),
@@ -1955,20 +1927,13 @@ mod tests {
             br#"{"v":1,"old":"alpha","new":"beta","started_at":"x"}"#,
         )
         .expect("journal");
-        for room in ["alpha", "beta"] {
-            let error = context
-                .mailbox_dirs(room)
-                .expect_err("mid-rename room refuses");
-            assert_eq!(
-                error.details.exact_fix.as_deref(),
-                Some("post rooms rename 'alpha' 'beta'")
-            );
+        for room in ["alpha", "beta", "gamma"] {
+            let (inbox, read) = context.mailbox_dirs(room).expect("paths");
+            assert_eq!(inbox, root.join(room).join("inbox"));
+            assert_eq!(read, root.join(room).join("read"));
             assert!(!root.join(room).exists(), "{room} was not created");
         }
-        context
-            .mailbox_dirs("gamma")
-            .expect("other rooms are served");
-        assert!(root.join("gamma/inbox").is_dir());
+        assert!(context.mailbox_dirs("../escape").is_err());
         trash_test_root(&root);
     }
 

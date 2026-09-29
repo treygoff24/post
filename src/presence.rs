@@ -35,6 +35,12 @@ pub(crate) fn touch_heartbeat(context: &Context, room: &str, interval_ms: u64) {
     touch_path(&heartbeat_path(context, room), interval_ms);
 }
 
+/// Unix seconds of the participant's last watch heartbeat, when it has one.
+pub(crate) fn participant_heartbeat_stamp(participant: &Participant) -> Option<u64> {
+    let raw = read_heartbeat_nofollow(&participant_heartbeat_path(participant)).ok()??;
+    parse_heartbeat(raw.trim()).0
+}
+
 pub(crate) fn touch_participant_heartbeat(participant: &Participant, interval_ms: u64) {
     touch_path(&participant_heartbeat_path(participant), interval_ms);
 }

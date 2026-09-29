@@ -10,6 +10,7 @@ mod identity;
 mod inbox;
 mod owner;
 mod participant;
+mod participant_gc;
 mod profile;
 mod read;
 mod rooms;
@@ -26,6 +27,7 @@ use crate::error::AppResult;
 use crate::error::{AppError, ErrorCode};
 use crate::mailbox::Context;
 use crate::migration_fence;
+use serde::Serialize;
 
 pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     let pretty = cli.pretty;
@@ -44,29 +46,61 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     if let Command::Bridge(args) = cli.command {
         return bridge::run(&context, args, pretty);
     }
-    let writes = migration_fence::classify_write(&cli.command);
+    let writes =
+        migration_fence::classify_write(&cli.command) || participant_gc_apply(&cli.command);
     let long_watch = matches!(&cli.command, Command::Watch(args) if !args.snapshot);
     let explicit_bootstrap = explicit_participant_bootstrap(&cli.command);
     let participant_is_required = participant_required(&cli.command);
     let resolution_required = participant_is_required || plain_participant_bind(&cli.command);
-    let (resolved_participant, resolution_error) = if explicit_bootstrap {
+    // Who is acting. A claim that names no record (`participant_missing`) is
+    // an error for every command that reads or writes as a participant; only
+    // the commands that diagnose or repair identity, or never act as a
+    // participant at all, carry it as a field and run. Any other resolution
+    // failure keeps its old shape: an error for a command that needs a
+    // participant, an advisory for the rest.
+    let (mut resolved_participant, resolution_error) = if explicit_bootstrap {
         (crate::participant::Resolved::Unbound, None)
     } else {
         match crate::participant::resolve(&context) {
             Ok(resolved) => (resolved, None),
-            Err(error) if resolution_required => return Err(error),
-            Err(error) => (crate::participant::Resolved::Unbound, Some(error.message)),
+            Err(error) if tolerates_resolution_error(&cli.command, &error, resolution_required) => {
+                (crate::participant::Resolved::Unbound, Some(error))
+            }
+            Err(error) => return Err(error),
         }
     };
+    // Unbound readers get an explicit marker on stdout instead of running:
+    // their bodies would otherwise guess a room from the working directory.
+    if resolved_participant.participant().is_none() && resolution_error.is_none() {
+        if let Some(marker) = unbound_reader_marker(&cli.command, json)? {
+            return Ok(marker);
+        }
+    }
+    // A read never reads stdin: input on it is refused before anything is
+    // admitted, bound, routed, or marked read.
+    if let Command::Read(args) = &cli.command {
+        read::refuse_unintended_stdin(args, json, pretty)?;
+    }
     let mut admission = if writes {
         Some(migration_fence::admit(&context, true)?)
     } else {
         None
     };
+    // A write run with a harness conversation key but no record yet binds the
+    // session first, exactly as `participant bind --harness <h> --key <key>`
+    // would (same deterministic id), then proceeds. Without a key it is the
+    // bind-command error.
+    let mut lazy_binding = None;
     if participant_is_required && resolved_participant.participant().is_none() {
-        return Err(AppError::no_participant(
-            crate::participant::bind_key_available()?,
-        ));
+        lazy_binding = match lazy_mint_key(&cli.command) {
+            true => crate::participant::ambient_key()?,
+            false => None,
+        };
+        if lazy_binding.is_none() {
+            return Err(AppError::no_participant(
+                crate::participant::bind_key_available()?,
+            ));
+        }
     }
     let enrolled_watch = long_watch
         && admission
@@ -78,6 +112,22 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     let _read_only = crate::mailbox::enter_read_only_command(fenced_read);
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;
+    }
+    let mut bound_now = None;
+    if let Some((harness, key)) = lazy_binding {
+        let cwd = std::env::current_dir().map_err(|error| {
+            AppError::io(
+                "resolve current directory to bind this session",
+                ".".as_ref(),
+                error,
+            )
+        })?;
+        let minted = crate::participant::bind(&context, &cwd, None, Some((&harness, &key)), false)?;
+        bound_now = Some(BoundNow {
+            id: minted.id.clone(),
+            workspace: minted.workspace.clone(),
+        });
+        resolved_participant = crate::participant::resolve(&context)?;
     }
     if writes && !participant_command_manages_activity(&cli.command) {
         if let Some(participant) = resolved_participant.participant() {
@@ -94,7 +144,7 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         && !matches!(
             &cli.command,
             Command::Participant(crate::cli::ParticipantArgs {
-                command: crate::cli::ParticipantCommand::Show,
+                command: crate::cli::ParticipantCommand::Show(_),
             })
         );
     let annotate_unbound_json = report_unbound && unbound_json_listing(&cli.command);
@@ -116,6 +166,7 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
             format!("Drop {flag} for the JSON output, or drop --json for the human form."),
         ));
     }
+    let channels_text = matches!(&cli.command, Command::Channels(args) if args.text);
     // Commands that create or write a room's mailbox by room name (send's
     // canonical inbox, legacy read's inbox/read move and room cursors, legacy
     // chat's room cursors), and catchup, whose after-stdout commit writes
@@ -177,13 +228,28 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     if let Some(lock) = rename_lock {
         result = result.holding(lock);
     }
+    if let Some(bound_now) = bound_now.as_ref() {
+        annotate_bound_now(&mut result, bound_now);
+    }
     if report_unbound {
-        eprintln!("participant: unbound (run: post participant bind)");
-        if let Some(error) = resolution_error.as_deref() {
-            eprintln!("participant resolution error: {error}");
+        // The marker on stdout is what an agent sees; stderr keeps the human
+        // line for text mode only, and never appears under --json.
+        if !json {
+            eprintln!("participant: unbound (run: post participant bind)");
+        }
+        match resolution_error.as_ref() {
+            Some(error) => {
+                if !json {
+                    eprintln!("participant resolution error: {}", error.message);
+                }
+            }
+            None if channels_text => {
+                result.stdout = format!("post: {}\n{}", unbound_hint(), result.stdout);
+            }
+            None => {}
         }
         if annotate_unbound_json {
-            annotate_unbound(&mut result, pretty, resolution_error.as_deref())?;
+            annotate_unbound(&mut result, pretty, resolution_error.as_ref())?;
         }
     }
     if !long_watch && writes {
@@ -195,6 +261,190 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         }));
     }
     Ok(result)
+}
+
+/// Whether a failed identity resolution lets the command run with the failure
+/// carried as a field. A claim that names no record (`participant_missing`)
+/// runs only where the command diagnoses or repairs identity, or never acts as
+/// a participant; any other failure runs unless the command needs a participant.
+fn tolerates_resolution_error(
+    command: &Command,
+    error: &AppError,
+    resolution_required: bool,
+) -> bool {
+    if error.code != ErrorCode::ParticipantMissing {
+        return !resolution_required;
+    }
+    use crate::cli::{IdentityCommand, ParticipantCommand, ProfileCommand};
+    match command {
+        Command::Who(_)
+        | Command::Doctor(_)
+        | Command::Schema
+        | Command::Rooms(_)
+        | Command::Owner(_) => true,
+        Command::Participant(args) => matches!(
+            &args.command,
+            ParticipantCommand::Show(_)
+                | ParticipantCommand::Bind(_)
+                | ParticipantCommand::List
+                | ParticipantCommand::Gc(_)
+        ),
+        Command::Identity(args) => {
+            matches!(
+                &args.command,
+                IdentityCommand::List | IdentityCommand::Show(_)
+            )
+        }
+        Command::Profile(args) => matches!(
+            &args.command,
+            Some(ProfileCommand::List)
+                | Some(ProfileCommand::Show(crate::cli::ProfileShowArgs {
+                    participant: Some(_)
+                }))
+        ),
+        _ => false,
+    }
+}
+
+fn participant_gc_apply(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Participant(crate::cli::ParticipantArgs {
+            command: crate::cli::ParticipantCommand::Gc(crate::cli::ParticipantGcArgs {
+                apply: true
+            }),
+        })
+    )
+}
+
+/// The one line an unbound session is told, and the fix that suits it: a
+/// harness session binds itself; a bare shell mints an identity.
+pub(super) fn unbound_hint() -> &'static str {
+    if crate::participant::bind_key_available().unwrap_or(false) {
+        "This session is not bound to a post participant yet, so nothing can be addressed to it. Send a message, or run `post participant bind`, to bind it."
+    } else {
+        "This session is not bound to a post participant yet, so nothing can be addressed to it. Run `post participant bind --new`, then run the printed `export POST_PARTICIPANT=...` command, to bind it."
+    }
+}
+
+#[derive(Serialize)]
+struct UnboundMarker {
+    ok: bool,
+    participant: Option<&'static str>,
+    bound: bool,
+    hint: &'static str,
+}
+
+/// `participant: null, bound: false, hint`: the explicit stdout answer of a
+/// reader that has no participant to read for.
+fn unbound_marker_json(pretty: bool) -> AppResult<String> {
+    crate::output::json(
+        &UnboundMarker {
+            ok: true,
+            participant: None,
+            bound: false,
+            hint: unbound_hint(),
+        },
+        pretty,
+    )
+}
+
+/// The marker for a reader whose body would guess a room from the working
+/// directory. `inbox` and `watch --snapshot` answer for themselves (their
+/// output has a shape of its own, and an explicit `--room` still runs).
+fn unbound_reader_marker(command: &Command, json: bool) -> AppResult<Option<CommandResult>> {
+    let reader = match command {
+        Command::Chat(_) => !migration_fence::classify_write(command),
+        Command::Search(_) => true,
+        Command::Read(_) => !participant_required(command),
+        // `profile` and `profile show` with no target read the acting
+        // participant's profile; a named target needs no participant.
+        Command::Profile(args) => matches!(
+            &args.command,
+            None | Some(crate::cli::ProfileCommand::Show(
+                crate::cli::ProfileShowArgs { participant: None }
+            ))
+        ),
+        _ => false,
+    };
+    if !reader {
+        return Ok(None);
+    }
+    let mut stdout = if json {
+        unbound_marker_json(false)?
+    } else {
+        format!("post: {}\n", unbound_hint())
+    };
+    // `--max-bytes` caps final stdout, marker included: fall back to the bare
+    // marker (no hint), and refuse a cap too small even for that.
+    let max_bytes = match command {
+        Command::Chat(args) => args.max_bytes,
+        Command::Read(args) => args.max_bytes,
+        _ => None,
+    };
+    if let Some(max_bytes) = max_bytes.filter(|max| stdout.len() > *max) {
+        stdout = if json {
+            "{\"ok\":true,\"participant\":null,\"bound\":false}\n".to_owned()
+        } else {
+            "post: session not bound; run `post participant bind`\n".to_owned()
+        };
+        if stdout.len() > max_bytes {
+            return Err(byte_budget::scaffold_too_large(max_bytes, stdout.len()));
+        }
+    }
+    Ok(Some(CommandResult::success(stdout)))
+}
+
+/// What a lazy bind reports in a write's receipt.
+struct BoundNow {
+    id: String,
+    workspace: Option<String>,
+}
+
+/// Commands that bind a session on its first write. Consuming reads and
+/// writes do; readers get the marker; lifecycle, identity, profile and
+/// delivery commands, and long watches, keep the bind-command error.
+fn lazy_mint_key(command: &Command) -> bool {
+    match command {
+        Command::Send(_) | Command::Catchup(_) => true,
+        Command::Read(_) | Command::Chat(_) => participant_required(command),
+        Command::Inbox(args) => args.adopt,
+        _ => false,
+    }
+}
+
+/// `"bound_now": {"id", "workspace"}` in a JSON receipt, or one line at the end
+/// of a text one. Output that is neither a single JSON object nor plain text
+/// (a stream of JSON lines) is left alone.
+fn annotate_bound_now(result: &mut CommandResult, bound_now: &BoundNow) {
+    let trimmed = result.stdout.trim_start();
+    let looks_json = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if looks_json {
+        let Ok(serde_json::Value::Object(object)) =
+            serde_json::from_str::<serde_json::Value>(&result.stdout)
+        else {
+            return;
+        };
+        let member = serde_json::json!({ "id": bound_now.id, "workspace": bound_now.workspace });
+        let opening = result
+            .stdout
+            .find('{')
+            .expect("a parsed object has an opening brace");
+        let separator = if object.is_empty() { "" } else { "," };
+        result
+            .stdout
+            .insert_str(opening + 1, &format!("\"bound_now\":{member}{separator}"));
+        return;
+    }
+    let mut line = format!("post: bound this session as participant {}", bound_now.id);
+    if let Some(workspace) = bound_now.workspace.as_deref() {
+        line.push_str(&format!(" (workspace {workspace})"));
+    }
+    if !result.stdout.is_empty() && !result.stdout.ends_with('\n') {
+        result.stdout.push('\n');
+    }
+    result.stdout.push_str(&line);
+    result.stdout.push('\n');
 }
 
 fn unbound_json_listing(command: &Command) -> bool {
@@ -212,7 +462,10 @@ fn unbound_json_listing(command: &Command) -> bool {
         Command::Participant(crate::cli::ParticipantArgs {
             command: ParticipantCommand::List,
         }) => true,
-        Command::Profile(args) => matches!(args.command, None | Some(ProfileCommand::Show(_))),
+        Command::Profile(args) => matches!(
+            &args.command,
+            Some(ProfileCommand::Show(show)) if show.participant.is_some()
+        ),
         Command::Owner(args) => matches!(args.command, None | Some(OwnerCommand::Show)),
         _ => false,
     }
@@ -268,10 +521,13 @@ fn participant_required(command: &Command) -> bool {
     }
 }
 
+/// Add the unbound marker (`participant: null` unless the command reports its
+/// own participant, `bound: false`, `hint`) to a JSON listing, or the
+/// `participant_missing` field when a claim names no record.
 fn annotate_unbound(
     result: &mut CommandResult,
     pretty: bool,
-    resolution_error: Option<&str>,
+    resolution_error: Option<&AppError>,
 ) -> AppResult<()> {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result.stdout) else {
         return Ok(());
@@ -279,27 +535,51 @@ fn annotate_unbound(
     let Some(object) = value.as_object_mut() else {
         return Ok(());
     };
+    if object.contains_key("bound") {
+        // The command answered for itself (unbound `inbox`).
+        return Ok(());
+    }
     let ok = object.remove("ok").unwrap_or(serde_json::Value::Bool(true));
-    let participant_present = object.contains_key("participant");
+    // A command that reports its own participant object keeps it; the old
+    // `"unbound"` string and an absent key both become `null`.
+    let own_participant = object
+        .remove("participant")
+        .filter(|value| value.is_object() || value.as_str().is_some_and(|id| id != "unbound"));
     let payload: std::collections::BTreeMap<String, serde_json::Value> =
         std::mem::take(object).into_iter().collect();
     #[derive(serde::Serialize)]
-    struct AnnotatedUnbound {
+    struct Annotated {
         ok: serde_json::Value,
         #[serde(flatten)]
         payload: std::collections::BTreeMap<String, serde_json::Value>,
+        participant: serde_json::Value,
+        bound: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        participant: Option<&'static str>,
-        participant_fix: &'static str,
+        hint: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        participant_missing: Option<participant::MissingReport>,
         #[serde(skip_serializing_if = "Option::is_none")]
         participant_error: Option<String>,
     }
-    let output = AnnotatedUnbound {
+    // A claim that names no record is `participant_missing`; any other reason
+    // the claim could not be resolved (a malformed id, a corrupt record) keeps
+    // its own message, as `participant_error`. Either replaces the hint: the
+    // claim, not the absence of one, is what the reader has to fix.
+    let (missing_report, resolution_message) = match resolution_error {
+        Some(error) if error.code == ErrorCode::ParticipantMissing => {
+            (Some(participant::MissingReport::from_error(error)), None)
+        }
+        Some(error) => (None, Some(error.message.clone())),
+        None => (None, None),
+    };
+    let output = Annotated {
         ok,
         payload,
-        participant: (!participant_present).then_some("unbound"),
-        participant_fix: "run: post participant bind",
-        participant_error: resolution_error.map(str::to_owned),
+        participant: own_participant.unwrap_or(serde_json::Value::Null),
+        bound: false,
+        hint: resolution_error.is_none().then(unbound_hint),
+        participant_missing: missing_report,
+        participant_error: resolution_message,
     };
     result.stdout = crate::output::json(&output, pretty)?;
     Ok(())

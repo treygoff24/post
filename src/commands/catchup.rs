@@ -866,11 +866,7 @@ fn collect_mail(
                 ),
                 body: item.body,
             });
-            moves.push(MailMove {
-                id: id.clone(),
-                source: item.path.clone(),
-                destination: item.path,
-            });
+            moves.push(MailMove { id: id.clone() });
             addresses.insert(id, address.clone());
         }
     }

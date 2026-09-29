@@ -433,6 +433,17 @@ impl ReceivedIndex {
         }
     }
 
+    /// Whether any readable store names this participant: a frozen receipt
+    /// lists it as a recipient, or it authored a letter there. A store whose
+    /// receipts cannot be read cannot deliver anything, so it does not count.
+    pub(crate) fn names(&self, id: &str) -> bool {
+        self.naming.contains_key(id)
+            || self
+                .irregular
+                .iter()
+                .any(|index| self.stores[*index].first_named.contains_key(id))
+    }
+
     /// Stores in `store_addresses` order, failing where that participant's
     /// own walk would.
     pub(crate) fn received(&self, participant: &Participant) -> AppResult<Vec<Address>> {
@@ -699,10 +710,18 @@ fn routed_by_once(context: &Context, routed_by: &mut Option<String>) -> AppResul
     if let Some(known) = routed_by {
         return Ok(known.clone());
     }
-    let actor = participant::resolve(context)?
-        .participant()
-        .map(|actor| actor.id.clone())
-        .unwrap_or_else(|| "post".to_owned());
+    // A claim that names no record is not an actor either: the receipt is
+    // stamped `post`, and the command that asked for the claim reports it.
+    let actor = match participant::resolve(context) {
+        Ok(resolved) => resolved
+            .participant()
+            .map(|actor| actor.id.clone())
+            .unwrap_or_else(|| "post".to_owned()),
+        Err(error) if error.code == crate::error::ErrorCode::ParticipantMissing => {
+            "post".to_owned()
+        }
+        Err(error) => return Err(error),
+    };
     *routed_by = Some(actor.clone());
     Ok(actor)
 }

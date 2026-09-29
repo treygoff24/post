@@ -1019,7 +1019,8 @@ fn routing_unbound_pending_classification_is_truthful_and_read_only() {
     let json = sandbox.run_without_identity(&["inbox", "--room", "alpha"], &alpha);
     assert!(json.status.success(), "{}", common::stderr(&json));
     let json: Value = from_stdout(&json);
-    assert_eq!(json["participant"], "unbound");
+    assert!(json["participant"].is_null());
+    assert_eq!(json["bound"], false);
     assert_eq!(json["pending"], 0);
     assert_eq!(json["held"], 0);
     assert_eq!(json["skipped_unreadable"], 1);
@@ -1034,7 +1035,8 @@ fn routing_unbound_pending_classification_is_truthful_and_read_only() {
     let channels = sandbox.run_without_identity(&["channels"], &alpha);
     assert!(channels.status.success(), "{}", common::stderr(&channels));
     let channels: Value = from_stdout(&channels);
-    assert_eq!(channels["participant"], "unbound");
+    assert!(channels["participant"].is_null());
+    assert_eq!(channels["bound"], false);
     assert_eq!(channels["pending"], 0);
 
     let doctor = sandbox.run_without_identity(&["doctor"], &alpha);
@@ -1675,8 +1677,11 @@ fn routing_text_read_state_wording_uses_recipient_status() {
     assert!(!pending_text.contains("still unread"));
 }
 
+/// Mail in a room's legacy `read/` directory belongs to no participant. A
+/// session with no participant used to be served it by naming the room; it now
+/// gets the unbound marker, and neither the mail nor the room's state is touched.
 #[test]
-fn routing_legacy_read_history_keeps_legacy_already_read_wording() {
+fn routing_unbound_read_of_legacy_history_gets_the_marker_not_the_mail() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
     let id = "20990916-051000-acde10";
@@ -1686,12 +1691,14 @@ fn routing_legacy_read_history_keeps_legacy_already_read_wording() {
         &json!({"id":id,"from":"beta","to":"alpha","kind":"note","subject":"legacy","sent":"2026-09-16 05:10:00 -0500"}),
         "legacy history",
     );
+    let before = tree(&sandbox.mail_root);
     let read = sandbox.run_without_identity(&["read", id, "--room", "alpha", "--peek"], &alpha);
     assert_success(&read);
     let text = common::stdout(&read);
-    assert!(text.contains("already_read=true"), "{text}");
-    assert!(!text.contains("participant's exact-id cursor"), "{text}");
-    assert!(!text.contains("canonical mail stayed in place"), "{text}");
+    assert!(text.contains("not bound to a post participant"), "{text}");
+    assert!(!text.contains("legacy history"), "{text}");
+    assert!(!text.contains("already_read"), "{text}");
+    assert_eq!(tree(&sandbox.mail_root), before);
 }
 
 #[test]
@@ -1906,6 +1913,118 @@ fn routing_workspace_less_channel_watch_uses_participant_address_even_with_linea
     }
     assert!(events.iter().any(|event| event["id"] == channel_id));
     assert!(events.iter().any(|event| event["id"] == malformed_id));
+}
+
+/// A participant is watched at several addresses (its workspace, itself, its
+/// lineage), and a channel it joined is validated once per address. One
+/// corrupted message file is one problem, so the watch process says so once,
+/// not once per address the participant happens to be reachable at.
+#[test]
+fn routing_watch_reports_one_corrupted_consumed_message_once_however_many_addresses() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let reader = bind(&sandbox, "warn-once-reader", &alpha, "alpha");
+    let writer = bind(&sandbox, "warn-once-writer", &beta, "beta");
+    patch_participant(&sandbox, &reader, |record| {
+        record["lineage"] = json!("ember");
+        record["lineage_since"] = json!("2026-09-16T04:41:00Z");
+    });
+    for (participant, cwd) in [(&reader, &alpha), (&writer, &beta)] {
+        assert_success(&sandbox.run_as_participant(
+            &["chat", "warn-once", "--join", "--json"],
+            participant,
+            cwd,
+        ));
+    }
+    let sent = sandbox.run_as_participant(
+        &[
+            "chat",
+            "warn-once",
+            "--send",
+            "--anyway",
+            "--body",
+            "soon to be damaged",
+            "--json",
+        ],
+        &writer,
+        &beta,
+    );
+    assert_success(&sent);
+    let sent: Value = from_stdout(&sent);
+    let message_id = sent["message"]["id"]
+        .as_str()
+        .expect("message id")
+        .to_owned();
+    // The reader consumes it, then the file is damaged on disk.
+    assert_success(&sandbox.run_as_participant(&["chat", "warn-once", "--json"], &reader, &alpha));
+    fs::write(
+        sandbox
+            .mail_root
+            .join(format!("channels/warn-once/messages/{message_id}.msg")),
+        b"damaged after it was read",
+    )
+    .expect("damage the consumed message");
+
+    let watched = sandbox.run_as_participant(&["watch", "--snapshot"], &reader, &alpha);
+    assert!(watched.status.success(), "watch failed: {watched:?}");
+    let stderr = common::stderr(&watched);
+    let warnings = stderr
+        .lines()
+        .filter(|line| line.contains("unreadable") && line.contains(&message_id))
+        .count();
+    assert_eq!(warnings, 1, "one bad file, one warning; stderr:\n{stderr}");
+}
+
+/// `post read` never reads stdin, so input piped into it is refused exactly as
+/// `post chat` refuses it: before anything is bound, routed, or marked read,
+/// with the same command rerun from /dev/null as the fix.
+#[test]
+fn routing_read_with_piped_stdin_refuses_before_consuming_or_binding() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let reader = bind(&sandbox, "stdin-reader", &alpha, "alpha");
+    let sender = bind(&sandbox, "stdin-sender", &beta, "beta");
+    let sent = send_as(&sandbox, &sender, &beta, "workspace:alpha", "still unread");
+    let id = sent["envelope"]["id"].as_str().expect("mail id").to_owned();
+    let before = tree(&sandbox.mail_root);
+
+    let refused = sandbox.run_in_env(
+        &["read", &id, "--json"],
+        Some("input the read would drop\n"),
+        &alpha,
+        &[("POST_PARTICIPANT", &reader)],
+    );
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    let error: post::output::ErrorEnvelope = common::from_stderr(&refused);
+    assert_eq!(error.error.code, "invalid_argument");
+    let fix = error.error.details.exact_fix.expect("exact fix");
+    assert!(fix.starts_with("post read "), "{fix}");
+    assert!(fix.ends_with("--json < /dev/null"), "{fix}");
+    assert_eq!(
+        tree(&sandbox.mail_root),
+        before,
+        "nothing was read or moved"
+    );
+
+    // A session that has a harness key but no participant yet is not bound
+    // by the refused read either.
+    let unbound_before = tree(&sandbox.mail_root);
+    let keyed = sandbox.run_in_env(
+        &["read", &id, "--json"],
+        Some("input the read would drop\n"),
+        &alpha,
+        &[("CLAUDE_CODE_SESSION_ID", "fresh-session-key")],
+    );
+    assert_eq!(keyed.status.code(), Some(2), "{keyed:?}");
+    assert_eq!(
+        tree(&sandbox.mail_root),
+        unbound_before,
+        "no participant was minted"
+    );
+
+    // Without the piped input the same read consumes normally.
+    let read = sandbox.run_as_participant(&["read", &id, "--json"], &reader, &alpha);
+    assert_success(&read);
 }
 
 #[test]

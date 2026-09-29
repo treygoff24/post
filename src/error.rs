@@ -67,6 +67,15 @@ pub struct MissedChannelMessage {
     pub sender_provenance: Option<String>,
 }
 
+/// Which claim a `participant_missing` error is about.
+#[derive(Debug, Clone, Copy)]
+pub enum MissingClaim<'a> {
+    /// `POST_PARTICIPANT=<id>`.
+    Explicit { id: &'a str },
+    /// This session's by-session index entry, naming a record that is gone.
+    SessionIndex { harness: &'a str, id: &'a str },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -84,6 +93,10 @@ pub enum ErrorCode {
     DeliveredUnarchived,
     NotAMember,
     NoParticipant,
+    /// A claimed participant identity (`POST_PARTICIPANT`, or this session's
+    /// by-session index entry) names a record that does not exist. Distinct
+    /// from `NoParticipant`, which is no claim at all.
+    ParticipantMissing,
     NotYet,
     /// Unseen messages from other rooms exist in the channel; send was not delivered.
     CrossedSend,
@@ -109,7 +122,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -124,6 +137,7 @@ impl ErrorCode {
         Self::DeliveredUnarchived,
         Self::NotAMember,
         Self::NoParticipant,
+        Self::ParticipantMissing,
         Self::NotYet,
         Self::CrossedSend,
         Self::InputAmbiguous,
@@ -152,6 +166,7 @@ impl ErrorCode {
             Self::DeliveredUnarchived => "delivered_unarchived",
             Self::NotAMember => "not_a_member",
             Self::NoParticipant => "no_participant",
+            Self::ParticipantMissing => "participant_missing",
             Self::NotYet => "not_yet",
             Self::CrossedSend => "crossed_send",
             Self::InputAmbiguous => "input_ambiguous",
@@ -175,6 +190,7 @@ impl ErrorCode {
             | Self::DuplicateWorkspace
             | Self::NotAMember
             | Self::NoParticipant
+            | Self::ParticipantMissing
             | Self::CrossedSend
             | Self::UnknownHost
             | Self::RemoteSenderUnroutable => 65,
@@ -337,6 +353,48 @@ impl AppError {
             )
         };
         error.reason("no bound participant record")
+    }
+
+    /// A claimed identity that resolves to nothing. `ambient_key` says whether
+    /// this session carries a harness conversation key that a plain `bind`
+    /// can use.
+    pub fn participant_missing(claim: MissingClaim<'_>, ambient_key: bool) -> Self {
+        match claim {
+            MissingClaim::Explicit { id } => {
+                let (fix, command) = if ambient_key {
+                    (
+                        "Drop the stale POST_PARTICIPANT and bind this session (run: unset POST_PARTICIPANT && post participant bind).",
+                        "unset POST_PARTICIPANT && post participant bind",
+                    )
+                } else {
+                    (
+                        "Create a participant with `post participant bind --new`, then run the printed `export POST_PARTICIPANT=...` command; `post participant list` shows the ids that exist.",
+                        "post participant bind --new",
+                    )
+                };
+                Self::new(
+                    ErrorCode::ParticipantMissing,
+                    format!(
+                        "POST_PARTICIPANT names participant '{id}', but no participant record with that id exists (mistyped, or removed by `post participant gc`)"
+                    ),
+                    fix,
+                )
+                .exact_fix(command)
+                .input(format!("POST_PARTICIPANT={id}"))
+                .id(id)
+                .reason("POST_PARTICIPANT does not name an existing record")
+            }
+            MissingClaim::SessionIndex { harness, id } => Self::new(
+                ErrorCode::ParticipantMissing,
+                format!(
+                    "this {harness} session is indexed to participant '{id}', but no matching participant record exists"
+                ),
+                "Rebind this session (run: post participant bind); it restores an archived record or mints the same id again.",
+            )
+            .exact_fix("post participant bind")
+            .id(id)
+            .reason("the session index names a record that does not exist"),
+        }
     }
 
     pub fn not_yet(task: &str) -> Self {
