@@ -52,6 +52,10 @@ fn real_python() -> PathBuf {
 fn shim_dir(root: &Path, on_test: &str) -> PathBuf {
     let dir = root.join("shims");
     fs::create_dir_all(&dir).expect("shim dir");
+    let fake_post = root.join("post");
+    executable(&fake_post, "#!/bin/sh\nexit 0\n");
+    // `cargo build` reports the binary the way the real one does: a
+    // compiler-artifact message, which the gate takes its POST_BIN from.
     executable(
         &dir.join("cargo"),
         &format!(
@@ -59,24 +63,24 @@ fn shim_dir(root: &Path, on_test: &str) -> PathBuf {
 case "$1" in
   --version) echo "cargo 0.0.0 (shim)";;
   test) {on_test};;
+  build) echo '{{"reason":"compiler-artifact","target":{{"name":"post","kind":["bin"]}},"executable":"{post}"}}';;
   *) exit 0;;
 esac
-"#
+"#,
+            post = fake_post.display()
         ),
     );
-    let fake_post = root.join("post");
-    executable(&fake_post, "#!/bin/sh\nexit 0\n");
     executable(
         &dir.join("node"),
         &format!(
             r#"#!/bin/sh
 case "$1" in
-  scripts/cargo-release-bin.mjs) echo "{}";;
+  -e) exec "{}" "$@";;
   --version) echo v0.0.0;;
   *) exit 0;;
 esac
 "#,
-            fake_post.display()
+            real_tool("node").display()
         ),
     );
     executable(
