@@ -100,8 +100,15 @@ pub(crate) fn route_message(
 }
 
 pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<RouteReport> {
+    // Everything already routed is the steady state: answer it without taking
+    // the host-wide participants lock. Mail that lands after this look is
+    // routed by the next pass, exactly as mail that lands just after a pass.
+    if !has_unrouted_mail(context, address)? {
+        return Ok(RouteReport::default());
+    }
     let _lock = participant::lock(context)?;
     let mut report = RouteReport::default();
+    let mut pass = RoutePass::default();
     for path in message_files(&inbox_path(context, address))? {
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
@@ -121,7 +128,7 @@ pub(crate) fn route_pending(context: &Context, address: &Address) -> AppResult<R
             }
             Err(error) => return Err(error),
         }
-        match route_message_locked(context, address, id) {
+        match route_message_in_pass(context, address, id, &mut pass) {
             Ok(Some(receipt)) => report.routed.push((id.to_owned(), receipt.recipients)),
             Ok(None) => report.pending += 1,
             Err(error) if error.code == ErrorCode::BlockedRoute => {
@@ -644,6 +651,28 @@ pub(crate) fn route_message_locked(
     address: &Address,
     id: &str,
 ) -> AppResult<Option<Receipt>> {
+    route_message_in_pass(context, address, id, &mut RoutePass::default())
+}
+
+/// What one routing pass learns once and reuses for every letter it routes.
+/// The caller holds the participants lock for the whole pass, so neither
+/// answer can change under it: an address's resolved recipients do not depend
+/// on the letter, and resolving them lists every participant on the host; the
+/// acting participant is the same for every receipt the pass writes. Doing
+/// either per letter made a first `read` cost one full roster scan per
+/// unrouted letter (50 letters among 2,000 participants took 27 s).
+#[derive(Default)]
+struct RoutePass {
+    resolved: Option<Vec<String>>,
+    routed_by: Option<String>,
+}
+
+fn route_message_in_pass(
+    context: &Context,
+    address: &Address,
+    id: &str,
+    pass: &mut RoutePass,
+) -> AppResult<Option<Receipt>> {
     if let Some(existing) = receipt(context, address, id)? {
         return Ok(Some(existing));
     }
@@ -653,18 +682,29 @@ pub(crate) fn route_message_locked(
     // Parsing pins filename/envelope identity before a receipt can bless the
     // file. The digest below covers the exact immutable bytes.
     let parsed = parse_mail(&message_path)?;
-    let (recipients, excluded) = filtered_recipients(context, address, &parsed.envelope)?;
+    let candidates = resolved_once(context, address, &mut pass.resolved)?;
+    let (recipients, excluded) = filtered_among(context, address, &parsed.envelope, candidates)?;
     if recipients.is_empty() {
         return Ok(None);
     }
-    let routed_by = participant::resolve(context)?
-        .participant()
-        .map(|actor| actor.id.clone())
-        .unwrap_or_else(|| "post".to_owned());
+    let routed_by = routed_by_once(context, &mut pass.routed_by)?;
     publish_receipt(
         context, address, id, &bytes, recipients, excluded, routed_by,
     )
     .map(Some)
+}
+
+/// The acting participant's id, or `post` when no participant is acting.
+fn routed_by_once(context: &Context, routed_by: &mut Option<String>) -> AppResult<String> {
+    if let Some(known) = routed_by {
+        return Ok(known.clone());
+    }
+    let actor = participant::resolve(context)?
+        .participant()
+        .map(|actor| actor.id.clone())
+        .unwrap_or_else(|| "post".to_owned());
+    *routed_by = Some(actor.clone());
+    Ok(actor)
 }
 
 /// Route an imported letter that `post bridge deliver` admitted to
@@ -730,19 +770,6 @@ fn publish_receipt(
     Ok(receipt)
 }
 
-fn filtered_recipients(
-    context: &Context,
-    address: &Address,
-    envelope: &crate::model::Envelope,
-) -> AppResult<(Vec<String>, Vec<ExcludedRecipient>)> {
-    filtered_among(
-        context,
-        address,
-        envelope,
-        resolved_recipients(context, address)?,
-    )
-}
-
 /// An address's resolved recipients do not depend on the message, and
 /// resolving them lists every participant on the host. A pass over one store
 /// resolves them on first need and reuses them for every message after
@@ -760,7 +787,8 @@ fn resolved_once(
     Ok(recipients)
 }
 
-/// `filtered_recipients` from the address's already-resolved recipients.
+/// The address's recipients for one letter, from its already-resolved
+/// candidates.
 fn filtered_among(
     context: &Context,
     address: &Address,
