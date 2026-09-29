@@ -61,11 +61,20 @@ esac
 "#;
 
 /// The fake cargo: `build --release --locked` writes the scripted post,
-/// stamped with the checked-out commit's short sha as build.rs would.
+/// stamped with the checked-out commit's short sha as build.rs would, and
+/// `metadata` names the target directory the build used. FAKE_CONFIG_TARGET_DIR
+/// plays a `build.target-dir` set in a cargo config file, which (unlike
+/// CARGO_TARGET_DIR) the installer cannot see in its environment.
 const FAKE_CARGO: &str = r#"#!/usr/bin/env bash
+target="${CARGO_TARGET_DIR:-${FAKE_CONFIG_TARGET_DIR:-$PWD/target}}"
+case "$target" in /*) ;; *) target="$PWD/$target" ;; esac
+if [ "$*" = "metadata --no-deps --format-version 1 --locked" ]; then
+  printf '{"target_directory":"%s"}\n' "$target"
+  exit 0
+fi
 [ "$*" = "build --release --locked" ] || { echo "fake cargo: unexpected: $*" >&2; exit 64; }
 sha=$(git rev-parse --short HEAD)
-out="${CARGO_TARGET_DIR:-target}/release"
+out="$target/release"
 mkdir -p "$out"
 sed "s/@SHA@/$sha/g" "$FAKE_POST_TEMPLATE" > "$out/post"
 chmod +x "$out/post"
@@ -343,6 +352,25 @@ fn a_plain_install_backs_up_the_live_post_by_build_sha() {
     let output = rig.run(&[]);
     assert_code(&output, 0);
     assert_eq!(fs::read(&backup).expect("backup"), before);
+}
+
+/// A host whose cargo config sets `build.target-dir` (the devbox does) builds
+/// into a shared directory the installer's environment does not mention.
+#[test]
+fn a_target_dir_set_in_cargo_config_is_found() {
+    let rig = Rig::new();
+    let live = rig.live("config-target-dir");
+    let shared = rig.sandbox.path.join("shared-cargo-targets");
+    let output = rig.run(&[(
+        "FAKE_CONFIG_TARGET_DIR",
+        shared.to_str().expect("utf-8 path"),
+    )]);
+    assert_code(&output, 0);
+    assert!(
+        shared.join("release/post").is_file(),
+        "the build went to the configured directory"
+    );
+    assert_backed_up_and_installed(&rig, &live);
 }
 
 #[test]

@@ -177,8 +177,13 @@ trap cleanup EXIT
 note "building $short_sha in a temporary worktree"
 git -C "$repo" worktree add --detach --quiet "$src" "$full_sha" || die "could not create a worktree for $short_sha"
 ( cd "$src" && cargo build --release --locked ) >&2 || die "cargo build --release --locked failed at $short_sha"
-target_dir="${CARGO_TARGET_DIR:-$src/target}"
-case "$target_dir" in /*) ;; *) target_dir="$src/$target_dir" ;; esac
+# Cargo owns target-directory precedence (CARGO_TARGET_DIR, a config file's
+# build.target-dir, the default), so ask it rather than guess: a host whose
+# ~/.cargo/config.toml sets target-dir built fine and then found no binary.
+target_dir=$(cd "$src" && cargo metadata --no-deps --format-version 1 --locked \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])') \
+  || die "cargo metadata could not name the target directory at $short_sha"
+case "$target_dir" in /*) ;; *) die "cargo metadata returned a relative target directory: $target_dir" ;; esac
 built="$target_dir/release/post"
 [ -x "$built" ] || die "no binary at $built"
 # Copy it out: a shared CARGO_TARGET_DIR can be rebuilt under us.
