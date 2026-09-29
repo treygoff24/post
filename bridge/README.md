@@ -197,7 +197,10 @@ Local bridge state is under `$POST_MAIL_ROOT/bridge/`:
   it toward the relay: the letter's sha256, the sending participant (only when
   that participant exists here and is bound to the workspace the letter says
   it came from) and the sending workspace. A bounce is routed by this record.
-  It is written once and never rewritten or removed.
+  It is written once and never rewritten. A record that does not describe the
+  letter is left as it is (see Bounce). Once the letter's relay entry is retired
+  (delivered, or bounced) and the retirement is pushed, the record is removed,
+  so the directory holds only letters still in flight.
 - `quarantine/`: rejected bytes or metadata retained for local forensics.
 - `tmp/`: same-filesystem publication temporaries, cleared during recovery.
 - `stray/`: unexpected relay-worktree files moved aside during recovery.
@@ -333,13 +336,18 @@ time. On a terminal receipt the sender's bridge:
    stuck on the Mac when this landed) has no record. Its own
    `from_participant` stamp is believed only while that participant's record
    still names the workspace in the letter's `from`; otherwise it is a dead
-   letter. The body names the
+   letter. A record that exists but does not describe the letter (another
+   id or sha256, unreadable, wrong shape) is never overwritten and never
+   believed: the bounce is a dead letter, and a `sender_record_mismatch`
+   attention item names the letter while it is still in the relay. The body
+   names the
    letter id, recipient, the reason in words, and the exact `post send
    --body-file` command that re-sends the original text (kept in
    `bridge/bounced/<id>.body`). It reads with `post inbox` and `post read`.
 2. records that it did (`bridge/bounced/<id>.sent`, a JSON record naming the
    letter, the notice id and the destination), then retires the outbox entry
-   with `git rm`.
+   with `git rm`. After that retirement is pushed, the letter's origin record
+   is removed.
 
 Every step is idempotent under a hard kill (see the `bounce-*` crash hooks), so
 a crash never sends two notices or none. The destination is fixed in the
@@ -347,12 +355,18 @@ intent (`<id>.json`) before anything is published; a redo whose notice is
 already at that path completes it there and never chooses again, even if the
 room or participant has changed since. A redo that finds nothing published
 yet may choose again. Every file a redo finds (the intent, the saved body, the
-notice, the sent marker) is checked against the letter in hand: ids, sha256,
-the notice's letter id and its destination must match. On a mismatch the
-bridge retires nothing: the outbox entry stays in the relay and a
+notice, the sent marker) is checked against the letter in hand. The intent
+carries the SHA-256 of the whole notice, fixed when the intent is written (the
+notice is deterministic from the intent and the letter, and the time in it is
+recorded in the intent), so a notice at the intent's path is accepted only if
+every byte matches that digest; a redo writes exactly those bytes. A `.sent`
+marker is not proof by itself: the notice must still be at the intent's path.
+If the marker exists and the notice does not, the bridge retires nothing.
+On any mismatch or missing notice the outbox entry stays in the relay and a
 `refused_letter` attention item names the file and the `mv ... .conflict`
 that lets the next tick redo that step. The notice never enters `archive/`,
-so it cannot itself travel to a peer.
+so it cannot itself travel to a peer. A dead letter's attention item carries
+the refused letter's id (read from the intent), not the notice's.
 
 ### Decided markers
 
@@ -476,8 +490,10 @@ is liveness (the bridge is running, fetching and pushing); `attention` is the
 separate list of things that are stuck: items `{kind, id, summary, fix}`,
 where `fix` is an exact command or a one-sentence instruction. Kinds:
 `refused_letter` (a terminal refusal whose sender could not be told, whose
-bounce failed, or whose bounce record does not match the letter),
-`unrelayable_letter`, `quarantined_inbound` (a peer's letter
+bounce failed, or whose bounce record does not match the letter or names a
+notice that is gone), `sender_record_mismatch` (the record of who sent a letter
+still in the relay does not describe it; it leaves when the letter is
+retired), `unrelayable_letter`, `quarantined_inbound` (a peer's letter
 this host refused; it clears when the sender's bounce retires it),
 `archived_participant` (participant mail waiting for a participant whose record
 `post participant gc` moved to `participants-archive/<id>/`; see below), and

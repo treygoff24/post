@@ -1717,7 +1717,7 @@ def copy_outbound(settings, selected, logger):
                 )
             continue
         # Who sent this letter, as of now: what a later bounce is routed by.
-        bounce.record_origin(settings, mail_id, data)
+        bounce.record_origin(settings, mail_id, data, logger)
         try:
             exclusive_publish(target, data, target.parent, settings.repo)
         except FileExistsError:
@@ -1763,6 +1763,8 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
         return 0
     real_rooms = snapshot.real_rooms if snapshot is not None else {}
     pruned = 0
+    # Mismatched sender records of letters still in the relay when this ends.
+    mismatched = {}
     for path in sorted(root.glob("*/*/*.mail")):
         relative = path.relative_to(settings.repo).as_posix()
         parts = PurePosixPath(relative).parts
@@ -1782,6 +1784,14 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
             logger.emit("outbox_invalid", path=relative, reason=str(error))
             continue
         sha256 = hashlib.sha256(data).hexdigest()
+        if refusals is not None:
+            # A record of who sent this letter that is not its own stands
+            # until the letter is retired: a bounce of it is a dead letter.
+            mismatch = bounce.origin_conflict(settings, mail_id, sha256)
+            if mismatch is not None:
+                mismatched[mail_id] = attention.sender_record_mismatch(
+                    mail_id, host, room, mismatch
+                )
         ref = (
             snapshot.oids.get(f"machines/{host}")
             if snapshot is not None
@@ -1857,6 +1867,7 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
                 continue
             git.run(["rm", "--quiet", "--", relative])
             pruned += 1
+            mismatched.pop(mail_id, None)
             logger.emit(
                 "outbox_bounced", host=host, room=room, id=mail_id,
                 reason=receipt["reason"],
@@ -1876,8 +1887,11 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
             continue
         git.run(["rm", "--quiet", "--", relative])
         pruned += 1
+        mismatched.pop(mail_id, None)
         logger.emit("outbox_pruned", host=host, room=room, id=mail_id)
         checkpoint("outbound-o5-prune")
+    if refusals is not None:
+        refusals.extend(mismatched.values())
     checkpoint("outbound-o5-prune")
     return pruned
 
@@ -1983,6 +1997,54 @@ def commit_and_push(settings, config, git, rooms, logger, has_queued_work):
                 raise TickError("branch_diverged", "remote changed after successful push")
         logger.emit("pushed", head=local, ref=f"machines/{settings.host}")
     return pushed
+
+
+def prune_origins(settings, git, logger):
+    """Remove the origin record of every letter the relay no longer holds.
+
+    A record (bridge/origin/<id>.json) is what a bounce is routed by, and a
+    bounce happens only while the letter's outbox entry is in the relay. Once
+    the entry has been retired (delivered, or bounced) and that is durable
+    (this host's branch is committed and pushed, so HEAD is what the relay
+    holds), nothing routes by the record again. Only a letter this host has
+    seen on the relay (its ``published`` marker) counts: a record for a letter
+    still on its way to the relay must stay. Run after every push, so a crash
+    between the push and the removal is healed by the next tick.
+    """
+    remote = git.rev(f"origin/machines/{settings.host}")
+    if remote is None or git.rev("HEAD") != remote:
+        return 0
+    try:
+        names = decided.names(destination(settings.root, "bridge", "origin"))
+    except ConfigError:
+        return 0
+    mail_ids = []
+    for name in sorted(names):
+        if name.endswith(".json"):
+            try:
+                validate_id(name[: -len(".json")])
+            except ConfigError:
+                continue
+            mail_ids.append(name[: -len(".json")])
+    if not mail_ids:
+        return 0
+    try:
+        entries = git.ls_tree("HEAD", "outbox/")
+    except GitReadError:
+        return 0
+    held = set()
+    for entry in entries:
+        parts = PurePosixPath(entry["path"]).parts if entry["path"] is not None else ()
+        if len(parts) == 4 and parts[3].endswith(".mail"):
+            held.add(parts[3][: -len(".mail")])
+    removed = 0
+    for mail_id in mail_ids:
+        if mail_id in held or not marker_exists(settings, "published", mail_id):
+            continue
+        if bounce.remove_origin(settings, mail_id):
+            logger.emit("origin_pruned", id=mail_id)
+            removed += 1
+    return removed
 
 
 def derive_published_and_tidy(settings, config, git, rooms, logger, ref, tidy):
@@ -2262,13 +2324,19 @@ def build_attention(settings, logger, snapshot, refusals, prior, read_failures):
         listed = sorted(decided.names(bounce.dead_letter_dir(settings)))
     except ConfigError:
         listed = []
-    for name in listed:
-        if name.endswith(".mail"):
-            dead_letters.append(
-                attention.refused_dead_letter(
-                    name[: -len(".mail")], bounce.dead_letter_dir(settings) / name
-                )
+    notices = [name[: -len(".mail")] for name in listed if name.endswith(".mail")]
+    intents = bounce.dead_letter_intents(settings, notices) if notices else {}
+    for notice_id in notices:
+        # The item is about the refused letter, whose id only the intent
+        # that wrote the notice knows; a notice with no intent is a stray.
+        intent = intents.get(notice_id, {})
+        dead_letters.append(
+            attention.refused_dead_letter(
+                intent.get("id", notice_id),
+                bounce.dead_letter_dir(settings) / (notice_id + ".mail"),
+                intent.get("basis"),
             )
+        )
     unrelayable = []
     ids = sorted(logger.unrelayables)
     retired = destination(root, "bridge", "unrelayable-retired")
@@ -2784,6 +2852,9 @@ def execute(check_config=False):
                 # sender's `post delivery` shows why it is still queued.
                 pmail.note_unpushed(settings, logger, pmail.RELAY_PUSH_FAILED)
             raise
+        # Retirements this tick made are now durable: their origin records
+        # (and any left by a crash after an earlier push) can go.
+        prune_origins(settings, git, logger)
         pmail_health = pmail.health(settings, snapshot, pmail_imported, pmail_sent)
         pmail.log_awaiting(settings, logger, pmail_health["awaiting_receipt"])
         size = relay_size(settings.repo)

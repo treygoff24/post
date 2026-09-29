@@ -16,23 +16,31 @@ the inbox of the workspace (any session there sees it), else a dead-letter
 file the attention list points at. A letter published before this record
 existed has nothing recorded, so the letter's own stamps are believed only
 while the participant still names the workspace the letter says it came from;
-otherwise the notice is a dead letter. Nothing is ever routed by a
-participant's *current* workspace alone: a rebound participant would read
-someone else's bounce.
+otherwise the notice is a dead letter. A record that exists but does not
+describe the letter is never overwritten and never believed: the bounce is a
+dead letter (basis ``unproven``) and the caller lists the record. Nothing is
+ever routed by a participant's *current* workspace alone: a rebound
+participant would read someone else's bounce. A record is removed once the
+letter's outbox entry is retired and that retirement is pushed
+(:func:`remove_origin`, called by the sweep).
 
 Crash safety. Everything is idempotent under a hard kill between any two
 steps, and no step is ever skipped:
 
 1. ``bridge/bounced/<id>.json`` (the intent) is published first. It names the
-   letter (id and sha256), the notice's letter id and its destination, so a
-   redo writes the same file to the same place rather than a second notice.
+   letter (id and sha256), the notice's letter id and its destination, the
+   time the notice will carry and the sha256 of the whole notice. A redo
+   therefore writes the same bytes to the same place rather than a second
+   notice, and a notice found later is judged against that digest.
 2. ``bridge/bounced/<id>.body`` keeps the original body, so the re-send
    command in the notice names a file that exists.
 3. The notice is published with an exclusive link. A notice already at the
    intent's path is completed, never re-routed and never duplicated, but only
-   after it is checked to hold this bounce.
+   when every byte of it matches the intent's digest.
 4. ``bridge/bounced/<id>.sent`` records that the notice exists, so a redo
-   after step 3 does not write it again or log it twice.
+   after step 3 does not write it again or log it twice. The marker is not
+   proof on its own: it counts only while the notice is still at the intent's
+   path. A marker with no notice raises :class:`BounceConflict`.
 
 Every file found on a redo (intent, body, notice, sent marker) is checked
 against the letter in hand. One that does not describe this letter raises
@@ -52,6 +60,7 @@ import json
 import os
 import secrets
 import shlex
+import stat
 import time
 
 from bridgelib import pmail
@@ -62,6 +71,7 @@ from bridgelib.common import (
     destination,
     epoch_from_iso,
     exclusive_publish,
+    fsync_directory,
     load_json_bytes,
     open_regular,
     utc_now,
@@ -194,7 +204,7 @@ def _origin_path(settings, mail_id):
     return destination(settings.root, "bridge", "origin", mail_id + ".json")
 
 
-def record_origin(settings, mail_id, data):
+def record_origin(settings, mail_id, data, logger):
     """Remember who sent an outbound letter, as of the moment the bridge takes it.
 
     Called when the bridge first copies the letter toward the relay. It keeps
@@ -203,7 +213,11 @@ def record_origin(settings, mail_id, data):
     when that participant exists here and is bound to the workspace the letter
     says it came from (a participant sends only from its own workspace, so a
     stamp that disagrees with its participant's record is not vouched for),
-    and that workspace. First write wins; the record is never rewritten.
+    and that workspace. First write wins; the record is never rewritten. A
+    record that is already there and does not describe this letter is left as
+    it is and logged; a bounce of the letter is then a dead letter
+    (:func:`_choose_where`), and the sweep lists the record until the letter
+    is retired (:func:`origin_conflict`).
     """
     envelope, _ = split_letter(data)
     workspace = envelope.get("from")
@@ -221,18 +235,29 @@ def record_origin(settings, mail_id, data):
         "workspace": workspace if isinstance(workspace, str) else None,
         "at": utc_now(),
     }
-    _publish(settings, _origin_path(settings, mail_id), _json_bytes(origin))
+    if _publish(settings, _origin_path(settings, mail_id), _json_bytes(origin)):
+        return
+    try:
+        _read_origin(settings, mail_id, origin["sha256"])
+    except BounceConflict as error:
+        logger.emit("origin_record_mismatch", id=mail_id, reason=str(error))
 
 
 def _read_origin(settings, mail_id, sha256):
-    """The recorded origin of this exact letter, else ``None`` (never
-    recorded, unreadable, or recorded for another letter)."""
-    try:
-        data = _read_optional(_origin_path(settings, mail_id), 4096)
-        value = None if data is None else load_json_bytes(data, "letter origin")
-    except (ConfigError, OSError):
+    """The recorded origin of this exact letter, or ``None`` when none was
+    ever recorded. A record that is there but is not this letter's (unreadable,
+    malformed, or written for another letter) raises :class:`BounceConflict`:
+    it is never read as "no record", which would let the letter's own stamps
+    stand in for a proof the bridge no longer has."""
+    path = _origin_path(settings, mail_id)
+    data = _read_found(path, 4096)
+    if data is None:
         return None
-    if (
+    try:
+        value = load_json_bytes(data, "letter origin")
+    except ConfigError as error:
+        raise BounceConflict(f"origin record for {mail_id} is unreadable: {error}", path)
+    if not (
         isinstance(value, dict)
         and value.get("v") == 1
         and value.get("id") == mail_id
@@ -240,8 +265,39 @@ def _read_origin(settings, mail_id, sha256):
         and (value.get("participant") is None or isinstance(value.get("participant"), str))
         and (value.get("workspace") is None or isinstance(value.get("workspace"), str))
     ):
-        return value
+        raise BounceConflict(
+            f"origin record for {mail_id} does not describe this letter", path
+        )
+    return value
+
+
+def origin_conflict(settings, mail_id, sha256):
+    """The :class:`BounceConflict` for a letter whose origin record is not its
+    own, else ``None`` (no record, or a good one). For the sweep's standing
+    attention check; an I/O error is not a verdict and reads as ``None``."""
+    try:
+        _read_origin(settings, mail_id, sha256)
+    except BounceConflict as error:
+        return error
+    except (ConfigError, OSError):
+        return None
     return None
+
+
+def remove_origin(settings, mail_id):
+    """Delete a letter's origin record; ``True`` when one was removed. Only for
+    a letter whose outbox entry is gone from the relay for good: nothing after
+    that routes a bounce for it."""
+    path = _origin_path(settings, mail_id)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(metadata.st_mode):
+        return False
+    path.unlink()
+    fsync_directory(path.parent)
+    return True
 
 
 def _choose_where(settings, mail_id, sha256, envelope, real_rooms):
@@ -263,9 +319,14 @@ def _choose_where(settings, mail_id, sha256, envelope, real_rooms):
 
     A letter with no record is believed only as far as it can be checked now:
     its ``from_participant`` must still name the workspace in the letter's
-    ``from``. Anything else is a dead letter.
+    ``from``. Anything else is a dead letter, and so is a letter whose record
+    is there but is not its own (``basis`` ``unproven``): the record is not
+    overwritten and the letter's stamps are not believed in its place.
     """
-    origin = _read_origin(settings, mail_id, sha256)
+    try:
+        origin = _read_origin(settings, mail_id, sha256)
+    except BounceConflict:
+        return DEAD_LETTER, "unproven"
     if origin is not None:
         basis = "recorded"
         participant, workspace = origin["participant"], origin["workspace"]
@@ -390,13 +451,18 @@ def _addressee(where, envelope):
     return str(envelope.get("from", SYSTEM_SENDER)), {"address_kind": "workspace"}
 
 
-def render_notice(mail_id, host, room, receipt, envelope, body_path, letter_id, where):
-    reason = receipt["reason"]
+def _sent_stamp():
+    return dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+
+
+def render_notice(mail_id, host, room, reason, envelope, body_path, letter_id, where, sent):
+    """The notice's exact bytes. Every input is fixed by the intent and the
+    letter (``sent`` included), so a redo renders the same bytes the first
+    attempt did and the intent's ``notice_sha256`` can vouch for them."""
     original = str(envelope.get("subject", ""))
     subject = SUBJECT_PREFIX + original
     while len(subject.encode("utf-8")) > SUBJECT_MAX_BYTES:
         subject = subject[:-1]
-    now = dt.datetime.now().astimezone()
     to, header = _addressee(where, envelope)
     envelope_out = {
         "id": letter_id,
@@ -404,7 +470,7 @@ def render_notice(mail_id, host, room, receipt, envelope, body_path, letter_id, 
         "to": to,
         "kind": "note",
         "subject": subject,
-        "sent": now.strftime("%Y-%m-%d %H:%M:%S %z"),
+        "sent": sent,
     }
     envelope_out.update(header)
     text = (
@@ -433,13 +499,28 @@ def render_notice(mail_id, host, room, receipt, envelope, body_path, letter_id, 
 NOTICE_MAX_BYTES = 64 * 1024
 
 
+def _intent_notice(intent, envelope, body_path):
+    """The notice an intent stands for, rendered from the intent and the letter."""
+    return render_notice(
+        intent["id"], intent["host"], intent["room"], intent["reason"], envelope,
+        body_path, intent["letter_id"], intent["where"], intent["sent"],
+    )
+
+
+def _sealed(intent, envelope, body_path):
+    """``intent`` with the sha256 of the notice it renders to (``notice_sha256``)."""
+    digest = hashlib.sha256(_intent_notice(intent, envelope, body_path)).hexdigest()
+    return dict(intent, notice_sha256=digest)
+
+
 def notify(settings, host, room, mail_id, data, receipt, logger, real_rooms):
     """Write the sender's notice for one refused outbox letter; idempotent.
 
     Returns a :class:`Bounce`. Raises ``ConfigError``/``OSError`` when the
     notice cannot be written, and :class:`BounceConflict` (a ``ConfigError``)
-    when a record from an earlier attempt does not describe this letter; the
-    caller then keeps the outbox entry and tries again next tick.
+    when a record from an earlier attempt does not describe this letter, or a
+    marker says a notice was written and it is not there; the caller then
+    keeps the outbox entry and tries again next tick.
     """
     envelope, body = split_letter(data)
     sha256 = hashlib.sha256(data).hexdigest()
@@ -450,31 +531,50 @@ def notify(settings, host, room, mail_id, data, receipt, logger, real_rooms):
     decided_now = existing is None
     if decided_now:
         where, basis = _choose_where(settings, mail_id, sha256, envelope, real_rooms)
-        intent = {
-            "v": 1,
-            "id": mail_id,
-            "sha256": sha256,
-            "letter_id": _new_letter_id(),
-            "where": where,
-            "basis": basis,
-            "host": host,
-            "room": room,
-            "reason": receipt["reason"],
-            "at": utc_now(),
-        }
+        intent = _sealed(
+            {
+                "v": 1,
+                "id": mail_id,
+                "sha256": sha256,
+                "letter_id": _new_letter_id(),
+                "where": where,
+                "basis": basis,
+                "host": host,
+                "room": room,
+                "reason": receipt["reason"],
+                "sent": _sent_stamp(),
+                "at": utc_now(),
+            },
+            envelope,
+            body_path,
+        )
         _publish(settings, intent_path, _json_bytes(intent))
         checkpoint("bounce-b1-intent")
     else:
         intent = _load_intent(existing, intent_path, mail_id, sha256, host, room)
-    letter_id = intent["letter_id"]
+        # The digest the intent carries must be the digest of the notice this
+        # letter renders to: what a notice is later compared with is then
+        # known to come from this letter.
+        if _sealed(intent, envelope, body_path)["notice_sha256"] != intent["notice_sha256"]:
+            raise BounceConflict(
+                f"bounce intent for {mail_id} does not describe the notice "
+                f"this letter renders to",
+                intent_path,
+            )
     where = intent["where"]
     sent = _read_sent(sent_path, mail_id, sha256, intent)
     # The notice at the intent's own path comes first: if it is there, the
     # bounce was already published, and completing it is the only correct
     # move whatever the world looks like now.
-    notice_path, notice = _find_notice(
-        settings, intent_path, mail_id, letter_id, where, envelope
-    )
+    notice_path, notice = _find_notice(settings, intent_path, intent, mail_id)
+    if sent is not None and notice is None:
+        # The marker only records that the notice was written; the notice is
+        # the proof. Without it the letter would be retired with nobody told.
+        raise BounceConflict(
+            f"the sent marker for {mail_id} says its notice was written, but "
+            f"there is no notice at {notice_path}",
+            sent_path,
+        )
     if sent is None and notice is None and not decided_now:
         # Nothing was published yet, so nothing pins the destination: choose
         # again from the world as it is now, rather than write into a
@@ -482,11 +582,9 @@ def notify(settings, host, room, mail_id, data, receipt, logger, real_rooms):
         fresh, basis = _choose_where(settings, mail_id, sha256, envelope, real_rooms)
         if fresh != where:
             where = fresh
-            intent = dict(intent, where=where, basis=basis)
+            intent = _sealed(dict(intent, where=where, basis=basis), envelope, body_path)
             atomic_replace(intent_path, _json_bytes(intent), settings.root)
-            notice_path, notice = _find_notice(
-                settings, intent_path, mail_id, letter_id, where, envelope
-            )
+            notice_path, notice = _find_notice(settings, intent_path, intent, mail_id)
     if not _publish(settings, body_path, body):
         if _read_found(body_path, len(body) + 1) != body:
             raise BounceConflict(
@@ -495,45 +593,41 @@ def notify(settings, host, room, mail_id, data, receipt, logger, real_rooms):
     checkpoint("bounce-b2-body")
     if sent is None:
         if notice is None:
-            rendered = render_notice(
-                mail_id, host, room, receipt, envelope, body_path, letter_id, where
-            )
+            rendered = _intent_notice(intent, envelope, body_path)
             if not _publish(settings, notice_path, rendered):
                 # A file appeared since the read above: it must be ours.
-                _find_notice(
-                    settings, intent_path, mail_id, letter_id, where, envelope,
-                    required=True,
-                )
+                _find_notice(settings, intent_path, intent, mail_id, required=True)
         checkpoint("bounce-b3-letter")
         marker = {
             "v": 1,
             "id": mail_id,
             "sha256": sha256,
-            "letter_id": letter_id,
+            "letter_id": intent["letter_id"],
             "where": where,
             "at": utc_now(),
         }
         _publish(settings, sent_path, _json_bytes(marker))
         logger.emit(
             "letter_bounced", id=mail_id, host=host, room=room,
-            reason=receipt["reason"], where=where, notice=letter_id,
+            reason=receipt["reason"], where=where, notice=intent["letter_id"],
         )
         checkpoint("bounce-b4-sent")
-    return Bounce(where, letter_id, notice_path)
+    return Bounce(where, intent["letter_id"], notice_path)
 
 
-def _find_notice(settings, intent_path, mail_id, letter_id, where, envelope, required=False):
+def _find_notice(settings, intent_path, intent, mail_id, required=False):
     """``(path, data)`` of the notice at the intent's destination; ``data`` is
-    ``None`` when nothing is there. A file that is there must hold this bounce
-    (:class:`BounceConflict` otherwise), so it is never accepted on sight."""
+    ``None`` when nothing is there. A file that is there must be the notice
+    the intent sealed, byte for byte (:class:`BounceConflict` otherwise), so a
+    file is never accepted on sight or on a few matching lines."""
     try:
-        path = _path_for(settings, where, letter_id)
+        path = _path_for(settings, intent["where"], intent["letter_id"])
     except ConfigError as error:
         raise BounceConflict(f"bounce intent for {mail_id}: {error}", intent_path)
     data = _read_found(path, NOTICE_MAX_BYTES)
     if data is None and required:
         raise BounceConflict(f"the notice for {mail_id} could not be written", path)
-    if data is not None and not _notice_holds(data, mail_id, letter_id, where, envelope):
+    if data is not None and hashlib.sha256(data).hexdigest() != intent["notice_sha256"]:
         raise BounceConflict(
             f"the file at the notice path is not the notice for {mail_id}", path
         )
@@ -554,8 +648,10 @@ def _load_intent(existing, intent_path, mail_id, sha256, host, room):
         or intent.get("sha256") != sha256
         or intent.get("host") != host
         or intent.get("room") != room
-        or not isinstance(intent.get("letter_id"), str)
-        or not isinstance(intent.get("where"), str)
+        or not all(
+            isinstance(intent.get(key), str)
+            for key in ("letter_id", "where", "reason", "sent", "notice_sha256")
+        )
     ):
         raise BounceConflict(
             f"bounce intent for {mail_id} does not describe this letter", intent_path
@@ -589,18 +685,36 @@ def _read_sent(sent_path, mail_id, sha256, intent):
     return value
 
 
-def _notice_holds(data, mail_id, letter_id, where, envelope):
-    """Whether ``data`` is the notice this bounce wrote: the notice id, the
-    system sender, the addressee, and the refused letter's id in the text."""
-    header, text = split_letter(data)
-    to, _ = _addressee(where, envelope)
-    line = b"\n  letter:     " + mail_id.encode("ascii") + b"\n"
-    return (
-        header.get("id") == letter_id
-        and header.get("from") == SYSTEM_SENDER
-        and header.get("to") == to
-        and line in b"\n" + text
-    )
+def dead_letter_intents(settings, notice_ids):
+    """``{notice id: intent}`` for the dead-letter notices in ``notice_ids``,
+    read from the intents that wrote them (the notice's own id is not the
+    refused letter's)."""
+    wanted = set(notice_ids)
+    found = {}
+    directory = _bounced(settings)
+    try:
+        names = sorted(
+            entry.name for entry in os.scandir(str(directory))
+            if entry.name.endswith(".json")
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        return found
+    for name in names:
+        if len(found) == len(wanted):
+            break
+        try:
+            data = _read_optional(directory / name, 4096)
+            intent = load_json_bytes(data or b"", "bounce intent")
+        except (ConfigError, OSError):
+            continue
+        if (
+            isinstance(intent, dict)
+            and intent.get("where") == DEAD_LETTER
+            and intent.get("letter_id") in wanted
+            and intent.get("id") == name[: -len(".json")]
+        ):
+            found[intent["letter_id"]] = intent
+    return found
 
 
 def _json_bytes(value):

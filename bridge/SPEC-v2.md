@@ -1904,6 +1904,21 @@ unchanged.
 
 ## History
 
+- r6.5 (2026-09-28): bounce safety, review round 2 of the bridge move (see
+  README "Bounce"). (1) A `.sent` marker is proof only while the notice is at
+  the intent's path; if the notice is gone the outbox entry stays and a
+  `refused_letter` attention item names the marker. (2) The intent stores the
+  SHA-256 of the whole notice (the notice's time is stored in the intent too),
+  and a notice found on a redo must match it byte for byte; a redo writes
+  those bytes. (3) A dead-letter attention item carries the refused letter's
+  id, read from the intent. (4) An origin record that exists but does not
+  describe the letter is never overwritten: the bounce is a dead letter and a
+  `sender_record_mismatch` attention item stands while the letter is in the
+  relay. (5) A letter's origin record is removed after its relay entry is
+  retired (delivered or bounced) and the retirement is pushed, so
+  `bridge/origin/` holds only letters in flight. No tolerance for the earlier
+  intent and `.sent` formats was added: the bounce feature had not been
+  deployed.
 - r6.4 (2026-09-28): bounce safety, review round 1 of the bridge move (see
   README "Bounce"). (1) A delivery is final: a delivered receipt or ledger
   entry that matches the letter is re-asserted before the receiver looks at
