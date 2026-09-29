@@ -238,9 +238,8 @@ Notifications use `[post] #channel: N new`, without inspection instructions.
   atomic replacement. The lock is a solitary regular inode checked after
   acquisition and is mode `0600`; concurrent acknowledgements therefore keep
   the whole map instead of losing marks. Seen-sets only grow, so a late id
-  below newer consumed ids still surfaces. Growth is linear in history; a
-  50,000-id warning remains the operational threshold and watermark compaction
-  is unsafe while late backfills can arrive.
+  below newer consumed ids still surfaces. Growth is linear in history, and
+  watermark compaction is unsafe while late backfills can arrive.
 - Missing, malformed, unknown-field, wrong-version, invalid-id, symlinked, or
   non-regular cursor state is advisory-invalid on read-only loads: the whole
   snapshot becomes empty, one sanitized warning goes to stderr, and eligible

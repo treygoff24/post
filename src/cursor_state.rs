@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 pub(crate) const CURSORS_FILE: &str = "cursors.json";
 pub(crate) const CURSORS_LOCK_FILE: &str = ".cursors.lock";
 pub(crate) const STATE_VERSION: u64 = 1;
-pub(crate) const SEEN_SET_WARN: usize = 50_000;
 
 const PARTICIPANT_STATE_VERSION: u64 = 2;
 
@@ -590,33 +589,8 @@ impl Snapshot {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn mail_has_seen(&self, id: &str) -> bool {
-        self.mail.contains(id)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn channel_has_seen(&self, channel: &str, id: &str) -> bool {
-        self.channels
-            .get(channel)
-            .is_some_and(|seen| seen.contains(id))
-    }
-
     pub(crate) fn into_channels(self) -> BTreeMap<String, BTreeSet<String>> {
         self.channels
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn max_seen(&self, channel: &str) -> Option<&str> {
-        self.channels
-            .get(channel)
-            .and_then(|seen| seen.last())
-            .map(String::as_str)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn channel_seen_count(&self, channel: &str) -> usize {
-        self.channels.get(channel).map(|set| set.len()).unwrap_or(0)
     }
 }
 
@@ -627,155 +601,6 @@ impl State {
             channels: self.channels,
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn consume_channel(
-    context: &Context,
-    room: &str,
-    channel: &str,
-    ids: Vec<String>,
-) -> AppResult<CursorAdvance> {
-    consume_channel_waiting(context, room, channel, ids, LockWait::Blocking)
-}
-
-fn consume_channel_waiting(
-    context: &Context,
-    room: &str,
-    channel: &str,
-    ids: Vec<String>,
-    wait: LockWait,
-) -> AppResult<CursorAdvance> {
-    if ids.is_empty() {
-        let prior = Snapshot::load(context, room)
-            .max_seen(channel)
-            .map(str::to_owned);
-        return Ok(CursorAdvance {
-            cursor: prior.clone().unwrap_or_default(),
-            prior,
-            advanced: false,
-            marked: 0,
-        });
-    }
-    consume_inner(
-        context,
-        room,
-        vec![(channel.to_owned(), ids)],
-        Some(channel),
-        None,
-        wait,
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn consume_channel_through(
-    context: &Context,
-    room: &str,
-    channel: &str,
-    target: &str,
-) -> AppResult<CursorAdvance> {
-    consume_inner(
-        context,
-        room,
-        Vec::new(),
-        Some(channel),
-        Some((channel, target)),
-        LockWait::Blocking,
-    )
-}
-
-fn consume_inner(
-    context: &Context,
-    room: &str,
-    channel_seen: Vec<(String, Vec<String>)>,
-    outcome_channel: Option<&str>,
-    through: Option<(&str, &str)>,
-    wait: LockWait,
-) -> AppResult<CursorAdvance> {
-    validate_channel_seen(&channel_seen)?;
-    let path = cursor_path(context, room)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::invalid_argument("cursor path has no room directory"))?;
-    crate::mailbox::ensure_room_not_mid_rename(context, room)?;
-    fs::create_dir_all(parent)
-        .map_err(|error| AppError::io("create cursor state directory", parent, error))?;
-    let _lock = lock_room_cursors(context, room, wait)?;
-    ensure_cursor_destination_safe(&path)?;
-    let mut state = load_for_write(context, room, &path)?;
-    let prior = outcome_channel.and_then(|channel| {
-        state
-            .channels
-            .get(channel)
-            .and_then(|seen| seen.last())
-            .cloned()
-    });
-
-    let through_ids = match through {
-        Some((channel, target)) => {
-            let empty = BTreeSet::new();
-            let seen = state.channels.get(channel).unwrap_or(&empty);
-            unseen_candidates(context, channel, seen, Some(target), None)?
-        }
-        None => BTreeSet::new(),
-    };
-
-    let mut requested_channels: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (channel, ids) in channel_seen {
-        requested_channels.entry(channel).or_default().extend(ids);
-    }
-    if let Some((channel, _)) = through {
-        requested_channels
-            .entry(channel.to_owned())
-            .or_default()
-            .extend(through_ids);
-    }
-
-    let mut marked_channels = 0;
-    for (channel, additions) in requested_channels {
-        let seen = state.channels.entry(channel.clone()).or_default();
-        let fresh: Vec<String> = additions.difference(seen).cloned().collect();
-        marked_channels += fresh.len();
-        seen.extend(fresh);
-        if seen.len() >= SEEN_SET_WARN {
-            eprintln!(
-                "post: warning: channel '{channel}' seen-set holds {} ids; reads/acks scale linearly",
-                seen.len()
-            );
-        }
-    }
-
-    if marked_channels > 0 {
-        replace_state(&path, &state)?;
-    }
-
-    let cursor = outcome_channel
-        .and_then(|channel| state.channels.get(channel))
-        .and_then(|seen| seen.last())
-        .cloned()
-        .or(prior.clone())
-        .unwrap_or_default();
-    Ok(CursorAdvance {
-        prior,
-        cursor,
-        advanced: marked_channels > 0,
-        marked: marked_channels,
-    })
-}
-
-fn validate_channel_seen(channel_seen: &[(String, Vec<String>)]) -> AppResult<()> {
-    for (channel, ids) in channel_seen {
-        channel::validate_channel_name(channel)?;
-        for id in ids {
-            if !channel::is_canonical_channel_message_id(id) {
-                return Err(AppError::invalid_argument(format!(
-                    "channel cursor id '{}' is not canonical",
-                    id
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn cursor_path(context: &Context, room: &str) -> AppResult<PathBuf> {
@@ -882,50 +707,6 @@ fn id_kind_name(kind: &IdKind) -> &'static str {
     }
 }
 
-fn serialize_state(state: &State) -> AppResult<Vec<u8>> {
-    #[derive(Serialize)]
-    struct StoredSet<'a> {
-        seen: &'a BTreeSet<String>,
-    }
-    #[derive(Serialize)]
-    struct StoredDocument<'a> {
-        version: u64,
-        mail: StoredSet<'a>,
-        channels: BTreeMap<&'a str, StoredSet<'a>>,
-    }
-    let document = StoredDocument {
-        version: STATE_VERSION,
-        mail: StoredSet { seen: &state.mail },
-        channels: state
-            .channels
-            .iter()
-            .map(|(channel, seen)| (channel.as_str(), StoredSet { seen }))
-            .collect(),
-    };
-    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|error| {
-        AppError::new(
-            ErrorCode::IoError,
-            format!("failed to serialize cursor state: {error}"),
-            "Retry the consuming command; the cursor was not updated.",
-        )
-    })?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
-fn replace_state(path: &Path, state: &State) -> AppResult<()> {
-    ensure_cursor_destination_safe(path)?;
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| AppError::io("restrict cursor state", path, error))?;
-        }
-    }
-    let bytes = serialize_state(state)?;
-    atomic_replace(path, &bytes)
-        .map_err(|error| AppError::io("atomically update cursor state", path, error))
-}
-
 fn ensure_cursor_destination_safe(path: &Path) -> AppResult<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -948,14 +729,6 @@ fn cursor_write_refused(path: &Path, reason: &str) -> AppError {
     )
     .path(path.display().to_string())
     .reason(reason)
-}
-
-fn load_for_write(context: &Context, room: &str, path: &Path) -> AppResult<State> {
-    match read_cursor(path) {
-        CursorRead::Valid(state) => Ok(state),
-        CursorRead::Missing => load_legacy_state(context, room),
-        CursorRead::Invalid => Ok(State::default()),
-    }
 }
 
 fn load_legacy_state(context: &Context, room: &str) -> AppResult<State> {
@@ -1160,14 +933,6 @@ fn is_canonical_mail_id(id: &str) -> bool {
         && id[16..].iter().all(u8::is_ascii_hexdigit)
 }
 
-fn lock_room_cursors(context: &Context, room: &str, wait: LockWait) -> AppResult<File> {
-    let directory = cursor_path(context, room)?
-        .parent()
-        .expect("room cursor path has a parent")
-        .to_path_buf();
-    lock_cursor_dir(&directory, wait)
-}
-
 fn trusted_lock_metadata(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_file() && metadata.nlink() == 1
 }
@@ -1178,7 +943,6 @@ mod tests {
     use crate::channel_state::ParticipantChannels;
     use crate::model::ChannelMessage;
     use crate::test_support::{test_root, trash_test_root};
-    use std::sync::{Arc, Barrier};
 
     const MAIL_ID: &str = "20260831-171234-a1b2c3";
     const ID1: &str = "20260831-171234-000001-a1b2c3";
@@ -1230,32 +994,12 @@ mod tests {
         fs::write(root.join(room).join("channel-state.json"), bytes).expect("write legacy");
     }
 
-    /// G1: a legacy room cursor write never recreates a room an
-    /// interrupted rename names.
-    #[test]
-    fn legacy_room_cursor_write_refuses_a_room_mid_rename() {
-        let (root, context) = context("mid-rename");
-        fs::write(
-            root.join(crate::mailbox::RENAME_JOURNAL_FILE),
-            br#"{"v":1,"old":"alpha","new":"beta","started_at":"x"}"#,
-        )
-        .expect("journal");
-        let error = consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
-            .expect_err("mid-rename room refuses");
-        assert_eq!(
-            error.details.exact_fix.as_deref(),
-            Some("post rooms rename 'alpha' 'beta'")
-        );
-        assert!(!root.join("alpha").exists());
-        trash_test_root(&root);
-    }
-
     #[test]
     fn missing_and_malformed_cursor_are_empty_without_writes() {
         let (root, context) = context("advisory");
         let before = fs::read_dir(&root).expect("root").count();
         let missing = Snapshot::load(&context, "alpha");
-        assert!(!missing.mail_has_seen(MAIL_ID));
+        assert_eq!(missing, Snapshot::default());
         assert!(!root.join("alpha").exists());
         assert_eq!(before, fs::read_dir(&root).expect("root").count());
         fs::create_dir_all(root.join("alpha")).expect("room");
@@ -1263,8 +1007,7 @@ mod tests {
         let legacy = format!(r#"{{"tax":"{ID1}"}}"#);
         fs::write(root.join("alpha/channel-state.json"), &legacy).expect("legacy");
         let malformed = Snapshot::load(&context, "alpha");
-        assert!(!malformed.mail_has_seen(MAIL_ID));
-        assert!(!malformed.channel_has_seen("tax", ID1));
+        assert_eq!(malformed, Snapshot::default());
         assert_eq!(
             fs::read(root.join("alpha/cursors.json")).expect("read"),
             b"{not json"
@@ -1317,23 +1060,33 @@ mod tests {
     }
 
     #[test]
-    fn exact_v1_serialization_round_trips_mail_and_channels() {
+    fn exact_v2_serialization_round_trips_mail_and_channels() {
         let (root, context) = context("roundtrip");
-        consume_channel(
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let address = Address {
+            kind: crate::participant::AddressKind::Workspace,
+            name: "alpha".to_owned(),
+        };
+        ParticipantCursors::consume_mail(&context, &participant, &address, &[MAIL_ID.to_owned()])
+            .expect("consume mail");
+        ParticipantCursors::consume_channel(
             &context,
-            "alpha",
+            &participant,
             "tax",
-            vec![ID2.to_owned(), ID1.to_owned()],
+            &[ID2.to_owned(), ID1.to_owned()],
         )
         .expect("consume channel set");
-        let path = root.join("alpha/cursors.json");
-        let bytes = fs::read_to_string(&path).expect("read cursor");
+        let bytes = fs::read_to_string(participant.dir.join(CURSORS_FILE)).expect("read cursor");
         assert_eq!(
             bytes,
             r#"{
-  "version": 1,
+  "version": 2,
   "mail": {
-    "seen": []
+    "workspace:alpha": {
+      "seen": [
+        "20260831-171234-a1b2c3"
+      ]
+    }
   },
   "channels": {
     "tax": {
@@ -1346,9 +1099,10 @@ mod tests {
 }
 "#
         );
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("tax", ID1));
-        assert!(snapshot.channel_has_seen("tax", ID2));
+        let loaded = ParticipantCursors::load(&context, &participant);
+        assert!(loaded.mail_has_seen(&address, MAIL_ID));
+        assert!(loaded.channel_has_seen("tax", ID1));
+        assert!(loaded.channel_has_seen("tax", ID2));
         trash_test_root(&root);
     }
 
@@ -1391,31 +1145,29 @@ mod tests {
     }
 
     #[test]
-    fn legacy_import_is_read_only_then_materialized_without_touching_legacy() {
+    fn legacy_v1_import_is_read_only_and_never_creates_a_room_cursor() {
         let (root, context) = context("legacy");
         seed_message(&root, "tax", ID1, "beta");
         seed_message(&root, "tax", ID2, "beta");
         seed_message(&root, "tax", ID3, "beta");
         let legacy = r#"{"tax":"20260831-171234-000002-b2c3d4"}"#;
         write_legacy_v1(&root, "alpha", legacy);
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("tax", ID1));
-        assert!(snapshot.channel_has_seen("tax", ID2));
-        assert!(!snapshot.channel_has_seen("tax", ID3));
-        let legacy_path = root.join("alpha/channel-state.json");
-        assert_eq!(fs::read(&legacy_path).expect("legacy"), legacy.as_bytes());
-        consume_channel(&context, "alpha", "tax", vec![ID3.to_owned()]).expect("materialize");
-        assert_eq!(fs::read(&legacy_path).expect("legacy"), legacy.as_bytes());
-        assert!(root.join("alpha/cursors.json").is_file());
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("tax", ID1));
-        assert!(snapshot.channel_has_seen("tax", ID2));
-        assert!(snapshot.channel_has_seen("tax", ID3));
+        let seen = Snapshot::load(&context, "alpha").into_channels();
+        assert_eq!(
+            seen["tax"],
+            BTreeSet::from([ID1.to_owned(), ID2.to_owned()])
+        );
+        assert_eq!(
+            fs::read(root.join("alpha/channel-state.json")).expect("legacy"),
+            legacy.as_bytes()
+        );
+        assert!(!root.join("alpha/cursors.json").exists());
+        assert!(!root.join("alpha/.cursors.lock").exists());
         trash_test_root(&root);
     }
 
     #[test]
-    fn legacy_v2_import_is_read_only_then_materialized_without_touching_legacy() {
+    fn legacy_v2_import_is_read_only_and_a_participant_write_does_not_inherit_it() {
         let (root, context) = context("legacy-v2");
         let legacy = format!(
             r#"{{"version":2,"channels":{{"tax":{{"seen":["{}","{}"]}}}}}}"#,
@@ -1423,81 +1175,95 @@ mod tests {
         );
         write_legacy_v1(&root, "alpha", &legacy);
         let legacy_path = root.join("alpha/channel-state.json");
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("tax", ID1));
-        assert!(snapshot.channel_has_seen("tax", ID2));
-        assert!(!snapshot.channel_has_seen("tax", ID3));
+        let seen = Snapshot::load(&context, "alpha").into_channels();
+        assert_eq!(
+            seen["tax"],
+            BTreeSet::from([ID1.to_owned(), ID2.to_owned()])
+        );
         assert!(!root.join("alpha/cursors.json").exists());
         assert_eq!(fs::read(&legacy_path).expect("legacy"), legacy.as_bytes());
 
-        consume_channel(&context, "alpha", "tax", vec![ID3.to_owned()]).expect("materialize");
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("tax", ID1));
-        assert!(snapshot.channel_has_seen("tax", ID2));
-        assert!(snapshot.channel_has_seen("tax", ID3));
+        // Participant reads never import room state (CONTRACT.md: participant
+        // cursors are independent), so a live write starts from nothing.
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        ParticipantCursors::consume_channel(&context, &participant, "tax", &[ID3.to_owned()])
+            .expect("participant write");
+        let loaded = ParticipantCursors::load(&context, &participant);
+        assert!(loaded.channel_has_seen("tax", ID3));
+        assert!(!loaded.channel_has_seen("tax", ID1));
+        assert!(!root.join("alpha/cursors.json").exists());
         assert_eq!(fs::read(&legacy_path).expect("legacy"), legacy.as_bytes());
         trash_test_root(&root);
     }
 
     #[test]
-    fn legacy_v1_migration_error_refuses_write_without_losing_prior_channels() {
-        let (root, context) = context("legacy-v1-permission");
-        seed_message(&root, "aaa", ID1, "beta");
-        let locked_directory = root.join(CHANNELS_DIR).join("zzz").join("messages");
-        fs::create_dir_all(&locked_directory).expect("locked directory");
-        let legacy = format!(r#"{{"aaa":"{}","zzz":"{}"}}"#, ID1, ID2);
-        write_legacy_v1(&root, "alpha", &legacy);
-        fs::set_permissions(&locked_directory, fs::Permissions::from_mode(0o000))
-            .expect("lock messages directory");
-
-        let error = consume_channel(&context, "alpha", "aaa", vec![ID3.to_owned()])
-            .expect_err("writer must refuse unreadable legacy channel");
-        assert_eq!(error.code, ErrorCode::IoError);
-        assert!(!root.join("alpha/cursors.json").exists());
-
-        fs::set_permissions(&locked_directory, fs::Permissions::from_mode(0o700))
-            .expect("restore messages directory");
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("aaa", ID1));
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn late_channel_id_below_maximum_stays_unread() {
-        let (root, context) = context("late");
-        consume_channel(
-            &context,
-            "alpha",
-            "tax",
-            vec![ID1.to_owned(), ID3.to_owned()],
+    fn room_cursor_snapshot_wins_over_a_conflicting_legacy_channel_state() {
+        let (root, context) = context("cursor-precedence");
+        fs::create_dir_all(root.join("alpha")).expect("room");
+        fs::write(
+            root.join("alpha/channel-state.json"),
+            format!(r#"{{"version":2,"channels":{{"tax":{{"seen":["{ID1}"]}}}}}}"#),
         )
-        .expect("mark out of order");
-        seed_message(&root, "tax", ID2, "beta");
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.channel_has_seen("tax", ID1));
-        assert!(snapshot.channel_has_seen("tax", ID3));
-        assert!(!snapshot.channel_has_seen("tax", ID2));
+        .expect("legacy");
+        fs::write(
+            root.join("alpha/cursors.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "mail": {{"seen": []}},
+  "channels": {{"tax": {{"seen": ["{ID2}"]}}}}
+}}
+"#
+            ),
+        )
+        .expect("cursor");
+
+        let seen = Snapshot::load(&context, "alpha").into_channels();
+        assert_eq!(seen["tax"], BTreeSet::from([ID2.to_owned()]));
         trash_test_root(&root);
     }
 
     #[test]
-    fn symlinked_cursor_degrades_on_read_and_refuses_write() {
+    fn symlinked_room_cursor_degrades_to_an_empty_snapshot_on_read() {
         let (root, context) = context("symlink");
         fs::create_dir_all(root.join("alpha")).expect("room");
-        fs::write(root.join("target.json"), b"{}").expect("target");
-        let target_before = fs::read(root.join("target.json")).expect("target");
+        let valid = format!(
+            r#"{{"version":1,"mail":{{"seen":[]}},"channels":{{"tax":{{"seen":["{ID1}"]}}}}}}"#
+        );
+        fs::write(root.join("target.json"), &valid).expect("target");
         std::os::unix::fs::symlink(root.join("target.json"), root.join("alpha/cursors.json"))
             .expect("symlink");
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(!snapshot.channel_has_seen("tax", ID1));
-        let error = consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
-            .expect_err("writer must refuse symlink");
-        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(Snapshot::load(&context, "alpha"), Snapshot::default());
         assert!(root.join("alpha/cursors.json").is_symlink());
-        assert_eq!(
-            fs::read(root.join("target.json")).expect("target"),
-            target_before
-        );
+        trash_test_root(&root);
+    }
+
+    /// The live writer never follows a planted symlink and never discards a
+    /// malformed document to start over.
+    #[cfg(unix)]
+    #[test]
+    fn participant_cursor_writer_refuses_a_symlink_and_a_malformed_document() {
+        let (root, context) = context("participant-refuse");
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        fs::create_dir_all(&participant.dir).expect("participant dir");
+        let cursor = participant.dir.join(CURSORS_FILE);
+
+        fs::write(root.join("target.json"), b"{}").expect("target");
+        std::os::unix::fs::symlink(root.join("target.json"), &cursor).expect("symlink");
+        let error =
+            ParticipantCursors::consume_channel(&context, &participant, "tax", &[ID1.to_owned()])
+                .expect_err("writer must refuse a symlink");
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert!(cursor.is_symlink());
+        assert_eq!(fs::read(root.join("target.json")).expect("target"), b"{}");
+        fs::remove_file(&cursor).expect("drop symlink");
+
+        fs::write(&cursor, b"{not json").expect("malformed");
+        let error =
+            ParticipantCursors::consume_channel(&context, &participant, "tax", &[ID1.to_owned()])
+                .expect_err("writer must refuse a malformed document");
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(fs::read(&cursor).expect("cursor"), b"{not json");
         trash_test_root(&root);
     }
 
@@ -1625,41 +1391,6 @@ mod tests {
         )
         .expect("a free lock is taken within the budget");
         assert!(ParticipantCursors::load(&context, &participant).channel_has_seen("tax", ID1));
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn concurrent_writers_union_the_whole_map() {
-        let (root, context) = context("concurrent");
-        let barrier = Arc::new(Barrier::new(8));
-        let mut handles = Vec::new();
-        for worker in 0..8 {
-            let context = context.clone();
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                let channel = format!("chan{worker}");
-                let id = format!("20260831-171234-00000{worker}-a1b2c3");
-                consume_channel(&context, "alpha", &channel, vec![id]).expect("consume");
-            }));
-        }
-        for handle in handles {
-            handle.join().expect("worker");
-        }
-        let snapshot = Snapshot::load(&context, "alpha");
-        for worker in 0..8 {
-            let channel = format!("chan{worker}");
-            let id = format!("20260831-171234-00000{worker}-a1b2c3");
-            assert!(snapshot.channel_has_seen(&channel, &id));
-        }
-        assert_eq!(
-            fs::metadata(root.join("alpha/.cursors.lock"))
-                .expect("lock")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
         trash_test_root(&root);
     }
 }

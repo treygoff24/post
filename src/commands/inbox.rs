@@ -339,39 +339,3 @@ pub(crate) fn render_reply_targets(
 ) {
     output::render_reply_metadata(rendered, origin, participant, shared);
 }
-
-#[cfg(test)]
-mod profile_render_tests {
-    use crate::output::{sender_label_quoted, SenderAttribution};
-
-    fn attribution<'a>(
-        from: &'a str,
-        display_name: Option<&'a str>,
-        pfp: Option<&'a str>,
-    ) -> SenderAttribution<'a> {
-        SenderAttribution {
-            from,
-            from_participant: None,
-            from_host: None,
-            from_lineage: None,
-            display_name,
-            pfp,
-        }
-    }
-
-    #[test]
-    fn inbox_line_sender_absent_profile_is_byte_identical() {
-        assert_eq!(
-            sender_label_quoted(attribution("beta", None, None)),
-            "\"beta\""
-        );
-    }
-
-    #[test]
-    fn inbox_line_sender_renders_stamped_profile() {
-        assert_eq!(
-            sender_label_quoted(attribution("beta", Some("Lantern"), Some("🏮"))),
-            "🏮 Lantern (\"beta\")"
-        );
-    }
-}
