@@ -27,6 +27,8 @@ const CHANNELS: usize = 200;
 /// 0.2-0.35 s on disk or tmpfs. The per-participant code took over 120 s for
 /// `who`, and 10.7 s for `channels` and 8.9 s for `doctor` even on tmpfs.
 const DEADLINE: Duration = Duration::from_secs(3);
+/// `read` routing 50 unrouted letters at 2,000 participants.
+const ROUTE_DEADLINE: Duration = Duration::from_secs(3);
 
 struct WideStore {
     sandbox: Sandbox,
@@ -78,6 +80,10 @@ fn seed_participants(sandbox: &Sandbox) -> (Vec<String>, Vec<String>) {
 }
 
 fn wide_store() -> WideStore {
+    wide_store_with(UNROUTED)
+}
+
+fn wide_store_with(unrouted: usize) -> WideStore {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let (alpha_ids, beta_ids) = seed_participants(&sandbox);
@@ -107,7 +113,7 @@ fn wide_store() -> WideStore {
 
     // Legacy unrouted mail: no receipt, so every report resolves its
     // recipients -- the whole active roster -- for itself.
-    for index in 0..UNROUTED {
+    for index in 0..unrouted {
         let id = format!("20990916-035959-{index:06x}");
         write_custom_mail(
             &sandbox.mail_root.join("alpha/inbox"),
@@ -260,4 +266,49 @@ fn doctor_resolves_recipients_once_per_store_not_once_per_message() {
     let doctor: Value = from_stdout(&doctor);
     assert_eq!(doctor["participant"]["id"], actor.as_str());
     assert_eq!(doctor["pending"]["workspace:alpha"], UNROUTED);
+}
+
+/// Routing a store's unrouted mail resolves its recipients once per pass.
+/// Every unrouted letter used to list all participants again under the
+/// host-wide participants lock, and resolve the acting participant again for
+/// the receipt's `routed_by`, so a reader's first consuming `read` cost one
+/// full roster scan per letter.
+#[test]
+fn read_routes_unrouted_mail_with_one_roster_scan_per_pass() {
+    const LETTERS: usize = 50;
+    let store = wide_store_with(LETTERS);
+    let reader = &store.alpha_ids[0];
+    let receipts_dir = store.sandbox.mail_root.join("alpha/routing");
+    let before = fs::read_dir(&receipts_dir)
+        .expect("routed broadcast receipt")
+        .count();
+    assert_eq!(before, 1, "only the routed broadcast has a receipt yet");
+
+    let output = timed(
+        &store,
+        &["read", "20990916-035959-000000", "--json"],
+        reader,
+        ROUTE_DEADLINE,
+    );
+    assert_success(&output);
+    let read: Value = from_stdout(&output);
+    assert_eq!(read["envelope"]["id"], "20990916-035959-000000", "{read}");
+
+    let mut routed_by = std::collections::BTreeSet::new();
+    let mut named_all_alpha = true;
+    for entry in fs::read_dir(&receipts_dir).expect("receipts") {
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(entry.expect("entry").path()).expect("receipt"))
+                .expect("receipt json");
+        routed_by.insert(receipt["routed_by"].as_str().unwrap_or("").to_owned());
+        named_all_alpha &=
+            receipt["recipients"].as_array().map_or(0, Vec::len) >= store.alpha_ids.len();
+    }
+    assert_eq!(
+        fs::read_dir(&receipts_dir).expect("receipts").count(),
+        LETTERS + 1,
+        "every letter is routed by the one pass"
+    );
+    assert!(named_all_alpha, "each receipt names the whole alpha roster");
+    assert!(routed_by.contains(reader.as_str()), "{routed_by:?}");
 }

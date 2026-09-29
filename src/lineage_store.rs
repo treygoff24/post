@@ -1322,6 +1322,7 @@ mod tests {
             display_name: None,
             last_seen: Some("2026-09-16T00:00:00Z".to_owned()),
             lease_hours: 24,
+            ephemeral: false,
             ended_at: None,
             dir,
         }

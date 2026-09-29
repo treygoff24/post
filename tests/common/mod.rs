@@ -314,9 +314,18 @@ impl Sandbox {
             && (args.contains(&"--key") || args.contains(&"--new"));
         let launcher_bind = args.starts_with(&["participant", "bind"])
             && envs.iter().any(|(key, _)| *key == "POST_SENDER_ADDRESS");
+        // The fixture pin `test-default` is exported only when that record
+        // exists: a claim that names no record is `participant_missing`, an
+        // error, so a pin naming nothing would no longer read as "unbound".
+        let default_exists = self
+            .mail_root
+            .join("participants/test-default/participant.json")
+            .is_file();
         if !has_explicit_participant && !bootstrap_bind && !launcher_bind {
             if self.mail_root.join(".post-arx.json").exists() {
-                command.env("POST_PARTICIPANT", "test-default");
+                if default_exists {
+                    command.env("POST_PARTICIPANT", "test-default");
+                }
             } else if self.mail_root.exists() && invocation_needs_test_participant(args) {
                 let workspace = envs
                     .iter()
@@ -328,7 +337,9 @@ impl Sandbox {
                 let id = self.seed_test_participant(workspace.as_deref(), None);
                 command.env("POST_PARTICIPANT", id);
             } else {
-                command.env("POST_PARTICIPANT", "test-default");
+                if default_exists {
+                    command.env("POST_PARTICIPANT", "test-default");
+                }
             }
         }
         for (key, value) in envs {

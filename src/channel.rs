@@ -148,15 +148,18 @@ pub(crate) fn lock_channels(context: &Context) -> AppResult<File> {
 }
 
 /// Resolve the acting room for channel operations. A bound participant's
-/// workspace is authoritative; unbound read-only commands retain the legacy
-/// POST_FROM-or-cwd lookup. There is deliberately no --from/--room override
-/// on channel commands. Membership additionally requires a registered room.
+/// workspace is authoritative. An unbound session has no acting room: the
+/// working directory is never a substitute for an identity, so the caller
+/// gets `no_participant` (readers are answered with the unbound marker before
+/// they get here), and a claim that names no record is `participant_missing`.
+/// There is deliberately no --from/--room override on channel commands.
+/// Membership additionally requires a registered room.
 pub(crate) fn acting_room(
     context: &Context,
-    rooms: &RoomMap,
+    _rooms: &RoomMap,
 ) -> AppResult<(String, SenderProvenance)> {
-    let (room, provenance) = match crate::participant::resolve(context) {
-        Ok(crate::participant::Resolved::Bound { participant, .. }) => {
+    let (room, provenance) = match crate::participant::resolve(context)? {
+        crate::participant::Resolved::Bound { participant, .. } => {
             let room = participant
                 .workspace
                 .clone()
@@ -181,13 +184,11 @@ pub(crate) fn acting_room(
             };
             (room, provenance)
         }
-        Ok(crate::participant::Resolved::Unbound) => {
-            context.resolved_room_with_provenance(None, rooms)?
+        crate::participant::Resolved::Unbound => {
+            return Err(AppError::no_participant(
+                crate::participant::bind_key_available()?,
+            ));
         }
-        Err(_) if crate::mailbox::read_only_command() => {
-            context.resolved_room_with_provenance(None, rooms)?
-        }
-        Err(error) => return Err(error),
     };
     // A participant without workspace context is still a first-class channel
     // actor; its participant id is the shared reply address. Legacy code

@@ -7,7 +7,7 @@ pub(crate) mod routing;
 
 use crate::channel::{self, CHANNELS_DIR};
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::mailbox::{atomic_replace, exclusive_move, Context, MoveError};
+use crate::mailbox::{atomic_replace, Context};
 use crate::participant::{Address, Participant};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -552,8 +552,6 @@ pub(crate) struct CursorAdvance {
 #[derive(Debug, Clone)]
 pub(crate) struct MailMove {
     pub id: String,
-    pub source: PathBuf,
-    pub destination: PathBuf,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -632,14 +630,6 @@ impl State {
 }
 
 #[allow(dead_code)]
-pub(crate) fn consume(context: &Context, room: &str, delta: Delta) -> AppResult<()> {
-    if delta.mail_moves.is_empty() && delta.channel_seen.iter().all(|(_, ids)| ids.is_empty()) {
-        return Ok(());
-    }
-    consume_inner(context, room, delta, None, None, LockWait::Blocking).map(|_| ())
-}
-
-#[allow(dead_code)]
 pub(crate) fn consume_channel(
     context: &Context,
     room: &str,
@@ -682,10 +672,7 @@ fn consume_channel_waiting(
     consume_inner(
         context,
         room,
-        Delta {
-            mail_moves: Vec::new(),
-            channel_seen: vec![(channel.to_owned(), ids)],
-        },
+        vec![(channel.to_owned(), ids)],
         Some(channel),
         None,
         wait,
@@ -702,7 +689,7 @@ pub(crate) fn consume_channel_through(
     consume_inner(
         context,
         room,
-        Delta::default(),
+        Vec::new(),
         Some(channel),
         Some((channel, target)),
         LockWait::Blocking,
@@ -712,12 +699,12 @@ pub(crate) fn consume_channel_through(
 fn consume_inner(
     context: &Context,
     room: &str,
-    delta: Delta,
+    channel_seen: Vec<(String, Vec<String>)>,
     outcome_channel: Option<&str>,
     through: Option<(&str, &str)>,
     wait: LockWait,
 ) -> AppResult<CursorAdvance> {
-    validate_delta(&delta)?;
+    validate_channel_seen(&channel_seen)?;
     let path = cursor_path(context, room)?;
     let parent = path
         .parent()
@@ -745,25 +732,8 @@ fn consume_inner(
         None => BTreeSet::new(),
     };
 
-    let mut committed_mail = BTreeSet::new();
-    let mut move_errors = Vec::new();
-    for mail_move in delta.mail_moves {
-        match exclusive_move(&mail_move.source, &mail_move.destination) {
-            Ok(()) => {
-                committed_mail.insert(mail_move.id);
-            }
-            Err(error @ MoveError::Link(_)) => {
-                move_errors.push(mail_move_error(&mail_move, error));
-            }
-            Err(error @ MoveError::Unlink(_)) => {
-                committed_mail.insert(mail_move.id.clone());
-                move_errors.push(mail_move_error(&mail_move, error));
-            }
-        }
-    }
-
     let mut requested_channels: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (channel, ids) in delta.channel_seen {
+    for (channel, ids) in channel_seen {
         requested_channels.entry(channel).or_default().extend(ids);
     }
     if let Some((channel, _)) = through {
@@ -787,28 +757,8 @@ fn consume_inner(
         }
     }
 
-    let fresh_mail: Vec<String> = committed_mail.difference(&state.mail).cloned().collect();
-    let changed = !fresh_mail.is_empty() || marked_channels > 0;
-    state.mail.extend(fresh_mail);
-    if state.mail.len() >= SEEN_SET_WARN {
-        eprintln!(
-            "post: warning: mail seen-set holds {} ids; reads/acks scale linearly",
-            state.mail.len()
-        );
-    }
-
-    if changed {
+    if marked_channels > 0 {
         replace_state(&path, &state)?;
-    }
-    let mut move_errors = move_errors.into_iter();
-    if let Some(error) = move_errors.next() {
-        for warning in move_errors {
-            eprintln!(
-                "post: warning: additional mail move failure: {}",
-                warning.message
-            );
-        }
-        return Err(error);
     }
 
     let cursor = outcome_channel
@@ -825,16 +775,8 @@ fn consume_inner(
     })
 }
 
-fn validate_delta(delta: &Delta) -> AppResult<()> {
-    for mail_move in &delta.mail_moves {
-        if !is_canonical_mail_id(&mail_move.id) {
-            return Err(AppError::invalid_argument(format!(
-                "mail cursor id '{}' is not canonical",
-                mail_move.id
-            )));
-        }
-    }
-    for (channel, ids) in &delta.channel_seen {
+fn validate_channel_seen(channel_seen: &[(String, Vec<String>)]) -> AppResult<()> {
+    for (channel, ids) in channel_seen {
         channel::validate_channel_name(channel)?;
         for id in ids {
             if !channel::is_canonical_channel_message_id(id) {
@@ -1214,38 +1156,6 @@ fn unseen_candidates(
     Ok(candidates)
 }
 
-fn mail_move_error(mail_move: &MailMove, error: MoveError) -> AppError {
-    match error {
-        MoveError::Link(error) if error.kind() == std::io::ErrorKind::AlreadyExists => AppError::new(
-            ErrorCode::IoError,
-            format!(
-                "cannot mark mail '{}' read because '{}' already exists",
-                mail_move.id,
-                mail_move.destination.display()
-            ),
-            "Run post doctor; resolve the duplicate without deleting either copy.",
-        )
-        .input(mail_move.id.clone())
-        .reason("read destination already exists"),
-        MoveError::Link(error) => AppError::io(
-            "move mail from inbox to read",
-            &mail_move.destination,
-            error,
-        ),
-        MoveError::Unlink(error) => AppError::new(
-            ErrorCode::DeliveredOutputFailure,
-            format!(
-                "mail '{}' was printed but could not be removed from inbox '{}': {error}; it now appears in both inbox and read",
-                mail_move.id,
-                mail_move.source.display()
-            ),
-            "Do not treat the next inbox listing of this id as new mail; run post doctor and reconcile the duplicate links by hand.",
-        )
-        .input(mail_move.id.clone())
-        .reason("inbox link removal failed after read link was committed"),
-    }
-}
-
 fn warn_invalid_cursor(room: &str) {
     eprintln!(
         "post: warning: cursor state for room '{room}' is invalid or unavailable; treating all messages as unread"
@@ -1421,13 +1331,11 @@ mod tests {
     #[test]
     fn exact_v1_serialization_round_trips_mail_and_channels() {
         let (root, context) = context("roundtrip");
-        consume(
+        consume_channel(
             &context,
             "alpha",
-            Delta {
-                mail_moves: Vec::new(),
-                channel_seen: vec![("tax".to_owned(), vec![ID2.to_owned(), ID1.to_owned()])],
-            },
+            "tax",
+            vec![ID2.to_owned(), ID1.to_owned()],
         )
         .expect("consume channel set");
         let path = root.join("alpha/cursors.json");
@@ -1581,100 +1489,6 @@ mod tests {
         assert!(snapshot.channel_has_seen("tax", ID1));
         assert!(snapshot.channel_has_seen("tax", ID3));
         assert!(!snapshot.channel_has_seen("tax", ID2));
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn out_of_order_mail_marks_only_the_chosen_ids() {
-        let (root, context) = context("mail");
-        let inbox = root.join("alpha/inbox");
-        let read = root.join("alpha/read");
-        fs::create_dir_all(&inbox).expect("inbox");
-        fs::create_dir_all(&read).expect("read");
-        let mail_ids = [
-            "20260831-171234-a1b2c3",
-            "20260831-171235-b2c3d4",
-            "20260831-171236-c3d4e5",
-        ];
-        for id in mail_ids {
-            fs::write(inbox.join(format!("{id}.mail")), b"mail").expect("mail");
-        }
-        consume(
-            &context,
-            "alpha",
-            Delta {
-                mail_moves: vec![
-                    MailMove {
-                        id: mail_ids[2].to_owned(),
-                        source: inbox.join(format!("{}.mail", mail_ids[2])),
-                        destination: read.join(format!("{}.mail", mail_ids[2])),
-                    },
-                    MailMove {
-                        id: mail_ids[0].to_owned(),
-                        source: inbox.join(format!("{}.mail", mail_ids[0])),
-                        destination: read.join(format!("{}.mail", mail_ids[0])),
-                    },
-                ],
-                channel_seen: Vec::new(),
-            },
-        )
-        .expect("consume selected mail");
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(snapshot.mail_has_seen(mail_ids[0]));
-        assert!(!snapshot.mail_has_seen(mail_ids[1]));
-        assert!(snapshot.mail_has_seen(mail_ids[2]));
-        assert!(inbox.join(format!("{}.mail", mail_ids[1])).exists());
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn mail_move_failure_does_not_stop_later_moves() {
-        let (root, context) = context("mail-failure-continues");
-        let inbox = root.join("alpha/inbox");
-        let read = root.join("alpha/read");
-        fs::create_dir_all(&inbox).expect("inbox");
-        fs::create_dir_all(&read).expect("read");
-        let duplicate_id = "20260831-171234-a1b2c3";
-        let later_id = "20260831-171235-b2c3d4";
-        fs::write(
-            inbox.join(format!("{duplicate_id}.mail")),
-            b"duplicate unread",
-        )
-        .expect("duplicate inbox mail");
-        fs::write(inbox.join(format!("{later_id}.mail")), b"later unread")
-            .expect("later inbox mail");
-        fs::write(read.join(format!("{duplicate_id}.mail")), b"existing read")
-            .expect("existing read copy");
-
-        let error = consume(
-            &context,
-            "alpha",
-            Delta {
-                mail_moves: vec![
-                    MailMove {
-                        id: duplicate_id.to_owned(),
-                        source: inbox.join(format!("{duplicate_id}.mail")),
-                        destination: read.join(format!("{duplicate_id}.mail")),
-                    },
-                    MailMove {
-                        id: later_id.to_owned(),
-                        source: inbox.join(format!("{later_id}.mail")),
-                        destination: read.join(format!("{later_id}.mail")),
-                    },
-                ],
-                channel_seen: Vec::new(),
-            },
-        )
-        .expect_err("duplicate destination should still surface an error");
-        assert_eq!(error.code, ErrorCode::IoError);
-        assert!(error.message.contains(duplicate_id));
-        assert!(inbox.join(format!("{duplicate_id}.mail")).exists());
-        assert!(read.join(format!("{duplicate_id}.mail")).exists());
-        assert!(!inbox.join(format!("{later_id}.mail")).exists());
-        assert!(read.join(format!("{later_id}.mail")).exists());
-        let snapshot = Snapshot::load(&context, "alpha");
-        assert!(!snapshot.mail_has_seen(duplicate_id));
-        assert!(snapshot.mail_has_seen(later_id));
         trash_test_root(&root);
     }
 
