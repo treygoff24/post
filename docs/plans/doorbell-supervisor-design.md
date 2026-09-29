@@ -98,7 +98,7 @@ A participant in two channels who subscribes to one gets ordinary events from th
 For each armed subscription with fresh eligible events (keys not yet in that subscription's `announced` set):
 
 1. **Recheck, best effort (E3).** First the participant: `POST_PARTICIPANT=<id> post participant show --json` must report it bound with no `ended_at`. The 60-second list cache can never keep an ended participant armed; an ended participant retires here. Then the pane: `herdr agent get <pane_id>` immediately before prompting:
-   - same terminal id and session digest, idle or done, unfocused unless `--focused`: prompt;
+   - same terminal id and session digest, idle or done, unfocused unless `--focused`: prompt. A Claude pane Herdr reports `working` counts as idle when its session's turn mark (written by the Claude mail hook: `busy` at UserPromptSubmit and PreToolUse, `idle` at Stop) is `idle`, because Claude keeps its title spinner, which Herdr reads, while background tasks run after the main turn ends (post-bt2);
    - busy or focused: `deferred`;
    - a different terminal id or session digest, or the pane is gone: `retired` for this subscription;
    - a lookup error or unparseable reply: `failed`, retried; never a retirement, and never a retirement of other subscriptions.

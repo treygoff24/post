@@ -186,12 +186,16 @@ node skills/post/hooks/install-claude-hooks.mjs ~/.claude/settings.json
 
 The target path is a required argument on purpose — the installer never
 guesses at a live config. It registers the adapter for SessionStart /
-UserPromptSubmit / root PostToolUse / SessionEnd in exec form (no shell), merges without
+UserPromptSubmit / PreToolUse / root PostToolUse / Stop / SessionEnd in exec form (no shell), merges without
 touching unrelated hooks, is idempotent on re-run, and copies the reviewed
 adapter to `~/.claude/hooks/` — that private copy is what future sessions
 execute, so later repo edits never silently change live hook behavior.
 Subagent events are suppressed; PostToolUse scans are throttled to one per
-30 s.
+30 s. PreToolUse and Stop never run post: with UserPromptSubmit they write the
+doorbell's per-session turn mark (`busy`/`idle`) under
+`<mail root>/doorbell/turns/`, which lets the doorbell ring a Claude pane that
+Herdr reports `working` only because background tasks keep its title spinner
+going after the main turn has ended.
 
 **Idle wake, Claude Code flavor:** Claude Code has a Monitor primitive that
 can own a long-running process and turn output into a session wake. Monitor is

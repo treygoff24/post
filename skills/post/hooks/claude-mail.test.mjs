@@ -9,12 +9,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "claude-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-claude-hook-test-"));
 const CWD = path.join(ROOT, "some-project");
 fs.mkdirSync(CWD, { recursive: true });
 
+const MAIL_ROOT = path.join(ROOT, "mail");
 const STUB = path.join(ROOT, "post-stub.mjs");
 const CONTROL = path.join(ROOT, "stub-control.json");
 const CALLS = path.join(ROOT, "stub-calls.log");
@@ -90,6 +92,7 @@ function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
       DELEGATE_RUN_ID: "", // a delegate child is not minted at start; these tests are not one
+      POST_MAIL_ROOT: MAIL_ROOT, // turn marks never land in the live mail root
       ...extraEnv,
     },
   });
@@ -822,4 +825,38 @@ test("SessionEnd attempts participant end without scanning", () => {
   const out = run({ ...BASE, hook_event_name: "SessionEnd", session_id: "end-test" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
   assert.deepEqual(allStubCalls().map((call) => call.args), [["participant", "end"]]);
+});
+
+test("doorbell turn marks: busy at prompt and tool use, idle at Stop, gone at SessionEnd; subagents never mark", () => {
+  const stateDir = freshStateDir();
+  const mailRoot = path.join(ROOT, "turn-mail");
+  const env = { POST_MAIL_ROOT: mailRoot };
+  const session = "turn-session";
+  const markFile = path.join(mailRoot, "doorbell", "turns", `${createHash("sha256").update(session).digest("hex")}.json`);
+  const mark = () => JSON.parse(fs.readFileSync(markFile, "utf8"));
+  const base = { session_id: session, cwd: CWD };
+  setStub({ events: [] });
+
+  // No doorbell directory: the hook creates nothing.
+  run({ ...base, hook_event_name: "Stop" }, { stateDir, env });
+  assert.ok(!fs.existsSync(mailRoot));
+
+  fs.mkdirSync(path.join(mailRoot, "doorbell"), { recursive: true });
+  run({ ...base, hook_event_name: "UserPromptSubmit" }, { stateDir, env });
+  assert.equal(mark().turn, "busy");
+  const before = allStubCalls().length;
+  assert.deepEqual(run({ ...base, hook_event_name: "Stop", background_tasks: [{ type: "subagent" }] }, { stateDir, env }), {});
+  assert.equal(mark().turn, "idle");
+  assert.equal(mark().event, "Stop");
+  assert.equal(fs.statSync(markFile).mode & 0o777, 0o600);
+  // A background subagent's own tool use and stop leave the main turn idle.
+  run({ ...base, hook_event_name: "PreToolUse", agent_id: "agent-1", tool_name: "Bash" }, { stateDir, env });
+  run({ ...base, hook_event_name: "SubagentStop", agent_id: "agent-1" }, { stateDir, env });
+  assert.equal(mark().turn, "idle");
+  assert.deepEqual(run({ ...base, hook_event_name: "PreToolUse", tool_name: "Bash" }, { stateDir, env }), {});
+  assert.equal(mark().turn, "busy");
+  assert.equal(allStubCalls().length, before, "Stop and PreToolUse never run post");
+  assert.deepEqual(fs.readdirSync(path.dirname(markFile)), [path.basename(markFile)], "no temp files left behind");
+  run({ ...base, hook_event_name: "SessionEnd", reason: "exit" }, { stateDir, env });
+  assert.ok(!fs.existsSync(markFile));
 });

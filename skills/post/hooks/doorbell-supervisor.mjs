@@ -234,6 +234,7 @@ export function resolvePaths(env = process.env) {
     prefsDir: path.join(doorbell, "prefs"),
     residentsDir: path.join(doorbell, "residents"),
     stateDir: path.join(doorbell, "state"),
+    turnsDir: path.join(doorbell, "turns"),
     lockFile: path.join(doorbell, "supervisor.lock"),
     heartbeatFile: path.join(doorbell, "heartbeat.json"),
     healthFile: path.join(doorbell, "health.json"),
@@ -243,6 +244,35 @@ export function resolvePaths(env = process.env) {
     cmuxBin: executable(env.POST_DOORBELL_CMUX_BIN, "/Applications/cmux.app/Contents/Resources/bin/cmux", "cmux"),
     pythonBin: env.POST_DOORBELL_PYTHON_BIN || "python3",
   };
+}
+
+// ------------------------------------------------------------------ turn marks
+
+// Herdr reads Claude's status from the terminal-title spinner, and Claude keeps
+// that spinner while background tasks run after its main turn has ended, so
+// Herdr reports such a pane `working` although it sits at its input prompt.
+// The Claude mail hook records the main thread's own turn state instead:
+// `busy` at UserPromptSubmit and PreToolUse, `idle` at Stop, one file per
+// session named by the same digest the supervisor binds panes with, last
+// writer wins. The mark only ever widens ringing: a Claude pane Herdr calls
+// `working` rings when its session's last mark is `idle`. It never holds back
+// a pane Herdr calls idle or done, and no other harness or status reads it.
+export function turnPath(paths, digest) {
+  return path.join(paths.turnsDir, `${digest}.json`);
+}
+
+export function readTurn(paths, digest) {
+  const raw = readJson(turnPath(paths, digest));
+  return raw && (raw.turn === "idle" || raw.turn === "busy") ? raw.turn : null;
+}
+
+// Why a pane may not be rung now, or null when it may. `turn` is consulted only
+// for a Claude pane Herdr reports working.
+export function ringGate({ agent, status, focused, turn }, prefs) {
+  const idle = ["idle", "done"].includes(status) || (agent === "claude" && status === "working" && turn === "idle");
+  if (!idle) return status;
+  if (focused && !prefs.focused) return "focused";
+  return null;
 }
 
 // ------------------------------------------------------------------- execution
@@ -981,6 +1011,7 @@ export class Supervisor {
         pane: agent.pane_id,
         terminal: agent.terminal_id,
         digest,
+        agent: agent.agent,
         status: agent.agent_status,
         focused: agent.focused === true,
       };
@@ -1065,9 +1096,14 @@ export class Supervisor {
         this.emit({ type: "arm", participant: participant.id, generation: genHash, armed, prefs_version: prefs.version });
         if (armed) this.markDirty(sub, "armed");
       }
-      const scannable = ["idle", "done"].includes(chosen.status) && (!chosen.focused || prefs.focused);
+      const turn = this.turnFor(chosen.agent, chosen.status, digest);
+      sub.turn = turn;
+      const gate = ringGate({ ...chosen, turn }, prefs);
+      const scannable = gate === null;
       if (scannable && !sub.scannable && sub.armed) this.markDirty(sub, "scannable");
       sub.scannable = scannable;
+      // Mail seen for a pane that may not be rung is logged once per reason.
+      if (sub.hinted || scannable) this.noteDeferral(sub, gate, { herdr_status: chosen.status, turn });
     }
 
     for (const [key, sub] of this.subs) {
@@ -1178,6 +1214,8 @@ export class Supervisor {
       scannable: false,
       paneStatus: null,
       focused: false,
+      turn: null,
+      deferLogged: null,
       consecutiveFailures: 0,
       nextAttemptAt: 0,
       lastOutcome: null,
@@ -1257,6 +1295,23 @@ export class Supervisor {
     sub.dirtyGen += 1;
     if (reason === "hint") sub.hinted = true;
     if (reason === "reconcile" && this.reconcileRound) sub.reconcileRound = this.reconcileRound.id;
+  }
+
+  // The turn mark, read only where it can change the answer.
+  turnFor(agent, status, digest) {
+    return agent === "claude" && status === "working" ? readTurn(this.paths, digest) : null;
+  }
+
+  // One `deferred` line per reason change while a subscription has something
+  // to ring and may not; a null reason (ringable again) re-arms the log.
+  noteDeferral(sub, reason, extra = {}) {
+    if (reason === null) {
+      sub.deferLogged = null;
+      return;
+    }
+    if (!sub.armed || sub.deferLogged === reason) return;
+    sub.deferLogged = reason;
+    this.emit({ type: "deferred", participant: sub.participant, sink: sub.sink, generation: sub.genHash, pane: sub.generation.pane, reason, ...extra });
   }
 
   isDirty(sub) {
@@ -1875,9 +1930,9 @@ export class Supervisor {
     const session = agent.agent_session;
     const digest = session?.kind === "id" && typeof session.value === "string" ? sha256(session.value) : null;
     if (digest !== sub.generation.digest) return { outcome: "retired", reason: "session changed" };
-    if (!["idle", "done"].includes(agent.agent_status) || (agent.focused && !prefs.focused)) {
-      return { outcome: "deferred", reason: agent.focused ? "focused" : agent.agent_status };
-    }
+    const turn = this.turnFor(agent.agent, agent.agent_status, digest);
+    const gate = ringGate({ agent: agent.agent, status: agent.agent_status, focused: agent.focused, turn }, prefs);
+    if (gate !== null) return { outcome: "deferred", reason: gate, herdr_status: agent.agent_status, turn };
     if (this.halted) return { outcome: "failed", stage: "halted", detail: {} };
     const notice = buildNotice(sub.participant, eligible);
     const prompted = await this.exec("herdr", ["agent", "prompt", sub.generation.pane, notice], {});
@@ -1898,7 +1953,12 @@ export class Supervisor {
   outcome(sub, outcome, prefs, eligible, extra) {
     sub.lastOutcome = outcome;
     sub.lastOutcomeAt = new Date(this.now()).toISOString();
-    if (outcome === "deferred") return;
+    if (outcome === "deferred") {
+      // A resident's exit 75 carries no reason of its own.
+      this.noteDeferral(sub, extra?.reason ?? "busy", { herdr_status: extra?.herdr_status ?? null, turn: extra?.turn ?? null });
+      return;
+    }
+    this.noteDeferral(sub, null);
     const record = {
       type: "outcome",
       outcome,
@@ -1950,6 +2010,7 @@ export class Supervisor {
         prefs_version: prefs.version,
         generation: sub ? { hash: sub.genHash, pane: sub.generation.pane, terminal: sub.generation.terminal } : null,
         pane_status: sub?.paneStatus ?? null,
+        turn: sub?.turn ?? null,
         scannable: Boolean(sub?.scannable),
         in_flight: Boolean(sub?.inFlight),
         last_outcome: sub?.lastOutcome ?? null,

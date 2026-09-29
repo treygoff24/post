@@ -107,7 +107,7 @@ test("creates a fresh settings file with lifecycle events and copies the adapter
   const result = run(target);
   assert.equal(result.status, 0, result.stderr);
   const config = JSON.parse(fs.readFileSync(target, "utf8"));
-  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"]) {
+  for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]) {
     const groups = config.hooks[event];
     assert.equal(groups.length, 1, event);
     assert.deepEqual(groups[0].hooks, [
@@ -198,7 +198,10 @@ test("is idempotent and preserves unrelated hooks byte-identical", () => {
   assert.equal(run(target).status, 0);
   const after = JSON.parse(fs.readFileSync(target, "utf8"));
   assert.deepEqual(after.hooks.SessionStart[0], unrelated.hooks.SessionStart[0]);
-  assert.deepEqual(after.hooks.PreToolUse, unrelated.hooks.PreToolUse);
+  // PreToolUse also carries the adapter now (the doorbell turn mark); the
+  // unrelated group stays first and untouched.
+  assert.deepEqual(after.hooks.PreToolUse[0], unrelated.hooks.PreToolUse[0]);
+  assert.equal(after.hooks.PreToolUse.length, 2);
   assert.deepEqual(after.permissions, unrelated.permissions);
   assert.equal(after.hooks.SessionStart.length, 2);
 

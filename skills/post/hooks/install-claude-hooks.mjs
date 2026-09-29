@@ -34,7 +34,8 @@ const ADAPTER = path.join(
 );
 // The adapter imports this by its plain name, so it sits beside the adapter.
 const CORE = path.join(path.dirname(ADAPTER), "mail-hook-core.mjs");
-const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
+// Stop and PreToolUse carry only the doorbell turn mark (see claude-mail.mjs).
+const EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"];
 
 const USAGE = "usage: node install-claude-hooks.mjs <path-to-settings.json>";
 
