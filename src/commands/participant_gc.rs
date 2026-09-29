@@ -92,7 +92,16 @@ struct GcOutput {
     kept: BTreeMap<String, usize>,
 }
 
-pub(super) fn run(context: &Context, apply: bool, pretty: bool) -> AppResult<CommandResult> {
+/// What one pass found: the lists `post participant gc` prints.
+pub(super) struct Report {
+    pub(super) deleted: Vec<String>,
+    pub(super) archived: Vec<String>,
+    pub(super) kept: BTreeMap<String, usize>,
+}
+
+/// One plan-and-maybe-apply pass. The command and the automatic run both come
+/// through here, so they share the planner and its safety rules.
+pub(super) fn execute(context: &Context, apply: bool) -> AppResult<Report> {
     let now = SystemTime::now();
     let plan = plan(context, now)?;
     let (deleted, archived, kept) = if apply {
@@ -110,16 +119,25 @@ pub(super) fn run(context: &Context, apply: bool, pretty: bool) -> AppResult<Com
             plan.kept.clone(),
         )
     };
+    Ok(Report {
+        deleted,
+        archived,
+        kept: kept
+            .into_iter()
+            .map(|(reason, count)| (reason.to_owned(), count))
+            .collect(),
+    })
+}
+
+pub(super) fn run(context: &Context, apply: bool, pretty: bool) -> AppResult<CommandResult> {
+    let report = execute(context, apply)?;
     CommandResult::json(
         &GcOutput {
             ok: true,
             applied: apply,
-            deleted,
-            archived,
-            kept: kept
-                .into_iter()
-                .map(|(reason, count)| (reason.to_owned(), count))
-                .collect(),
+            deleted: report.deleted,
+            archived: report.archived,
+            kept: report.kept,
         },
         pretty,
     )

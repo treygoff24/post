@@ -200,10 +200,10 @@ pub(super) fn run(
                 None
             };
             if text_export {
-                return Ok(CommandResult::success(format!(
-                    "export POST_PARTICIPANT={}\n",
-                    participant.id
-                )));
+                let result =
+                    CommandResult::success(format!("export POST_PARTICIPANT={}\n", participant.id));
+                super::participant_auto_gc::maybe_run(context);
+                return Ok(result);
             }
             let provenance = if bootstrap.is_some() {
                 Some("explicit-bootstrap")
@@ -213,7 +213,7 @@ pub(super) fn run(
                     .map(|p| p.as_str())
             };
             let id = participant.id.clone();
-            CommandResult::json(
+            let result = CommandResult::json(
                 &ParticipantOutput {
                     ok: true,
                     status: "bound",
@@ -227,7 +227,9 @@ pub(super) fn run(
                     notice,
                 },
                 pretty,
-            )
+            )?;
+            super::participant_auto_gc::maybe_run(context);
+            Ok(result)
         }
         ParticipantCommand::Touch => lifecycle(context, false, pretty),
         ParticipantCommand::End => lifecycle(context, true, pretty),

@@ -10,6 +10,7 @@ mod identity;
 mod inbox;
 mod owner;
 mod participant;
+mod participant_auto_gc;
 mod participant_gc;
 mod profile;
 mod read;
