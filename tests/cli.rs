@@ -12416,7 +12416,8 @@ fn doctor_brief_prints_one_line_for_both_outcomes() {
 
 #[test]
 fn schema_describes_seen_set_semantics_not_watermarks() {
-    let output = post_command().args(["schema"]).output().unwrap();
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["schema"]);
     assert_eq!(output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&output.stdout);
     // Membership semantics must be what the machine contract publishes.
@@ -12447,10 +12448,8 @@ fn schema_describes_seen_set_semantics_not_watermarks() {
 
 #[test]
 fn doctor_brief_is_human_only_and_conflicts_with_json() {
-    let output = post_command()
-        .args(["--json", "doctor", "--brief"])
-        .output()
-        .unwrap();
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["--json", "doctor", "--brief"]);
     assert_ne!(output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&output.stdout);
     let err = String::from_utf8_lossy(&output.stderr);
