@@ -608,8 +608,11 @@ build from a tree with uncommitted tracked changes.
   Bodies are scanned for `@<room>` word-boundary mentions of registered rooms
   (stamped into the envelope as `mentions`). Readers also resolve `@<name>`
   themselves, at read time, against the body: a reader is addressed by its
-  workspace, its participant id, and its lineage name (same case-sensitive
-  word-boundary rule; a name that is several of these addresses the reader
+  workspace, its participant id, and its lineage name (same word-boundary
+  rule, but ASCII case-insensitive at read time, so `@Sieve` addresses
+  `sieve`; stamping stays case-sensitive; `@name` inside an inline backtick
+  span or a fenced ``` block never counts, in stamping or reading, while a
+  real tag elsewhere in the body still does; a name that is several of these addresses the reader
   once, and a workspace and a lineage sharing a name each address their own
   participants). That resolution drives `addressed_to_you`, `reason: mention`
   watch events, the omitted `mention_count`, and peek's mention rescue, so a

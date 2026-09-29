@@ -1938,3 +1938,94 @@ fn send_receipt_counts_an_unstamped_lineage_mention_as_addressed_to_you() {
     assert_eq!(receipt["crossed"]["unseen"], 2, "{receipt}");
     assert_eq!(receipt["crossed"]["addressed_to_you"], 1, "{receipt}");
 }
+
+fn mention_ids(sandbox: &Sandbox, member: &str) -> Vec<String> {
+    let watch = run_as(
+        sandbox,
+        member,
+        &["watch", "--snapshot", "--json", "--reason", "mention"],
+    );
+    assert_success(&watch);
+    stdout(&watch)
+        .lines()
+        .map(|line| {
+            let event: Value = serde_json::from_str(line).expect("event json");
+            event["id"].as_str().expect("id").to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn code_spans_and_email_addresses_do_not_mention_but_a_real_tag_beside_them_does() {
+    let sandbox = Sandbox::new();
+    let member = seed_lineage_member(&sandbox);
+    let cases = [
+        ("1", "use `@sieve` here", false),
+        ("2", "see:\n```\n@sieve\n```\nthanks", false),
+        ("3", "mail a@sieve.com", false),
+        ("4", "`@sieve` is the tag; @sieve please look", true),
+        ("5", "before\n```\n@sieve\n```\nafter @sieve", true),
+        ("6", "``a `@sieve` b`` only code", false),
+    ];
+    let mut expected = Vec::new();
+    for (n, body, rings) in cases {
+        let id = format!("20990923-060000-00000{n}-aaaa0{n}");
+        write_unstamped_message(&sandbox, &id, body);
+        if rings {
+            expected.push(id);
+        }
+    }
+    assert_eq!(mention_ids(&sandbox, &member), expected);
+}
+
+#[test]
+fn a_capitalized_lineage_or_participant_id_tag_still_mentions() {
+    let sandbox = Sandbox::new();
+    let member = seed_lineage_member(&sandbox);
+    write_unstamped_message(&sandbox, "20990923-060000-000001-aaaa01", "@Sieve hi");
+    write_unstamped_message(&sandbox, "20990923-060000-000002-aaaa02", "@SIEVE.");
+    write_unstamped_message(&sandbox, "20990923-060000-000003-aaaa03", "@Sievex no");
+    let ids = mention_ids(&sandbox, &member);
+    assert_eq!(
+        ids,
+        vec![
+            "20990923-060000-000001-aaaa01".to_owned(),
+            "20990923-060000-000002-aaaa02".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn peek_rescues_a_capitalized_tag_but_not_one_inside_code() {
+    let sandbox = Sandbox::new();
+    let member = seed_lineage_member(&sandbox);
+    write_unstamped_message(&sandbox, "20990923-060000-000001-aaaa01", "`@sieve` code");
+    write_unstamped_message(&sandbox, "20990923-060000-000002-aaaa02", "hi @Sieve");
+    write_unstamped_message(
+        &sandbox,
+        "20990923-060000-000003-aaaa03",
+        "```\n@sieve\n```",
+    );
+    write_unstamped_message(&sandbox, "20990923-060000-000004-aaaa04", "plain newest");
+    let peek = run_as(
+        &sandbox,
+        &member,
+        &["chat", "ops", "--peek", "--limit", "1", "--json"],
+    );
+    assert_success(&peek);
+    let doc: Value = from_stdout(&peek);
+    let ids: Vec<&str> = doc["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "20990923-060000-000002-aaaa02",
+            "20990923-060000-000004-aaaa04"
+        ],
+        "{doc}"
+    );
+}

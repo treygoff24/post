@@ -1448,7 +1448,78 @@ pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResul
 /// `foo`/`foo.bar` do not double-stamp. Matching is case-sensitive to the
 /// registered spelling.
 pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
+    scan_mentions(body, rooms, false)
+}
+
+/// Blank out fenced ``` blocks and inline backtick spans (byte-for-byte, so
+/// offsets survive): an `@name` shown as code is an example, not an address.
+/// An unclosed fence runs to the end; an unmatched backtick run is literal.
+fn mask_code(body: &str) -> String {
+    let mut out = body.as_bytes().to_vec();
+    let bytes = body.as_bytes();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for b in &mut out[from..to] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    };
+    let mut fence_start: Option<usize> = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let end = offset + line.len();
+        let fenced = line.trim_start().starts_with("```");
+        match (fence_start, fenced) {
+            (Some(from), true) => {
+                blank(&mut out, from, end);
+                fence_start = None;
+            }
+            (None, true) => fence_start = Some(offset),
+            (None, false) => {
+                let mut i = offset;
+                while i < end {
+                    if bytes[i] != b'`' {
+                        i += 1;
+                        continue;
+                    }
+                    let run = bytes[i..end].iter().take_while(|b| **b == b'`').count();
+                    let mut j = i + run;
+                    let mut close = None;
+                    while j < end {
+                        if bytes[j] == b'`' {
+                            let r = bytes[j..end].iter().take_while(|b| **b == b'`').count();
+                            if r == run {
+                                close = Some(j + r);
+                                break;
+                            }
+                            j += r;
+                        } else {
+                            j += 1;
+                        }
+                    }
+                    match close {
+                        Some(c) => {
+                            blank(&mut out, i, c);
+                            i = c;
+                        }
+                        None => i += run,
+                    }
+                }
+            }
+            (Some(_), false) => {}
+        }
+        offset = end;
+    }
+    if let Some(from) = fence_start {
+        blank(&mut out, from, bytes.len());
+    }
+    String::from_utf8(out).unwrap_or_else(|_| body.to_owned())
+}
+
+fn scan_mentions(body: &str, rooms: &RoomMap, ascii_ci: bool) -> Vec<String> {
     use std::collections::BTreeSet;
+    let masked = mask_code(body);
+    let body = masked.as_str();
     let mut names: Vec<&String> = rooms.keys().collect();
     names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     let mut found = BTreeSet::new();
@@ -1465,7 +1536,14 @@ pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
         let after_at = at + '@'.len_utf8();
         let mut matched: Option<&String> = None;
         for name in &names {
-            if !body[after_at..].starts_with(name.as_str()) {
+            let starts = if ascii_ci {
+                body.as_bytes()
+                    .get(after_at..after_at + name.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
+            } else {
+                body[after_at..].starts_with(name.as_str())
+            };
+            if !starts {
                 continue;
             }
             let end = after_at + name.len();
@@ -1534,7 +1612,7 @@ impl MentionTargets {
             .mentions
             .iter()
             .any(|mention| self.names.contains_key(mention))
-            || !extract_mentions(body, &self.names).is_empty()
+            || !scan_mentions(body, &self.names, true).is_empty()
     }
 }
 

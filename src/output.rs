@@ -1393,7 +1393,9 @@ pub enum WatchEvent {
         sender_address: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_provenance: Option<String>,
-        /// `"mention"` when the watching room is @mentioned in the body;
+        /// `"mention"` when the watcher is @mentioned: a stamped room name, or
+        /// `@<workspace|participant id|lineage>` in the body (read-time,
+        /// ASCII case-insensitive, code spans and fenced blocks ignored);
         /// otherwise `"channel"`.
         reason: WatchReason,
         /// Sanitized preview of the body text for watch events.
