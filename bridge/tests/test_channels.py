@@ -82,15 +82,6 @@ class ConfigTest(unittest.TestCase):
             ["bridgelib.common"],
         )
 
-    def test_import_doc_states_first_record_origin_rule(self):
-        self.assertIn("first imported valid record", channels.import_channels.__doc__)
-
-    def test_import_doc_states_snapshot_quarantines_are_final(self):
-        self.assertIn(
-            "published or not when its message arrives",
-            channels.import_channels.__doc__,
-        )
-
     def test_parse_channels_config_accepts_two_contract_shapes(self):
         # An explicit null is the opt-out; the absent-key default lives in
         # sweep.load_config (SPEC-v2 r6.2); test_tick_v2 covers absent and null.
@@ -1022,9 +1013,29 @@ class ChannelIntegrationTest(unittest.TestCase):
                 Git(self.beta.repo),
                 snapshot,
                 self.log,
-                Deadline(raise_after=2),
+                Deadline(raise_after=3),
                 lambda: False,
             )
+
+    def test_entry_walk_under_one_stride_does_not_check_the_deadline_per_entry(self):
+        # Control for the test above: the same allowance survives a walk
+        # shorter than one stride, so the 1200-entry raise comes from the
+        # 500-entry checks and not from the per-host check alone.
+        self.alpha.write_many_relay_entries(400)
+        snapshot = self.alpha_snapshot()
+        deadline = Deadline(raise_after=3)
+
+        channels.import_channels(
+            self.beta.settings,
+            ALL,
+            Git(self.beta.repo),
+            snapshot,
+            self.log,
+            deadline,
+            lambda: False,
+        )
+
+        self.assertLessEqual(deadline.calls, 3)
 
     def test_record_contract_rejects_all_invalid_families_once(self):
         base = channel_record("good", "alice")

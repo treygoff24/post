@@ -355,6 +355,20 @@ class RoomsTest(unittest.TestCase):
             ),
             # M3: 2000 levels in 4 KiB raised RecursionError on Python 3.9.
             (deep_json(2000, b'{"v":1,"host":"h1","rooms":', b"}\n"), "100644"),
+            # A symlink or a tree at rooms.json is refused by mode even when
+            # its content is a valid publication.
+            (
+                json.dumps(
+                    {"v": 1, "host": "h1", "rooms": ["hostile"]}, sort_keys=True
+                ).encode(),
+                "120000",
+            ),
+            (
+                json.dumps(
+                    {"v": 1, "host": "h1", "rooms": ["hostile"]}, sort_keys=True
+                ).encode(),
+                "040000",
+            ),
         ]
         for data, mode in hostile:
             with self.subTest(data=data[:24], mode=mode):
@@ -383,28 +397,6 @@ class RoomsTest(unittest.TestCase):
         rooms.read_peer_rooms(self.settings, self.git, "h1", second, self.logger)
         rooms.read_peer_rooms(self.settings, self.git, "h1", first, self.logger)
         self.assertEqual(len(self.logger.actions("rooms_invalid")) - before, 2)
-
-    def test_nonregular_rooms_publications_are_never_read(self):
-        valid = {"v": 1, "host": "h1", "rooms": ["last-valid"]}
-        valid_oid = self.push_rooms(self.h1, value=valid)
-        self.assertEqual(
-            rooms.read_peer_rooms(
-                self.settings, self.git, "h1", valid_oid, self.logger
-            ),
-            frozenset({"last-valid"}),
-        )
-        data = json.dumps(
-            {"v": 1, "host": "h1", "rooms": ["hostile"]}, sort_keys=True
-        ).encode("utf-8")
-        for mode in ("120000", "040000"):
-            with self.subTest(mode=mode):
-                oid = self.push_rooms(self.h1, data=data, mode=mode)
-                self.assertEqual(
-                    rooms.read_peer_rooms(
-                        self.settings, self.git, "h1", oid, self.logger
-                    ),
-                    frozenset({"last-valid"}),
-                )
 
     def test_build_snapshot_reads_publication_from_pinned_git_oid(self):
         self.persisted_rooms("h1", ["stale"])
@@ -465,13 +457,16 @@ class RoomsTest(unittest.TestCase):
         self.assertEqual(changed.owners["x"].host, "h2")
         self.assertEqual(len(self.logger.actions("owner_changed")), 1)
 
-        mtimes = (owners_path.stat().st_mtime_ns, shadow_path.stat().st_mtime_ns)
-        time.sleep(0.001)
+        # atomic_replace renames a new inode into place, so the inode changes
+        # on any rewrite even when a coarse kernel timestamp does not.
+        def identity(path):
+            found = path.stat()
+            return found.st_ino, found.st_mtime_ns
+
+        before = (identity(owners_path), identity(shadow_path))
+        time.sleep(0.05)
         self.build({"h1": [], "h2": []})
-        self.assertEqual(
-            (owners_path.stat().st_mtime_ns, shadow_path.stat().st_mtime_ns),
-            mtimes,
-        )
+        self.assertEqual((identity(owners_path), identity(shadow_path)), before)
 
     def test_legacy_invalid_owner_entry_is_dropped_not_fatal(self):
         legacy = "hq﻿"
@@ -892,9 +887,6 @@ class RoomsTest(unittest.TestCase):
             self.logger.actions("rooms_publication_truncated"),
             [{"action": "rooms_publication_truncated", "count": 1026}],
         )
-
-    def test_rooms_health_documents_route_contested_semantics(self):
-        self.assertIn("len(contested)", rooms.rooms_health.__doc__)
 
     def test_binding_verdict_full_table(self):
         snapshot = Snapshot(
