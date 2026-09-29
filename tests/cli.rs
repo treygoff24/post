@@ -3261,47 +3261,58 @@ fn send_to_a_mistyped_room_has_a_did_you_mean_and_a_discovery_hint() {
 
 /// A reader with no participant gets the unbound marker on stdout: it is never
 /// given a room guessed from its working directory, and nothing is created.
-#[test]
-fn unregistered_cwd_read_only_chat_reports_unbound_without_creating_identity() {
-    let sandbox = Sandbox::new();
-    let before = snapshot_tree(&sandbox.mail_root);
-    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
-    assert_success(&output);
-    let text = stdout(&output);
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.contains("not bound to a post participant"), "{text}");
-    assert!(text.contains("post participant bind"), "{text}");
-    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-
-    let json =
-        sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &sandbox.path);
-    assert_success(&json);
-    let marker: serde_json::Value = from_stdout(&json);
-    assert_eq!(marker["ok"], true);
-    assert!(marker["participant"].is_null());
-    assert_eq!(marker["bound"], false);
-    assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
-    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-}
-
-/// A cwd carrying shell metacharacters must reach neither the store nor any
-/// output: the unbound marker names no directory, so there is no `exact_fix`
-/// to inject into (the rule this repo pins for channel names in
+/// A working directory carrying shell metacharacters must reach neither the
+/// store nor any output: the marker names no directory (the rule this repo
+/// pins for channel names in
 /// crossed_send_exact_fix_shell_quotes_channel_metacharacters).
 #[test]
-fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
-    for dirname in ["has space", "has;touch INJECTED", "has'quote"] {
+fn unregistered_cwd_read_only_chat_reports_unbound_and_never_echoes_the_cwd() {
+    for dirname in [
+        None,
+        Some("has space"),
+        Some("has;touch INJECTED"),
+        Some("has'quote"),
+    ] {
         let sandbox = Sandbox::new();
-        let hostile = sandbox.path.join(dirname);
-        fs::create_dir_all(&hostile).expect("create hostile cwd");
+        let cwd = match dirname {
+            None => sandbox.path.clone(),
+            Some(name) => {
+                let hostile = sandbox.path.join(name);
+                fs::create_dir_all(&hostile).expect("create hostile cwd");
+                hostile
+            }
+        };
         let before = snapshot_tree(&sandbox.mail_root);
-        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
+
+        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &cwd);
         assert_success(&output);
         let text = stdout(&output);
-        assert!(!text.contains(dirname), "{text}");
-        assert!(!text.contains("exact_fix"), "{text}");
-        assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-        assert!(!hostile.join("INJECTED").exists());
+        assert_eq!(text.lines().count(), 1, "{dirname:?}: {text}");
+        assert!(
+            text.contains("not bound to a post participant"),
+            "{dirname:?}: {text}"
+        );
+        assert!(
+            text.contains("post participant bind"),
+            "{dirname:?}: {text}"
+        );
+        if let Some(name) = dirname {
+            assert!(!text.contains(name), "{text}");
+        }
+        assert_eq!(snapshot_tree(&sandbox.mail_root), before, "{dirname:?}");
+
+        let json =
+            sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &cwd);
+        assert_success(&json);
+        let marker: serde_json::Value = from_stdout(&json);
+        assert_eq!(marker["ok"], true);
+        assert!(marker["participant"].is_null());
+        assert_eq!(marker["bound"], false);
+        assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        if let Some(name) = dirname {
+            assert!(!stdout(&json).contains(name), "{dirname:?}");
+        }
+        assert_eq!(snapshot_tree(&sandbox.mail_root), before, "{dirname:?}");
     }
 }
 

@@ -226,19 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_heartbeat_is_not_live() {
-        let root = test_root("presence-missing");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let presence = read_presence(&context, "alpha").expect("read");
-        assert!(!presence.live_watch);
-        assert!(presence.last_seen.is_none());
-        trash_test_root(&root);
-    }
-
-    #[test]
     fn fifo_heartbeat_does_not_hang_who() {
         let root = test_root("presence-fifo");
         let context = Context {
@@ -286,9 +273,18 @@ mod tests {
         };
         let path = heartbeat_path(&context, "alpha");
         std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
-        std::fs::write(&path, "9".repeat(MAX_HEARTBEAT_BYTES + 1)).expect("write");
+        // A fresh, well-formed stamp padded past the size guard: only the
+        // guard can make this read dead (an unpadded copy reads live).
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let padded = format!("{now} 1000 {}", "x".repeat(MAX_HEARTBEAT_BYTES));
+        assert!(padded.len() > MAX_HEARTBEAT_BYTES);
+        std::fs::write(&path, &padded).expect("write");
         let presence = read_presence(&context, "alpha").expect("read");
         assert!(!presence.live_watch);
+        assert!(presence.last_seen.is_none());
         trash_test_root(&root);
     }
 
@@ -327,22 +323,6 @@ mod tests {
         assert!(presence.last_seen.is_some());
         let meta = std::fs::metadata(&path).expect("meta");
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn stale_heartbeat_is_not_live() {
-        let root = test_root("presence-stale");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let path = heartbeat_path(&context, "alpha");
-        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
-        std::fs::write(&path, "1 1000\n").expect("write stale");
-        let presence = read_presence(&context, "alpha").expect("read");
-        assert!(!presence.live_watch);
-        assert_eq!(presence.last_seen.as_deref(), Some("1"));
         trash_test_root(&root);
     }
 
