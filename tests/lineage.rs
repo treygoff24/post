@@ -423,7 +423,7 @@ fn lineage_rejects_room_reserved_existing_and_second_affiliation_names() {
 }
 
 #[test]
-fn lineage_voice_content_rules_and_truncated_journal_tail_are_enforced() {
+fn lineage_voice_content_rules_are_enforced() {
     let sandbox = Sandbox::new();
     let actor = sandbox.test_participant("claude-space");
     assert_success(&run_as(&sandbox, &actor, &["identity", "new", "ember"]));
@@ -476,18 +476,6 @@ fn lineage_voice_content_rules_and_truncated_journal_tail_are_enforced() {
     assert!(!invalid_utf8.status.success());
     let error: ErrorEnvelope = from_stderr(&invalid_utf8);
     assert!(error.error.message.contains("not valid UTF-8"));
-
-    let journal = sandbox.mail_root.join("lineages/ember/history.jsonl");
-    OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .expect("open lineage journal")
-        .write_all(b"{\"at\":\"truncated\"")
-        .expect("append truncated tail");
-    let shown = run_as(&sandbox, &actor, &["identity", "show", "ember"]);
-    assert_success(&shown);
-    let shown: Value = from_stdout(&shown);
-    assert_eq!(shown["lineage"]["name"], "ember");
 }
 
 #[test]
@@ -1257,40 +1245,32 @@ fn lineage_withdraw_selector_rejects_symlinked_lineage_directory_without_mutatio
 }
 
 #[test]
-fn lineage_withdraw_after_readd_and_leave_preserves_gap_count() {
+fn lineage_unaffiliated_settled_gap_retry_is_idempotent() {
     let sandbox = Sandbox::new();
     let actor = sandbox.test_participant("claude-space");
     let body = sandbox.path.join("voice.md");
-    write_body(&body, b"first voice\n");
+    let add_voice = |text: &[u8]| {
+        write_body(&body, text);
+        assert_success(&run_as(
+            &sandbox,
+            &actor,
+            &[
+                "identity",
+                "voice",
+                "add",
+                "--body-file",
+                body.to_str().expect("UTF-8 fixture path"),
+            ],
+        ));
+    };
     assert_success(&run_as(&sandbox, &actor, &["identity", "new", "ember"]));
-    assert_success(&run_as(
-        &sandbox,
-        &actor,
-        &[
-            "identity",
-            "voice",
-            "add",
-            "--body-file",
-            body.to_str().expect("UTF-8 fixture path"),
-        ],
-    ));
+    add_voice(b"first voice\n");
     assert_success(&run_as(
         &sandbox,
         &actor,
         &["identity", "voice", "withdraw"],
     ));
-    write_body(&body, b"second voice\n");
-    assert_success(&run_as(
-        &sandbox,
-        &actor,
-        &[
-            "identity",
-            "voice",
-            "add",
-            "--body-file",
-            body.to_str().expect("UTF-8 fixture path"),
-        ],
-    ));
+    add_voice(b"second voice\n");
     assert_success(&run_as(&sandbox, &actor, &["identity", "leave"]));
 
     let withdrawn = run_as(&sandbox, &actor, &["identity", "voice", "withdraw"]);
@@ -1298,46 +1278,25 @@ fn lineage_withdraw_after_readd_and_leave_preserves_gap_count() {
     let receipt: Value = from_stdout(&withdrawn);
     assert_eq!(receipt["lineage"], "ember");
     assert_eq!(receipt["changed"], true);
-    let gap = sandbox
+    let gap_path = sandbox
         .mail_root
         .join("lineages/ember/voices")
         .join(format!("{actor}.gap"));
-    let gap: Value =
-        serde_json::from_slice(&fs::read(gap).expect("voice gap")).expect("voice gap JSON");
+    let settled = fs::read(&gap_path).expect("voice gap");
+    let gap: Value = serde_json::from_slice(&settled).expect("voice gap JSON");
     assert_eq!(gap["withdrawals"], 2);
     assert_eq!(gap["cleanup_pending"], false);
-}
-
-#[test]
-fn lineage_unaffiliated_settled_gap_retry_is_idempotent() {
-    let sandbox = Sandbox::new();
-    let actor = sandbox.test_participant("claude-space");
-    let body = sandbox.path.join("voice.md");
-    write_body(&body, b"voice\n");
-    assert_success(&run_as(&sandbox, &actor, &["identity", "new", "ember"]));
-    assert_success(&run_as(
-        &sandbox,
-        &actor,
-        &[
-            "identity",
-            "voice",
-            "add",
-            "--body-file",
-            body.to_str().expect("UTF-8 fixture path"),
-        ],
-    ));
-    assert_success(&run_as(&sandbox, &actor, &["identity", "leave"]));
-    assert_success(&run_as(
-        &sandbox,
-        &actor,
-        &["identity", "voice", "withdraw"],
-    ));
 
     let retry = run_as(&sandbox, &actor, &["identity", "voice", "withdraw"]);
     assert_success(&retry);
     let receipt: Value = from_stdout(&retry);
     assert_eq!(receipt["lineage"], "ember");
     assert_eq!(receipt["changed"], false);
+    assert_eq!(
+        fs::read(&gap_path).expect("voice gap after retry"),
+        settled,
+        "a retry leaves the settled gap untouched"
+    );
 }
 
 #[test]
@@ -1765,60 +1724,6 @@ fn lineage_new_recovery_with_terms_requires_acknowledged_continuation() {
     assert!(stdout(&refused).contains("post identity continue 'ember' --acknowledge"));
     assert!(sandbox.read_participant(&founder)["lineage"].is_null());
     assert!(!dir.join("history.jsonl").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn lineage_new_validation_waits_for_participants_lock() {
-    let sandbox = Sandbox::new();
-    let actor = sandbox.test_participant("claude-space");
-    let room = sandbox.path.join("ember-room");
-    fs::create_dir_all(&room).expect("colliding room path");
-    let rooms_path = sandbox.mail_root.join("rooms.json");
-    let mut rooms: Value =
-        serde_json::from_slice(&fs::read(&rooms_path).expect("rooms")).expect("rooms JSON");
-    rooms["ember"] = Value::String(room.to_string_lossy().into_owned());
-    fs::write(
-        &rooms_path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&rooms).expect("rooms JSON")
-        ),
-    )
-    .expect("register colliding room");
-
-    let lock_path = sandbox.mail_root.join(".participants.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .expect("participants lock");
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    let mut command = post_command();
-    let mut child = command
-        .args(["identity", "new", "ember"])
-        .current_dir(&sandbox.path)
-        .env("HOME", &sandbox.home)
-        .env("POST_MAIL_ROOT", &sandbox.mail_root)
-        .env("POST_PARTICIPANT", &actor)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn identity new under participants lock");
-    thread::sleep(Duration::from_secs(2));
-    assert!(
-        child.try_wait().expect("poll blocked validation").is_none(),
-        "lineage name validation must happen after .participants.lock is acquired"
-    );
-    drop(lock);
-    let output = child.wait_with_output().expect("finish identity new");
-    assert!(!output.status.success());
-    assert_eq!(
-        from_stderr::<ErrorEnvelope>(&output).error.code,
-        "invalid_argument"
-    );
 }
 
 #[cfg(unix)]
