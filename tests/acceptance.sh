@@ -11,5 +11,5 @@ if grep -nE '^[[:space:]]*/[^[:space:]]*/cp[[:space:]]' scripts/smoke-installed.
     exit 1
 fi
 cargo build --release
-bash scripts/smoke-installed.sh target/release/post
+bash scripts/smoke-installed.sh "$(node scripts/cargo-release-bin.mjs)"
 bash scripts/gate.sh
