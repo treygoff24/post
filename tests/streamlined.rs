@@ -209,6 +209,10 @@ fn real_harness_hooks_deliver_notice_once_and_survive_lost_hook_cache() {
         ("grok", "UserPromptSubmit"),
     ] {
         let sandbox = Sandbox::new();
+        // A session starts inside a registered room, as it does in a real
+        // project; the hooks defer minting for a working directory that no
+        // room contains, and this test is about the delivered notice.
+        let (project, _) = register_alpha_beta(&sandbox);
         let readonly_stdout = sandbox.path.join("readonly-stdout");
         std::fs::write(&readonly_stdout, b"").unwrap();
         for (key, cache, expected, broken_stdout) in [
@@ -249,7 +253,7 @@ fn real_harness_hooks_deliver_notice_once_and_survive_lost_hook_cache() {
                 .unwrap()
                 .write_all(
                     serde_json::to_string(&serde_json::json!({
-                        "hook_event_name": event, "session_id": key, "cwd": sandbox.path
+                        "hook_event_name": event, "session_id": key, "cwd": project
                     }))
                     .unwrap()
                     .as_bytes(),
