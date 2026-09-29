@@ -36,13 +36,7 @@ Five unchanged interleaved pairs: medians 5.513s and 5.494s, paired change +0.81
 95% CI [-8.69%, +2.05%], half-width 5.72%. Verdict WITHIN NOISE. This floor is below
 our 10% minimum effect. Test count 224 in every run. CPU medians 4.730s and 4.710s.
 
-## Rounds
-Pending known-cost sanity check and worker-count measurements.
-
-## Result
-Pending full verification.
-
-### Confirmed measurements
+## Confirmed measurements
 - Planted two-second delay: 5.453s -> 7.481s, +37.19%, 95% CI
   [+35.71%, +39.84%]. WORSE as expected; plant removed.
 - Four to eight Rust workers: 5.420s -> 3.331s, -38.54%, CI
