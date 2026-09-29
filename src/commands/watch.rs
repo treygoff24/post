@@ -1139,13 +1139,10 @@ fn touch_admitted_heartbeats(
     interval_ms: u64,
     warned_failures: &mut HashSet<String>,
 ) -> usize {
-    let warnings = touch_admitted_heartbeats_with(
-        context,
-        targets,
-        interval_ms,
-        warned_failures,
-        |participant| crate::participant::touch(context, participant).map(|_| ()),
-    );
+    let warnings =
+        touch_admitted_heartbeats_with(targets, interval_ms, warned_failures, |participant| {
+            crate::participant::touch(context, participant).map(|_| ())
+        });
     let warning_count = warnings.len();
     for error in warnings {
         eprintln!(
@@ -1157,7 +1154,6 @@ fn touch_admitted_heartbeats(
 }
 
 fn touch_admitted_heartbeats_with(
-    context: &Context,
     targets: &[WatchTarget],
     interval_ms: u64,
     warned_failures: &mut HashSet<String>,
@@ -1165,18 +1161,17 @@ fn touch_admitted_heartbeats_with(
 ) -> Vec<AppError> {
     let mut warnings = Vec::new();
     let mut participants = HashSet::new();
-    for target in targets {
-        if let Some(participant) = target.participant.as_ref() {
-            if participants.insert(participant.id.clone()) {
-                if let Some(error) =
-                    touch_warning_for(&participant.id, touch(&participant.id), warned_failures)
-                {
-                    warnings.push(error);
-                }
-                crate::presence::touch_participant_heartbeat(participant, interval_ms);
+    for participant in targets
+        .iter()
+        .filter_map(|target| target.participant.as_ref())
+    {
+        if participants.insert(participant.id.clone()) {
+            if let Some(error) =
+                touch_warning_for(&participant.id, touch(&participant.id), warned_failures)
+            {
+                warnings.push(error);
             }
-        } else {
-            crate::presence::touch_heartbeat(context, &target.room, interval_ms);
+            crate::presence::touch_participant_heartbeat(participant, interval_ms);
         }
     }
     warnings
@@ -2705,25 +2700,15 @@ mod tests {
         let mut warned = HashSet::new();
         let failures = || Err(AppError::invalid_argument("transient touch failure"));
         assert_eq!(
-            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
-                .len(),
+            touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| failures()).len(),
             1
         );
-        assert!(touch_admitted_heartbeats_with(
-            &context,
-            &targets,
-            100,
-            &mut warned,
-            |_| failures()
-        )
-        .is_empty());
         assert!(
-            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| Ok(()))
-                .is_empty()
+            touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| failures()).is_empty()
         );
+        assert!(touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| Ok(())).is_empty());
         assert_eq!(
-            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
-                .len(),
+            touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| failures()).len(),
             1
         );
         crate::test_support::trash_test_root(&root);

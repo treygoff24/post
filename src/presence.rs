@@ -1,8 +1,9 @@
 //! Watch presence heartbeats — read-only inference of live watches.
 //!
-//! Each long-running `post watch` poll touches `<mail-root>/<room>/watch.heartbeat`
-//! with a unix-seconds stamp plus the poll interval. `post who` reads those
-//! files: a watch is "live" when the stamp is not in the future and younger
+//! Each long-running `post watch` poll touches
+//! `<mail-root>/participants/<id>/watch.heartbeat` with a unix-seconds stamp
+//! plus the poll interval. Legacy `<mail-root>/<room>/watch.heartbeat` files are
+//! read but never written. `post who` reads those files: a watch is "live" when the stamp is not in the future and younger
 //! than `interval*2 + slack`. No PIDs, no process info — presence must never
 //! become a kill list. Snapshot polls never touch heartbeats.
 
@@ -28,19 +29,15 @@ pub(crate) fn participant_heartbeat_path(participant: &Participant) -> PathBuf {
     participant.dir.join("watch.heartbeat")
 }
 
-/// Best-effort: a failed touch must never kill the doorbell. Never mint a
-/// room directory that does not already exist — watch must not recreate a
-/// mailbox that was moved aside mid-session. Never follow symlinks.
-pub(crate) fn touch_heartbeat(context: &Context, room: &str, interval_ms: u64) {
-    touch_path(&heartbeat_path(context, room), interval_ms);
-}
-
 /// Unix seconds of the participant's last watch heartbeat, when it has one.
 pub(crate) fn participant_heartbeat_stamp(participant: &Participant) -> Option<u64> {
     let raw = read_heartbeat_nofollow(&participant_heartbeat_path(participant)).ok()??;
     parse_heartbeat(raw.trim()).0
 }
 
+/// Best-effort: a failed touch must never kill the doorbell. Never mint a
+/// directory that does not already exist — watch must not recreate a record
+/// that was moved aside mid-session. Never follow symlinks.
 pub(crate) fn touch_participant_heartbeat(participant: &Participant, interval_ms: u64) {
     touch_path(&participant_heartbeat_path(participant), interval_ms);
 }
@@ -210,6 +207,24 @@ mod tests {
     use crate::test_support::{test_root, trash_test_root};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    /// A seeded participant, the reader's context over the participants
+    /// directory, and the participant's heartbeat path: the shape a live watch
+    /// writes and `who` reads.
+    fn participant_fixture(label: &str) -> (PathBuf, Participant, Context, PathBuf) {
+        let root = test_root(label);
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let reader = Context {
+            root: root.join(crate::participant::PARTICIPANTS_DIR),
+            home: root.clone(),
+        };
+        let path = participant_heartbeat_path(&participant);
+        (root, participant, reader, path)
+    }
+
     #[test]
     fn missing_heartbeat_is_not_live() {
         let root = test_root("presence-missing");
@@ -305,17 +320,12 @@ mod tests {
 
     #[test]
     fn fresh_heartbeat_is_live() {
-        let root = test_root("presence-live");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        std::fs::create_dir_all(root.join("alpha")).expect("room dir");
-        touch_heartbeat(&context, "alpha", 1000);
-        let presence = read_presence(&context, "alpha").expect("read");
+        let (root, participant, reader, path) = participant_fixture("presence-live");
+        touch_participant_heartbeat(&participant, 1000);
+        let presence = read_presence(&reader, &participant.id).expect("read");
         assert!(presence.live_watch);
         assert!(presence.last_seen.is_some());
-        let meta = std::fs::metadata(heartbeat_path(&context, "alpha")).expect("meta");
+        let meta = std::fs::metadata(&path).expect("meta");
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         trash_test_root(&root);
     }
@@ -359,18 +369,11 @@ mod tests {
 
     #[test]
     fn heartbeat_write_does_not_follow_symlink() {
-        let root = test_root("presence-symlink");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let room = root.join("alpha");
-        std::fs::create_dir_all(&room).expect("room");
+        let (root, participant, _reader, hb) = participant_fixture("presence-symlink");
         let victim = root.join("victim.txt");
         std::fs::write(&victim, b"SAFE\n").expect("victim");
-        let hb = room.join("watch.heartbeat");
         std::os::unix::fs::symlink(&victim, &hb).expect("plant symlink");
-        touch_heartbeat(&context, "alpha", 1000);
+        touch_participant_heartbeat(&participant, 1000);
         let contents = std::fs::read_to_string(&victim).expect("read victim");
         assert_eq!(contents, "SAFE\n", "must not write through symlink");
         // Symlink target unchanged; heartbeat path is still the symlink.
@@ -383,16 +386,10 @@ mod tests {
 
     #[test]
     fn existing_heartbeat_perms_normalized_to_0600() {
-        let root = test_root("presence-perms");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let path = heartbeat_path(&context, "alpha");
-        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        let (root, participant, _reader, path) = participant_fixture("presence-perms");
         std::fs::write(&path, "1 1000\n").expect("seed");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        touch_heartbeat(&context, "alpha", 1000);
+        touch_participant_heartbeat(&participant, 1000);
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         trash_test_root(&root);
@@ -400,26 +397,19 @@ mod tests {
 
     #[test]
     fn heartbeat_write_does_not_clobber_through_hard_link() {
-        let root = test_root("presence-hardlink");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let room = root.join("alpha");
-        std::fs::create_dir_all(&room).expect("room");
+        let (root, participant, _reader, hb) = participant_fixture("presence-hardlink");
         let victim = root.join("victim.txt");
         std::fs::write(&victim, b"SAFE\n").expect("victim");
         // Pin the mode: fs::write honours umask (0002 yields 0664), and the
         // assertion below checks the victim's mode is untouched, not the host default.
         std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        let hb = room.join("watch.heartbeat");
         std::fs::hard_link(&victim, &hb).expect("plant hard link");
         assert_eq!(
             std::fs::metadata(&hb).expect("meta").nlink(),
             2,
             "fixture must be a hard link"
         );
-        touch_heartbeat(&context, "alpha", 1000);
+        touch_participant_heartbeat(&participant, 1000);
         let contents = std::fs::read_to_string(&victim).expect("read victim");
         assert_eq!(
             contents, "SAFE\n",
@@ -436,20 +426,13 @@ mod tests {
 
     #[test]
     fn heartbeat_write_does_not_hang_or_write_fifo() {
-        let root = test_root("presence-fifo");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let room = root.join("alpha");
-        std::fs::create_dir_all(&room).expect("room");
-        let hb = room.join("watch.heartbeat");
+        let (root, participant, _reader, hb) = participant_fixture("presence-fifo-write");
         let c_path = std::ffi::CString::new(hb.as_os_str().as_encoded_bytes()).expect("c path");
         let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
         assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
         // Must return promptly (O_NONBLOCK) and leave the FIFO untouched.
         let started = std::time::Instant::now();
-        touch_heartbeat(&context, "alpha", 1000);
+        touch_participant_heartbeat(&participant, 1000);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "FIFO open must not block the watch poll"
