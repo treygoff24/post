@@ -52,7 +52,7 @@ function freshSettings(content) {
   return file;
 }
 
-function run(target, { bin = GOOD_POST, extra = [] } = {}) {
+function run(target, { bin = GOOD_POST, extra = [], env: extraEnv = {} } = {}) {
   const args = [INSTALLER];
   if (target !== undefined) args.push(target);
   args.push(...extra);
@@ -62,6 +62,7 @@ function run(target, { bin = GOOD_POST, extra = [] } = {}) {
       ...process.env,
       POST_CLAUDE_HOOK_INSTALL_DIR: INSTALL_DIR,
       POST_CLAUDE_HOOK_BIN: bin,
+      ...extraEnv,
     },
   });
 }
@@ -107,7 +108,7 @@ test("creates a fresh settings file with lifecycle events and copies the adapter
   const result = run(target);
   assert.equal(result.status, 0, result.stderr);
   const config = JSON.parse(fs.readFileSync(target, "utf8"));
-  for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]) {
+  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
     const groups = config.hooks[event];
     assert.equal(groups.length, 1, event);
     assert.deepEqual(groups[0].hooks, [
@@ -198,10 +199,7 @@ test("is idempotent and preserves unrelated hooks byte-identical", () => {
   assert.equal(run(target).status, 0);
   const after = JSON.parse(fs.readFileSync(target, "utf8"));
   assert.deepEqual(after.hooks.SessionStart[0], unrelated.hooks.SessionStart[0]);
-  // PreToolUse also carries the adapter now (the doorbell turn mark); the
-  // unrelated group stays first and untouched.
-  assert.deepEqual(after.hooks.PreToolUse[0], unrelated.hooks.PreToolUse[0]);
-  assert.equal(after.hooks.PreToolUse.length, 2);
+  assert.deepEqual(after.hooks.PreToolUse, unrelated.hooks.PreToolUse);
   assert.deepEqual(after.permissions, unrelated.permissions);
   assert.equal(after.hooks.SessionStart.length, 2);
 
@@ -213,20 +211,28 @@ test("is idempotent and preserves unrelated hooks byte-identical", () => {
 });
 
 test("updates a stale registration in place instead of duplicating", () => {
+  // A relocated copy of the adapter is recognised by its header marker.
+  const oldCopy = path.join(ROOT, "old-place", "post-claude-mail.mjs");
+  fs.mkdirSync(path.dirname(oldCopy), { recursive: true });
+  fs.writeFileSync(oldCopy, '#!/usr/bin/env node\n// Claude Code hook adapter: injects metadata-only "new post mail" notifications\n');
   const stale = {
     hooks: {
       UserPromptSubmit: [
         {
           hooks: [
-            { type: "command", command: "node /old/place/post-claude-mail.mjs", timeout: 5 },
+            { type: "command", command: `node ${oldCopy}`, timeout: 5 },
             { type: "command", command: "other-tool" },
           ],
         },
       ],
+      // The live shell form, `$HOME/...` naming the installed adapter path.
+      Stop: [{ hooks: [{ type: "command", command: 'node "$HOME/hooks/post-claude-mail.mjs"', timeout: 10 }] }],
     },
   };
   const target = freshSettings(JSON.stringify(stale));
-  assert.equal(run(target).status, 0);
+  assert.equal(run(target, { env: { HOME: ROOT } }).status, 0);
+  const stop = JSON.parse(fs.readFileSync(target, "utf8")).hooks.Stop;
+  assert.deepEqual(stop, [{ hooks: [{ type: "command", command: "node", args: [ADAPTER], timeout: 10 }] }], "the $HOME shell form is replaced, not duplicated");
   const after = JSON.parse(fs.readFileSync(target, "utf8"));
   const flat = after.hooks.UserPromptSubmit.flatMap((g) => g.hooks);
   const ours = flat.filter(
@@ -244,4 +250,26 @@ test("installer and installed adapter no longer reference identity-card.mjs", ()
   assert.equal(fs.existsSync(path.join(INSTALL_DIR, "identity-card.mjs")), false);
   assert.ok(!fs.readFileSync(path.join(INSTALL_DIR, path.basename(ADAPTER)), "utf8").includes("identity-card.mjs"));
   assert.ok(!fs.readFileSync(INSTALLER, "utf8").includes("identity-card.mjs"));
+});
+
+test("an unrelated hook that shares the adapter's basename survives the install", () => {
+  const foreign = path.join(ROOT, "other-tool", "claude-mail.mjs");
+  fs.mkdirSync(path.dirname(foreign), { recursive: true });
+  fs.writeFileSync(foreign, "#!/usr/bin/env node\n// some other tool's guard\n");
+  const foreignShell = { type: "command", command: `node ${foreign}` };
+  const foreignExec = { type: "command", command: "node", args: [path.join(ROOT, "elsewhere", "post-claude-mail.mjs")] };
+  const settings = {
+    hooks: {
+      Stop: [{ hooks: [foreignShell] }],
+      UserPromptSubmit: [{ hooks: [foreignExec, { type: "command", command: "other-tool" }] }],
+    },
+  };
+  const target = freshSettings(JSON.stringify(settings));
+  assert.equal(run(target).status, 0);
+  const after = JSON.parse(fs.readFileSync(target, "utf8")).hooks;
+  assert.deepEqual(after.Stop[0], { hooks: [foreignShell] }, "a same-basename script elsewhere is not ours");
+  assert.deepEqual(after.UserPromptSubmit[0].hooks, [foreignExec, { type: "command", command: "other-tool" }]);
+  for (const event of ["Stop", "UserPromptSubmit"]) {
+    assert.deepEqual(after[event].at(-1).hooks, [{ type: "command", command: "node", args: [ADAPTER], timeout: 10 }], event);
+  }
 });

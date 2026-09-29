@@ -904,7 +904,11 @@ describe("Claude turn marks (post-bt2)", () => {
     w.addPane("wC:p1", "session-c", { agent: "claude", status: "working" });
     w.enable("claude-aaaaaaaa");
     w.snapshots.set("claude-aaaaaaaa", [mailWith("20260923-000001-ccccc1")]);
-    w.mark = (turn, session = "session-c") => writeMark(w, session, { turn, event: turn === "idle" ? "Stop" : "PreToolUse", at: "2026-09-29T16:09:00Z" });
+    // "idle-bg" is a Stop with background work in flight: the bug case.
+    w.mark = (turn, session = "session-c") =>
+      writeMark(w, session, turn === "busy"
+        ? { turn: "busy", event: "UserPromptSubmit", at: "2026-09-29T16:09:00Z" }
+        : { turn: "idle", event: "Stop", background: turn === "idle-bg", at: "2026-09-29T16:09:00Z" });
     w.mailArrives = () => {
       w.sup.hint(["claude-aaaaaaaa"]);
       w.sup.flushHints();
@@ -913,12 +917,23 @@ describe("Claude turn marks (post-bt2)", () => {
     return w;
   }
 
-  test("a working Claude pane whose main turn is idle is rung", async () => {
+  test("a working Claude pane idle at Stop with background work pending is rung", async () => {
     const w = claudeWorld();
-    w.mark("idle");
+    w.mark("idle-bg");
     await w.run();
     assert.deepEqual(w.prompts.map((p) => p.pane), ["wC:p1"]);
     assert.equal(w.outcomes("accepted").length, 1);
+  });
+
+  test("an idle mark without background work never overrides working (a blocked stop)", async () => {
+    // Another Stop hook blocked the stop: the mark says idle, Claude is still
+    // working, and Herdr is right. Only background work explains a working
+    // spinner after a real stop.
+    const w = claudeWorld();
+    w.mark("idle");
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.equal(w.sub("claude-aaaaaaaa").scannable, false);
   });
 
   test("a working Claude pane whose turn is busy, or unmarked, is not rung", async () => {
@@ -933,12 +948,12 @@ describe("Claude turn marks (post-bt2)", () => {
 
   test("the last mark wins, and the recheck reads it fresh", async () => {
     const w = claudeWorld();
-    w.mark("idle");
+    w.mark("idle-bg");
     w.mark("busy"); // a new turn after the Stop: the idle mark is stale
     await w.run();
     assert.equal(w.prompts.length, 0);
     // Idle at discovery, busy again by the recheck: deferred, never typed.
-    w.mark("idle");
+    w.mark("idle-bg");
     const pane = w.panes[0];
     w.getOverride.set("wC:p1", () => {
       w.mark("busy");
@@ -951,7 +966,7 @@ describe("Claude turn marks (post-bt2)", () => {
 
   test("another session's idle mark does not apply to this pane", async () => {
     const w = claudeWorld();
-    w.mark("idle", "session-old");
+    w.mark("idle-bg", "session-old");
     await w.run();
     assert.equal(w.prompts.length, 0);
   });
@@ -959,7 +974,7 @@ describe("Claude turn marks (post-bt2)", () => {
   test("a focused Claude pane with an idle turn still waits for --focused", async () => {
     const w = claudeWorld();
     w.panes[0].focused = true;
-    w.mark("idle");
+    w.mark("idle-bg");
     await w.run();
     assert.equal(w.prompts.length, 0);
     w.enable("claude-aaaaaaaa", { focused: true });
@@ -970,7 +985,7 @@ describe("Claude turn marks (post-bt2)", () => {
   test("a non-Claude pane keeps Herdr's status even with an idle mark for its session", async () => {
     const w = standardWorld();
     w.panes[0].status = "working";
-    writeMark(w, "session-a", { turn: "idle" });
+    writeMark(w, "session-a", { turn: "idle", background: true });
     await w.run();
     assert.equal(w.prompts.length, 0);
     w.panes[0].status = "idle";

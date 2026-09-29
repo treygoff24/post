@@ -827,36 +827,57 @@ test("SessionEnd attempts participant end without scanning", () => {
   assert.deepEqual(allStubCalls().map((call) => call.args), [["participant", "end"]]);
 });
 
-test("doorbell turn marks: busy at prompt and tool use, idle at Stop, gone at SessionEnd; subagents never mark", () => {
-  const stateDir = freshStateDir();
-  const mailRoot = path.join(ROOT, "turn-mail");
-  const env = { POST_MAIL_ROOT: mailRoot };
-  const session = "turn-session";
+function turnWorld(name) {
+  const mailRoot = path.join(ROOT, `turn-mail-${name}`);
+  const session = `turn-session-${name}`;
   const markFile = path.join(mailRoot, "doorbell", "turns", `${createHash("sha256").update(session).digest("hex")}.json`);
-  const mark = () => JSON.parse(fs.readFileSync(markFile, "utf8"));
-  const base = { session_id: session, cwd: CWD };
+  return {
+    mailRoot,
+    markFile,
+    mark: () => JSON.parse(fs.readFileSync(markFile, "utf8")),
+    fire: (event, extra = {}, stateDir = freshStateDir()) =>
+      run({ session_id: session, cwd: CWD, hook_event_name: event, ...extra }, { stateDir, env: { POST_MAIL_ROOT: mailRoot } }),
+  };
+}
+
+test("doorbell turn marks: busy at prompt, idle at Stop with its background work, gone at SessionEnd", () => {
+  const t = turnWorld("life");
   setStub({ events: [] });
 
   // No doorbell directory: the hook creates nothing.
-  run({ ...base, hook_event_name: "Stop" }, { stateDir, env });
-  assert.ok(!fs.existsSync(mailRoot));
+  t.fire("Stop", { background_tasks: [{ type: "subagent" }] });
+  assert.ok(!fs.existsSync(t.mailRoot));
 
-  fs.mkdirSync(path.join(mailRoot, "doorbell"), { recursive: true });
-  run({ ...base, hook_event_name: "UserPromptSubmit" }, { stateDir, env });
-  assert.equal(mark().turn, "busy");
+  fs.mkdirSync(path.join(t.mailRoot, "doorbell"), { recursive: true });
+  t.fire("UserPromptSubmit");
+  assert.equal(t.mark().turn, "busy");
   const before = allStubCalls().length;
-  assert.deepEqual(run({ ...base, hook_event_name: "Stop", background_tasks: [{ type: "subagent" }] }, { stateDir, env }), {});
-  assert.equal(mark().turn, "idle");
-  assert.equal(mark().event, "Stop");
-  assert.equal(fs.statSync(markFile).mode & 0o777, 0o600);
-  // A background subagent's own tool use and stop leave the main turn idle.
-  run({ ...base, hook_event_name: "PreToolUse", agent_id: "agent-1", tool_name: "Bash" }, { stateDir, env });
-  run({ ...base, hook_event_name: "SubagentStop", agent_id: "agent-1" }, { stateDir, env });
-  assert.equal(mark().turn, "idle");
-  assert.deepEqual(run({ ...base, hook_event_name: "PreToolUse", tool_name: "Bash" }, { stateDir, env }), {});
-  assert.equal(mark().turn, "busy");
-  assert.equal(allStubCalls().length, before, "Stop and PreToolUse never run post");
-  assert.deepEqual(fs.readdirSync(path.dirname(markFile)), [path.basename(markFile)], "no temp files left behind");
-  run({ ...base, hook_event_name: "SessionEnd", reason: "exit" }, { stateDir, env });
-  assert.ok(!fs.existsSync(markFile));
+  assert.deepEqual(t.fire("Stop", { background_tasks: [{ type: "subagent" }] }), {});
+  assert.deepEqual([t.mark().turn, t.mark().event, t.mark().background], ["idle", "Stop", true]);
+  assert.equal(fs.statSync(t.markFile).mode & 0o777, 0o600);
+  t.fire("Stop", { background_tasks: [] });
+  assert.equal(t.mark().background, false, "an empty array is nothing in flight");
+  t.fire("Stop", {});
+  assert.equal(t.mark().background, false, "an older Claude Code without the field is treated as none");
+  assert.equal(allStubCalls().length, before, "Stop never runs post");
+  // Tool use no longer marks anything, and a subagent never does.
+  t.fire("Stop", { background_tasks: [{ type: "shell" }] });
+  t.fire("PreToolUse", { tool_name: "Bash" });
+  t.fire("UserPromptSubmit", { agent_id: "agent-1" });
+  assert.deepEqual([t.mark().turn, t.mark().background], ["idle", true]);
+  assert.deepEqual(fs.readdirSync(path.dirname(t.markFile)), [path.basename(t.markFile)], "no temp files left behind");
+  t.fire("SessionEnd", { reason: "exit" });
+  assert.ok(!fs.existsSync(t.markFile));
+});
+
+test("doorbell turn marks: every SessionStart clears a leftover mark", () => {
+  const t = turnWorld("start");
+  setStub({ events: [] });
+  fs.mkdirSync(path.join(t.mailRoot, "doorbell"), { recursive: true });
+  for (const source of ["startup", "resume", "clear", "compact"]) {
+    t.fire("Stop", { background_tasks: [{ type: "subagent" }] });
+    assert.equal(t.mark().turn, "idle");
+    t.fire("SessionStart", { source });
+    assert.ok(!fs.existsSync(t.markFile), `SessionStart ${source} must clear the mark`);
+  }
 });

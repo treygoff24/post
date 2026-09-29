@@ -252,24 +252,32 @@ export function resolvePaths(env = process.env) {
 // that spinner while background tasks run after its main turn has ended, so
 // Herdr reports such a pane `working` although it sits at its input prompt.
 // The Claude mail hook records the main thread's own turn state instead:
-// `busy` at UserPromptSubmit and PreToolUse, `idle` at Stop, one file per
-// session named by the same digest the supervisor binds panes with, last
-// writer wins. The mark only ever widens ringing: a Claude pane Herdr calls
-// `working` rings when its session's last mark is `idle`. It never holds back
-// a pane Herdr calls idle or done, and no other harness or status reads it.
+// `busy` at UserPromptSubmit, `idle` at Stop with whether background work was
+// in flight, deleted at SessionStart and SessionEnd; one file per session named
+// by the same digest the supervisor binds panes with, last writer wins. The
+// mark only ever widens ringing, and only for the exact case Herdr misreads: a
+// Claude pane Herdr calls `working` rings when its session's last mark is idle
+// WITH background work pending at Stop. A plain idle mark never overrides
+// Herdr (Herdr goes idle on its own then, and the mark may be wrong because a
+// parallel Stop hook blocked the stop). The mark is read only by the session
+// digest of a pane Herdr lists now, so a dead session's leftover file is never
+// consulted.
 export function turnPath(paths, digest) {
   return path.join(paths.turnsDir, `${digest}.json`);
 }
 
+// "busy", "idle", "idle-background" (idle with background work at Stop), or null.
 export function readTurn(paths, digest) {
   const raw = readJson(turnPath(paths, digest));
-  return raw && (raw.turn === "idle" || raw.turn === "busy") ? raw.turn : null;
+  if (raw?.turn === "busy") return "busy";
+  if (raw?.turn === "idle") return raw.background === true ? "idle-background" : "idle";
+  return null;
 }
 
 // Why a pane may not be rung now, or null when it may. `turn` is consulted only
 // for a Claude pane Herdr reports working.
 export function ringGate({ agent, status, focused, turn }, prefs) {
-  const idle = ["idle", "done"].includes(status) || (agent === "claude" && status === "working" && turn === "idle");
+  const idle = ["idle", "done"].includes(status) || (agent === "claude" && status === "working" && turn === "idle-background");
   if (!idle) return status;
   if (focused && !prefs.focused) return "focused";
   return null;

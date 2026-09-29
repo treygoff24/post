@@ -23,13 +23,18 @@
 // Turn marks for the doorbell supervisor: Herdr reports a Claude pane
 // `working` for as long as background tasks keep its title spinner going,
 // even after the main turn has ended, so this hook also records the main
-// thread's own turn state at <mail root>/doorbell/turns/<sha256(session_id)>.json
-// (`busy` at UserPromptSubmit and PreToolUse, `idle` at Stop, removed at
-// SessionEnd). Stop fires with background tasks still running (its payload
-// lists them in `background_tasks`); a background completion re-enters through
-// UserPromptSubmit. Subagent events never mark. Nothing is written unless the
-// doorbell directory already exists. The Stop and PreToolUse registrations
-// exist only for this mark; parse() ignores both, so they never run post.
+// thread's own turn state at <mail root>/doorbell/turns/<sha256(session_id)>.json:
+// `busy` at UserPromptSubmit, `idle` at Stop together with whether Stop's
+// `background_tasks` (in-flight background work; an empty array when none, and
+// absent before Claude Code 2.1.145) was non-empty, and removed at SessionStart
+// (every source) and SessionEnd. A background completion re-enters through
+// UserPromptSubmit (seen 17-41 ms after SubagentStop in the local hook ledger).
+// The doorbell overrides Herdr only for an idle mark WITH background work: a
+// plain idle Stop needs no override (Herdr goes idle on its own), and an idle
+// mark can be wrong when a parallel Stop hook blocks the stop. Subagent events
+// never mark. Nothing is written unless the doorbell directory already exists.
+// The Stop registration exists only for this mark; parse() ignores Stop, so it
+// never runs post.
 //
 // Test overrides (all optional):
 //   POST_CLAUDE_HOOK_BIN         path to the post binary
@@ -49,11 +54,12 @@ const PHASES = {
   SessionEnd: "end",
 };
 
-const TURN = { UserPromptSubmit: "busy", PreToolUse: "busy", Stop: "idle" };
+const TURN = { UserPromptSubmit: "busy", Stop: "idle" };
+const CLEARS_TURN = new Set(["SessionStart", "SessionEnd"]);
 
 function recordTurn(input, env) {
   const event = input.hook_event_name;
-  if (!Object.hasOwn(TURN, event) && event !== "SessionEnd") return;
+  if (!Object.hasOwn(TURN, event) && !CLEARS_TURN.has(event)) return;
   if (typeof input.agent_id === "string" && input.agent_id !== "") return;
   if (typeof input.session_id !== "string" || input.session_id === "") return;
   const root = env.POST_MAIL_ROOT || path.join(os.homedir(), ".claude-mail");
@@ -62,14 +68,18 @@ function recordTurn(input, env) {
   if (!fs.existsSync(doorbell)) return;
   const dir = path.join(doorbell, "turns");
   const file = path.join(dir, `${createHash("sha256").update(input.session_id).digest("hex")}.json`);
-  if (event === "SessionEnd") {
+  if (CLEARS_TURN.has(event)) {
+    // A new, resumed, cleared, or compacted session starts with no mark: a
+    // leftover idle from before a crash must not outlive it.
     fs.rmSync(file, { force: true });
     return;
   }
+  const record = { turn: TURN[event], event, at: new Date().toISOString() };
+  if (event === "Stop") record.background = Array.isArray(input.background_tasks) && input.background_tasks.length > 0;
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    fs.writeFileSync(tmp, `${JSON.stringify({ turn: TURN[event], event, at: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
     fs.renameSync(tmp, file);
   } finally {
     fs.rmSync(tmp, { force: true });
