@@ -1306,6 +1306,7 @@ fn crossed_report(
     // delivers) rather than showing a signed-looking body without its verdict.
     let owner = crate::mailbox::resolve_owner(context)?;
     let owner_room = owner.as_ref().map(|owner| owner.room.clone());
+    let targets = MentionTargets::of_participant(participant);
     let scan = unread_channel_with(context, participant, channel, Scan::Tolerant)?;
     let skipped = scan.skipped;
     let mut items: Vec<(ChannelMessage, String, bool)> = Vec::new();
@@ -1314,7 +1315,7 @@ fn crossed_report(
             continue;
         }
         let message = item.message;
-        let addressed = message.mentions.iter().any(|name| name == room)
+        let addressed = targets.addressed_by(&message, &item.body)
             || owner_room.as_deref() == Some(message.from.as_str())
             || message
                 .re
@@ -1447,7 +1448,78 @@ pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResul
 /// `foo`/`foo.bar` do not double-stamp. Matching is case-sensitive to the
 /// registered spelling.
 pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
+    scan_mentions(body, rooms, false)
+}
+
+/// Blank out fenced ``` blocks and inline backtick spans (byte-for-byte, so
+/// offsets survive): an `@name` shown as code is an example, not an address.
+/// An unclosed fence runs to the end; an unmatched backtick run is literal.
+fn mask_code(body: &str) -> String {
+    let mut out = body.as_bytes().to_vec();
+    let bytes = body.as_bytes();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for b in &mut out[from..to] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    };
+    let mut fence_start: Option<usize> = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let end = offset + line.len();
+        let fenced = line.trim_start().starts_with("```");
+        match (fence_start, fenced) {
+            (Some(from), true) => {
+                blank(&mut out, from, end);
+                fence_start = None;
+            }
+            (None, true) => fence_start = Some(offset),
+            (None, false) => {
+                let mut i = offset;
+                while i < end {
+                    if bytes[i] != b'`' {
+                        i += 1;
+                        continue;
+                    }
+                    let run = bytes[i..end].iter().take_while(|b| **b == b'`').count();
+                    let mut j = i + run;
+                    let mut close = None;
+                    while j < end {
+                        if bytes[j] == b'`' {
+                            let r = bytes[j..end].iter().take_while(|b| **b == b'`').count();
+                            if r == run {
+                                close = Some(j + r);
+                                break;
+                            }
+                            j += r;
+                        } else {
+                            j += 1;
+                        }
+                    }
+                    match close {
+                        Some(c) => {
+                            blank(&mut out, i, c);
+                            i = c;
+                        }
+                        None => i += run,
+                    }
+                }
+            }
+            (Some(_), false) => {}
+        }
+        offset = end;
+    }
+    if let Some(from) = fence_start {
+        blank(&mut out, from, bytes.len());
+    }
+    String::from_utf8(out).unwrap_or_else(|_| body.to_owned())
+}
+
+fn scan_mentions(body: &str, rooms: &RoomMap, ascii_ci: bool) -> Vec<String> {
     use std::collections::BTreeSet;
+    let masked = mask_code(body);
+    let body = masked.as_str();
     let mut names: Vec<&String> = rooms.keys().collect();
     names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     let mut found = BTreeSet::new();
@@ -1464,7 +1536,14 @@ pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
         let after_at = at + '@'.len_utf8();
         let mut matched: Option<&String> = None;
         for name in &names {
-            if !body[after_at..].starts_with(name.as_str()) {
+            let starts = if ascii_ci {
+                body.as_bytes()
+                    .get(after_at..after_at + name.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
+            } else {
+                body[after_at..].starts_with(name.as_str())
+            };
+            if !starts {
                 continue;
             }
             let end = after_at + name.len();
@@ -1488,6 +1567,53 @@ pub(crate) fn extract_mentions(body: &str, rooms: &RoomMap) -> Vec<String> {
         }
     }
     found.into_iter().collect()
+}
+
+/// The names a reader answers to in an `@name` tag: its workspace, its
+/// participant id, and its lineage. Resolution happens at READ time against the
+/// body, so a message sent by an older binary (or through the bridge from a
+/// host that only stamps workspaces) still addresses the reader.
+pub(crate) struct MentionTargets {
+    names: RoomMap,
+}
+
+impl MentionTargets {
+    pub(crate) fn of_participant(participant: &crate::participant::Participant) -> Self {
+        Self::of_names(
+            [
+                participant.workspace.as_deref(),
+                Some(participant.id.as_str()),
+                participant.lineage.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        )
+    }
+
+    /// A reader known only by its acting room name (workspace or participant id).
+    pub(crate) fn of_room(room: &str) -> Self {
+        Self::of_names([room])
+    }
+
+    fn of_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            names: names
+                .into_iter()
+                .map(|name| (name.to_owned(), String::new()))
+                .collect(),
+        }
+    }
+
+    /// True when the message stamped one of these names or its body carries
+    /// `@<name>` for one of them. A name that is both a workspace and a lineage
+    /// is one entry here, so it addresses the reader once.
+    pub(crate) fn addressed_by(&self, message: &ChannelMessage, body: &str) -> bool {
+        message
+            .mentions
+            .iter()
+            .any(|mention| self.names.contains_key(mention))
+            || !scan_mentions(body, &self.names, true).is_empty()
+    }
 }
 
 fn is_mention_boundary_char(c: char) -> bool {

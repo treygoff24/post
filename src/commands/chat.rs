@@ -653,6 +653,7 @@ fn read(
     };
     // Peek's @mention rescue is scoped to the member's own span: history
     // mentions predate the membership and are not addressed to this session.
+    let mention_targets = channel::MentionTargets::of_participant(&participant);
     let peek_rescue_floor = if args.peek {
         cursor_state::eligibility::channel_history_floor(context, &participant, &args.name)?
     } else {
@@ -688,7 +689,12 @@ fn read(
     let skipped = if cursorless {
         0
     } else if args.peek {
-        apply_peek_catch_up(&mut batch, args.limit, &room, peek_rescue_floor.as_deref())?
+        apply_peek_catch_up(
+            &mut batch,
+            args.limit,
+            &mention_targets,
+            peek_rescue_floor.as_deref(),
+        )?
     } else {
         apply_consuming_catch_up(&mut batch, args.limit)
     };
@@ -737,7 +743,7 @@ fn read(
         match args.max_bytes {
             Some(max_bytes) => {
                 let array_sizes = super::byte_budget::JsonArrayPrefix::new(&messages, pretty, 4)?;
-                let mention_suffix = chat_message_mention_suffix(&messages, &room);
+                let mention_suffix = chat_message_mention_suffix(&messages, &mention_targets);
                 let continuations = messages
                     .iter()
                     .map(|item| {
@@ -846,7 +852,7 @@ fn read(
                     &message_ids,
                     owner.as_ref(),
                 );
-                let mention_suffix = chat_batch_mention_suffix(&batch, &room);
+                let mention_suffix = chat_batch_mention_suffix(&batch, &mention_targets);
                 let continuations = batch
                     .iter()
                     .zip(&signed_statuses)
@@ -988,7 +994,7 @@ const DEFAULT_CATCH_UP: usize = 25;
 fn apply_peek_catch_up(
     batch: &mut Vec<(ChannelMessage, String)>,
     limit: Option<usize>,
-    room: &str,
+    targets: &channel::MentionTargets,
     rescue_floor: Option<&str>,
 ) -> AppResult<usize> {
     let n = match limit {
@@ -1006,7 +1012,7 @@ fn apply_peek_catch_up(
     for item in older {
         let history = rescue_floor
             .is_some_and(|floor| cursor_state::eligibility::is_channel_history(&item.0.id, floor));
-        if !history && item.0.mentions.iter().any(|m| m == room) {
+        if !history && targets.addressed_by(&item.0, &item.1) {
             rescued.push(item);
         } else {
             skipped += 1;
@@ -1208,11 +1214,14 @@ fn chat_omission(
     ))
 }
 
-fn chat_message_mention_suffix(messages: &[output::ChatMessageItem], room: &str) -> Vec<usize> {
+fn chat_message_mention_suffix(
+    messages: &[output::ChatMessageItem],
+    targets: &channel::MentionTargets,
+) -> Vec<usize> {
     mention_suffix(
         messages
             .iter()
-            .map(|item| item.message.mentions.iter().any(|mention| mention == room)),
+            .map(|item| targets.addressed_by(&item.message, &item.body)),
     )
 }
 
@@ -1245,11 +1254,14 @@ fn chat_batch_omission(
     ))
 }
 
-fn chat_batch_mention_suffix(batch: &[(ChannelMessage, String)], room: &str) -> Vec<usize> {
+fn chat_batch_mention_suffix(
+    batch: &[(ChannelMessage, String)],
+    targets: &channel::MentionTargets,
+) -> Vec<usize> {
     mention_suffix(
         batch
             .iter()
-            .map(|(message, _)| message.mentions.iter().any(|mention| mention == room)),
+            .map(|(message, body)| targets.addressed_by(message, body)),
     )
 }
 
@@ -2853,7 +2865,13 @@ mod tests {
         seed_message(&dir, ID3, "beta", "newest");
 
         let mut batch = read_batch(&context, "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha", None).expect("limit");
+        let skipped = apply_peek_catch_up(
+            &mut batch,
+            Some(2),
+            &channel::MentionTargets::of_room("alpha"),
+            None,
+        )
+        .expect("limit");
         assert_eq!(skipped, 1);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].0.id, ID2, "peek keeps the newest slice");
@@ -2868,7 +2886,13 @@ mod tests {
         seed_message(&dir, ID1, "beta", "oldest");
         seed_message(&dir, ID2, "beta", "newest");
         let mut batch = read_batch(&context, "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(5), "alpha", None).expect("limit");
+        let skipped = apply_peek_catch_up(
+            &mut batch,
+            Some(5),
+            &channel::MentionTargets::of_room("alpha"),
+            None,
+        )
+        .expect("limit");
         assert_eq!(skipped, 0);
         let ids: Vec<&str> = batch
             .iter()
@@ -2888,7 +2912,13 @@ mod tests {
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "only");
         let mut batch = read_batch(&context, "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(0), "alpha", None).expect("unlimited");
+        let skipped = apply_peek_catch_up(
+            &mut batch,
+            Some(0),
+            &channel::MentionTargets::of_room("alpha"),
+            None,
+        )
+        .expect("unlimited");
         assert_eq!(skipped, 0);
         assert_eq!(batch.len(), 1, "limit 0 must keep every message");
         assert_eq!(apply_consuming_catch_up(&mut batch, Some(0)), 0);

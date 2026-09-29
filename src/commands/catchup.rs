@@ -792,6 +792,7 @@ impl CatchupRemainderIndex {
         room: &str,
         max_bytes: usize,
     ) -> AppResult<Self> {
+        let mention_targets = crate::channel::MentionTargets::of_participant(participant);
         let mut remaining_by_target = vec![0usize; targets.len()];
         let mut remaining_targets = 0usize;
         for (index, target) in targets.iter().enumerate().rev() {
@@ -851,7 +852,7 @@ impl CatchupRemainderIndex {
                             source: CatchupRemainderSource::Channel(channel.clone()),
                             id: item.message.id.clone(),
                             body_bytes: item.body.len(),
-                            mentioned: item.message.mentions.iter().any(|mention| mention == room),
+                            mentioned: mention_targets.addressed_by(&item.message, &item.body),
                             remaining_targets: remaining_by_target[index],
                             continuation: super::chat::measured_omission_continuation(
                                 context,
