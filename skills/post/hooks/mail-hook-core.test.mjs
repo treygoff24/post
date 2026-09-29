@@ -151,6 +151,9 @@ function makeWorld(name, adapter) {
         STUB_CALLS: world.callsFile,
         DELEGATE_RUN_ID: "",
         POST_PARTICIPANT: "",
+        // The Claude adapter writes doorbell turn marks under the mail root; a
+        // test must never write them into the live ~/.claude-mail.
+        POST_MAIL_ROOT: path.join(dir, "mail"),
         ...extra,
       };
       for (const key of unsetEnv) delete env[key];
