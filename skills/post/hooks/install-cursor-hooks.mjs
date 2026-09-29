@@ -8,8 +8,8 @@
 // at (or silently edits) a live config. Run it against ~/.cursor/hooks.json
 // deliberately. Safe to re-run: an existing cursor-mail entry is updated in
 // place, never duplicated. The reviewed adapter is copied to ~/.cursor/hooks/
-// (and watch-notice.mjs alongside it); those private copies are what future
-// Cursor sessions execute.
+// (with mail-hook-core.mjs, which it imports, and watch-notice.mjs alongside
+// it); those private copies are what future Cursor sessions execute.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -22,9 +22,12 @@ import { stableNodePath } from "./stable-node-path.mjs";
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = path.join(DIR, "cursor-mail.mjs");
 const NOTICE_SOURCE = path.join(DIR, "watch-notice.mjs");
+const CORE_SOURCE = path.join(DIR, "mail-hook-core.mjs");
 const INSTALL_DIR =
   process.env.POST_CURSOR_HOOK_INSTALL_DIR || path.join(os.homedir(), ".cursor", "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-cursor-mail.mjs");
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(INSTALL_DIR, "mail-hook-core.mjs");
 const NOTICE = path.join(INSTALL_DIR, "post-watch-notice.mjs");
 // Pin an absolute Node that survives package-manager upgrades: process.execPath
 // is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
@@ -104,7 +107,30 @@ function writeAllSync(fd, data) {
   }
 }
 
-function writeFileAtomic(file, content, mode) {
+// Every file the install writes is STAGED first and renamed into place only
+// after every write has succeeded, so a failure while staging (disk full, an
+// unwritable config directory) leaves what is installed exactly as it was; the
+// temps are removed on exit. Renames run in staging order (watch-notice, core,
+// adapter, then config), so an adapter never lands without the core it imports.
+const staged = [];
+process.on("exit", () => {
+  for (const { tmp } of staged) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Never created, or already renamed into place.
+    }
+  }
+});
+
+function commitStaged() {
+  while (staged.length > 0) {
+    fs.renameSync(staged[0].tmp, staged[0].file);
+    staged.shift();
+  }
+}
+
+function stageFile(file, content, mode) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let writeMode = mode;
   if (writeMode === undefined) {
@@ -129,9 +155,10 @@ function writeFileAtomic(file, content, mode) {
       (fs.constants.O_NOFOLLOW || 0);
     fd = fs.openSync(tmp, flags, writeMode);
     writeAllSync(fd, content);
+    // The umask must not trim the mode the file is meant to have.
+    fs.fchmodSync(fd, writeMode);
     fs.closeSync(fd);
     fd = undefined;
-    fs.renameSync(tmp, file);
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -147,20 +174,22 @@ function writeFileAtomic(file, content, mode) {
     }
     throw error;
   }
+  staged.push({ tmp, file });
 }
 
-function copyScript(source, dest) {
+// Stage a reviewed file for installation if its bytes or mode differ. Returns
+// whether anything will change.
+function copyScript(source, dest, mode = 0o755) {
   const bytes = fs.readFileSync(source);
-  let changed = true;
+  let current = null;
   try {
-    changed = !bytes.equals(fs.readFileSync(dest));
+    current = { bytes: fs.readFileSync(dest), mode: fs.statSync(dest).mode & 0o777 };
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  if (changed) writeFileAtomic(dest, bytes, 0o755);
-  const modeChanged = (fs.statSync(dest).mode & 0o777) !== 0o755;
-  if (modeChanged) fs.chmodSync(dest, 0o755);
-  return changed || modeChanged;
+  const changed = current === null || !current.bytes.equals(bytes) || current.mode !== mode;
+  if (changed) stageFile(dest, bytes, mode);
+  return changed;
 }
 
 function normalizeConfig(parsed) {
@@ -198,6 +227,8 @@ if (fs.existsSync(target)) {
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 const noticeChanged = copyScript(NOTICE_SOURCE, NOTICE);
+// The adapter imports ./mail-hook-core.mjs, so the core goes in before it.
+const coreChanged = copyScript(CORE_SOURCE, CORE, 0o644);
 const adapterChanged = copyScript(SOURCE, ADAPTER);
 
 function unquoteLeadingArg(text) {
@@ -255,13 +286,14 @@ for (const event of EVENTS) {
 
 const configChanged = JSON.stringify(config) !== original;
 if (configChanged) {
-  writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
+  stageFile(target, `${JSON.stringify(config, null, 2)}\n`);
 }
+commitStaged();
 console.log(
-  configChanged || adapterChanged || noticeChanged
+  configChanged || adapterChanged || coreChanged || noticeChanged
     ? [
         configChanged && "hooks updated",
-        adapterChanged && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
         noticeChanged && "watch-notice updated",
       ]
         .filter(Boolean)

@@ -8,9 +8,10 @@
 // at (or silently edits) a live config. Run it against the intended settings
 // file (user-level ~/.claude/settings.json, or a profile variant) deliberately.
 // Safe to re-run: an existing claude-mail entry is updated in place, never
-// duplicated. The reviewed adapter is copied to ~/.claude/hooks/ and that
-// private copy is what future Claude sessions execute, so later repo edits do
-// not silently change live hook behavior.
+// duplicated. The reviewed adapter and the shared mail-hook-core.mjs it imports
+// are copied to ~/.claude/hooks/ and that private copy is what future Claude
+// sessions execute, so later repo edits do not silently change live hook
+// behavior.
 //
 // Registration uses the exec form (command + args array): no shell, exact
 // argv, and Claude Code deduplicates identical command+args registrations
@@ -23,12 +24,16 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "claude-mail.mjs");
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE = path.join(HERE, "claude-mail.mjs");
+const CORE_SOURCE = path.join(HERE, "mail-hook-core.mjs");
 // POST_CLAUDE_HOOK_INSTALL_DIR is a test override; live installs use the default.
 const ADAPTER = path.join(
   process.env.POST_CLAUDE_HOOK_INSTALL_DIR || path.join(os.homedir(), ".claude", "hooks"),
   "post-claude-mail.mjs"
 );
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(path.dirname(ADAPTER), "mail-hook-core.mjs");
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"];
 
 const USAGE = "usage: node install-claude-hooks.mjs <path-to-settings.json>";
@@ -109,9 +114,26 @@ if (typeof config.hooks !== "object" || config.hooks === null) config.hooks = {}
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 
+// Every file the install writes is STAGED first and renamed into place only
+// after every write has succeeded, so a failure while staging (disk full, an
+// unwritable settings directory) leaves what is installed exactly as it was; the
+// temps are removed on exit. Renames run in staging order (core, adapter, then
+// settings), so an adapter never lands without the core it imports.
+const staged = [];
+process.on("exit", () => {
+  for (const { tmp } of staged) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Never created, or already renamed into place.
+    }
+  }
+});
+
 // Random-named exclusive temp, O_EXCL|O_NOFOLLOW: a planted predictable
 // symlink can neither be followed nor clobber a victim file.
-function writeFileAtomic(file, bytes, mode) {
+function stageFile(file, bytes, mode) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = path.join(
     path.dirname(file),
     `.${path.basename(file)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
@@ -133,9 +155,10 @@ function writeFileAtomic(file, bytes, mode) {
       if (n <= 0) throw new Error("short write");
       offset += n;
     }
+    // The umask must not trim the mode the file is meant to have.
+    fs.fchmodSync(fd, mode);
     fs.closeSync(fd);
     fd = undefined;
-    fs.renameSync(tmp, file);
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -151,20 +174,35 @@ function writeFileAtomic(file, bytes, mode) {
     }
     throw error;
   }
+  staged.push({ tmp, file });
 }
 
-const source = fs.readFileSync(SOURCE);
-let adapterChanged = true;
-try {
-  adapterChanged = !source.equals(fs.readFileSync(ADAPTER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
+function commitStaged() {
+  while (staged.length > 0) {
+    fs.renameSync(staged[0].tmp, staged[0].file);
+    staged.shift();
+  }
 }
-if (adapterChanged) {
-  writeFileAtomic(ADAPTER, source, 0o755);
+
+// Stage a reviewed file for installation if its bytes or mode differ. Returns
+// whether anything will change.
+function installFile(from, to, mode) {
+  const bytes = fs.readFileSync(from);
+  let current = null;
+  try {
+    current = { bytes: fs.readFileSync(to), mode: fs.statSync(to).mode & 0o777 };
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const changed = current === null || !current.bytes.equals(bytes) || current.mode !== mode;
+  if (changed) stageFile(to, bytes, mode);
+  return changed;
 }
-const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
-if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
+
+// The adapter imports ./mail-hook-core.mjs, so the core goes in first and the
+// two always travel together.
+const coreChanged = installFile(CORE_SOURCE, CORE, 0o644);
+const adapterChanged = installFile(SOURCE, ADAPTER, 0o755);
 
 const canonicalHook = () => ({ type: "command", command: "node", args: [ADAPTER], timeout: 10 });
 
@@ -210,15 +248,21 @@ for (const event of EVENTS) {
 
 const configChanged = JSON.stringify(config) !== original;
 if (configChanged) {
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
-  fs.renameSync(tmp, target);
+  // Keep an existing settings file's mode; a new one is created 0644.
+  let configMode = 0o644;
+  try {
+    configMode = fs.statSync(target).mode & 0o777;
+  } catch {
+    // New file.
+  }
+  stageFile(target, `${JSON.stringify(config, null, 2)}\n`, configMode);
 }
+commitStaged();
 console.log(
-  configChanged || adapterChanged || adapterModeChanged
+  configChanged || adapterChanged || coreChanged
     ? [
         configChanged && "hooks updated",
-        (adapterChanged || adapterModeChanged) && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
       ]
         .filter(Boolean)
         .join("\n")

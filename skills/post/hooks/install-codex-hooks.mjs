@@ -7,9 +7,10 @@
 // The target path is a required argument on purpose: this script never guesses
 // at (or silently edits) a live config. Run it against ~/.codex/hooks.json
 // deliberately. Safe to re-run: an existing codex-mail entry is updated in
-// place, never duplicated. The reviewed adapter is sourced from this
-// installer's own directory and copied to ~/.codex/hooks/; that private copy
-// is what future Codex sessions execute.
+// place, never duplicated. The reviewed adapter and the shared
+// mail-hook-core.mjs it imports are sourced from this installer's own directory
+// and copied to ~/.codex/hooks/; that private copy is what future Codex
+// sessions execute.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -23,11 +24,15 @@ import { stableNodePath } from "./stable-node-path.mjs";
 // the installed skill rather than a guessed location (~/.codex/skills).
 // POST_CODEX_HOOK_INSTALL_DIR is a test override; live installs use the
 // default.
-const SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE = path.join(HERE, "codex-mail.mjs");
+const CORE_SOURCE = path.join(HERE, "mail-hook-core.mjs");
 const ADAPTER = path.join(
   process.env.POST_CODEX_HOOK_INSTALL_DIR || path.join(os.homedir(), ".codex", "hooks"),
   "post-codex-mail.mjs"
 );
+// The adapter imports this by its plain name, so it sits beside the adapter.
+const CORE = path.join(path.dirname(ADAPTER), "mail-hook-core.mjs");
 // Pin an absolute Node that survives package-manager upgrades: process.execPath
 // is version-pinned on Homebrew, so baking it in breaks every hook with exit 127
 // at the next `brew upgrade node` (see stable-node-path.mjs). Shell-quote both args.
@@ -114,7 +119,30 @@ function writeAllSync(fd, data) {
   }
 }
 
-function writeFileAtomic(file, content, mode) {
+// Every file the install writes is STAGED first and renamed into place only
+// after every write has succeeded, so a failure while staging (disk full, an
+// unwritable config directory) leaves what is installed exactly as it was; the
+// temps are removed on exit. Renames run in staging order (core, adapter, then
+// config), so an adapter never lands without the core it imports.
+const staged = [];
+process.on("exit", () => {
+  for (const { tmp } of staged) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Never created, or already renamed into place.
+    }
+  }
+});
+
+function commitStaged() {
+  while (staged.length > 0) {
+    fs.renameSync(staged[0].tmp, staged[0].file);
+    staged.shift();
+  }
+}
+
+function stageFile(file, content, mode) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let writeMode = mode;
   if (writeMode === undefined) {
@@ -139,9 +167,10 @@ function writeFileAtomic(file, content, mode) {
       (fs.constants.O_NOFOLLOW || 0);
     fd = fs.openSync(tmp, flags, writeMode);
     writeAllSync(fd, content);
+    // The umask must not trim the mode the file is meant to have.
+    fs.fchmodSync(fd, writeMode);
     fs.closeSync(fd);
     fd = undefined;
-    fs.renameSync(tmp, file);
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -157,6 +186,7 @@ function writeFileAtomic(file, content, mode) {
     }
     throw error;
   }
+  staged.push({ tmp, file });
 }
 
 function normalizeConfig(parsed) {
@@ -198,18 +228,26 @@ if (fs.existsSync(target)) {
 }
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
-const source = fs.readFileSync(SOURCE);
-let adapterChanged = true;
-try {
-  adapterChanged = !source.equals(fs.readFileSync(ADAPTER));
-} catch (error) {
-  if (error.code !== "ENOENT") throw error;
+
+// Stage a reviewed file for installation if its bytes or mode differ. Returns
+// whether anything will change.
+function installFile(from, to, mode) {
+  const bytes = fs.readFileSync(from);
+  let current = null;
+  try {
+    current = { bytes: fs.readFileSync(to), mode: fs.statSync(to).mode & 0o777 };
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const changed = current === null || !current.bytes.equals(bytes) || current.mode !== mode;
+  if (changed) stageFile(to, bytes, mode);
+  return changed;
 }
-if (adapterChanged) {
-  writeFileAtomic(ADAPTER, source, 0o755);
-}
-const adapterModeChanged = (fs.statSync(ADAPTER).mode & 0o777) !== 0o755;
-if (adapterModeChanged) fs.chmodSync(ADAPTER, 0o755);
+
+// The adapter imports ./mail-hook-core.mjs, so the core goes in first and the
+// two always travel together.
+const coreChanged = installFile(CORE_SOURCE, CORE, 0o644);
+const adapterChanged = installFile(SOURCE, ADAPTER, 0o755);
 
 const canonicalHook = () => ({ type: "command", command: COMMAND, timeout: 5 });
 
@@ -272,13 +310,14 @@ for (const event of EVENTS) {
 
 const configChanged = JSON.stringify(config) !== original;
 if (configChanged) {
-  writeFileAtomic(target, `${JSON.stringify(config, null, 2)}\n`);
+  stageFile(target, `${JSON.stringify(config, null, 2)}\n`);
 }
+commitStaged();
 console.log(
-  configChanged || adapterChanged || adapterModeChanged
+  configChanged || adapterChanged || coreChanged
     ? [
         configChanged && "hooks updated",
-        (adapterChanged || adapterModeChanged) && "adapter updated",
+        (adapterChanged || coreChanged) && "adapter updated",
       ]
         .filter(Boolean)
         .join("\n")

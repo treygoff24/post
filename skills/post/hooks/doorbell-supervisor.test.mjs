@@ -254,6 +254,35 @@ function standardWorld(opts) {
 
 // ------------------------------------------------------------------ pure pieces
 
+describe("parsing: a bad line fails the snapshot, a future kind does not (E4, contract 3)", () => {
+  const FUTURE = { event: "bridge_attention", id: "x", note: "a kind a later post may add" };
+
+  test("future event kinds are skipped and the events beside them survive", () => {
+    const parsed = parseSnapshot(jsonl([FUTURE, mailWith("20260923-000001-aaaaa1"), { ...FUTURE, event: "join" }]));
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.events.map((e) => e.id), ["20260923-000001-aaaaa1"]);
+    assert.equal(parsed.skipped, 2);
+    assert.equal(parsed.unbound, false);
+  });
+
+  test("a batch of only future kinds is an empty inbox, not a failure", () => {
+    const parsed = parseSnapshot(jsonl([FUTURE]));
+    assert.deepEqual({ ok: parsed.ok, events: parsed.events.length, skipped: parsed.skipped }, { ok: true, events: 0, skipped: 1 });
+  });
+
+  test("the bound:false marker is reported as unbound, not as an event", () => {
+    const parsed = parseSnapshot(jsonl([{ ok: true, participant: null, bound: false, hint: "not bound yet" }]));
+    assert.deepEqual({ ok: parsed.ok, events: parsed.events.length, unbound: parsed.unbound }, { ok: true, events: 0, unbound: true });
+    // Only a line with no `event` is the marker.
+    assert.equal(parseSnapshot(jsonl([{ ...mailWith("20260923-000001-aaaaa1"), bound: false }])).unbound, false);
+  });
+
+  test("a known event that fails validation still fails the whole snapshot, future kind or not", () => {
+    assert.equal(parseSnapshot(jsonl([FUTURE, { ...mailWith("x"), id: undefined }])).ok, false);
+    assert.equal(parseSnapshot(jsonl([FUTURE, { ok: true }])).ok, false, "an object with no event string is not a future kind");
+  });
+});
+
 describe("parsing is all or nothing (E4)", () => {
   test("the real samples parse whole", () => {
     const parsed = parseSnapshot(jsonl(samples().watch));
@@ -270,7 +299,7 @@ describe("parsing is all or nothing (E4)", () => {
   const broken = [
     ["a truncated line", () => jsonl([mailWith("20260923-000001-aaaaa1")]).slice(0, -20)],
     ["a final line without a newline", () => JSON.stringify(mailWith("20260923-000001-aaaaa1"))],
-    ["an unknown event", () => jsonl([mailWith("20260923-000001-aaaaa1", { event: "mial" })])],
+    ["an object with no event string", () => jsonl([{ ...mailWith("20260923-000001-aaaaa1"), event: undefined }])],
     ["a missing id", () => jsonl([{ ...mailWith("x"), id: undefined }])],
     ["an unknown address kind", () => jsonl([mailWith("20260923-000001-aaaaa1", { address: { kind: "room", name: "alpha" } })])],
     ["a channel message without channel", () => jsonl([{ ...clone(samples().channelMessage), channel: undefined }])],
@@ -834,8 +863,8 @@ describe("failed scans (E4)", () => {
     ["a timeout", { result: { ok: false, code: null, signal: "SIGKILL", timedOut: true, stdout: "", stderr: "" } }, "snapshot_timeout"],
     ["oversize output", { result: { ok: false, code: null, signal: "SIGKILL", oversize: true, stdout: "", stderr: "" } }, "snapshot_oversize"],
     ["a truncated line", () => ok(jsonl([mailWith("20260923-000001-aaaaa1")]).slice(0, -30)), "snapshot_malformed"],
-    ["an unknown event", () => ok(jsonl([mailWith("20260923-000001-aaaaa1", { event: "mail_v9" })])), "snapshot_malformed"],
-    ["an unbound participant", () => ({ ok: true, code: 0, stdout: "", stderr: "participant: unbound (run: post participant bind)\n" }), "snapshot_unbound"],
+    ["a known event that fails validation next to a future kind", () => ok(jsonl([{ event: "mail_v9", id: "x" }, mailWith("x", { id: undefined })])), "snapshot_malformed"],
+    ["an unbound participant (the typed marker)", () => ok(jsonl([{ ok: true, participant: null, bound: false, hint: "this session is not bound yet" }])), "snapshot_unbound"],
   ];
   for (const [label, script, stage] of failures) {
     test(`${label} is failed, never accepted, and never advances state`, async () => {
@@ -852,6 +881,14 @@ describe("failed scans (E4)", () => {
       assert.ok(w.sup.isDirty(w.sub("codex-aaaaaaaa")), "still dirty for the retry");
     });
   }
+
+  test("post's stderr text no longer decides anything: only the typed marker and code do", async () => {
+    const w = standardWorld();
+    w.snapshots.set("codex-aaaaaaaa", () => ({ ok: true, code: 0, stdout: jsonl([mailWith("20260923-000001-aaaaa1")]), stderr: "participant: unbound (run: post participant bind)\n" }));
+    await w.run();
+    assert.equal(w.prompts.length, 1, "valid stdout rings even with that text on stderr");
+    assert.equal(w.outcomes("failed").length, 0);
+  });
 
   test("failures back off to the cap and mark broken, but never retire", async () => {
     const w = standardWorld();
@@ -870,6 +907,86 @@ describe("failed scans (E4)", () => {
     assert.equal(health.bindings[0].broken, true);
     assert.equal(health.bindings[0].last_error.stage, "snapshot");
     assert.equal(w.outcomes("retired").length, 0);
+  });
+});
+
+// ------------------------------------------------------------------ typed answers
+
+describe("typed answers from post (contract sections 1 and 3)", () => {
+  const envelope = (code) => JSON.stringify({ ok: false, error: { code, message: "m", suggested_fix: "run: post participant bind --harness codex --key K" } }) + "\n";
+
+  test("participant_missing on the snapshot retires the subscription, once, without ringing or backing off", async () => {
+    const w = standardWorld();
+    w.snapshots.set("codex-aaaaaaaa", { result: { ok: false, code: 65, stdout: "", stderr: envelope("participant_missing") } });
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.deepEqual(w.outcomes("retired").map((r) => r.reason), ["participant gone"]);
+    assert.equal(w.outcomes("failed").length, 0, "a typed answer is not a transient failure");
+    assert.equal(w.sub("codex-aaaaaaaa"), undefined, "the subscription is gone, not backing off");
+  });
+
+  test("a warning line before the envelope does not hide the code", async () => {
+    const w = standardWorld();
+    w.snapshots.set("codex-aaaaaaaa", { result: { ok: false, code: 65, stdout: "", stderr: `warning: lock was busy\n${envelope("participant_missing")}` } });
+    await w.run();
+    assert.deepEqual(w.outcomes("retired").map((r) => r.reason), ["participant gone"]);
+  });
+
+  test("exit 65 with a different code, or participant_missing under another exit, is an ordinary failure", async () => {
+    for (const result of [
+      { ok: false, code: 65, stdout: "", stderr: envelope("no_participant") },
+      { ok: false, code: 78, stdout: "", stderr: envelope("participant_missing") },
+      { ok: false, code: 65, stdout: "", stderr: "participant_missing but not an envelope" },
+    ]) {
+      const w = standardWorld();
+      w.snapshots.set("codex-aaaaaaaa", { result });
+      await w.run();
+      assert.equal(w.outcomes("retired").length, 0, JSON.stringify(result.stderr));
+      assert.equal(w.outcomes("failed").at(-1)?.stage, "snapshot");
+      assert.equal(w.prompts.length, 0);
+    }
+  });
+
+  test("participant show reporting the record missing (a field, exit 0) retires at the recheck", async () => {
+    const w = standardWorld();
+    const exec = w.exec;
+    w.sup.exec = async (kind, args, opts = {}) => {
+      if (kind === "post" && args[0] === "participant" && args[1] === "show") {
+        w.calls.push({ kind, args: [...args], participant: opts.participant });
+        return ok(JSON.stringify({ ok: true, status: "missing", bound: false, participant_missing: { claim: "POST_PARTICIPANT", id: opts.participant, message: "gone", suggested_fix: "run: post participant bind" } }));
+      }
+      return exec(kind, args, opts);
+    };
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.deepEqual(w.outcomes("retired").map((r) => r.reason), ["participant gone"]);
+    assert.equal(w.outcomes("failed").length, 0);
+  });
+
+  test("a future event kind beside real mail: the mail rings, the future kind is ignored", async () => {
+    const w = standardWorld();
+    const future = { event: "bridge_attention", id: "attn-1", address: { kind: "workspace", name: "alpha" }, note: "SECRET-FUTURE" };
+    w.snapshots.set("codex-aaaaaaaa", [future, mailWith("20260923-000001-aaaaa1"), { ...future, event: "join" }]);
+    await w.run();
+    assert.equal(w.prompts.length, 1, "the good mail still rings");
+    assert.equal(w.outcomes("failed").length, 0);
+    assert.ok(!w.prompts[0].text.includes("SECRET-FUTURE"));
+    const state = JSON.parse(fs.readFileSync(w.sub("codex-aaaaaaaa").stateFile, "utf8"));
+    assert.equal(state.announced.length, 1, "only the mail is remembered as announced");
+    // The same batch again does not ring a second time.
+    w.clock.t += 61_000;
+    await w.run();
+    assert.equal(w.prompts.length, 1);
+  });
+
+  test("a snapshot of only future kinds is quiet and counts as a successful scan", async () => {
+    const w = standardWorld();
+    w.snapshots.set("codex-aaaaaaaa", [{ event: "join", id: "j-1", address: { kind: "workspace", name: "alpha" } }]);
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.equal(w.outcomes("failed").length, 0);
+    assert.equal(w.sub("codex-aaaaaaaa").consecutiveFailures, 0);
+    assert.ok(w.sub("codex-aaaaaaaa").lastSuccessAt);
   });
 });
 

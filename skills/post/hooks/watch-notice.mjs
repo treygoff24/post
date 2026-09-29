@@ -10,6 +10,8 @@
 // NDJSON lines becomes exactly one stdout line (Grok monitor treats each
 // newline as a notification). --once / --snapshot use a single scan.
 // Empty snapshot: no stdout, exit 0. Scan failure: one UNKNOWN line, exit 1.
+// Events of a kind this script does not know (a future post) are skipped, and
+// the unbound-reader marker is no mail; neither turns a batch into UNKNOWN.
 // Malformed batch: one UNKNOWN line, no event fields echoed, exit 0 for
 // --snapshot/--once after a successful post process (the scan ran; the
 // payload was hostile), exit 1 only when post itself failed.
@@ -191,12 +193,24 @@ function validSnapshotEvent(event) {
   }
 }
 
+const KNOWN_EVENTS = new Set(["mail", "channel_message", "unreadable"]);
+
+// Tolerant reading (contract docs/plans/post-just-works-2026-09-28.md section 3):
+// a well-formed object whose `event` value this notice does not know is a
+// future kind and is skipped without dropping the rest of the batch; so is the
+// `bound: false` marker an unbound reader prints (no mail, not an error). A
+// line that is unparseable, is not an object, has no `event` string, or is a
+// KNOWN event that fails validation still fails the whole batch closed.
 function parseBatch(lines) {
   const events = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const event = JSON.parse(line);
+      if (event && typeof event === "object" && !Array.isArray(event)) {
+        if (event.event === undefined && event.bound === false) continue;
+        if (typeof event.event === "string" && !KNOWN_EVENTS.has(event.event)) continue;
+      }
       if (!validSnapshotEvent(event)) return { ok: false, events: [] };
       events.push(event);
     } catch {

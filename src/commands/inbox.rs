@@ -59,8 +59,10 @@ impl InboxItemV2 {
 #[derive(Serialize)]
 struct InboxOutputV2 {
     ok: bool,
-    room: String,
-    participant: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room: Option<String>,
+    /// `null` when the session is not bound to a participant.
+    participant: Option<String>,
     unread: Vec<InboxItemV2>,
     count: usize,
     skipped_unreadable: usize,
@@ -172,8 +174,8 @@ fn list_bound(
     CommandResult::json(
         &InboxOutputV2 {
             ok: true,
-            room,
-            participant: participant.id.clone(),
+            room: Some(room),
+            participant: Some(participant.id.clone()),
             unread,
             count,
             skipped_unreadable,
@@ -186,9 +188,26 @@ fn list_bound(
     )
 }
 
+/// An unbound session has no addresses, so nothing is unread for it. With no
+/// `--room` it gets the unbound marker (empty lists, `participant: null`); the
+/// working directory never picks a room for it. An explicit `--room` is a
+/// command sink asking about that room's own pending mail, so the summary is
+/// still answered, with the same marker fields alongside.
 fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<CommandResult> {
+    let Some(requested) = args.room else {
+        if args.text {
+            return Ok(CommandResult::success(format!(
+                "post: {}\n",
+                super::unbound_hint()
+            )));
+        }
+        return CommandResult::json(
+            &empty_unbound_output(None, 0, 0, 0, BTreeMap::new()),
+            pretty,
+        );
+    };
     let rooms = context.load_rooms()?;
-    let room = context.resolved_room(args.room, &rooms)?;
+    let room = context.resolved_room(Some(requested), &rooms)?;
     let address = Address {
         kind: AddressKind::Workspace,
         name: room.clone(),
@@ -199,27 +218,44 @@ fn list_unbound(context: &Context, args: InboxArgs, pretty: bool) -> AppResult<C
     let skipped_unreadable = pending_summary.unreadable.len();
     if args.text {
         return Ok(CommandResult::success(format!(
-            "participant: unbound (run: post participant bind)\npost: inbox for {} (pending {pending}; held {held}; skipped unreadable {skipped_unreadable}; unread unavailable)\n",
+            "post: {}\npost: inbox for {} (pending {pending}; held {held}; skipped unreadable {skipped_unreadable}; unread unavailable)\n",
+            super::unbound_hint(),
             output::sanitize_text_header(&room)
         )));
     }
     let mut pending_by_address = BTreeMap::new();
     pending_by_address.insert(address_label(&address), pending);
     CommandResult::json(
-        &InboxOutputV2 {
-            ok: true,
-            room,
-            participant: "unbound".to_owned(),
-            unread: Vec::new(),
-            count: 0,
+        &empty_unbound_output(
+            Some(room),
             skipped_unreadable,
-            unread_count: 0,
             pending,
-            pending_by_address,
             held,
-        },
+            pending_by_address,
+        ),
         pretty,
     )
+}
+
+fn empty_unbound_output(
+    room: Option<String>,
+    skipped_unreadable: usize,
+    pending: usize,
+    held: usize,
+    pending_by_address: BTreeMap<String, usize>,
+) -> InboxOutputV2 {
+    InboxOutputV2 {
+        ok: true,
+        room,
+        participant: None,
+        unread: Vec::new(),
+        count: 0,
+        skipped_unreadable,
+        unread_count: 0,
+        pending,
+        pending_by_address,
+        held,
+    }
 }
 
 fn adopt(context: &Context, participant: &Participant, pretty: bool) -> AppResult<CommandResult> {

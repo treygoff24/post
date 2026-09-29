@@ -198,8 +198,8 @@ pub(crate) enum ParticipantCommand {
         #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
         release: Option<u32>,
     },
-    /// Show the acting participant, or unbound when none is bound.
-    Show,
+    /// Show the acting participant, or unbound when none is bound. With --harness and --key, look that conversation up without minting.
+    Show(ParticipantShowArgs),
     /// Bind this harness conversation, minting its deterministic participant only when absent.
     Bind(ParticipantBindArgs),
     /// Refresh the acting participant's activity lease.
@@ -208,6 +208,36 @@ pub(crate) enum ParticipantCommand {
     End,
     /// List every participant record in this local store.
     List,
+    /// Collect participant records that hold nothing (dry run unless --apply).
+    Gc(ParticipantGcArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ParticipantShowArgs {
+    /// Harness slug of the conversation to look up (with --key); never mints a record.
+    #[arg(
+        long,
+        value_name = "SLUG",
+        value_parser = nonempty_without_controls,
+        requires = "key"
+    )]
+    pub harness: Option<String>,
+
+    /// Conversation key to look up (with --harness): the record it maps to, or bound: false.
+    #[arg(
+        long,
+        value_name = "CONVERSATION_KEY",
+        value_parser = nonempty_without_controls,
+        requires = "harness"
+    )]
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ParticipantGcArgs {
+    /// Act on the plan. Without it, report what would be deleted or archived and change nothing.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Args)]
@@ -711,7 +741,8 @@ pub(crate) struct WhoArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct InboxArgs {
-    /// Mailbox room; defaults to the room containing cwd or cwd basename.
+    /// Room to read instead of the acting participant's own addresses. An unbound session
+    /// has no addresses, so it sees only this room's pending summary (never its unread mail).
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Option<String>,
 
@@ -902,11 +933,11 @@ pub(crate) struct ReadArgs {
     #[arg(value_name = "ID_OR_PREFIX", value_parser = NonEmptyStringValueParser::new())]
     pub id: String,
 
-    /// Mailbox room; defaults to the room containing cwd or cwd basename.
+    /// Look only at this room's mail; by default every address the acting participant receives at.
     #[arg(long, value_name = "ROOM", value_parser = NonEmptyStringValueParser::new())]
     pub room: Option<String>,
 
-    /// Read without moving the message to read/.
+    /// Read without marking the message read.
     #[arg(long)]
     pub peek: bool,
     /// Presentation when absent: POST_FRAMING env (auto|full|compact), else

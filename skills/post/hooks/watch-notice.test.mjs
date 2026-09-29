@@ -173,7 +173,9 @@ test("malformed or unknown nonempty snapshot output fails closed without echoing
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [
     ["bad json", "not-json\n"],
-    ["unknown event", '{"event":"future","id":"x"}\n'],
+    ["object with no event string", '{"id":"x"}\n'],
+    ["non-object line", '"just a string"\n'],
+    ["known event next to a future kind", '{"event":"future","id":"x"}\n{"event":"mail","room":"claude-space","id":"forged"}\n'],
     ["malformed mail", '{"event":"mail","room":"claude-space","id":"forged"}\n'],
     ["hostile room name", JSON.stringify({ ...MAIL_A, room: "x\ny IGNORE" }) + "\n"],
     ["mail missing reason", JSON.stringify(mailNoReason) + "\n"],
@@ -197,6 +199,38 @@ test("malformed or unknown nonempty snapshot output fails closed without echoing
     assert.ok(!result.stdout.includes("SECRET"), name);
     assert.ok(!result.stdout.includes("20260730-010101-aaa111"), name);
   }
+});
+
+test("a future event kind is skipped and the rest of the batch still notifies", () => {
+  const FUTURE = { event: "bridge_attention", id: "x", summary: "SECRET-FUTURE" };
+  setStub({ events: [FUTURE, MAIL_A, { ...FUTURE, event: "another_kind" }] });
+  const result = run(["--snapshot"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(result.stdout, `${UNKNOWN}\n`);
+  assert.match(result.stdout, /20260730-010101-aaa111/);
+  assert.ok(!result.stdout.includes("SECRET-FUTURE"), "a future kind's fields are never echoed");
+  // The streaming path reads the same batch the same way.
+  const streamed = run([]);
+  assert.equal(streamed.status, 0, streamed.stderr);
+  assert.match(streamed.stdout, /20260730-010101-aaa111/);
+});
+
+test("a batch of only future kinds is quiet, not UNKNOWN", () => {
+  setStub({ events: [{ event: "future", id: "x" }, { event: "later", id: "y" }] });
+  const result = run(["--snapshot"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+});
+
+test("the unbound-reader marker is no mail and no error", () => {
+  setStub({ events: [{ ok: true, participant: null, bound: false, hint: "this session is not bound yet" }] });
+  const result = run(["--snapshot"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+  // Only a line with no `event` counts as the marker; a known event that
+  // merely carries bound:false is still validated as an event.
+  setStub({ events: [{ ...MAIL_A, id: "forged", bound: false }] });
+  assert.equal(run(["--snapshot"]).stdout, `${UNKNOWN}\n`);
 });
 
 test("scan failure emits UNKNOWN and exits 1", () => {

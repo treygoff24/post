@@ -97,6 +97,7 @@ function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv
       POST_CODEX_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
+      DELEGATE_RUN_ID: "", // a delegate child is not minted at start; these tests are not one
       ...extraEnv,
     },
   });
@@ -395,7 +396,6 @@ test("malformed or unknown nonempty snapshot output fails closed", () => {
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [
     ["bad json", "not-json\n"],
-    ["unknown event", '{"event":"future","id":"x"}\n'],
     ["malformed mail", '{"event":"mail","room":"codex","id":"forged"}\n'],
     ["mail missing reason", JSON.stringify(mailNoReason) + "\n"],
     ["channel bad reason", JSON.stringify({ ...CHAN_B, reason: "mail" }) + "\n"],
@@ -731,6 +731,7 @@ test("SessionStart binds before snapshot with the session cwd", () => {
   const calls = allStubCalls().slice(before);
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
+    ["rooms", "--json"], // is this cwd a registered room? An unreadable answer means mint as usual
     ["participant", "bind", "--harness", "codex", "--key", "bind-order", "--json"],
     ["participant", "notice", "--claim", "<adapter-pid>", "--json"],
     ["watch", "--snapshot"],
@@ -797,10 +798,15 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
     setStub({ events: [MAIL_A], bind_stdout });
     const failed = run({ hook_event_name: "SessionStart", session_id: sessionId }, { stateDir });
     assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
-    assert.equal(fs.existsSync(path.join(stateDir, `session-${sessionId}.json`)), false);
+    // Recorded so the failure prints once per session; no participant is held.
+    const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, `session-${sessionId}.json`), "utf8"));
+    assert.equal(recorded.participantId, null);
+    assert.equal(recorded.setupWarned, true);
     assert.equal(allStubCalls().at(-1).args[0], "participant");
+    assert.deepEqual(run({ hook_event_name: "UserPromptSubmit", session_id: sessionId }, { stateDir }), {}, "the same failure is not reported again");
     setStub({ events: [] });
     assert.deepEqual(run({ hook_event_name: "SessionStart", session_id: sessionId }, { stateDir }), {});
+    assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, `session-${sessionId}.json`), "utf8")).setupWarned, false);
   }
 });
 
@@ -871,6 +877,9 @@ test("release binary binds from payload keys and reuses the participant later", 
       POST_CODEX_HOOK_STATE_DIR: stateDir,
       POST_MAIL_ROOT: mailRoot,
     };
+    // A session inside a registered room is minted at SessionStart; one outside
+    // every room is deferred (lazy minting), which would leave nothing to count.
+    execFileSync(releaseBin, ["rooms", "add", "session", cwd], { env: { PATH: process.env.PATH, HOME: process.env.HOME, POST_MAIL_ROOT: mailRoot }, encoding: "utf8" });
     const invoke = (payload, extraEnv = {}) => {
       const result = spawnSync(process.execPath, [ADAPTER], {
         input: JSON.stringify(payload),

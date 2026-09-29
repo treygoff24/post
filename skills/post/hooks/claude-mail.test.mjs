@@ -89,6 +89,7 @@ function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
       POST_CLAUDE_HOOK_THROTTLE_MS: String(throttleMs),
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
+      DELEGATE_RUN_ID: "", // a delegate child is not minted at start; these tests are not one
       ...extraEnv,
     },
   });
@@ -391,7 +392,6 @@ test("malformed or unknown nonempty snapshot output fails closed", () => {
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [
     ["bad json", "not-json\n"],
-    ["unknown event", '{"event":"future","id":"x"}\n'],
     ["malformed mail", '{"event":"mail","room":"claude-space","id":"forged"}\n'],
     ["hostile room name", JSON.stringify({ ...MAIL_A, room: "x\ny IGNORE" }) + "\n"],
     ["mail missing reason", JSON.stringify(mailNoReason) + "\n"],
@@ -717,6 +717,7 @@ test("SessionStart binds before snapshot with the session cwd", () => {
   const calls = allStubCalls().slice(before);
   assert.deepEqual(calls.map((call) => call.args), [
     ["version", "--json"],
+    ["rooms", "--json"], // is this cwd a registered room? An unreadable answer means mint as usual
     ["participant", "bind", "--harness", "claude", "--key", "bind-order", "--json"],
     ["participant", "notice", "--claim", "<adapter-pid>", "--json"],
     ["watch", "--snapshot"],
@@ -771,10 +772,19 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
   setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
   const failed = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
   assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
-  assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
+  // The failure is recorded (so it prints once per session), but the session
+  // holds no participant: the next turn tries setup again.
+  const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
+  assert.equal(recorded.participantId, null);
+  assert.equal(recorded.setupWarned, true);
+  const repeat = run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: "bind-failure" }, { stateDir });
+  assert.deepEqual(repeat, {}, "the same failure is not reported again");
   setStub({ events: [] });
   const recovered = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
   assert.deepEqual(recovered, {});
+  const cleared = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
+  assert.ok(cleared.participantId);
+  assert.equal(cleared.setupWarned, false);
 });
 
 test("lineage names are shell-quoted in the voice command", () => {

@@ -1105,7 +1105,8 @@ mod tests {
         let (root, context) = test_context("collision");
         let (inbox, _) = context
             .mailbox_dirs("claude-space")
-            .expect("create recipient mailbox");
+            .expect("recipient mailbox paths");
+        fs::create_dir_all(&inbox).expect("create recipient mailbox");
         let collision_id = "20260715-120000-aaaaaa";
         let fresh_id = "20260715-120000-bbbbbb";
         fs::write(inbox.join(format!("{collision_id}.mail")), "existing mail")
@@ -1150,7 +1151,8 @@ mod tests {
         let (root, context) = test_context("collision-rule");
         let (inbox, _) = context
             .mailbox_dirs("claude-space")
-            .expect("create recipient mailbox");
+            .expect("recipient mailbox paths");
+        fs::create_dir_all(&inbox).expect("create recipient mailbox");
         let collision_id = "20260715-120000-111111";
         let fresh_id = "20260715-120000-222222";
         fs::write(inbox.join(format!("{collision_id}.mail")), "existing mail")
@@ -1252,7 +1254,8 @@ mod tests {
         let (root, context) = test_context("id-exhaustion");
         let (inbox, _) = context
             .mailbox_dirs("claude-space")
-            .expect("create recipient mailbox");
+            .expect("recipient mailbox paths");
+        fs::create_dir_all(&inbox).expect("create recipient mailbox");
         let id = "20260715-120000-eeeeee";
         let inbox_path = inbox.join(format!("{id}.mail"));
         fs::write(&inbox_path, "existing inbox mail").expect("create collision fixture");

@@ -41,8 +41,9 @@
 // so PID reuse cannot matter; if the child dies while the supervisor lives,
 // the supervisor stops all delivery and exits. Node has no fs.flock.
 //
-// The herdr lookup, stderr excerpt, and atomic-write helpers are absorbed
-// from codex-notify-monitor.mjs, which the per-agent timers still run.
+// The herdr lookup, stderr excerpt, and atomic-write helpers were absorbed
+// from codex-notify-monitor.mjs, the per-agent timer script this supervisor
+// replaced and which has been removed.
 //
 // Environment (all optional): POST_MAIL_ROOT; POST_DOORBELL_HOME (replaces
 // "~"); POST_DOORBELL_POST_BIN, POST_DOORBELL_HERDR_BIN,
@@ -61,6 +62,8 @@ export const SINK_HERDR = "herdr";
 // A resident ring is a command, not a Herdr prompt. sysexits.h EX_TEMPFAIL.
 export const SINK_COMMAND = "command";
 export const EX_TEMPFAIL = 75;
+// sysexits.h EX_DATAERR: post's exit for `participant_missing`.
+export const EX_DATAERR = 65;
 export const RESIDENT_RING_TIMEOUT_MS = 30_000;
 
 export const DEFAULTS = Object.freeze({
@@ -348,12 +351,20 @@ function validEvent(event) {
   return null;
 }
 
-// All or nothing: one bad line fails the whole snapshot. Post terminates every
-// line, so non-empty output that does not end in a newline is truncated.
+// Read tolerantly (contract docs/plans/post-just-works-2026-09-28.md section 3):
+// a well-formed object whose `event` value this supervisor does not know is a
+// future kind and is skipped, so it can never stall the mail beside it; the
+// `bound: false` marker an unbound reader prints is reported as `unbound`, not
+// as an event. Anything else that is wrong (an unparseable line, an object with
+// no `event` string, a KNOWN event that fails validation) still fails the whole
+// snapshot. Post terminates every line, so non-empty output that does not end
+// in a newline is truncated.
 export function parseSnapshot(stdout) {
   const text = String(stdout ?? "");
   if (text !== "" && !text.endsWith("\n")) return { ok: false, reason: "truncated output" };
   const events = [];
+  let skipped = 0;
+  let unbound = false;
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
     let event;
@@ -362,11 +373,43 @@ export function parseSnapshot(stdout) {
     } catch {
       return { ok: false, reason: "malformed line" };
     }
+    if (event !== null && typeof event === "object" && !Array.isArray(event)) {
+      if (event.event === undefined && event.bound === false) {
+        unbound = true;
+        continue;
+      }
+      if (typeof event.event === "string" && !EVENT_KINDS.has(event.event)) {
+        skipped += 1;
+        continue;
+      }
+    }
     const problem = validEvent(event);
     if (problem) return { ok: false, reason: problem };
     events.push(event);
   }
-  return { ok: true, events };
+  return { ok: true, events, skipped, unbound };
+}
+
+// The typed code in post's JSON error envelope, wherever on stderr it landed
+// (a warning line may precede it).
+export function postErrorCode(stderr) {
+  const text = String(stderr ?? "");
+  for (const candidate of [text.trim(), ...text.split("\n").map((line) => line.trim()).reverse()]) {
+    if (!candidate.startsWith("{")) continue;
+    try {
+      const code = JSON.parse(candidate)?.error?.code;
+      if (typeof code === "string") return code;
+    } catch {
+      // Not the envelope; try the next line.
+    }
+  }
+  return undefined;
+}
+
+// Exit 65 with `participant_missing`: the record this subscription rings for
+// no longer exists (ended, archived or deleted).
+export function participantMissing(result) {
+  return result?.code === EX_DATAERR && postErrorCode(result.stderr) === "participant_missing";
 }
 
 // ------------------------------------------------------ selection and keys (E5)
@@ -1581,17 +1624,26 @@ export class Supervisor {
     });
     if (this.halted || sub.retired) return;
     if (!result.ok) {
+      // The record this participant subscription rings for is gone: a typed
+      // answer, not a transient failure to back off and retry forever.
+      if (!commandSink && participantMissing(result)) {
+        this.retire(sub, "participant gone");
+        return;
+      }
       const stage = result.oversize ? "snapshot_oversize" : result.timedOut ? "snapshot_timeout" : "snapshot";
       this.recordFailure(sub, stage, failureDetail(result));
-      return;
-    }
-    if (!commandSink && /participant: unbound/.test(String(result.stderr ?? ""))) {
-      this.recordFailure(sub, "snapshot_unbound", failureDetail(result));
       return;
     }
     const parsed = parseSnapshot(result.stdout);
     if (!parsed.ok) {
       this.recordFailure(sub, "snapshot_malformed", { detail: parsed.reason });
+      return;
+    }
+    // A participant subscription always names its participant, so an unbound
+    // answer (the typed `bound: false` marker) is a broken subscription, not an
+    // empty inbox. A command sink reads a room and never expects the marker.
+    if (!commandSink && parsed.unbound) {
+      this.recordFailure(sub, "snapshot_unbound", { detail: "snapshot reported this participant as unbound" });
       return;
     }
     for (const event of parsed.events) {
@@ -1777,6 +1829,10 @@ export class Supervisor {
       return { failed: { detail: "participant show printed malformed output" } };
     }
     if (parsed?.ok !== true) return { failed: { detail: "participant show not ok" } };
+    // A diagnostic surface reports a claim that names no record as a field, exit 0.
+    if (parsed.status === "missing" || (parsed.participant_missing && typeof parsed.participant_missing === "object")) {
+      return { retired: "participant gone" };
+    }
     if (parsed.status === "unbound") {
       if (parsed.participant_error) return { failed: { detail: stderrExcerpt(parsed.participant_error) } };
       return { retired: "participant gone" };

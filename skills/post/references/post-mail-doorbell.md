@@ -50,12 +50,14 @@ mail, so the gap costs a late ring, not a lost message.
 
 Liveness is proven by rings, not by elapsed time. Two probes answer it:
 
-1. `post who --json`, then find your row in `participants[]`: `live_watch`
-   is `true` while a watch for your participant is heartbeating, and
-   `watch_last_seen` is its last heartbeat (Unix seconds).
-2. Ring yourself: `post send --to participant:<your-id> --subject "doorbell
-   probe" --body probe`. A live doorbell notifies within one interval. Read
-   the probe afterward to clear it.
+1. Check that the Monitor task is still in your harness's task list and that no
+   expiry notice has arrived for it. `post participant show --json` confirms
+   you are bound and your lease is current (`status: "bound"`, `last_seen`
+   within `lease_hours`); it does not report a watch. Do not use
+   `post who --json` here: it lists every participant on the host.
+2. Ring yourself with `echo probe | post send --to participant:<your-id>
+   --subject "doorbell probe"`. A live doorbell notifies within one interval.
+   Read the probe afterward to clear it.
 
 If neither shows a live watch, re-arm. If one does, leave it running; arming a
 second doubles every ring.

@@ -10,8 +10,12 @@
 // `participant show --json`, `watch --snapshot` (plain and cursor-unusable),
 // `rooms`, `channels`. Not covered: `participant notice` (no sample; the stub
 // echoes the snapshot text, as the neighbouring suites do, which never parses
-// as an activation), `watch --digest` (no hook requests it), and herdr's
-// `agent get` output (not post's).
+// as an activation) and `watch --digest` (no hook requests it).
+//
+// Snapshot reading is tolerant of exactly two things (contract section 3): a
+// line whose `event` kind is a string this consumer does not know, and the
+// `{"bound":false}` marker line. Both are skipped. Every other defect,
+// including an unknown address kind, still makes the batch UNKNOWN.
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
@@ -123,7 +127,6 @@ function brokenEvents() {
     { label: "mail missing subject", event: without(mail(1), "subject") },
     { label: "mail missing reason", event: without(mail(2), "reason") },
     { label: "mail from is a number", event: mail(3, { from: 42 }) },
-    { label: "unknown event discriminator", event: mail(4, { event: "mial" }) },
     { label: "mail with reason mention", event: mail(5, { reason: "mention" }) },
     { label: "unknown address kind", event: mail(6, { address: { kind: "room", name: "alpha" } }) },
     { label: "address missing name", event: mail(7, { address: { kind: "workspace" } }) },
@@ -131,7 +134,7 @@ function brokenEvents() {
     { label: "room is a number", event: mail(9, { room: 7 }) },
     { label: "workspace room disagrees with address", event: mail(10, { room: "beta" }) },
     { label: "lineage address carries a room", event: mail(11, { address: { kind: "lineage", name: "ember" } }) },
-    { label: "pending is a string", event: mail(12, { pending: "true" }), notReadBy: ["watch-notice", "monitor"] },
+    { label: "pending is a string", event: mail(12, { pending: "true" }), notReadBy: ["watch-notice"] },
     { label: "channel is a number", event: channel(13, { channel: 5 }) },
     { label: "channel message missing channel", event: without(channel(14), "channel") },
     { label: "unknown channel reason", event: channel(15, { reason: "dm" }) },
@@ -139,6 +142,18 @@ function brokenEvents() {
     { label: "unknown unreadable reason", event: unreadable({ reason: "other" }) },
     { label: "unreadable channel is a number", event: unreadable({ channel: 3 }) },
     { label: "unreadable missing id", event: without(unreadable(), "id") },
+  ];
+}
+
+// Lines every snapshot consumer must skip, not refuse (contract section 3):
+// a future `event` kind, and the typed marker an unbound reader is given.
+function toleratedLines() {
+  const { ev } = samples();
+  return [
+    { ...clone(ev.workspaceMail), id: "20260101-999999-fut000", event: "reaction" },
+    { ...clone(ev.channelMessage), id: "20260101-000000-999999-fut001", event: "channel_edited", channel: "tax" },
+    { event: "digest_hint", note: "a kind that does not exist yet" },
+    { bound: false },
   ];
 }
 
@@ -178,11 +193,6 @@ const POST_STUB = writeStub("post", [
   "const exit = control.exit?.[key] ?? 0;",
   "if (exit) process.exit(exit);",
 ]);
-// herdr: the named agent exists, is idle, and is not focused.
-const HERDR_STUB = writeStub("herdr", [
-  'if (args[0] === "agent" && args[1] === "get") process.stdout.write(JSON.stringify({ result: { agent: { name: args[2], agent_status: "idle", focused: false } } }));',
-]);
-const SINK_STUB = writeStub("sink", []);
 
 function readCalls(file) {
   try {
@@ -395,6 +405,23 @@ for (const adapter of MAIL_ADAPTERS) {
       assert.equal(mixed.context, await mailBaseline(adapter));
     });
 
+    test("future event kinds and the bound:false marker are skipped, not refused", async () => {
+      const S = samples();
+      const tolerated = toleratedLines();
+      // Mixed with the valid sample they change nothing, wherever they sit.
+      const [after, before, only] = await Promise.all([
+        runMail(adapter, { watch: jsonl([...S.watch, ...tolerated]) }),
+        runMail(adapter, { watch: jsonl([...tolerated, ...S.watch]) }),
+        runMail(adapter, { watch: jsonl(tolerated) }),
+      ]);
+      assert.equal(after.context, await mailBaseline(adapter));
+      assert.equal(before.context, await mailBaseline(adapter));
+      // Alone they are an empty inbox: nothing rendered, and never UNKNOWN.
+      assert.doesNotMatch(only.context, UNKNOWN);
+      for (const line of tolerated) assert.ok(!only.context.includes(line.id ?? "no-id"), `rendered a skipped line: ${only.context}`);
+      assert.ok(!only.context.includes("Direct mail"), only.context);
+    });
+
     test("malformed version output fails the capability check", async () => {
       const S = samples();
       const probeFailed = /could not verify installed post capabilities/;
@@ -520,6 +547,24 @@ describe("watch-notice", { concurrency: true }, () => {
     assert.equal(legacyRoute.stdout, baseline.stdout);
   });
 
+  test("future event kinds and the bound:false marker are skipped, not refused", async () => {
+    const { raw, watch } = samples();
+    const tolerated = toleratedLines();
+    const [baseline, after, before, only] = await Promise.all([
+      runNotice(raw.watch),
+      runNotice(jsonl([...watch, ...tolerated])),
+      runNotice(jsonl([...tolerated, ...watch])),
+      runNotice(jsonl(tolerated)),
+    ]);
+    assert.equal(after.status, 0, after.stderr);
+    assert.equal(after.stdout, baseline.stdout);
+    assert.equal(before.stdout, baseline.stdout);
+    // Alone they are an empty inbox, not an UNKNOWN one.
+    assert.equal(only.status, 0, only.stderr);
+    assert.doesNotMatch(only.stdout, UNKNOWN);
+    assert.ok(!only.stdout.includes("Direct mail"), only.stdout);
+  });
+
   test("any malformed snapshot event makes the batch UNKNOWN", async () => {
     const { watch } = samples();
     await Promise.all(
@@ -535,272 +580,3 @@ describe("watch-notice", { concurrency: true }, () => {
     );
   });
 });
-
-// ---------------------------------------------------- codex-notify-monitor
-
-async function runMonitor(stdout) {
-  const run = runDir();
-  fs.writeFileSync(run.control, JSON.stringify({ post: { watch: stdout } }));
-  const result = await runNode(path.join(HOOKS, "codex-notify-monitor.mjs"), ["alpha"], {
-    env: {
-      ...process.env,
-      ...stubEnv(run),
-      POST_CODEX_NOTIFY_POST_BIN: POST_STUB,
-      POST_CODEX_NOTIFY_HERDR_BIN: HERDR_STUB,
-      POST_CODEX_NOTIFY_CMUX_BIN: SINK_STUB,
-      POST_CODEX_NOTIFY_HERDR_AGENT: "lane-bot",
-      POST_CODEX_NOTIFY_CHANNELS: "tax,broken",
-      POST_CODEX_NOTIFY_STATE: path.join(run.state, "seen.json"),
-    },
-  });
-  const prompts = readCalls(run.calls).filter((call) => call.tool === "herdr" && call.args[1] === "prompt");
-  return { ...result, prompt: prompts.at(-1)?.args[3] ?? null, prompts: prompts.length };
-}
-
-describe("codex-notify-monitor", { concurrency: true }, () => {
-  test("exact snapshot rings with every typed route", async () => {
-    const { raw, watch, ev } = samples();
-    const result = await runMonitor(raw.watch);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, "");
-    const direct = watch.filter((e) => e.reason === "mail").length;
-    const channel = watch.length - direct;
-    assert.ok(result.prompt.includes(`${direct} direct messages and ${channel} selected channel messages are waiting`), result.prompt);
-    for (const ref of [
-      `lineage:ember:${ev.lineageMail.id}`,
-      `participant:${ev.participantMail.address.name}:${ev.participantMail.id}`,
-      `alpha:${ev.workspaceMail.id}`,
-      `alpha:${ev.pendingMail.id}`,
-      `#tax:${ev.channelMessage.id}`,
-      "unreadable delivery",
-    ]) {
-      assert.ok(result.prompt.includes(ref), `missing ${ref}: ${result.prompt}`);
-    }
-    assert.ok(!result.prompt.includes("plain channel note") && !result.prompt.includes("beta"));
-  });
-
-  test("cursor-unusable snapshot rings as a normal snapshot", async () => {
-    const { raw, cursorUnusable } = samples();
-    const result = await runMonitor(raw.cursorUnusable);
-    assert.equal(result.status, 0, result.stderr);
-    for (const e of cursorUnusable) assert.ok(result.prompt.includes(e.id), e.id);
-  });
-
-  test("unknown fields change nothing", async () => {
-    const { raw, watch } = samples();
-    const [extended, baseline] = await Promise.all([runMonitor(jsonl(extendedEvents(watch))), runMonitor(raw.watch)]);
-    assert.equal(extended.status, 0, extended.stderr);
-    assert.equal(extended.prompt, baseline.prompt);
-  });
-
-  test("optional fields removed are handled", async () => {
-    const { raw, watch, ev } = samples();
-    const baseline = (await runMonitor(raw.watch)).prompt;
-    await Promise.all(
-      [
-        ["room removed", jsonl(watch.map((e) => without(e, "room")))],
-        ["pending removed", jsonl(watch.map((e) => without(e, "pending")))],
-        ["workspace address removed", jsonl(watch.map((e) => (e.address?.kind === "workspace" ? without(e, "address") : e)))],
-      ].map(async ([label, stdout]) => {
-        const result = await runMonitor(stdout);
-        assert.equal(result.status, 0, `${label}: ${result.stderr}`);
-        assert.equal(result.prompt, baseline, label);
-      })
-    );
-    const legacy = await runMonitor(jsonl(watch.map((e) => (e === ev.unreadableChannel ? without(e, "channel") : e))));
-    assert.equal(legacy.status, 0, legacy.stderr);
-    assert.match(legacy.prompt, /^Post compatibility warning: .*Per-message delivery is unknown/);
-  });
-
-  test("any malformed snapshot event fails without ringing", async () => {
-    const { watch } = samples();
-    await Promise.all(
-      brokenEvents()
-        .filter(({ notReadBy = [] }) => !notReadBy.includes("monitor"))
-        .map(async ({ label, event }) => {
-          const result = await runMonitor(jsonl([...watch, event]));
-          assert.equal(result.status, 1, label);
-          assert.match(result.stderr, /snapshot output was malformed; notification state is unknown/, label);
-          assert.equal(result.prompts, 0, `${label}: rang anyway`);
-        })
-    );
-  });
-});
-
-// ------------------------------------------------------ doorbell installers
-
-const INSTALLERS = [
-  {
-    name: "install-codex-doorbell",
-    platform: "darwin",
-    env: (bin) => ({ POST_CODEX_DOORBELL_LAUNCHCTL_BIN: bin }),
-    artifact: (home) => path.join(home, "Library", "LaunchAgents", "dev.post.codex-doorbell.lane-bot.plist"),
-    resolvesParticipant: false,
-  },
-  {
-    name: "install-systemd-doorbell",
-    platform: "linux",
-    env: (bin) => ({ POST_CODEX_DOORBELL_SYSTEMCTL_BIN: bin }),
-    artifact: (home) => path.join(home, ".config", "systemd", "user", "post-codex-doorbell@lane-bot.service"),
-    resolvesParticipant: true,
-  },
-];
-
-async function runInstaller(installer, post = {}, args = ["--room", "alpha", "--channel", "tax", "--channel", "broken"]) {
-  const S = samples();
-  const run = runDir();
-  const home = path.join(run.dir, "home");
-  fs.writeFileSync(
-    run.control,
-    JSON.stringify({
-      post: { rooms: S.raw.rooms, channels: S.raw.channels, watch: S.raw.watch, "participant show": S.raw.show, ...post },
-    })
-  );
-  const result = await runNode(path.join(HOOKS, `${installer.name}.mjs`), [...args, "--agent", "lane-bot"], {
-    env: {
-      ...process.env,
-      ...stubEnv(run),
-      ...installer.env(SINK_STUB),
-      POST_CODEX_DOORBELL_PLATFORM: installer.platform,
-      POST_CODEX_DOORBELL_HOME: home,
-      POST_CODEX_DOORBELL_INSTALL_DIR: path.join(home, "hooks"),
-      POST_CODEX_DOORBELL_POST_BIN: POST_STUB,
-      POST_CODEX_DOORBELL_HERDR_BIN: HERDR_STUB,
-      POST_MAIL_ROOT: undefined,
-    },
-  });
-  const calls = readCalls(run.calls);
-  const artifact = installer.artifact(home);
-  return {
-    ...result,
-    calls,
-    artifact: fs.existsSync(artifact) ? fs.readFileSync(artifact, "utf8") : null,
-    serviceCalls: calls.filter((call) => call.tool === "sink").length,
-  };
-}
-
-function assertRefused(result, pattern, label) {
-  assert.equal(result.status, 1, `${label}: ${result.stderr}`);
-  assert.match(result.stderr, pattern, label);
-  assert.equal(result.artifact, null, `${label}: wrote the job anyway`);
-  assert.equal(result.serviceCalls, 0, `${label}: touched the service manager`);
-}
-
-for (const installer of INSTALLERS) {
-  describe(installer.name, { concurrency: true }, () => {
-    test("exact samples install for a listed room and member channels", async () => {
-      const { show } = samples();
-      const result = await runInstaller(installer);
-      assert.equal(result.status, 0, result.stderr);
-      assert.ok(result.artifact, "job file written");
-      const postCalls = result.calls.filter((call) => call.tool === "post").map((call) => call.args.join(" "));
-      assert.ok(postCalls.includes("rooms") && postCalls.includes("channels"), postCalls.join("; "));
-      assert.ok(postCalls.includes("watch --room alpha --snapshot"), postCalls.join("; "));
-      assert.ok(result.artifact.includes("tax,broken"), "selected channels pinned");
-      if (installer.resolvesParticipant) {
-        assert.match(result.artifact, new RegExp(`^Environment=POST_PARTICIPANT=${show.id}$`, "m"));
-        const watchCall = result.calls.find((call) => call.args[0] === "watch");
-        assert.equal(watchCall.participant, show.id, "the probe runs as the resolved participant");
-      }
-    });
-
-    test("routing reads room names and channel membership from the samples", async () => {
-      const { show } = samples();
-      // The systemd installer first requires the acting participant to be
-      // bound to --room; bind the sample participant there so the rooms and
-      // channels checks are the ones under test.
-      const boundTo = (room) =>
-        installer.resolvesParticipant ? { "participant show": JSON.stringify({ ...show, participant: { ...show.participant, workspace: room } }) } : {};
-      const [unlisted, noChannel, nonMember] = await Promise.all([
-        runInstaller(installer, boundTo("zeta"), ["--room", "zeta"]),
-        runInstaller(installer, boundTo("alpha"), ["--room", "alpha", "--channel", "nope"]),
-        runInstaller(installer, boundTo("beta"), ["--room", "beta", "--channel", "broken"]),
-      ]);
-      assertRefused(unlisted, /room 'zeta' is not registered/, "unlisted room");
-      assertRefused(noChannel, /channel 'nope' is not listed/, "unlisted channel");
-      assertRefused(nonMember, /room 'beta' is not a member of channel 'broken'/, "non-member channel");
-      if (installer.resolvesParticipant) {
-        assertRefused(await runInstaller(installer, {}, ["--room", "beta"]), /is not bound to room 'beta'/, "participant bound elsewhere");
-      }
-    });
-
-    test("unknown fields at top level and in nested objects change nothing", async () => {
-      const S = samples();
-      const rooms = withExtra(S.rooms);
-      rooms.rooms = rooms.rooms.map((row) => ({ ...withExtra(row), blocked: row.blocked.map(withExtra) }));
-      const channels = withExtra(S.channels);
-      channels.channels = channels.channels.map(withExtra);
-      const result = await runInstaller(installer, {
-        rooms: JSON.stringify(rooms),
-        channels: JSON.stringify(channels),
-        watch: jsonl(extendedEvents(S.watch)),
-        "participant show": extendedParticipant(S.show),
-      });
-      assert.equal(result.status, 0, result.stderr);
-      assert.ok(result.artifact);
-    });
-
-    test("optional fields removed are handled", async () => {
-      const S = samples();
-      const rooms = without(S.rooms, "count");
-      rooms.rooms = rooms.rooms.map((row) => ({ name: row.name }));
-      const channels = without(S.channels, "count", "participant", "pending", "archived_hidden");
-      channels.channels = channels.channels.map((row) => ({ name: row.name, members: row.members }));
-      const show = without(S.show, "provenance");
-      show.participant = without(show.participant, "lineage", "lineage_since", "workspace_path");
-      const [trimmed, empty] = await Promise.all([
-        runInstaller(installer, {
-          rooms: JSON.stringify(rooms),
-          channels: JSON.stringify(channels),
-          watch: S.raw.cursorUnusable,
-          "participant show": JSON.stringify(show),
-        }),
-        runInstaller(installer, { watch: "" }),
-      ]);
-      assert.equal(trimmed.status, 0, trimmed.stderr);
-      assert.ok(trimmed.artifact);
-      assert.equal(empty.status, 0, `an empty snapshot is a valid probe: ${empty.stderr}`);
-    });
-
-    test("malformed rooms, channels, and snapshot output refuse the install", async () => {
-      const { rooms, channels } = samples();
-      const cases = [
-        ["rooms not JSON", { rooms: "alpha\nbeta\n" }, /`post rooms` printed malformed output/],
-        ["rooms ok false", { rooms: JSON.stringify({ ...rooms, ok: false }) }, /`post rooms` printed an unexpected schema/],
-        ["rooms ok is a string", { rooms: JSON.stringify({ ...rooms, ok: "true" }) }, /`post rooms` printed an unexpected schema/],
-        ["rooms is an object", { rooms: JSON.stringify({ ...rooms, rooms: { alpha: {} } }) }, /`post rooms` printed an unexpected schema/],
-        ["room name is a number", { rooms: JSON.stringify({ ...rooms, rooms: [...rooms.rooms, { name: 5 }] }) }, /malformed room entries/],
-        ["room name missing", { rooms: JSON.stringify({ ...rooms, rooms: [...rooms.rooms, { path: "/x" }] }) }, /malformed room entries/],
-        ["channels ok missing", { channels: JSON.stringify(without(channels, "ok")) }, /`post channels` printed an unexpected schema/],
-        ["channel members missing", { channels: JSON.stringify({ ...channels, channels: [without(channels.channels[0], "members")] }) }, /malformed channel entries/],
-        ["channel member is a number", { channels: JSON.stringify({ ...channels, channels: [{ ...channels.channels[0], members: ["alpha", 3] }] }) }, /malformed channel entries/],
-        ["channel name is a number", { channels: JSON.stringify({ ...channels, channels: [{ ...channels.channels[0], name: 1 }] }) }, /malformed channel entries/],
-        ["snapshot line is an array", { watch: "[]\n" }, /--snapshot` printed malformed output/],
-        ["snapshot line is a string", { watch: '"mail"\n' }, /--snapshot` printed malformed output/],
-        ["snapshot line truncated", { watch: '{"event":"mail",\n' }, /--snapshot` printed malformed output/],
-      ];
-      await Promise.all(cases.map(async ([label, post, pattern]) => assertRefused(await runInstaller(installer, post), pattern, label)));
-    });
-
-    if (installer.resolvesParticipant) {
-      test("malformed participant show output refuses the install", async () => {
-        const { show } = samples();
-        const unbound = /acting participant is unbound or malformed/;
-        const cases = [
-          ["not JSON", "participant: bound\n", /`post participant show` printed malformed output/],
-          ["status unbound", JSON.stringify({ ...show, status: "unbound" }), unbound],
-          ["unknown status", JSON.stringify({ ...show, status: "bogus" }), unbound],
-          ["ok false", JSON.stringify({ ...show, ok: false }), unbound],
-          ["id is a number", JSON.stringify({ ...show, id: 7 }), unbound],
-          ["id is a path", JSON.stringify({ ...show, id: "../x", participant: { ...show.participant, id: "../x" } }), unbound],
-          ["participant id disagrees", JSON.stringify({ ...show, participant: { ...show.participant, id: "codex-37cdb648" } }), unbound],
-          ["participant missing", JSON.stringify(without(show, "participant")), unbound],
-          ["workspace missing", JSON.stringify({ ...show, participant: without(show.participant, "workspace") }), /is not bound to room 'alpha'/],
-        ];
-        await Promise.all(
-          cases.map(async ([label, value, pattern]) => assertRefused(await runInstaller(installer, { "participant show": value }), pattern, label))
-        );
-      });
-    }
-  });
-}

@@ -424,7 +424,6 @@ test("malformed or unknown nonempty snapshot output fails closed", () => {
   const { reason: _ignored, ...mailNoReason } = MAIL_A;
   for (const [name, stdout] of [
     ["bad json", "not-json\n"],
-    ["unknown event", '{"event":"future","id":"x"}\n'],
     ["malformed mail", '{"event":"mail","room":"claude-space","id":"forged"}\n'],
     ["hostile room name", JSON.stringify({ ...MAIL_A, room: "x\ny IGNORE" }) + "\n"],
     ["mail missing reason", JSON.stringify(mailNoReason) + "\n"],
@@ -739,11 +738,16 @@ test("capability mismatch stays retryable until the binary is upgraded", () => {
   setStub({ version: { ok: true, version: "0.9.0", capabilities: [] }, events: [] });
   const first = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(first.hookSpecificOutput.additionalContext, /lacks the participants capability/);
-  assert.equal(fs.existsSync(path.join(stateDir, "session-cap-once.json")), false);
+  // The mismatch is recorded so it prints once per session; no participant is held.
+  const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, "session-cap-once.json"), "utf8"));
+  assert.equal(recorded.participantId, null);
+  assert.equal(recorded.setupWarned, true);
   assert.deepEqual(allStubCalls().at(-1).args, ["version", "--json"]);
+  assert.deepEqual(run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir }), {}, "the same mismatch is not reported again");
   setStub({ events: [MAIL_A] });
   const second = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "cap-once" }, { stateDir });
   assert.match(second.hookSpecificOutput.additionalContext, /20260730-010101-aaa111/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, "session-cap-once.json"), "utf8")).setupWarned, false);
   assert.deepEqual(allStubCalls().slice(-6).map((call) => call.args), [
     ["version", "--json"],
     ["participant", "bind", "--harness", "grok", "--key", "cap-once", "--json"],
@@ -852,9 +856,14 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
   setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
   const failed = run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "bind-failure" }, { stateDir });
   assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
-  assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
+  // Recorded so the failure prints once per session; no participant is held.
+  const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
+  assert.equal(recorded.participantId, null);
+  assert.equal(recorded.setupWarned, true);
+  assert.deepEqual(run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "bind-failure" }, { stateDir }), {}, "the same failure is not reported again");
   setStub({ events: [] });
   assert.match(run({ ...BASE, hookEventName: "UserPromptSubmit", sessionId: "bind-failure" }, { stateDir }).hookSpecificOutput.additionalContext, /prefix Post commands with POST_PARTICIPANT=test-participant/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8")).setupWarned, false);
 });
 
 test("lineage names are shell-quoted in the voice command", () => {

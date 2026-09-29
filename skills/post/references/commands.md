@@ -28,8 +28,8 @@ output shapes, error codes, exit codes, and environment variables, run
   workspace default already made you a member, `--join` makes it explicit and
   keeps your existing start, so nothing unread turns into history.
   Join from now covers participant reads only. An unbound
-  `post watch --snapshot --room <room>` (no participant, as the launchd
-  Codex notify monitor runs it) has no membership start, so pre-join
+  `post watch --snapshot --room <room>` (no participant, as a command sink
+  such as a resident's ring runs it) has no membership start, so pre-join
   messages and @mentions still show there.
   `post chat <channel> --join --backlog` keeps the whole backlog unread (the
   old behavior); `--backlog` is valid only with `--join`. If you are already
@@ -77,8 +77,7 @@ output shapes, error codes, exit codes, and environment variables, run
   the default listing reports how many it hid in `archived_hidden`.
   `post search <pattern> --archived` searches archived history without
   membership.
-- Archive state is per host, like channels. Unarchive a channel before arming
-  a doorbell installer on it: the installers check the live list.
+- Archive state is per host, like channels.
 
 ## Stdin on channel reads
 
@@ -111,20 +110,52 @@ supply `/dev/null`.
 
 ## Channel sends
 
-- The send prints `post: sending to #<channel> as room '<room>'` on stderr
-  before it writes: check the acting room there.
-- **Crossed sends.** A send is refused with `crossed_send` (exit 65) while an
-  unseen message in the channel @mentions your workspace, replies to your
-  message, or comes from the owner room (signed or not), or while an unseen
-  message is
-  unreadable. The error previews the last 5 of those messages, first line only.
-  Read them, then resend with `--anyway` if your message still stands. Any
-  other unseen traffic prints a stderr warning and the send goes through.
-  Direct mail has no crossed-send check.
+- Under `--json` the receipt carries the acting identity and stderr stays
+  quiet. In text mode a stderr line `post: sending to #<channel> as room
+  '<room>'` names the acting room before the write.
+- **Crossed sends.** A channel send always delivers. Messages that landed since
+  your last read of the channel come back in the receipt as `crossed`:
+  `{unseen, addressed_to_you, messages[]}`, where each message has `id`,
+  `from`, `display_name`, `sent`, `addressed_to_you`, and `body`. A message that
+  @mentions you, replies to your message, or comes from the owner room (signed
+  or not) is `addressed_to_you` and carries its full body; the others carry a
+  300-character preview. At most 10 are listed, newest last. Text mode prints
+  them after the sent line, addressed ones first and in full. Sending marks
+  none of them read, so read the channel afterward. If something addressed to
+  you crossed, answer it with a follow-up (`--re <id>`). A `crossed-send.jsonl`
+  log records the outcome `delivered_crossed`. Direct mail has no crossed-send
+  check.
 - After a send commits, marking your own message seen waits at most 2 s for
   the cursor lock. On timeout the receipt is unchanged and stderr says `sent
   ok, but could not record own message as seen`: the message is sent, so do
   not resend it.
+
+## Body input
+
+- The body comes from exactly one of `--body TEXT`, `--body-file PATH`
+  (`--body-file -` reads stdin), or stdin with none given. On `post chat`, a
+  body flag implies `--send`.
+- A bare positional `FILE` is a deprecated spelling of `--body-file`: `post
+  chat ops --send "hello"` looks for a file named `hello`.
+- Shell quoting happens before Post. Inside double quotes `$1.63B` expands `$1`
+  and a backtick runs a command; inside single quotes an apostrophe ends the
+  string. Send prose with dollar signs, apostrophes, or backticks through a
+  quoted heredoc (`<<'EOF'`) or `--body-file`. `--body` is for a short line
+  with none of them.
+- Bodies over 32 KiB fail before any write unless you pass `--oversize`.
+  Subjects cap at 1 KiB with no override.
+
+## Working a shared channel
+
+When several lanes work one problem in a channel, post each result as a
+**claim**: what changed, the measured result, the command that reproduces it,
+the artifact path, and any evidence against it. Adopt another lane's approach
+only after you reproduce its claim, then post whether it reproduced.
+Coordination (who owns which file, what you are starting) posts freely.
+Conclusions about the problem wait until the lead asks for them, and the lead
+weighs each by its evidence rather than by how many lanes agree: a reader can
+check a claim, while an early opinion pulls the group toward agreement whether
+or not it is true.
 
 ## Catchup and search
 
@@ -162,6 +193,19 @@ supply `/dev/null`.
 
 ## Inbox, pending, and read state
 
+- **Unbound readers.** With no bound participant (an ambient harness key that
+  has no record yet, or no key), the read-only commands (`inbox`, `watch
+  --snapshot`, `chat --peek` and `--history`, `channels`, `search`, `read
+  --peek`) exit 0 with `"participant": null, "bound": false` and a one-line
+  `hint` (text mode prints one line saying the session is not bound yet and
+  nothing can be addressed to it). They never fall back to the room of the
+  current directory; `--room <name>` on `inbox` and `watch --snapshot` is for
+  command sinks. A write or consuming read with an ambient key and no record
+  mints the record, exactly as `post participant bind --harness <h> --key <k>`
+  would, and its receipt carries `"bound_now": {"id", "workspace"}`. With no
+  key it fails `no_participant`, and the fix is the bind command. An explicit
+  claim (`POST_PARTICIPANT`) that names a missing record fails
+  `participant_missing` (exit 65) instead of minting.
 - `--peek` preserves unread state. A consuming `read` marks only the message
   it printed, after stdout succeeds; the file does not move. Re-reading an
   already-read message by id works and reports `already_read`.
@@ -227,7 +271,9 @@ lineage, workspace, `live_watch`, and separate `unread` and `pending` maps.
 `--room <room>` limits the rows to participants bound to that room. The text
 form labels the lease `lease=`; JSON keeps the key `state`. A lease says the
 binding is alive, not that anyone read anything: ask `post chat <channel>
---seen-by <id>` for that.
+--seen-by <id>` for that. `who` lists every participant on the host, so it is
+the wrong check for "am I bound and alive": use `post participant show --json`.
+It prints `bridge_attention: <count>` when the bridge has something stuck.
 
 ## Participant mail across hosts
 

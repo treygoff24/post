@@ -24,6 +24,8 @@ const SOURCE = path.join(DIR, "codex-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-install-test-"));
 const INSTALL_DIR = path.join(ROOT, "hooks");
 const ADAPTER = path.join(INSTALL_DIR, "post-codex-mail.mjs");
+const CORE_SOURCE = path.join(DIR, "mail-hook-core.mjs");
+const CORE = path.join(INSTALL_DIR, "mail-hook-core.mjs");
 
 // Preflight stubs: a fixed post that mints nothing, and a stale one that
 // reproduces the pre-0.2.0 junk-mailbox bug.
@@ -97,6 +99,7 @@ test("preflight refuses a stale binary that mints unroomed mailboxes, touching n
   assert.match(result.stderr, /mints a mailbox/);
   assert.ok(!fs.existsSync(target), "a failed preflight must not write the hooks file");
   assert.ok(!fs.existsSync(ADAPTER), "a failed preflight must not copy the adapter");
+  assert.ok(!fs.existsSync(CORE), "a failed preflight must not copy the shared core");
 });
 
 test("preflight refuses an unrunnable binary", () => {
@@ -106,6 +109,7 @@ test("preflight refuses an unrunnable binary", () => {
   assert.match(result.stderr, /could not run the post binary/);
   assert.ok(!fs.existsSync(target));
   assert.ok(!fs.existsSync(ADAPTER));
+  assert.ok(!fs.existsSync(CORE));
 });
 
 test("creates a fresh hooks file with all three events and copies the adapter", () => {
@@ -128,6 +132,24 @@ test("creates a fresh hooks file with all three events and copies the adapter", 
     "adapter copy must match the installer's own source"
   );
   assert.equal(fs.statSync(ADAPTER).mode & 0o777, 0o755);
+});
+
+test("installs the shared core beside the adapter, and the installed adapter runs on its own", () => {
+  const target = freshTarget();
+  assert.equal(run(target).status, 0);
+  assert.deepEqual(fs.readFileSync(CORE), fs.readFileSync(CORE_SOURCE));
+  assert.equal(fs.statSync(CORE).mode & 0o777, 0o644);
+  // The adapter imports ./mail-hook-core.mjs; a missing core would crash it
+  // before it printed anything.
+  const ran = spawnSync(process.execPath, [ADAPTER], { input: "{}", encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, "{}");
+  // A stale or damaged core is replaced on re-run.
+  fs.writeFileSync(CORE, "// stale\n");
+  const rerun = run(target);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /adapter updated/);
+  assert.deepEqual(fs.readFileSync(CORE), fs.readFileSync(CORE_SOURCE));
 });
 
 test("copies the adapter privately and writes through hook-config symlinks", () => {
@@ -242,7 +264,40 @@ test("malformed target JSON fails before copying the adapter", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /not valid JSON/);
   assert.ok(!fs.existsSync(adapter), "adapter must not be copied on malformed JSON");
+  assert.ok(!fs.existsSync(path.join(installDir, "mail-hook-core.mjs")), "core must not be copied on malformed JSON");
   assert.equal(fs.readFileSync(target, "utf8"), "{not-json");
+});
+
+// Everything is staged as temp files and renamed into place only when every
+// write has succeeded. The config directory here allows reading but not
+// creating a file, so the config write is the step that fails, after the core
+// and adapter have been staged.
+test("a failure writing the config leaves the installed files exactly as they were", { skip: process.getuid?.() === 0 && "root ignores directory permissions" }, () => {
+  const dir = path.join(ROOT, "hooks-staged");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "mail-hook-core.mjs"), "// old core\n", { mode: 0o644 });
+  fs.writeFileSync(path.join(dir, "post-codex-mail.mjs"), "// old adapter\n", { mode: 0o755 });
+  const before = fs.readdirSync(dir).sort();
+  const configDir = path.join(ROOT, "config-readonly");
+  fs.mkdirSync(configDir);
+  const target = path.join(configDir, "hooks.json");
+  fs.writeFileSync(target, JSON.stringify({ hooks: {} }));
+  const env = { ...process.env, POST_CODEX_HOOK_INSTALL_DIR: dir, POST_CODEX_HOOK_BIN: GOOD_POST };
+  fs.chmodSync(configDir, 0o500);
+  try {
+    const failed = spawnSync(process.execPath, [INSTALLER, target], { encoding: "utf8", env });
+    assert.notEqual(failed.status, 0, "the install must fail");
+    assert.equal(fs.readFileSync(path.join(dir, "mail-hook-core.mjs"), "utf8"), "// old core\n");
+    assert.equal(fs.readFileSync(path.join(dir, "post-codex-mail.mjs"), "utf8"), "// old adapter\n");
+    assert.deepEqual(fs.readdirSync(dir).sort(), before, "no staged temp files are left behind");
+    assert.equal(fs.readFileSync(target, "utf8"), JSON.stringify({ hooks: {} }));
+  } finally {
+    fs.chmodSync(configDir, 0o700);
+  }
+  const rerun = spawnSync(process.execPath, [INSTALLER, target], { encoding: "utf8", env });
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.deepEqual(fs.readFileSync(path.join(dir, "mail-hook-core.mjs")), fs.readFileSync(CORE_SOURCE));
+  assert.ok(JSON.parse(fs.readFileSync(target, "utf8")).hooks.SessionStart);
 });
 
 test("root array or null config normalizes to an object hooks map", () => {
@@ -316,6 +371,14 @@ test("installed adapter copy runs end-to-end with the release CLI", () => {
     const mailRoot = path.join(runtimeRoot, "mail");
     const stateDir = path.join(runtimeRoot, "state");
     fs.mkdirSync(cwd, { recursive: true });
+    // Lazy minting: a session in a directory that is not a registered room is
+    // not minted at start, so register the workspace the way an operator does.
+    const registered = spawnSync(releaseBin, ["rooms", "add", "installed-proof", cwd], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, HOME: runtimeHome, POST_MAIL_ROOT: mailRoot },
+    });
+    assert.equal(registered.status, 0, registered.stderr);
+    assert.ok(fs.existsSync(path.join(runtimeInstallDir, "mail-hook-core.mjs")), "the installed adapter needs its core");
     const result = spawnSync(process.execPath, [installedAdapter], {
       input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "installed-proof", cwd }),
       encoding: "utf8",
