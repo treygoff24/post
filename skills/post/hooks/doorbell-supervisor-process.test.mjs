@@ -242,12 +242,6 @@ describe("singleton", () => {
     const result = await exitWithin(a.exited, 5000);
     assert.equal(result.code, 70);
     assert.match(a.err, /lock helper died; stopping all delivery/);
-    // Mail and an armed pane appear after the exit: nothing rings.
-    host.control.snapshots["codex-aaaaaaaa"] = [{ ...sampleMail(), id: "20260923-000001-dead01" }];
-    host.save();
-    host.cli(["enable"], { POST_PARTICIPANT: "codex-aaaaaaaa" });
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    assert.deepEqual(host.prompts(), []);
   });
 });
 

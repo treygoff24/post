@@ -364,7 +364,6 @@ describe("selection after parsing (E5)", () => {
     assert.ok(kept.some((e) => e.event === "unreadable" && e.reason === "mail"));
     assert.ok(!kept.some((e) => e.event === "channel_message" && e.reason === "channel"));
     const args = snapshotArgs();
-    assert.deepEqual(args.slice(0, 5), ["watch", "--snapshot", "--json", "--limit", "0"]);
     assert.deepEqual(args, ["watch", "--snapshot", "--json", "--limit", "0"]);
   });
 });

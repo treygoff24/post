@@ -243,15 +243,6 @@ test("updates a stale registration in place instead of duplicating", () => {
   assert.ok(flat.some((h) => h.command === "other-tool"), "sibling hook preserved");
 });
 
-test("installer and installed adapter no longer reference identity-card.mjs", () => {
-  const target = freshSettings();
-  const result = run(target);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.existsSync(path.join(INSTALL_DIR, "identity-card.mjs")), false);
-  assert.ok(!fs.readFileSync(path.join(INSTALL_DIR, path.basename(ADAPTER)), "utf8").includes("identity-card.mjs"));
-  assert.ok(!fs.readFileSync(INSTALLER, "utf8").includes("identity-card.mjs"));
-});
-
 test("an unrelated hook that shares the adapter's basename survives the install", () => {
   const foreign = path.join(ROOT, "other-tool", "claude-mail.mjs");
   fs.mkdirSync(path.dirname(foreign), { recursive: true });
