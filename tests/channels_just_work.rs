@@ -336,11 +336,18 @@ fn a_crossed_send_delivers_and_reports_what_crossed_without_marking_it_read() {
         ));
     }
 
-    let sent = ok_json(
+    let sent_output = run(
         &sandbox,
         &["chat", "ops", "--send", "--body", "on it", "--json"],
         &beta,
     );
+    assert_success(&sent_output);
+    assert!(
+        !stderr(&sent_output).contains("unseen"),
+        "the crossing rides in the receipt on stdout, not as a stderr warning: {}",
+        stderr(&sent_output)
+    );
+    let sent: Value = from_stdout(&sent_output);
     assert_eq!(sent["ok"], true, "a crossed send delivers: {sent}");
     let crossed = &sent["crossed"];
     assert_eq!(crossed["unseen"], 2, "{sent}");
@@ -382,6 +389,8 @@ fn a_crossed_send_delivers_and_reports_what_crossed_without_marking_it_read() {
         .expect("crossed-send.jsonl");
     let event: Value = serde_json::from_str(log.lines().last().expect("a log line")).expect("json");
     assert_eq!(event["outcome"], "delivered_crossed", "{log}");
+    assert_eq!(event["room"], "beta", "{log}");
+    assert_eq!(event["channel"], "ops", "{log}");
     assert_eq!(event["unseen"], 2);
     assert_eq!(event["targeted"], 1);
 }
@@ -891,6 +900,10 @@ fn a_stray_positional_after_the_channel_is_refused_and_names_the_body_forms() {
         );
         let error: ErrorEnvelope = from_stderr(&output);
         assert_eq!(error.error.code, "invalid_argument", "{args:?}");
+        assert!(
+            !error.error.retryable,
+            "{args:?}: a usage error is not a retryable fault"
+        );
         let fix = &error.error.suggested_fix;
         assert!(
             fix.contains("--body-file") && fix.contains("--body") && fix.contains("<<'EOF'"),
@@ -1339,4 +1352,64 @@ fn a_roster_names_the_member_it_left_out_for_an_invalid_membership_file() {
     assert!(channels.get("skipped").is_none(), "{channels}");
     let seen = ok_json(&sandbox, &["chat", "ops", "--seen-by", A, "--json"], &alpha);
     assert!(seen.get("skipped").is_none(), "{seen}");
+}
+
+// ---------------------------------------------------------------------------
+// A blocked route bars shared membership in both directions, on a real join.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_blocked_route_refuses_a_join_in_either_direction_and_writes_nothing() {
+    // beta is an existing member; alpha joins. The rule names the pair in the
+    // direction alpha -> beta, then beta -> alpha: each row must fail if its
+    // own direction is dropped from the join guard.
+    for (from, to) in [("alpha", "beta"), ("beta", "alpha")] {
+        let sandbox = Sandbox::new();
+        let (alpha, _beta) = register_alpha_beta(&sandbox);
+        write_bad_channel(
+            &sandbox,
+            "shared",
+            Some(r#"{"beta":"2026-09-06 12:00:00 +0000"}"#),
+            true,
+            r#"{"name":"shared","created":"2026-09-06 12:00:00 +0000","created_by":"beta"}"#,
+        );
+        fs::write(
+            sandbox.mail_root.join("rules.json"),
+            format!(
+                r#"{{"blocked":[{{"from":"{from}","to":"{to}","reason":"armed instrument"}}]}}"#
+            ),
+        )
+        .expect("rules");
+        let channel = sandbox.mail_root.join("channels/shared");
+        let members_before = fs::read(channel.join("members.json")).expect("members");
+        let messages_before = fs::read_dir(channel.join("messages"))
+            .expect("messages")
+            .count();
+
+        let refused = run(&sandbox, &["chat", "shared", "--join", "--json"], &alpha);
+        assert_eq!(
+            refused.status.code(),
+            Some(77),
+            "{from} -> {to}: {}",
+            stderr(&refused)
+        );
+        let error: ErrorEnvelope = from_stderr(&refused);
+        assert_eq!(error.error.code, "blocked_route", "{from} -> {to}");
+        assert!(
+            error.error.message.contains("armed instrument"),
+            "{from} -> {to}"
+        );
+        assert_eq!(
+            fs::read(channel.join("members.json")).expect("members"),
+            members_before,
+            "{from} -> {to}: a refused join adds no member"
+        );
+        assert_eq!(
+            fs::read_dir(channel.join("messages"))
+                .expect("messages")
+                .count(),
+            messages_before,
+            "{from} -> {to}: a refused join writes no join event"
+        );
+    }
 }

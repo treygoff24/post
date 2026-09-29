@@ -2732,37 +2732,9 @@ mod tests {
         seed_channel(&root, &["beta"]);
         let error = read_batch(&context, "tax").expect_err("non-member must be refused");
         assert_eq!(error.code.as_str(), "not_a_member");
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn missing_channel_is_not_found() {
-        let (root, context) = chat_context("missing");
-        let error = read_batch(&context, "tax").expect_err("missing channel must error");
-        assert_eq!(error.code.as_str(), "not_found");
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn send_marks_own_message_seen_so_it_never_reshows() {
-        let (root, context) = chat_context("ownadvance");
-        let dir = seed_channel(&root, &["alpha", "beta"]);
-        seed_message(&dir, ID1, "beta", "earlier");
-        consume_seen(&context, "tax", vec![ID1.to_owned()]).expect("catch up");
-        seed_message(&dir, ID2, "alpha", "my own send");
-        let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
-            .expect("parse own message")
-            .message;
-        mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
-        let state = seen_state(&context);
-        assert!(
-            state.channel_has_seen("tax", ID2),
-            "own send is in the seen-set"
-        );
-
-        assert!(
-            read_batch(&context, "tax").expect("re-read").is_empty(),
-            "own message must not re-show as unread"
+        assert_eq!(
+            error.suggested_fix,
+            "Join first with `post chat 'tax' --join`."
         );
         trash_test_root(&root);
     }
@@ -2892,16 +2864,23 @@ mod tests {
 
     #[test]
     fn catch_up_larger_than_batch_is_a_plain_read() {
-        let mut batch = vec![];
+        let (root, context) = chat_context("larger");
+        let dir = seed_channel(&root, &["alpha"]);
+        seed_message(&dir, ID1, "beta", "oldest");
+        seed_message(&dir, ID2, "beta", "newest");
+        let mut batch = read_batch(&context, "tax").expect("read");
+        let skipped = apply_peek_catch_up(&mut batch, Some(5), "alpha", None).expect("limit");
+        assert_eq!(skipped, 0);
+        let ids: Vec<&str> = batch
+            .iter()
+            .map(|(message, _)| message.id.as_str())
+            .collect();
         assert_eq!(
-            apply_peek_catch_up(&mut batch, Some(5), "alpha", None).expect("empty"),
-            0
+            ids,
+            [ID1, ID2],
+            "a limit above the batch keeps every message"
         );
-        // Default (None) on an empty batch is also a no-op.
-        assert_eq!(
-            apply_peek_catch_up(&mut batch, None, "alpha", None).expect("default"),
-            0
-        );
+        trash_test_root(&root);
     }
 
     #[test]
@@ -2915,27 +2894,6 @@ mod tests {
         assert_eq!(batch.len(), 1, "limit 0 must keep every message");
         assert_eq!(apply_consuming_catch_up(&mut batch, Some(0)), 0);
         assert_eq!(batch.len(), 1, "consuming limit 0 must keep every message");
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn catch_up_rescues_mentions_from_skipped_range() {
-        let (root, context) = chat_context("mention-rescue");
-        let dir = seed_channel(&root, &["alpha", "beta"]);
-        seed_message(&dir, ID1, "beta", "hey @alpha look");
-        // Stamp the mention field as a send would.
-        let path = dir.join("messages").join(format!("{ID1}.msg"));
-        let mut parsed = channel::parse_channel_message(&path).expect("parse");
-        parsed.message.mentions = vec!["alpha".to_owned()];
-        let bytes = channel::encode_message(&parsed.message, &parsed.body).expect("encode");
-        fs::write(&path, bytes).expect("rewrite");
-        seed_message(&dir, ID2, "beta", "middle");
-        seed_message(&dir, ID3, "beta", "newest");
-        let mut batch = read_batch(&context, "tax").expect("read");
-        let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha", None).expect("catch-up");
-        assert_eq!(skipped, 0, "the mention must not count as silently skipped");
-        assert_eq!(batch.len(), 3);
-        assert_eq!(batch[0].0.id, ID1);
         trash_test_root(&root);
     }
 

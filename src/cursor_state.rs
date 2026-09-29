@@ -1197,6 +1197,33 @@ mod tests {
     }
 
     #[test]
+    fn room_cursor_snapshot_wins_over_a_conflicting_legacy_channel_state() {
+        let (root, context) = context("cursor-precedence");
+        fs::create_dir_all(root.join("alpha")).expect("room");
+        fs::write(
+            root.join("alpha/channel-state.json"),
+            format!(r#"{{"version":2,"channels":{{"tax":{{"seen":["{ID1}"]}}}}}}"#),
+        )
+        .expect("legacy");
+        fs::write(
+            root.join("alpha/cursors.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "mail": {{"seen": []}},
+  "channels": {{"tax": {{"seen": ["{ID2}"]}}}}
+}}
+"#
+            ),
+        )
+        .expect("cursor");
+
+        let seen = Snapshot::load(&context, "alpha").into_channels();
+        assert_eq!(seen["tax"], BTreeSet::from([ID2.to_owned()]));
+        trash_test_root(&root);
+    }
+
+    #[test]
     fn symlinked_room_cursor_degrades_to_an_empty_snapshot_on_read() {
         let (root, context) = context("symlink");
         fs::create_dir_all(root.join("alpha")).expect("room");

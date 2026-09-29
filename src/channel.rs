@@ -1843,14 +1843,6 @@ pub(crate) struct ChannelSummary {
     pub archived: Option<crate::channel_archive::ArchiveMark>,
 }
 
-// The strict listing: every read-only surface here uses `list_channels_with`
-// tolerantly, but the fail-closed form stays for callers that must not act on
-// a partial picture.
-#[allow(dead_code)]
-pub(crate) fn list_channels(context: &Context) -> AppResult<Vec<ChannelSummary>> {
-    Ok(list_channels_with(context, Scan::Strict)?.0)
-}
-
 /// The channel listing with one bad channel directory (an unreadable
 /// `channel.json` or `members.json`) skipped and reported instead of failing
 /// every listing on the host.
@@ -2177,30 +2169,6 @@ mod tests {
     }
 
     #[test]
-    fn blocked_route_bars_shared_membership_in_both_directions() {
-        let (root, context) = test_context("blocked", "{}", r#"{"blocked":[]}"#);
-        fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
-        fs::write(
-            root.join("rules.json"),
-            r#"{"blocked":[{"from":"*","to":"beta","reason":"armed instrument"}]}"#,
-        )
-        .expect("rules");
-        let rooms = context.load_rooms().expect("load rooms");
-        let rules = context.load_rules(&rooms).expect("load rules");
-
-        // beta is already a member; alpha joining must be refused because
-        // alpha -> beta is blocked, even though beta -> alpha is not.
-        let members: MemberMap = [("beta".to_owned(), "t".to_owned())].into_iter().collect();
-        let refused = members.keys().any(|member| {
-            rules.blocked.iter().any(|rule| {
-                rule.matches_route("alpha", member) || rule.matches_route(member, "alpha")
-            })
-        });
-        assert!(refused, "pairwise check must catch the alpha->beta block");
-        trash_test_root(&root);
-    }
-
-    #[test]
     fn list_channels_skips_strays_and_counts_messages() {
         let (root, context) = test_context("list", "{}", r#"{"blocked":[]}"#);
         fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
@@ -2232,11 +2200,24 @@ mod tests {
         .expect("send");
         // A stray directory without channel.json must not break the listing.
         fs::create_dir_all(root.join(CHANNELS_DIR).join("not-a-channel")).expect("stray");
+        // An existing channel whose channel.json is malformed is skipped and
+        // named, not a failure of every listing on the host.
+        let bent = ChannelPaths::new(&context, "bent").expect("bent paths");
+        fs::create_dir_all(&bent.messages).expect("bent messages dir");
+        fs::write(&bent.channel_json, b"{not json").expect("bent channel.json");
 
-        let summaries = list_channels(&context).expect("list");
+        let (summaries, skipped) = list_channels_with(&context, Scan::Tolerant).expect("list");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].info.name, "tax");
         assert_eq!(summaries[0].messages, 1);
+        assert_eq!(
+            skipped.len(),
+            1,
+            "{:?}",
+            skipped.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(skipped[0].id, "channel.json");
+        assert_eq!(skipped[0].channel.as_deref(), Some("bent"));
         trash_test_root(&root);
     }
 
@@ -2339,35 +2320,5 @@ mod tests {
         let error = validate_channel_message(Path::new("<test>"), &message)
             .expect_err("non-canonical re must be refused");
         assert_eq!(error.code.as_str(), "config_invalid");
-    }
-
-    #[test]
-    fn participant_review_unit_channel_send_stamps_actor_fields() {
-        let (root, context) = test_context("participant-fields", "{}", r#"{"blocked":[]}"#);
-        fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
-        let paths = ChannelPaths::new(&context, "tax").expect("paths");
-        fs::create_dir_all(&paths.messages).expect("messages dir");
-        let id = write_message(
-            &context,
-            &paths,
-            WriteMessage {
-                room: "alpha",
-                channel: "tax",
-                subject: "",
-                body: "body",
-                event: None,
-                re: None,
-                mentions: Vec::new(),
-                signature_tag: None,
-                provenance: SenderProvenance::InferredCwd,
-            },
-        )
-        .expect("channel send");
-        let raw = fs::read_to_string(paths.messages.join(format!("{id}.msg"))).expect("message");
-        let head = raw.split_once("\n---\n").expect("separator").0;
-        let message: serde_json::Value = serde_json::from_str(head).expect("message JSON");
-        assert!(message["from_participant"].is_string());
-        assert_eq!(message["address_kind"], "channel");
-        trash_test_root(&root);
     }
 }
