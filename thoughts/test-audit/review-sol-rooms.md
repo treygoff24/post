@@ -1,0 +1,68 @@
+# Independent layer review: rooms registry and rename
+
+Read-only review of the 64 declarations in `ledger-rooms.md` against the tests, production callers, and `CONTRACT.md`. No tests, Cargo, builds, Python, or Node ran. The proposed marks stand: **55 R, 1 F, 7 C, 1 D**. The C rows are conditional on moving their unique assertions into the named keepers. Earlier commit messages report red proofs; this review did not reproduce them.
+
+## Disagreements and corrections per test
+
+There is **no mark disagreement**. These corrections make the proposed edits precise and preserve proof:
+
+| Test (ledger -> review) | Evidence and required correction |
+| --- | --- |
+| `rooms_add_rejects_mail_root_reserved_names` (F -> F) | `tests/cli.rs:1172-1215` hard-codes 14 cases, while `src/mailbox.rs:85-102` has 15 exact reserved entries plus two temporary-file patterns in `validate_new_room_name` (`:672-688`). The eight omitted exact entries named by the ledger are real. **Do not add a second copied 15-name inventory**: that repeats the copied-inventory junk pattern. A test within `src/mailbox.rs` can iterate `RESERVED_ROOM_NAMES`, try each original and an ASCII-uppercase variant through `validate_new_room_name`, and assert a reserved error; keep the existing CLI test for command wiring and the two temporary-file patterns. Iteration alone is vacuous if an entry is deleted from the constant. Keep independent CLI anchors for `participants`, `.rename.lock`, and `rename-journal.json` (the first can absorb P1); derive other anchors from actual storage path constants or a separately maintained public contract where practical. A removal from `RESERVED_ROOM_NAMES` must make an anchor go red. The constant is private, so an integration test cannot directly iterate it without a test-only production export; prefer a mailbox-local unit test over such an export. The exact completeness of the full 15-name inventory remains a design decision if all entries must be deletion-proof without any copied contract list. Also exercise `rooms rename` with a reserved new name: it independently calls the validator (`src/commands/rooms.rs:235-243`). |
+| `participant_rooms_add_rejects_new_reserved_store_name` (C -> C) | `tests/participants.rs:1202-1220` uniquely anchors `participants` today. Move that literal CLI case, including unchanged `rooms.json`, into I8 **before** removing P1. Merely iterating `RESERVED_ROOM_NAMES` would not absorb it: deletion of `participants` from the constant would remove the iteration row too. |
+| `rooms_add_warns_when_a_dangling_symlink_parent_is_inconclusive` (C -> C) | `tests/cli.rs:1083-1118` uses a distinct dangling link whose target is under sibling `b`, while I5 (`:1039-1081`) points back inside the candidate. Carry the I6 fixture as a second row in I5, with success, warning, and registration assertions. The paths reach the unverifiable stored-alias branch at `src/commands/rooms.rs:1720` and the `add` caller (`:30-126`). Do not simply delete the second fixture on the ledger's unrun dominance argument. |
+| `rooms_add_rejects_duplicate_names_without_overwriting_the_registry` (C -> C) and `rooms_add_local_duplicate_keeps_the_set_path_hint` (C -> C) | I9 (`tests/cli.rs:1218-1240`) has exact-case duplicate and message assertions. I15 (`:1463-1484`) has the local reason, absent host, and `set-path` hint. Add exact-case as a row and the I15 assertions to I10 (`:1242-1269`), preserving the registry byte comparison for both cases. `add` checks the duplicate before path validation (`src/commands/rooms.rs:54-89`), so I15's different path does not distinguish a new branch. |
+| `suffixed_candidate_falls_back_to_the_bridge_host` (C -> C) | U7 (`src/commands/rooms.rs:2037-2051`) has both bridge fallback and no-candidate branches. I13 (`tests/cli.rs:1400-1427`) proves the former with an exact fix; I20 (`:1989-2057`) proves no fix without a bridge and then a fix with one. Retain those assertions. |
+| `suffixed_candidate_skips_a_name_that_is_not_free_for_the_next` (C -> C) | U8 (`src/commands/rooms.rs:2053-2071`) is absorbed by I12 (`tests/cli.rs:1343-1398`): lineage-held learned name yields no fix, blocked bridge name yields no fix, lifting the block yields a runnable `hq-trey` fix. This tests the real `is_free` closure at `src/commands/rooms.rs:1067-1087`, not a hand-written substitute. |
+| `rooms_rename_keeps_routed_workspace_mail_readable` (C -> C) | I17 (`tests/cli.rs:1852-1901`) repeats I16's real-send, receipt, read, rename, and inbox path (`:1605-1832`). Before deleting it, put its explicit `unread_count == 1` and absence of a `corrupt routing receipt` warning into I16's post-rename inbox assertion (`:1741-1745`). I16 already checks two receipt rewrites, address names, `skipped_unreadable == 0`, and the exact surviving unread id. Its helper functions remain used elsewhere. |
+| `rooms_rename_skips_the_interlock_without_a_bridge_config` (D -> D) | I29 (`tests/cli.rs:2555-2567`) asserts success and no `bridge/` directory. I16's successful unbridged rename (`:1605-1832`) and no bridge warning (`:1702-1709`) cover the required admission path; I36 also reaches unbridged dry-run. `rename` only reads bridge config at `src/commands/rooms.rs:455-461`; it does not create `bridge/`. The directory-absence assertion is an implementation side effect, not a separate documented contract. Confirm the harness creates no bridge directory before deletion; source inspection supports this but no run occurred. |
+| `rooms_rename_refuses_a_malformed_store_that_may_name_the_room` (R -> R) | The final warning assertion at `tests/cli.rs:3045-3058` accepts any `skipped malformed` warning. The unrelated malformed participant record is still present, so the assertion does not pin the skipped routing receipt. If tightening during the cutover, require `routing_receipts` or the receipt path in that warning; the preceding refusal for a receipt that names `hq` (`:3028-3044`) is already binding. |
+| `unknown_room_has_a_did_you_mean_and_exact_discovery_command` (R -> R) and `unbound_rooms_listing_is_complete_and_read_only_with_many_rooms` (R -> R) | I43 (`tests/cli.rs:3342-3360`) belongs to send's unknown-recipient behavior (`src/commands/send.rs:270-282`); its name promises an `exact_fix` that it never checks. Transfer ownership to the send area or rename the test. I44 (`tests/cli.rs:3413-3442`) uniquely checks an unseeded `rooms.json`-only store, 12 ordered names, and no write; retain it but replace its stale comment about an inline error-list bound removed from production. `rooms` calls `load_rooms` and `load_rules` (`src/commands/rooms.rs:23-27`). |
+
+All other R marks have distinct observable boundaries or branches. In particular U1's incomplete rollback is not reached by the CLI resume refusal; U2-U6 pin voting rules not covered by an ordinary suffix suggestion; U9's invalid bridge-host candidate is absent from CLI fixtures; P2 pins `add`'s participant lock; I25 and I27 cover different command variants; and R1-R9 exercise peer publication, ownership, evidence, and rename call sites. The unit candidate tests U7/U8 are the redundant layer because I12/I13/I20 use the real CLI and validation predicate (`src/commands/rooms.rs:1067-1087,1803-1825`). The remaining R contracts and named keepers are below.
+
+## Keeper per contract
+
+| Contract | Keeper declarations |
+| --- | --- |
+| Add registration, registry mode, no rules edit, path refusal, blocked route, symlinked registry, parser guard | I1, I39-I42; I3 for set-path-specific refusals |
+| Set-path re-points only discovery path and remains pure on dry-run/refusal | I2, I3 |
+| Local duplicate name and canonical workspace identity | I10 with I9/I15 assertions; I4, I5 with I6 fixture, I7 |
+| Reserved storage names and temporary-file patterns | I8 plus mailbox-local enumeration and independent CLI anchors; P1 only until its anchor moves |
+| Remote placeholder and suggested suffix | I11-I14, I20; U2-U6 and U9 for voting/invalid-candidate branches |
+| Rename live rewrites, mail readability, history preservation, overwritten-key warnings | I16 with I17 assertions; I18, I19 |
+| Rename refusals, lineage, bridge interlock, held mail | I20-I24; R6 for peer-published new name |
+| Lock order and command admission | P2, I25-I28 |
+| Rollback, journal, resume, dry-run, edge stores | U1, I30-I38; I16 and I36 absorb I29's admission assertion |
+| Rooms listing without a bound identity | I44 |
+| Send typo and discovery hint | I43 (move ownership to send area) |
+| Peer-published names, ownership memory, stale/broken evidence | R1-R9; R1 and R6 use separate `add`/`rename` call sites (`src/commands/rooms.rs:95-126,348-377`) |
+
+## Final edit list, in implementation order
+
+1. Repair I8 with a mailbox-local loop over `RESERVED_ROOM_NAMES` plus independent CLI anchors for critical storage names. Carry P1's `participants` and unchanged-registry assertions into I8. Preserve I8's wildcard, case-fold, and temporary-file checks. Add a reserved-new-name rename row to I20 (or a focused rename keeper). Establish a deletion-catching mutation for `participants`, `.rename.lock`, and `rename-journal.json`; a loop over the constant cannot supply that proof by itself.
+2. Extend I5 with I6's sibling-target symlink fixture. Extend I10 with I9's exact-case row and I15's reason, host, hint, and message checks. Keep the existing unchanged-registry checks.
+3. Extend I16 with I17's `unread_count` and no-corrupt-receipt-warning checks. Optionally sharpen I38's skipped-routing-receipt warning as above. Fix I44's comment; rename or reassign I43 in the send lane.
+4. Only after the keeper assertions exist, remove I6, I9, I15, I17, P1, U7, and U8. Remove I29 after checking its unbridged fixture does not pre-create `bridge/`. Keep U9's invalid-candidate half.
+5. Optional small seam cleanup: remove the `#[cfg(test)]` `learned_host_suffix` wrapper (`src/commands/rooms.rs:1839-1843`) by asserting on the first item of `learned_host_suffixes` in U2-U6. This does not change a production call path and is not unlocked by a deletion. Do not remove `suffixed_room_candidate`, `apply_rename`, `RenamePlan`, or their parameters: each has non-test callers.
+
+No entire test file is retired in this area. Do not delete a shared helper solely because one test is removed; the I17 mail helpers still have other callers.
+
+## Maintainer-decision items
+
+- **No proposed deletion changes production behavior or a documented contract.** `CONTRACT.md:483-486` documents reserved-name refusal and `:539-562` documents rename behavior; the listed removals must preserve both. The optional `learned_host_suffix` removal is a test-only wrapper, not a product path.
+- `CONTRACT.md:483-486` has only part of the current 15-entry reserved-name inventory, while `docs/PARTICIPANTS.md:56` names four later additions. A full deletion-proof inventory needs an independent authority: either maintain the complete list as a public contract and generate the validator's list from that source, or accept selected CLI anchors plus derived enumeration. Changing which names are reserved, or claiming the docs' partial list is exhaustive, needs the maintainer's decision. Do not quietly remove a guard to match the documents.
+- The minor message for `rooms rename x x` says the names differ only in ASCII case (`src/commands/rooms.rs:285-297`). Whether to improve that message is a product wording decision outside this audit; it does not justify deleting a test.
+
+## Bug and seam verdicts
+
+- **Product bug:** No contract-breaking bug was established by source inspection. The identical-name rename message is misleading but the refusal itself is correct (`src/commands/rooms.rs:285-297`); no runtime reproduction was run.
+- **Test-only seam:** `learned_host_suffix` is a `#[cfg(test)]` wrapper at `src/commands/rooms.rs:1839-1843`. Exact caller search: `rg -n 'learned_host_suffix\(' src tests` returned its definition and only U2-U6 assertions at `src/commands/rooms.rs:1966,1976,1987,2000,2014,2026,2031`; there is no non-test caller. Its removal is safe if those assertions use `learned_host_suffixes` directly.
+- **Real production paths:** Exact caller search: `rg -n 'suffixed_room_candidate|apply_rename|RenamePlan|validate_new_room_name|RESERVED_ROOM_NAMES' src tests CONTRACT.md docs`. `suffixed_room_candidate` is called by `suffixed_candidate_for` (`src/commands/rooms.rs:1067-1087`); `apply_rename` is called in initial rename and committed resume (`:565,748`); `RenamePlan` is built for those paths (`:505,724`); `validate_new_room_name` is called by `add` and `rename` (`:30,235`) and other owners (`src/lineage.rs:94`, `src/commands/doctor.rs:1020`). The reserved constant is used by the live validator (`src/mailbox.rs:678`). None is dead production code.
+
+## Open questions requiring a test run
+
+- Mutation-check every C consolidation against its intended failure, especially I5 with both symlink shapes and I16 with receipt rewriting disabled. The cited historical red-proof claims do not substitute for a run on the edited tree.
+- Confirm the reserved-name repair catches deletion of each independently promised storage name. A constant-derived loop catches a validator that stops consulting the constant, but cannot catch removal of one entry from the constant. A separate anchor or independent contract source is needed for that case.
+- Confirm the I29 fixture has no `bridge/` directory before rename and that I16/I36 remain green when I29 is removed.
+- Run focused cases under a non-root user: I7, I30, and I34 use chmod denial and can fail at their fixture guards under root. No such run was permitted here.
