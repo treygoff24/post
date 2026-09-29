@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
 # Build post from one commit and install it, leaving an install receipt.
 #
-#   scripts/install-post.sh [--dry-run] [--bin-dir DIR] [--served PATH]
-#                           [--receipt PATH] [--repo DIR] <commit>
+#   scripts/install-post.sh [--dry-run] [--allow-unreachable] [--bin-dir DIR]
+#                           [--served PATH] [--receipt PATH] [--repo DIR] <commit>
 #
+# 0. Refuse a <commit> that no branch on origin contains. Every build installed
+#    on a host must be traceable to a branch other hosts can fetch: an install
+#    of an unpushed or abandoned-branch commit leaves a running binary whose
+#    build id names a commit that exists on no remote (the devbox ran one for
+#    days). The script fetches origin, then asks `git branch -r --contains`;
+#    the branches found are recorded in the receipt. --allow-unreachable
+#    installs anyway and records reachable=false, for the rare deliberate case.
 # 1. Refuse a <bin-dir>/post that is a symlink or not a regular file: the
 #    install would silently replace the link with a file.
 # 2. Check out <commit> in a temporary git worktree and run
 #    `cargo build --release --locked` there (CARGO_TARGET_DIR is honored).
 # 3. Run scripts/install-smoke.sh from that commit against the built binary,
 #    before anything in the bin dir is touched: a failed smoke installs nothing.
+#    The smoke is told the commit (--expect-build), so it fails a binary whose
+#    build id is not that commit, and it times `post who` against a store as
+#    wide as the live hosts.
 #    Every check must run and pass. The results must name each of the six
-#    checks (setup, version, samples, doorbell_parsers, doorbell_contract,
-#    porch) exactly once and no other; a smoke that exits 0 with one missing,
-#    repeated, or unknown installs nothing. Only porch may be skipped, and only
-#    when the operator allowed it (POST_SMOKE_ALLOW_SKIP=porch, passed through
-#    to the smoke); the receipt then says pass_with_skips, never pass.
+#    checks (setup, version, build_id, samples, who_speed, porch) exactly once
+#    and no other; a smoke that exits 0 with one missing, repeated, or unknown
+#    installs nothing. Only porch may be skipped, and only when the operator
+#    allowed it (POST_SMOKE_ALLOW_SKIP=porch, passed through to the smoke); the
+#    receipt then says pass_with_skips, never pass.
 # 4. Back up the current <bin-dir>/post to <bin-dir>/post-<old-build-sha>.bak.
 #    The copy goes to a temporary name, its sha256 is checked against the live
 #    file, and only then is it renamed into place. An existing backup of that
@@ -30,8 +40,9 @@
 #    against the skill manifest built into the binary, recording whether the
 #    served root is a symlink or a rendered copy.
 # 7. Write the receipt (default ~/.local/share/post/install-receipt.json):
-#    commit, build sha, binary sha256, backup path and sha256, served-path
-#    kind, manifest verdict, smoke verdict and per-check smoke results.
+#    commit, build sha, the origin branches that contain it, binary sha256,
+#    backup path and sha256, served-path kind, manifest verdict, smoke verdict
+#    and per-check smoke results.
 #
 # Skill drift does not roll the install back: served prose is updated by
 # syncing the served checkout, not by un-installing the binary. It is recorded
@@ -46,8 +57,9 @@
 #   0  installed; served skill matches (manifest verdict match).
 #   1  installed; served skill drift (a changed, missing, or extra file).
 #   2  usage.
-#   3  nothing installed; post is untouched: refused target, build or smoke
-#      failure, unusable backup, or a failed backup or staging step.
+#   3  nothing installed; post is untouched: refused target, a commit no origin
+#      branch contains, build or smoke failure, unusable backup, or a failed
+#      backup or staging step.
 #   4  installed; served skill not verified: the path could not be checked
 #      (verdict unchecked), or a rendered copy's fenced file differs (verdict
 #      unverified).
@@ -67,6 +79,7 @@ note() { printf 'install-post: %s\n' "$*" >&2; }
 trap 'die "unexpected failure at line $LINENO (exit code $fail_code; see the header)" "$fail_code"' ERR
 
 dry_run=0
+allow_unreachable=0
 bin_dir="$HOME/.local/bin"
 served="$HOME/.agents/skill-library/post"
 receipt="$HOME/.local/share/post/install-receipt.json"
@@ -75,17 +88,18 @@ commit=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1 ;;
+    --allow-unreachable) allow_unreachable=1 ;;
     --bin-dir) [ "$#" -ge 2 ] || die "--bin-dir needs a value" 2; bin_dir="$2"; shift ;;
     --served) [ "$#" -ge 2 ] || die "--served needs a value" 2; served="$2"; shift ;;
     --receipt) [ "$#" -ge 2 ] || die "--receipt needs a value" 2; receipt="$2"; shift ;;
     --repo) [ "$#" -ge 2 ] || die "--repo needs a value" 2; repo="$2"; shift ;;
-    -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
     -*) die "unknown option: $1" 2 ;;
     *) [ -z "$commit" ] || die "one commit only" 2; commit="$1" ;;
   esac
   shift
 done
-[ -n "$commit" ] || die "usage: install-post.sh [--dry-run] [--bin-dir DIR] [--served PATH] [--receipt PATH] [--repo DIR] <commit>" 2
+[ -n "$commit" ] || die "usage: install-post.sh [--dry-run] [--allow-unreachable] [--bin-dir DIR] [--served PATH] [--receipt PATH] [--repo DIR] <commit>" 2
 for tool in git cargo python3 install; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool not found"
 done
@@ -107,6 +121,34 @@ refuse_unusable_target
 
 full_sha=$(git -C "$repo" rev-parse --verify --quiet "${commit}^{commit}") || die "not a commit in $repo: $commit" 2
 short_sha=$(git -C "$repo" rev-parse --short "$full_sha")
+
+# Traceability: refuse a commit no branch on origin contains, before the
+# (slow) build. Fetch first so a branch pushed since the last fetch counts, and
+# a branch deleted since does not; a failed fetch falls back to what was last
+# fetched, which can only under-report reachability, never over-report it.
+origin_branches=""
+reachable=true
+refuse_unreachable_commit() {
+  local why=""
+  if ! git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    why="this checkout has no origin remote to check it against"
+  else
+    GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch --quiet origin >&2 || note "could not fetch origin; checking the branches fetched last time"
+    # `git branch -r --contains` lists every remote's branches; only origin's
+    # count, and origin/HEAD is a pointer, not a branch.
+    origin_branches=$(git -C "$repo" branch -r --contains "$full_sha" --format='%(refname)' 2>/dev/null |
+      awk 'index($0, "refs/remotes/origin/") == 1 { name = substr($0, 21); if (name != "HEAD") print name }' | paste -sd, -) || origin_branches=""
+    [ -n "$origin_branches" ] || why="no branch on origin contains it"
+  fi
+  [ -n "$why" ] || return 0
+  if [ "$allow_unreachable" -eq 1 ]; then
+    reachable=false
+    note "WARNING: $short_sha is not traceable to a branch ($why); installing anyway because of --allow-unreachable, and the receipt says so"
+    return 0
+  fi
+  die "refusing to install $short_sha: $why. Every installed build must be traceable to a branch other hosts can fetch. Push the branch that holds it (git push origin <branch>; a Forgejo push needs no authorization) and rerun, or pass --allow-unreachable for a deliberate exception. Nothing was installed."
+}
+refuse_unreachable_commit
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/install-post.XXXXXX")
 src="$work/src"
@@ -141,7 +183,7 @@ smoke="$src/scripts/install-smoke.sh"
 [ -x "$smoke" ] || die "$short_sha has no scripts/install-smoke.sh; it predates the install procedure"
 smoke_results="$work/smoke-results.jsonl"
 note "running install-smoke against the built binary"
-"$smoke" --results "$smoke_results" "$built" >&2 || die "install-smoke failed for $short_sha; nothing was installed"
+"$smoke" --results "$smoke_results" --expect-build "$short_sha" "$built" >&2 || die "install-smoke failed for $short_sha; nothing was installed"
 # The verdict comes from the per-check results, not the exit code alone: pass
 # only when every check ran and passed; pass_with_skips when a skip was
 # allowed. A smoke that reported nothing, or reported a failure yet exited 0,
@@ -157,7 +199,7 @@ if not checks:
     sys.exit("the smoke reported no checks")
 # The six checks install-smoke.sh runs. Each must report exactly once; an
 # unknown id is refused; only porch may be skipped (and only when allowed).
-expected = ["setup", "version", "samples", "doorbell_parsers", "doorbell_contract", "porch"]
+expected = ["setup", "version", "build_id", "samples", "who_speed", "porch"]
 skippable = {"porch"}
 ids = [check.get("check") for check in checks]
 for check_id in ids:
@@ -301,6 +343,7 @@ backup_sha256=""
 write_receipt() {
   mkdir -p "$(dirname "$receipt")" || return 1
   COMMIT="$full_sha" BUILD_SHA="$built_sha" BINARY_SHA256="$binary_sha256" BIN_PATH="$target" \
+  REACHABLE="$reachable" ORIGIN_BRANCHES="$origin_branches" \
   BACKUP="$backup" BACKUP_SHA256="$backup_sha256" SERVED="$served" SERVED_KIND="$served_kind" \
   MANIFEST_VERDICT="$manifest_verdict" SMOKE_VERDICT="$smoke_verdict" SMOKE_RESULTS="$smoke_results" \
   RECEIPT="$receipt" python3 - <<'PY'
@@ -312,6 +355,8 @@ record = {
     "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     "commit": os.environ["COMMIT"],
     "build_sha": os.environ["BUILD_SHA"],
+    "reachable": os.environ["REACHABLE"] == "true",
+    "origin_branches": [name for name in os.environ["ORIGIN_BRANCHES"].split(",") if name],
     "binary_sha256": os.environ["BINARY_SHA256"],
     "bin_path": os.environ["BIN_PATH"],
     "backup": os.environ["BACKUP"] or None,

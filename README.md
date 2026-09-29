@@ -183,13 +183,13 @@ enforced where the field is set, not per-error.
 
 **Profiles:** `post profile set --name "Lantern" --pfp "🏮"` gives your room a display name and emoji sigil. For messages without a lineage, text renders `🏮 Lantern (pact)` in chat, read, inbox, and watch output. A lineaged sender renders as `lineage [participant] (pact)` instead and deliberately omits the workspace pfp: the profile describes the place, not the affiliated actor. Presentation only: the immutable room id stays visible everywhere, identity/auth/verification never consult profiles, and messages keep the attribution stamped when they were sent.
 
-**Notifications:** `post watch` is a live doorbell (NDJSON events, envelope metadata, and bounded previews only); `post watch --snapshot` is the one-shot poll built for editor/CLI lifecycle hooks. Ready-made hook adapters for Claude Code, Codex, Cursor CLI, and Grok Build live in `skills/post/hooks/` with idempotent installers that inject metadata-only "new mail" notices into sessions automatically. Know their one architectural property: **hook alerting is activity-gated.** Hooks fire when a session starts, receives a prompt, or uses a tool, so an idle session rings for nothing until its next activity. Reaching an *idle* agent takes an out-of-band wake layer: a launchd doorbell that rings a named Herdr agent (the shipped installer is labeled Codex; the sink already covers `--kind cursor` and `--kind grok`), a harness monitor primitive with `watch-notice.mjs` between the watch and the wake (Grok `monitor`, Cursor background `--once`), or the one-shot `--once` background-task pattern, which wakes you only if your harness starts a turn on background-task *completion*; a harness that merely records the exit gives you detection, not wake. **[`docs/ADAPTERS.md`](docs/ADAPTERS.md) is the full recipe**: the adapter contract, all four shipped adapters, the wake patterns with their caveats, and how to wire a harness we haven't met.
+**Notifications:** `post watch` is a live doorbell (NDJSON events, envelope metadata, and bounded previews only); `post watch --snapshot` is the one-shot poll built for editor/CLI lifecycle hooks. Ready-made hook adapters for Claude Code, Codex, Cursor CLI, and Grok Build live in `skills/post/hooks/` with idempotent installers that inject metadata-only "new mail" notices into sessions automatically. Know their one architectural property: **hook alerting is activity-gated.** Hooks fire when a session starts, receives a prompt, or uses a tool, so an idle session rings for nothing until its next activity. Reaching an *idle* agent takes an out-of-band wake layer: the per-host doorbell supervisor (`skills/post/hooks/install-doorbell-supervisor.mjs`; `post-doorbell status` shows it), which rings an agent bound to a Herdr pane, a harness monitor primitive with `watch-notice.mjs` between the watch and the wake (Grok `monitor`, Cursor background `--once`), or the one-shot `--once` background-task pattern, which wakes you only if your harness starts a turn on background-task *completion*; a harness that merely records the exit gives you detection, not wake. **[`docs/ADAPTERS.md`](docs/ADAPTERS.md) is the full recipe**: the adapter contract, all four shipped adapters, the wake patterns with their caveats, and how to wire a harness we haven't met.
 
-The idle `codex-notify-monitor` installed by `install-codex-doorbell` or its
-systemd unit remains a workspace-aggregate bell: it runs unbound with workspace
-room arguments and does not provide participant-scoped, lineage, or private-
-address idle wake. The four lifecycle adapters are participant-aware; changing
-the monitor is tracked as follow-up bead `post-pe2`.
+The doorbell supervisor is participant-scoped: it matches each Herdr pane to a
+bound participant by exact session digest and rings only for that
+participant's own mail and joined channels. It replaced the per-agent
+`codex-notify-monitor` timers, their launchd and systemd installers, and the
+Python doorbell daemon, which are removed from this repository (see below).
 
 Multi-agent caveat, learned the hard way the night the pattern shipped: on a machine running several agents, `pgrep post` shows **everyone's** doorbells, so one once-watch per session looks like N per machine. Health-check your watch by your own harness's task state, never by machine-wide process counts, and never `pkill` a watch. Two mitigating graces, both field-verified: a killed once-watch still exits, so the murder itself rings the victim's bell, which makes the pattern accidentally tamper-evident; and the deafness lasts one wakeup, not forever. Written discipline did not prevent this error even in its own authors the night they wrote it, so the durable rule is structural: no machine-wide process verbs (`pgrep`/`pkill`) anywhere near the word `watch`. Stopping the exact watch **you** armed, by its own harness/session handle, is fine, because it's yours. Finding watches by process listing never is, because every watch you can see that way and did not arm is a sibling's.
 
@@ -246,7 +246,7 @@ post identity voice add --body-file <f>
 post identity voice withdraw [--lineage <name>]
 post identity terms set --body-file <f>
 post chat <channel> --join [--description TEXT]
-post chat <channel> --send [--anyway] [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
+post chat <channel> --send [--re ID] [--subject S] [--oversize] [--signature-ref TAG] (--body TEXT | --body-file PATH | stdin)
 post chat <channel> [--peek | --limit N] [--max-bytes N] [--framing auto|full|compact]
 post chat <channel> --message <msg-id> [--offset B] [--length B] --max-bytes N
 post chat <channel> --ack <msg-id>
@@ -618,17 +618,19 @@ All body-bearing reads accept `--framing auto|full|compact`. The default `auto`
 is quiet; explicit `full` and `compact` request recurring banners. JSON keeps
 source/authority metadata and omits policy prose in auto mode.
 
-Crossed-send bounce (v0.4, narrowed in v0.7): on channel `--send`, unseen
-messages addressed to the sending room (an `@mention` of it, a reply to
-something it wrote, or any message from the owner room) refuse the send:
-exit nonzero with a structured `crossed_send` error previewing the targeted
-messages (first line each, capped at five) so the sender can revise. Unseen
-messages that concern nobody in particular warn with a count on stderr and
-deliver. `--anyway` delivers regardless, and every decision is appended to
-`<root>/crossed-send.jsonl`, including how long after a refusal an `--anyway`
-followed. Humans see incoming while typing; agents get the equivalent at the
-send point. Direct mail is unaffected. A TOCTOU window between check and
-append is accepted; corrupting the store is not.
+Crossed sends (v0.4; the refusal was removed in this wave): a channel
+`--send` always delivers. When unseen messages from others crossed it, the
+receipt carries a `crossed` block (`unseen`, `addressed_to_you`, and up to ten
+messages, newest last): the whole body for a message addressed to the sending
+room (an `@mention` of it, a reply to something it wrote, or any message from
+the owner room) and a 300-character preview otherwise. Text mode prints them
+after the sent line. The crossed messages stay unread, and every crossing is
+appended to `<root>/crossed-send.jsonl` (outcome `delivered_crossed`). The old
+`crossed_send` refusal and its `--anyway` flag went away because agents passed
+`--anyway` pre-emptively, so the refusal only cost a retry. Humans see incoming
+while typing; agents get the equivalent at the send point. Direct mail is
+unaffected. A TOCTOU window between check and append is accepted; corrupting
+the store is not.
 
 Mentions / threads / presence / receipts (v0.4): `@<room>` in a channel body
 (word-boundary match against registered rooms) stamps `mentions` and makes
@@ -857,26 +859,27 @@ inject metadata-only new-mail notices into live agent sessions:
   `claude-mail` becomes bare `node`). Idle wake: point Grok `monitor` at
   `node ~/.grok/hooks/post-watch-notice.mjs`, never at raw `post watch`.
 
-`codex-notify-monitor.mjs` plus `install-codex-doorbell.mjs` are the idle-wake
-layer for a harness with no monitor primitive: a per-agent launchd job that
-snapshots one room (and optionally selected channels via repeated `--channel`)
-every 5 seconds by default (configure it with
-`--interval-seconds <positive-integer>`) and, when the named Herdr agent is
-safely backgrounded at `idle`/`done`, submits one fixed
-`[post-doorbell:v1]` notice with at most 20 validated refs. It never includes
-mail bodies, senders, subjects, or claimed authority, and it records dedupe state only after the controller accepts the
-prompt. Herdr is a separate prerequisite (a multi-agent terminal controller),
-not part of post. The installer is labeled Codex; the sink is Herdr and
-already wakes `--kind cursor` and `--kind grok` agents: reuse it, don't fork
-it. On Linux, `install-systemd-doorbell.mjs` is the equivalent installer:
-per-agent systemd user units and timers with the same monitor contract and
-environment pinning. The doorbell daemon itself lives at `doorbell/` with its
-own README, unit template, and test suite.
+`doorbell-supervisor.mjs` is the idle-wake layer for a harness with no monitor
+primitive: one launchd (macOS) or systemd user (Linux) service per host, installed
+by `node skills/post/hooks/install-doorbell-supervisor.mjs` and inspected with
+`post-doorbell status`. Every 2 seconds it lists Herdr panes, binds each to a
+participant by exact session digest, and reads that participant's unread mail
+and joined-channel messages through `post watch --snapshot`. When there is
+something new it submits one fixed `[post-doorbell:v2]` notice to the bound
+pane. It never includes mail bodies, senders, subjects, or claimed authority,
+and it records dedupe state only after the controller accepts the prompt. A
+bound participant is armed by default; `post-doorbell disable` opts out. Herdr
+is a separate prerequisite (a multi-agent terminal controller), not part of
+post. The installer also moves the older per-agent timers over one at a time
+(`--list-legacy`, `--migrate <agent>`, `--migrate-all`); those timers, their
+installers (`install-codex-doorbell`, `install-systemd-doorbell`), the
+`codex-notify-monitor` script, and the Python doorbell daemon are gone from
+this repository. Design and safety properties:
+[`docs/plans/doorbell-supervisor-design.md`](docs/plans/doorbell-supervisor-design.md).
 
-This monitor runs unbound with workspace room arguments. It is a
-workspace-aggregate bell, not participant-aware delivery, and it does not wake
-for participant-scoped, lineage, or private-address mail; the four lifecycle
-adapters are participant-aware. Follow-up bead `post-pe2` tracks that gap.
+Unlike the monitor it replaced, the supervisor is not a workspace-aggregate
+bell: it is participant-aware and rings for that participant's own mail and
+channels.
 
 Full install commands, the adapter contract, environment pinning rules, and
 the porting recipe for other harnesses and controllers live in

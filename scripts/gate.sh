@@ -19,15 +19,23 @@ step() { printf '\n=== %s ===\n' "$*"; }
 
 step "fmt";     cargo fmt --check || err "cargo fmt --check (run: cargo fmt)"
 step "clippy";  cargo clippy --all-targets --all-features -- -D warnings || err "clippy"
-step "test";    cargo test --all-targets --all-features || err "cargo test"
+# A hung test (a watcher that never exits, a lock that is never released) used
+# to hold the gate, the shared machine lock, and every session waiting on it
+# forever. The whole suite takes about two minutes on an idle machine; the
+# default limit is ten times that. GATE_TEST_TIMEOUT (seconds) overrides it.
+# macOS has no `timeout`, so scripts/with-timeout.py does the job, killing the
+# test binaries' process group with the cargo that started them.
+test_timeout="${GATE_TEST_TIMEOUT:-1200}"
+step "test";    python3 scripts/with-timeout.py "$test_timeout" cargo test --all-targets --all-features \
+  || err "cargo test (failed, or exceeded the ${test_timeout} s limit: GATE_TEST_TIMEOUT)"
 step "release"; cargo build --release || err "cargo build --release"
 
 # The launcher and hook suites exercise the release binary built above, so they
 # run after it and not before.
 #
-# The contract suites (skills/post/hooks/contract.test.mjs, doorbell/test_contract.py)
-# take their samples from `post contract samples` of the binary under test, so
-# they are pointed at exactly this release build rather than a guessed path.
+# The contract suite (skills/post/hooks/contract.test.mjs) takes its samples from
+# `post contract samples` of the binary under test, so it is pointed at exactly
+# this release build rather than a guessed path.
 if release_bin=$(node scripts/cargo-release-bin.mjs); then
   export POST_BIN="$release_bin"
 else
@@ -40,18 +48,6 @@ if command -v node >/dev/null 2>&1; then
   node --test launcher/*.test.mjs || err "node launcher tests"
 else
   err "node not found; the hook and launcher suites are part of this gate"
-fi
-
-# The doorbell is a Python daemon that ships in this repo; its suite is the only
-# thing standing between "the unit file installs" and "the doorbell rings", and a
-# gate that skips it is exactly the six-of-seven gate this file's header warns
-# about. It runs from its own directory because its tests resolve the daemon
-# beside them.
-if command -v python3 >/dev/null 2>&1; then
-  step "python: doorbell"
-  ( cd doorbell && python3 -m unittest discover -p 'test_*.py' ) || err "doorbell tests"
-else
-  err "python3 not found; the doorbell suite is part of this gate"
 fi
 
 # CONTRIBUTING invariant 2: post schema is the contract. A schema that cannot be

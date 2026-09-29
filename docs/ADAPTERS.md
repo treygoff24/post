@@ -29,9 +29,8 @@ for nothing until its next activity.
 **2. Out-of-band wake.** Something outside the session — a launchd job, a
 harness monitor primitive, a controller API — notices mail and *starts a
 turn* in an idle session. This is the only way mail reaches an agent that is
-sitting between turns. The shipped launchd doorbell wakes a named Herdr
-agent through Herdr's agent-control API (the installer is labeled Codex; the
-sink is Herdr and already covers `--kind cursor` and `--kind grok`). Claude
+sitting between turns. The shipped doorbell supervisor wakes the agent
+in a Herdr pane through Herdr's agent-control API. Claude
 Code's Monitor, Grok's `monitor` tool, and Cursor's background-task
 completion are native controller primitives — but raw watch output is not by
 itself a safe adapter; `watch-notice.mjs` (or the equivalent validator /
@@ -47,8 +46,8 @@ still complete mail notification — it is simply activity-gated.
 | Lifecycle hooks | In-session adapter | No; notices arrive on next activity |
 | Claude Code hooks | Shipped lifecycle adapter | Requires a validated Monitor controller; none ships here |
 | Codex CLI hooks | Shipped lifecycle adapter | No native idle wake; shipped macOS/Linux options use external Herdr |
-| Cursor CLI hooks | Shipped lifecycle adapter | Native: wrap `post watch --once` with `watch-notice.mjs` (Cursor starts a turn on background-task completion). Herdr doorbell also wakes `--kind cursor` |
-| Grok Build hooks | Shipped lifecycle adapter (UserPromptSubmit only) | Native: point Grok `monitor` at `watch-notice.mjs`, never at raw `post watch`. Herdr doorbell also wakes `--kind grok` |
+| Cursor CLI hooks | Shipped lifecycle adapter | Native: wrap `post watch --once` with `watch-notice.mjs` (Cursor starts a turn on background-task completion). |
+| Grok Build hooks | Shipped lifecycle adapter (UserPromptSubmit only) | Native: point Grok `monitor` at `watch-notice.mjs`, never at raw `post watch`. |
 | Addressable session controller | Lifecycle adapter plus controller port | Yes, after controller acceptance |
 
 ## The adapter contract
@@ -208,7 +207,7 @@ post watch --room <room>                 (NDJSON detector)
 Do not point Monitor directly at `post watch --text` or raw NDJSON: that skips
 rules 1-3 and lets attacker-reachable metadata enter context without the
 adapter boundary. A Monitor controller can reuse the validation, rendering,
-and current-snapshot algorithm in `codex-notify-monitor.mjs`, replacing only
+and current-snapshot handling in `doorbell-supervisor.mjs`, replacing only
 the final Herdr lookup/prompt calls with Monitor's delivery surface. No
 standalone Claude Monitor wrapper ships in this release; until that small port
 is written and its failure path tested, the shipped Claude lifecycle adapter
@@ -287,8 +286,8 @@ the background task at raw `post watch --once`. Use the copied renderer:
 node ~/.cursor/hooks/post-watch-notice.mjs --once
 ```
 
-The Herdr doorbell already wakes a named `--kind cursor` agent; do not fork
-`install-codex-doorbell.mjs` for Cursor.
+This background task is Cursor's idle wake; do not add a second wake
+mechanism for the same agent.
 
 ## Shipped adapter: Grok Build
 
@@ -327,8 +326,8 @@ node ~/.grok/hooks/post-watch-notice.mjs
 ```
 
 Long-running is the default (one notice line per flushed batch). `--once` /
-`--snapshot` are single scans. The Herdr doorbell already wakes a named
-`--kind grok` agent; do not fork `install-codex-doorbell.mjs` for Grok.
+`--snapshot` are single scans. `monitor` is Grok's idle wake; do not add a
+second wake mechanism for the same agent.
 
 ## Shipped renderer: watch-notice
 
@@ -349,76 +348,48 @@ exit 0. Scan failure: one UNKNOWN line, exit 1. A malformed batch is one
 UNKNOWN line with no event fields echoed. It never pins `--room` unless the
 caller passed it. Never `pgrep` / `pkill`.
 
-## Shipped wake layer: doorbell → Herdr
+## Shipped wake layer: doorbell supervisor → Herdr
 
-On Linux, use `node skills/post/hooks/install-systemd-doorbell.mjs --room
-<room> --agent <herdr-agent>` (the same channel and interval flags as below).
-It creates a private `~/.local/state/post-codex-doorbell` log/state directory
-before enabling the per-agent user timer; timer accuracy is 1 s. Uninstall with
-the same script's `--uninstall --agent <herdr-agent>`.
-
-The embedded `doorbell/` tree (also maintained in the `post-doorbell` repository)
-provides a continuous-watch Linux service (`post-doorbell@.service`); see
-`doorbell/README.md` for setup and behavior. Its service PATH
-includes `%h/.local/bin` for `post` and `herdr`. Choose one wake mechanism per
-agent rather than running both. The launchd instructions below are macOS-only.
-
-Files: `skills/post/hooks/codex-notify-monitor.mjs`,
-`install-codex-doorbell.mjs` (+ tests).
+Files: `skills/post/hooks/doorbell-supervisor.mjs`,
+`install-doorbell-supervisor.mjs` (+ tests).
 
 This is the worked example of out-of-band wake for a harness with **no**
-monitor primitive (Codex CLI). A launchd LaunchAgent ticks every 5 s by
-default, runs one snapshot for one configured room (and optionally selected
-channels via `--channel`), and — when there is fresh mail and the target agent is
-unfocused and idle/done — wakes exactly one explicitly named agent through
-the controller's public API, delivering a bounded metadata-only ring.
+monitor primitive (Codex CLI). One service per host (a launchd LaunchAgent,
+`dev.post.doorbell-supervisor`, on macOS; a systemd user service,
+`post-doorbell-supervisor.service`, on Linux) lists Herdr panes every 2 s,
+binds each pane to a participant by exact session digest, and reads that
+participant's unread mail and joined-channel messages through
+`post watch --snapshot`. When there is something new it wakes exactly that
+pane's agent through the controller's public API, delivering a bounded
+metadata-only ring (`[post-doorbell:v2]`). It replaces the per-agent timers
+and the Python daemon that earlier releases shipped; those are removed.
 
-The `codex-notify-monitor` launched by `install-codex-doorbell` or its systemd
-unit remains a workspace-aggregate bell: it runs unbound with workspace room
-arguments and does not provide participant-scoped, lineage, or private-address
-idle wake. The four lifecycle adapters are participant-aware; follow-up bead
-`post-pe2` tracks the monitor gap.
+The supervisor is participant-aware. It rings for its own participant's mail
+and joined channels, unlike the workspace-aggregate monitor it replaced. A
+bound participant is armed by default; `post-doorbell disable` opts out until
+`post-doorbell enable` runs again. Choose one wake mechanism per agent rather
+than running two.
 
-The installer is named for Codex because that is the harness that needed an
-external controller first. The sink is Herdr: `herdr agent get <name>` of a
-`--kind cursor` or `--kind grok` agent is a valid `--agent` target. Reuse
-this installer; do not fork it per harness unless the copy path
-(`~/.codex/hooks/`) becomes a problem.
-
-**Herdr is a separate prerequisite, not part of post.** The shipped monitor
+**Herdr is a separate prerequisite, not part of post.** The supervisor
 targets [Herdr](https://herdr.dev) (a multi-agent terminal controller with a
 public install: `curl -fsSL https://herdr.dev/install.sh | sh`; see its
 [installation guide](https://herdr.dev/docs/install/)) because that is the
 controller this machine runs.
-The monitor's controller surface is small — "is agent X unfocused and idle?"
-and "start a turn in agent X with this text" — so porting it to any
-controller that can answer those two questions is a bounded edit of
-`codex-notify-monitor.mjs`.
 
 ```bash
-herdr agent list
-herdr agent rename <target-from-list> post-codex
-herdr agent get post-codex
-node skills/post/hooks/install-codex-doorbell.mjs \
-  --room <room> --agent post-codex \
-  [--channel <name>]... [--interval-seconds <n>]
+node skills/post/hooks/install-doorbell-supervisor.mjs --dry-run   # what it would do
+node skills/post/hooks/install-doorbell-supervisor.mjs             # install or refresh
+post-doorbell status                                                # what it sees
 ```
 
-The target must already exist: the installer refuses to write anything unless
-`herdr agent get <name>` returns that exact agent. Agent names start with a
-lowercase letter and contain only lowercase letters, digits, `_`, or `-`
-(maximum 32 characters). Repeat `--channel <name>` for each joined channel
-that should ring; omit it for direct mail only.
-`--interval-seconds` accepts a positive integer and defaults to 5. Increase it
-when lower process churn matters more than immediate wake latency.
-
-Install copies the monitor to `~/.codex/hooks/`, writes a per-agent
-LaunchAgent (`dev.post.codex-doorbell.<agent>`), and loads it. Idempotent;
-uninstall removes only that agent's plist, state, and logs.
-
-```bash
-node skills/post/hooks/install-codex-doorbell.mjs --uninstall --agent post-codex
-```
+The installer starts the service and waits for a healthy first tick (both
+`herdr` and `post` answered); an unhealthy start is stopped again and
+reported. To move an old per-agent timer over, run
+`--list-legacy`, then `--migrate <agent>` (or `--migrate-all`): each timer is
+disabled only after the supervisor shows the same subscription armed and
+scanning. `--uninstall` removes only the supervisor and prints the commands to
+restore the legacy units; `--restore-legacy` re-enables them. Design and safety
+properties: [`docs/plans/doorbell-supervisor-design.md`](plans/doorbell-supervisor-design.md).
 
 ## Participants and lineage voices (layer 2)
 
@@ -527,7 +498,7 @@ lineage, voice, or terms file can alter authority.
 7. **Add a wake layer if your harness can be woken.** Monitor primitive or
    background-task-exit notification → put the same validator, renderer, and
    delivery-aware deduper between NDJSON and the harness notification.
-   External controller → port the doorbell monitor's final delivery calls.
+   External controller → port the doorbell supervisor's final delivery calls.
 
 ## Manual / no-wake loop
 

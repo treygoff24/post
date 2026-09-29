@@ -18,7 +18,16 @@ where
     let cli = match cli::Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
         Err(error) => match error.kind() {
-            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+            // `post --version` IS `post version`: clap's own text would be a
+            // second, shorter build line ("post 0.9.0") that names no commit.
+            ErrorKind::DisplayVersion => {
+                let program = argv.first().cloned().unwrap_or_else(|| "post".into());
+                match cli::Cli::try_parse_from([program, OsString::from("version")]) {
+                    Ok(cli) => cli,
+                    Err(_) => return 70,
+                }
+            }
+            ErrorKind::DisplayHelp => {
                 return if error.print().is_ok() { 0 } else { 70 };
             }
             _ => {
@@ -37,19 +46,44 @@ where
         },
     };
     let pretty = cli.pretty;
+    let human = human_rendering(&cli);
+    let report = |error: &AppError| {
+        if human {
+            output::write_error_text(error);
+        } else {
+            output::write_error(error, pretty);
+        }
+    };
     match commands::execute(cli) {
         Ok(result) => match finish_process_stdout(result) {
             Ok(exit_code) => exit_code,
             Err(error) => {
-                output::write_error(&error, pretty);
+                report(&error);
                 error.exit_code
             }
         },
         Err(error) => {
-            output::write_error(&error, pretty);
+            report(&error);
             error.exit_code
         }
     }
+}
+
+/// True when the caller chose a human-only rendering (`--text`, `--brief`):
+/// its errors are prose on stderr, not a JSON envelope. `--json` always wins.
+/// A command with no human flag keeps the envelope in both modes: hooks and
+/// wrappers parse it (`error.code`), and the flagless default is what they run.
+fn human_rendering(cli: &cli::Cli) -> bool {
+    use cli::Command;
+    !cli.json
+        && match &cli.command {
+            Command::Doctor(args) => args.brief,
+            Command::Channels(args) => args.text,
+            Command::Who(args) => args.text,
+            Command::Inbox(args) => args.text,
+            Command::Watch(args) => args.text,
+            _ => false,
+        }
 }
 
 fn finish_process_stdout(result: CommandResult) -> AppResult<i32> {
@@ -110,12 +144,16 @@ impl Write for StrictStdout {
 fn parse_failure_fix(message: &str, argv: &[OsString]) -> Option<(Option<String>, String)> {
     let subcommand = subcommand_of(argv);
     let subcommand = subcommand.as_deref();
-    // Agents keep typing `post send <room> --body …`; the positional is a body
-    // FILE, so clap reports a FILE/--body conflict that hides the real mistake.
-    if message.contains("'[FILE]' cannot be used with '--body") {
+    // Agents keep typing `post send <room> --body …`; the bare argument is the
+    // message body, so clap reports a BODY/--body conflict that hides the real
+    // mistake: the room belongs in --to.
+    if subcommand == Some("send")
+        && message.contains("'[BODY]'")
+        && message.contains("cannot be used with")
+    {
         return Some((
             None,
-            "The recipient is named by --to, never by position: the positional argument is a body FILE. Pass the recipient as a flag and the message as --body."
+            "The recipient is named by --to, never by position: a bare argument is the message body, so it cannot be combined with --body or --body-file. Pass the recipient as --to <ROOM> and give the body once; `post schema` lists the exact grammar."
                 .to_owned(),
         ));
     }
@@ -198,6 +236,23 @@ fn finish_command_result<W: Write>(mut result: CommandResult, stdout: &mut W) ->
         .and_then(|_| stdout.flush())
     {
         if result.registration_committed {
+            // The change landed; only the receipt could not be shown. Say so
+            // where a person might still look, and exit as the command did:
+            // a nonzero exit here invites a retry that would repeat the change.
+            eprintln!(
+                "post: the change was committed but stdout could not take the result ({source})"
+            );
+            return Ok(result.exit_code);
+        }
+        // The reader went away (`| head`, a parser that gave up). A command
+        // with nothing deferred has nothing to undo and nothing to retry, so
+        // the ordinary Unix answer applies: stop quietly. A command that still
+        // owes a state change after its output (a consuming read) keeps the
+        // error below, because that mail really is still unread.
+        if source.kind() == std::io::ErrorKind::BrokenPipe
+            && result.after_stdout.is_none()
+            && !result.delivery_committed
+        {
             return Ok(result.exit_code);
         }
         return Err(if result.delivery_committed {
@@ -271,5 +326,51 @@ mod tests {
                 .expect("a committed registration must not invite a retry"),
             0
         );
+    }
+
+    #[test]
+    fn a_send_that_landed_exits_as_it_did_when_its_receipt_cannot_be_written() {
+        // `post send` returns a committed delivery that is also a committed
+        // registration: the mail exists, so no stdout failure may read as a
+        // failed send (a caller that retries sends a second copy).
+        let landed = CommandResult::committed("receipt\n".to_owned()).registration_committed();
+        assert_eq!(
+            finish_command_result(landed, &mut BrokenWriter)
+                .expect("a landed send must not exit nonzero"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_reader_that_went_away_ends_a_read_only_command_quietly() {
+        // `post who --text | head`: nothing was changed, so there is nothing to
+        // retry and no error to print. The command's own exit code stands.
+        let listing = CommandResult::success("listing\n".to_owned());
+        assert_eq!(
+            finish_command_result(listing, &mut BrokenWriter).expect("EPIPE on a read-only result"),
+            0
+        );
+        let mut findings = CommandResult::success("findings\n".to_owned());
+        findings.exit_code = 1;
+        assert_eq!(
+            finish_command_result(findings, &mut BrokenWriter).expect("EPIPE keeps the exit code"),
+            1
+        );
+    }
+
+    #[test]
+    fn only_a_closed_pipe_is_quiet_for_read_only_commands() {
+        struct FullDisk;
+        impl io::Write for FullDisk {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("no space left on device"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = finish_command_result(CommandResult::success("x\n".to_owned()), &mut FullDisk)
+            .expect_err("a genuine write failure is still reported");
+        assert_eq!(error.code, crate::error::ErrorCode::IoError);
     }
 }

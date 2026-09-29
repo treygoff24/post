@@ -208,11 +208,9 @@ fn run_participant(
         ));
     }
     let Some((address, mail, already_read, pending, recipient, own)) = candidates.pop() else {
-        if let Some((channel, full_id, depth)) =
-            crate::channel::find_channel_message(context, &args.id)
+        if let Some((channel, full_id, _)) = crate::channel::find_channel_message(context, &args.id)
         {
-            let quoted = crate::mailbox::shell_quote(&channel);
-            let fix = format!("post chat {quoted} --history {depth}");
+            let fix = channel_message_fix(&channel, &full_id);
             return Err(AppError::new(
                 ErrorCode::NotFound,
                 format!(
@@ -968,12 +966,8 @@ fn resolve_already_read(
         // read, or archived, so the old answer was true, useless, and paired
         // with a fix (`post inbox`) that cannot show channel messages either --
         // two wrong answers in one error.
-        if let Some((channel, full_id, depth)) = crate::channel::find_channel_message(context, id) {
-            let quoted = crate::mailbox::shell_quote(&channel);
-            // --history <depth> is the only form that renders the message the
-            // caller named. --since <id> renders everything AFTER it, which is
-            // every message except the one they asked about.
-            let fix = format!("post chat {quoted} --history {depth}");
+        if let Some((channel, full_id, _)) = crate::channel::find_channel_message(context, id) {
+            let fix = channel_message_fix(&channel, &full_id);
             return Err(AppError::new(
                 ErrorCode::NotFound,
                 format!(
@@ -1114,6 +1108,20 @@ fn render(
         append_projection_state(&mut rendered, projection, will_consume);
         Ok(rendered)
     }
+}
+
+/// The command that shows the channel message an id named to `post read`.
+/// `--message <id>` renders exactly that message and consumes nothing;
+/// `--history <n>` needed a depth counted from the newest message, and
+/// `--since <id>` renders everything after it, never the message itself.
+/// `--max-bytes` is required by `--message`; 32768 holds a whole body under
+/// the default size guard, and a longer one reports its next offset.
+fn channel_message_fix(channel: &str, full_id: &str) -> String {
+    format!(
+        "post chat {} --message {} --max-bytes 32768",
+        crate::mailbox::shell_quote(channel),
+        crate::mailbox::shell_quote(full_id)
+    )
 }
 
 #[cfg(test)]

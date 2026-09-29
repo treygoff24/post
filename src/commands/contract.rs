@@ -84,16 +84,16 @@ struct SkillManifestOutput {
 }
 
 #[derive(Serialize)]
-struct SkillVerifyOutput {
+pub(super) struct SkillVerifyOutput {
     ok: bool,
-    verdict: &'static str,
+    pub(super) verdict: &'static str,
     served: String,
     kind: &'static str,
     resolved: String,
     checked: usize,
-    mismatched: Vec<&'static str>,
-    missing: Vec<&'static str>,
-    extra: Vec<String>,
+    pub(super) mismatched: Vec<&'static str>,
+    pub(super) missing: Vec<&'static str>,
+    pub(super) extra: Vec<String>,
     rendered_unverified: Vec<&'static str>,
 }
 
@@ -170,7 +170,7 @@ fn write_samples(dir: &Path) -> AppResult<()> {
 /// binary cannot strip fences to prove the rendering faithful. Everything else
 /// must match byte for byte, with nothing missing and nothing extra in the
 /// covered subtrees.
-fn verify_served(served: &Path) -> AppResult<SkillVerifyOutput> {
+pub(super) fn verify_served(served: &Path) -> AppResult<SkillVerifyOutput> {
     verify_against(served, SKILL_MANIFEST)
 }
 

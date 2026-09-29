@@ -184,7 +184,7 @@ fn help_and_schema_keep_command_contract_visible() {
         .expect("watch command in schema");
     assert_eq!(
         watch.usage,
-        "post watch [--room <name>]... [--once | --snapshot [--limit <n>]] [--interval-ms <ms>] [--reason mail|channel|mention]... [--digest] [--text]"
+        "post watch [--room <name>]... [--own <room>]... [--once | --snapshot [--limit <n>]] [--from now] [--interval-ms <ms>] [--reason mail|channel|mention]... [--digest] [--text]"
     );
     assert!(watch.side_effects.contains("deduplicates channel messages"));
     assert!(watch.side_effects.contains("--snapshot"));
@@ -194,10 +194,10 @@ fn help_and_schema_keep_command_contract_visible() {
     assert_eq!(
         schema.output_shapes.watch,
         vec![
-            "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?",
+            "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (true when the acting participant's cursor state could not be read, so everything reads as unseen)",
             "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
-            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_host?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?",
-            "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix)",
+            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_host?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (as on mail)",
+            "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix), cursor_unusable? (as on mail)",
         ]
     );
     assert!(
@@ -212,13 +212,21 @@ fn help_and_schema_keep_command_contract_visible() {
     let help = sandbox.run(&["--help"]);
     assert_success(&help);
     let text = stdout(&help);
-    for command in expected_commands {
+    // `bridge` is a bridge-only entry point: it stays in the schema (consumers
+    // parse it) but is hidden from the help agents read.
+    for command in expected_commands.iter().filter(|name| **name != "bridge") {
         assert!(
             text.lines()
                 .any(|line| line.trim_start().starts_with(&format!("{command} "))),
             "top-level help omitted command {command}: {text}"
         );
     }
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("bridge ")),
+        "top-level help must hide the bridge-only command: {text}"
+    );
     assert!(text.contains("direct-mail and joined-channel notifications"));
 }
 
@@ -3631,9 +3639,17 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     fs::create_dir_all(&workspace).expect("create room workspace");
     let workspace_arg = workspace.to_string_lossy().into_owned();
     assert_success(&sandbox.run(&["rooms", "add", "claude-space", &workspace_arg]));
+    // A registered room's inbox/ and read/ appear with its first mail. Their
+    // absence is normal, so doctor neither reports nor creates them.
     let refixed = sandbox.run(&["doctor", "--fix"]);
-    let _: DoctorOutput = from_stdout(&refixed);
-    assert!(sandbox.mail_root.join("claude-space/inbox").is_dir());
+    let report: DoctorOutput = from_stdout(&refixed);
+    assert!(report.ok, "{:?}", report.checks);
+    assert!(!report
+        .checks
+        .iter()
+        .any(|check| check.id.contains("inbox_missing") || check.id.contains("read_missing")));
+    assert!(!sandbox.mail_root.join("claude-space/inbox").exists());
+    fs::create_dir_all(sandbox.mail_root.join("claude-space/inbox")).expect("create inbox");
 
     fs::write(
         sandbox.mail_root.join("claude-space/inbox/stray.txt"),
@@ -4065,6 +4081,7 @@ fn body_can_come_from_stdin_without_a_tty_or_prompt() {
         "claude-space",
         "--from",
         "file-test",
+        "--body-file",
         &body_file_arg,
         "--json",
     ]);
@@ -4261,7 +4278,18 @@ fn watch_event_ndjson_warns_without_blocking_legitimate_forensics() {
         "--json",
     ]);
     assert!(warned.status.success(), "stderr: {}", stderr(&warned));
-    assert!(stderr(&warned).contains("contains Post watch-event NDJSON"));
+    // The warning rides in the receipt: 36% of callers discard stderr, and a
+    // stderr line broke `--json 2>&1 | jq`.
+    assert!(stderr(&warned).is_empty(), "stderr: {}", stderr(&warned));
+    let receipt: SendOutput = from_stdout(&warned);
+    assert!(
+        receipt
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("contains Post watch-event NDJSON")),
+        "warnings: {:?}",
+        receipt.warnings
+    );
 
     let control = sandbox.run(&[
         "send",
@@ -4274,7 +4302,8 @@ fn watch_event_ndjson_warns_without_blocking_legitimate_forensics() {
         "--json",
     ]);
     assert_success(&control);
-    assert!(!stderr(&control).contains("contains Post watch-event NDJSON"));
+    let control: SendOutput = from_stdout(&control);
+    assert!(control.warnings.is_empty(), "{:?}", control.warnings);
 }
 
 #[test]
@@ -9515,46 +9544,9 @@ fn who_room_scope_omits_participants_bound_to_other_rooms() {
     );
 }
 
-#[test]
-fn positional_prose_is_reported_as_prose_not_as_a_file_read_failure() {
-    let sandbox = Sandbox::new();
-    let _rooms = register_alpha_beta(&sandbox);
-
-    // Short prose lands in the body-FILE slot: a usage error (exit 2) whose
-    // remedy is the runnable --body form, not an I/O retry.
-    let short = sandbox.run(&["send", "--to", "alpha", "hello"]);
-    assert_eq!(short.status.code(), Some(2), "stderr: {}", stderr(&short));
-    assert!(
-        stderr(&short).contains("not inline message text"),
-        "stderr: {}",
-        stderr(&short)
-    );
-
-    // Prose longer than a file name can be (NAME_MAX is 255 bytes) is still a
-    // usage error, but the payload must not be echoed back and the advice must
-    // not be a --body-file fix that can never run.
-    let prose = "x".repeat(6000);
-    let long = sandbox.run(&["send", "--to", "alpha", &prose]);
-    assert_eq!(long.status.code(), Some(2), "stderr: {}", stderr(&long));
-    let error = stderr(&long);
-    assert!(
-        !error.contains(&prose),
-        "the rejected payload was echoed back: {} bytes of it",
-        error.len()
-    );
-    assert!(
-        !error.contains("--body-file"),
-        "an over-long positional cannot be a body file: {error}"
-    );
-    assert!(
-        error.contains("--body"),
-        "the remedy must name --body: {error}"
-    );
-    assert!(
-        !error.contains("retry the same command"),
-        "an unreadable 'path' must not invite the same retry: {error}"
-    );
-}
+// `send`'s positional FILE is gone: a bare argument is the message body. The
+// replacement for the prose-in-the-file-slot test lives in tests/surface.rs
+// (`a_bare_argument_is_the_message_body`).
 
 #[test]
 fn who_reports_live_for_ten_second_interval_watch() {
@@ -11949,10 +11941,32 @@ fn pin_sets_sender_and_provenance_on_mail() {
     assert_success(&output);
     let sent: SendOutput = from_stdout(&output);
     assert_eq!(sent.envelope.from, "pinned-sender");
+    // Under --json the receipt is the whole answer: a stderr banner would
+    // break `post send --json 2>&1 | jq`, so the identity source is recorded
+    // in the archived envelope (below) and not printed.
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("POST_FROM pin"),
-        "stderr must name the pin as the identity source: {stderr}"
+        stderr.is_empty(),
+        "--json send must leave stderr empty: {stderr}"
+    );
+    // The text-mode banner still names the pin as the identity source.
+    let text = sandbox.run_in_env(
+        &[
+            "send",
+            "--to",
+            "claude-space",
+            "--body",
+            "pinned hello again",
+        ],
+        None,
+        &sandbox.path,
+        &[("POST_FROM", "pinned-sender")],
+    );
+    assert_success(&text);
+    let banner = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        banner.contains("POST_FROM pin"),
+        "text-mode stderr must name the pin as the identity source: {banner}"
     );
     let raw = fs::read_to_string(
         sandbox
@@ -13138,6 +13152,12 @@ fn read_recognizes_a_channel_message_id_and_names_a_command_that_shows_it() {
         .exact_fix
         .clone()
         .expect("channel id must carry an exact_fix");
+    // `--message <id>` names the message itself; a depth-counted `--history`
+    // silently shows a different message once newer mail arrives.
+    assert!(
+        fix.contains("--message") && fix.contains(&target) && fix.contains("--max-bytes"),
+        "the fix must read the named message directly: {fix}"
+    );
     let applied = sandbox.run_fix(&fix, &alpha);
     assert!(
         applied.status.success(),

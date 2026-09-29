@@ -1506,9 +1506,15 @@ fn strict_stdout_preserves_committed_delivery_and_registration_rules() {
         &["send", "--to", "beta", "--body", "committed delivery"],
         &alpha,
     );
-    assert_eq!(delivered.status.code(), Some(70));
-    let error: Value = common::from_stderr(&delivered);
-    assert_eq!(error["error"]["code"], "delivered_output_failure");
+    // A send that landed never exits nonzero, even when its receipt cannot be
+    // written: a nonzero exit made callers resend, and duplicates landed (the
+    // 2026-09-28 double-send). Registration-style success plus a stderr note.
+    assert_eq!(delivered.status.code(), Some(0));
+    assert!(
+        common::stderr(&delivered).contains("committed"),
+        "the lost receipt is noted on stderr: {}",
+        common::stderr(&delivered)
+    );
     assert_eq!(
         fs::read_dir(sandbox.mail_root.join("beta/inbox"))
             .expect("delivered inbox")

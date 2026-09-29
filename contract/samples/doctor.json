@@ -15,97 +15,9 @@
       "path": "/SANDBOX/mail/archive/20260101-000001-a00001.mail",
       "severity": "error",
       "suggested_fix": "Copy the delivered .mail file into archive with an exclusive no-replace write; do not resend it."
-    },
-    {
-      "fixable": true,
-      "id": "room.agent-memory.inbox_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/agent-memory/inbox",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.agent-memory.read_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/agent-memory/read",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.alpha.read_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/alpha/read",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.beta.inbox_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/beta/inbox",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.beta.read_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/beta/read",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.claude-space.inbox_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/claude-space/inbox",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.claude-space.read_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/claude-space/read",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.pact.inbox_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/pact/inbox",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.pact.read_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/pact/read",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.remote-room.inbox_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/remote-room/inbox",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
-    },
-    {
-      "fixable": true,
-      "id": "room.remote-room.read_missing",
-      "message": "required mailbox directory is missing",
-      "path": "/SANDBOX/mail/remote-room/read",
-      "severity": "error",
-      "suggested_fix": "Run `post doctor --fix` to create missing mailbox directories."
     }
   ],
-  "count": 12,
+  "count": 1,
   "exit_codes": [
     {
       "code": 0,

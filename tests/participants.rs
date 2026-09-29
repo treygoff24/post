@@ -2491,19 +2491,29 @@ fn participant_lifecycle_who_reports_active_stale_ended_and_crash_gap() {
         .as_str()
         .is_some_and(|note| note.contains("not reassigned")));
 
+    // Doctor rolls every inactive participant into ONE count line (a Mac with
+    // 1,800 stale records printed 1,800 warnings); `who` names each one.
     let doctor = sandbox.run_as_participant(&["doctor"], &active_id, &alpha);
     let doctor: Value = from_stdout(&doctor);
-    let messages = doctor["checks"]
-        .as_array()
-        .expect("doctor checks")
+    let checks = doctor["checks"].as_array().expect("doctor checks");
+    let stale: Vec<&Value> = checks
         .iter()
-        .filter_map(|check| check["message"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(messages.contains(&stale_id), "{messages}");
-    assert!(messages.contains(&missing_lease_id), "{messages}");
-    assert!(messages.contains("no lease record"), "{messages}");
-    assert!(messages.contains("not reassigned"), "{messages}");
+        .filter(|check| check["id"] == "participants.stale")
+        .collect();
+    assert_eq!(stale.len(), 1, "{checks:?}");
+    assert_eq!(stale[0]["severity"], "info");
+    let message = stale[0]["message"].as_str().expect("stale message");
+    assert!(
+        message.contains("1 with an expired lease") && message.contains("1 with no lease record"),
+        "{message}"
+    );
+    assert!(message.contains("not reassigned"), "{message}");
+    assert!(
+        !checks.iter().any(|check| check["message"]
+            .as_str()
+            .is_some_and(|text| text.contains(&stale_id) || text.contains(&missing_lease_id))),
+        "no per-participant lines: {checks:?}"
+    );
 }
 
 #[test]
