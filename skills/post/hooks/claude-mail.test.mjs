@@ -9,12 +9,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "claude-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-claude-hook-test-"));
 const CWD = path.join(ROOT, "some-project");
 fs.mkdirSync(CWD, { recursive: true });
 
+const MAIL_ROOT = path.join(ROOT, "mail");
 const STUB = path.join(ROOT, "post-stub.mjs");
 const CONTROL = path.join(ROOT, "stub-control.json");
 const CALLS = path.join(ROOT, "stub-calls.log");
@@ -90,6 +92,7 @@ function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
       STUB_CONTROL: CONTROL,
       STUB_CALLS: CALLS,
       DELEGATE_RUN_ID: "", // a delegate child is not minted at start; these tests are not one
+      POST_MAIL_ROOT: MAIL_ROOT, // turn marks never land in the live mail root
       ...extraEnv,
     },
   });
@@ -822,4 +825,59 @@ test("SessionEnd attempts participant end without scanning", () => {
   const out = run({ ...BASE, hook_event_name: "SessionEnd", session_id: "end-test" }, { stateDir });
   assert.match(out.hookSpecificOutput.additionalContext, /participant lifecycle update unavailable/);
   assert.deepEqual(allStubCalls().map((call) => call.args), [["participant", "end"]]);
+});
+
+function turnWorld(name) {
+  const mailRoot = path.join(ROOT, `turn-mail-${name}`);
+  const session = `turn-session-${name}`;
+  const markFile = path.join(mailRoot, "doorbell", "turns", `${createHash("sha256").update(session).digest("hex")}.json`);
+  return {
+    mailRoot,
+    markFile,
+    mark: () => JSON.parse(fs.readFileSync(markFile, "utf8")),
+    fire: (event, extra = {}, stateDir = freshStateDir()) =>
+      run({ session_id: session, cwd: CWD, hook_event_name: event, ...extra }, { stateDir, env: { POST_MAIL_ROOT: mailRoot } }),
+  };
+}
+
+test("doorbell turn marks: busy at prompt, idle at Stop with its background work, gone at SessionEnd", () => {
+  const t = turnWorld("life");
+  setStub({ events: [] });
+
+  // No doorbell directory: the hook creates nothing.
+  t.fire("Stop", { background_tasks: [{ type: "subagent" }] });
+  assert.ok(!fs.existsSync(t.mailRoot));
+
+  fs.mkdirSync(path.join(t.mailRoot, "doorbell"), { recursive: true });
+  t.fire("UserPromptSubmit");
+  assert.equal(t.mark().turn, "busy");
+  const before = allStubCalls().length;
+  assert.deepEqual(t.fire("Stop", { background_tasks: [{ type: "subagent" }] }), {});
+  assert.deepEqual([t.mark().turn, t.mark().event, t.mark().background], ["idle", "Stop", true]);
+  assert.equal(fs.statSync(t.markFile).mode & 0o777, 0o600);
+  t.fire("Stop", { background_tasks: [] });
+  assert.equal(t.mark().background, false, "an empty array is nothing in flight");
+  t.fire("Stop", {});
+  assert.equal(t.mark().background, false, "an older Claude Code without the field is treated as none");
+  assert.equal(allStubCalls().length, before, "Stop never runs post");
+  // Tool use no longer marks anything, and a subagent never does.
+  t.fire("Stop", { background_tasks: [{ type: "shell" }] });
+  t.fire("PreToolUse", { tool_name: "Bash" });
+  t.fire("UserPromptSubmit", { agent_id: "agent-1" });
+  assert.deepEqual([t.mark().turn, t.mark().background], ["idle", true]);
+  assert.deepEqual(fs.readdirSync(path.dirname(t.markFile)), [path.basename(t.markFile)], "no temp files left behind");
+  t.fire("SessionEnd", { reason: "exit" });
+  assert.ok(!fs.existsSync(t.markFile));
+});
+
+test("doorbell turn marks: every SessionStart clears a leftover mark", () => {
+  const t = turnWorld("start");
+  setStub({ events: [] });
+  fs.mkdirSync(path.join(t.mailRoot, "doorbell"), { recursive: true });
+  for (const source of ["startup", "resume", "clear", "compact"]) {
+    t.fire("Stop", { background_tasks: [{ type: "subagent" }] });
+    assert.equal(t.mark().turn, "idle");
+    t.fire("SessionStart", { source });
+    assert.ok(!fs.existsSync(t.markFile), `SessionStart ${source} must clear the mark`);
+  }
 });

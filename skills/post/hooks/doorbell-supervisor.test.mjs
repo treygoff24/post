@@ -146,10 +146,10 @@ function makeWorld({ config = {} } = {}) {
   const agentJson = (pane) => ({
     pane_id: pane.pane_id,
     terminal_id: pane.terminal_id,
-    agent: "codex",
+    agent: pane.agent ?? "codex",
     agent_status: pane.status ?? "idle",
     focused: pane.focused ?? false,
-    agent_session: pane.session === null ? undefined : { agent: "codex", kind: "id", source: "herdr:codex", value: pane.session },
+    agent_session: pane.session === null ? undefined : { agent: pane.agent ?? "codex", kind: "id", source: `herdr:${pane.agent ?? "codex"}`, value: pane.session },
   });
   w.exec = async (kind, args, opts = {}) => {
     w.calls.push({ kind, args: [...args], participant: opts.participant });
@@ -884,6 +884,143 @@ describe("recheck before the prompt (E3)", () => {
     await w.run();
     assert.equal(w.outcomes("failed").at(-1).stage, "herdr_prompt");
     assert.equal(fs.existsSync(w.sub("codex-aaaaaaaa").stateFile), false);
+  });
+});
+
+// A Claude pane Herdr calls `working` (background tasks keep the title spinner
+// after the main turn ends) and the turn mark the Claude mail hook writes.
+describe("Claude turn marks (post-bt2)", () => {
+  // The path claude-mail.mjs writes, spelled out rather than imported: this is
+  // the on-disk contract between the hook and the supervisor.
+  function writeMark(w, session, record) {
+    const dir = path.join(w.paths.doorbell, "turns");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${sha256(session)}.json`), JSON.stringify(record));
+  }
+
+  function claudeWorld() {
+    const w = makeWorld();
+    w.addParticipant("claude-aaaaaaaa", "session-c", { harness: "claude" });
+    w.addPane("wC:p1", "session-c", { agent: "claude", status: "working" });
+    w.enable("claude-aaaaaaaa");
+    w.snapshots.set("claude-aaaaaaaa", [mailWith("20260923-000001-ccccc1")]);
+    // "idle-bg" is a Stop with background work in flight: the bug case.
+    w.mark = (turn, session = "session-c") =>
+      writeMark(w, session, turn === "busy"
+        ? { turn: "busy", event: "UserPromptSubmit", at: "2026-09-29T16:09:00Z" }
+        : { turn: "idle", event: "Stop", background: turn === "idle-bg", at: "2026-09-29T16:09:00Z" });
+    w.mailArrives = () => {
+      w.sup.hint(["claude-aaaaaaaa"]);
+      w.sup.flushHints();
+    };
+    w.deferrals = () => w.logs.filter((r) => r.type === "deferred");
+    return w;
+  }
+
+  test("a working Claude pane idle at Stop with background work pending is rung", async () => {
+    const w = claudeWorld();
+    w.mark("idle-bg");
+    await w.run();
+    assert.deepEqual(w.prompts.map((p) => p.pane), ["wC:p1"]);
+    assert.equal(w.outcomes("accepted").length, 1);
+  });
+
+  test("an idle mark without background work never overrides working (a blocked stop)", async () => {
+    // Another Stop hook blocked the stop: the mark says idle, Claude is still
+    // working, and Herdr is right. Only background work explains a working
+    // spinner after a real stop.
+    const w = claudeWorld();
+    w.mark("idle");
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.equal(w.sub("claude-aaaaaaaa").scannable, false);
+  });
+
+  test("a working Claude pane whose turn is busy, or unmarked, is not rung", async () => {
+    const w = claudeWorld();
+    await w.run();
+    assert.equal(w.prompts.length, 0, "no mark: Herdr's working stands");
+    w.mark("busy");
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.equal(w.sub("claude-aaaaaaaa").scannable, false);
+  });
+
+  test("the last mark wins, and the recheck reads it fresh", async () => {
+    const w = claudeWorld();
+    w.mark("idle-bg");
+    w.mark("busy"); // a new turn after the Stop: the idle mark is stale
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    // Idle at discovery, busy again by the recheck: deferred, never typed.
+    w.mark("idle-bg");
+    const pane = w.panes[0];
+    w.getOverride.set("wC:p1", () => {
+      w.mark("busy");
+      return ok(JSON.stringify({ result: { agent: { pane_id: "wC:p1", terminal_id: pane.terminal_id, agent: "claude", agent_status: "working", focused: false, agent_session: { kind: "id", value: "session-c" } } } }));
+    });
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    assert.equal(w.sub("claude-aaaaaaaa").lastOutcome, "deferred");
+  });
+
+  test("another session's idle mark does not apply to this pane", async () => {
+    const w = claudeWorld();
+    w.mark("idle-bg", "session-old");
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+  });
+
+  test("a focused Claude pane with an idle turn still waits for --focused", async () => {
+    const w = claudeWorld();
+    w.panes[0].focused = true;
+    w.mark("idle-bg");
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    w.enable("claude-aaaaaaaa", { focused: true });
+    await w.run();
+    assert.equal(w.prompts.length, 1);
+  });
+
+  test("a non-Claude pane keeps Herdr's status even with an idle mark for its session", async () => {
+    const w = standardWorld();
+    w.panes[0].status = "working";
+    writeMark(w, "session-a", { turn: "idle", background: true });
+    await w.run();
+    assert.equal(w.prompts.length, 0);
+    w.panes[0].status = "idle";
+    await w.run();
+    assert.equal(w.prompts.length, 1);
+  });
+
+  test("mail for a pane that may not ring logs one deferred line per reason", async () => {
+    const w = claudeWorld();
+    w.mark("busy");
+    await w.run();
+    assert.equal(w.deferrals().length, 0, "no mail activity yet: nothing to report");
+    w.mailArrives();
+    await w.run();
+    await w.run();
+    w.mailArrives();
+    await w.run();
+    assert.deepEqual(
+      w.deferrals().map(({ participant, pane, reason, herdr_status, turn }) => ({ participant, pane, reason, herdr_status, turn })),
+      [{ participant: "claude-aaaaaaaa", pane: "wC:p1", reason: "working", herdr_status: "working", turn: "busy" }]
+    );
+    w.panes[0].focused = true;
+    w.panes[0].status = "idle";
+    await w.run();
+    assert.deepEqual(w.deferrals().map((r) => r.reason), ["working", "focused"]);
+    w.panes[0].focused = false;
+    await w.run();
+    assert.equal(w.prompts.length, 1);
+    w.panes[0].status = "working";
+    await w.run();
+    w.snapshots.set("claude-aaaaaaaa", [mailWith("20260923-000001-ccccc1"), mailWith("20260923-000001-ccccc2")]);
+    w.mailArrives();
+    await w.run();
+    assert.deepEqual(w.deferrals().map((r) => r.reason), ["working", "focused", "working"], "ringable in between re-arms the log");
+    assert.equal(w.prompts.length, 1);
   });
 });
 
