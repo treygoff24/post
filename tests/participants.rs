@@ -2343,9 +2343,12 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
             ],
             Some("marker"),
         ),
+        // The one reader that still answers from the room it runs in:
+        // Porch's pre-bind launch check needs it
+        // (porch_pre_bind_checks_keep_their_shape). It still writes nothing.
         (
             vec!["profile".to_owned(), "show".to_owned(), "--json".to_owned()],
-            Some("marker"),
+            None,
         ),
         (
             vec![
@@ -3455,4 +3458,49 @@ fn participant_unbound_watch_snapshot_answers_with_one_marker_event() {
     assert_eq!(long.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&long);
     assert_eq!(error.error.code, "no_participant");
+}
+
+/// Porch's launch check runs `post profile show --json` and `post owner show
+/// --json` in its owner room before it binds, and refuses any key it does not
+/// know: profile show must still answer with the room's legacy entry (`ok`,
+/// `room`, `profile`) there, and neither may carry the unbound marker's
+/// `bound`/`hint`. Outside a registered room, profile show is the marker.
+#[test]
+fn porch_pre_bind_checks_keep_their_shape() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+
+    let shown = sandbox.run_without_identity(&["profile", "show", "--json"], &alpha);
+    assert_success(&shown);
+    let value: Value = from_stdout(&shown);
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(value["room"], "alpha", "{value}");
+    assert!(value["profile"].is_object(), "{value}");
+    assert_eq!(value["legacy"], true, "{value}");
+    for key in ["bound", "hint"] {
+        assert!(
+            value.get(key).is_none(),
+            "profile show carried {key}: {value}"
+        );
+    }
+
+    let owner = sandbox.run_without_identity(&["owner", "show", "--json"], &alpha);
+    assert_success(&owner);
+    let value: Value = from_stdout(&owner);
+    assert_eq!(value["ok"], true, "{value}");
+    for key in ["bound", "hint"] {
+        assert!(
+            value.get(key).is_none(),
+            "owner show carried {key}: {value}"
+        );
+    }
+
+    let outside = sandbox.path.join("not-a-room");
+    fs::create_dir_all(&outside).expect("outside dir");
+    let marker = sandbox.run_without_identity(&["profile", "show", "--json"], &outside);
+    assert_success(&marker);
+    let value: Value = from_stdout(&marker);
+    assert_eq!(value["bound"], false, "{value}");
+    assert!(value["participant"].is_null(), "{value}");
+    assert!(value.get("room").is_none(), "{value}");
 }

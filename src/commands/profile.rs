@@ -190,6 +190,16 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     Ok(CommandResult::json(&output, pretty)?.registration_committed())
 }
 
+/// Whether the working directory lies inside a registered room: the only place
+/// an unbound `profile show` still answers with that room's legacy entry.
+pub(crate) fn cwd_in_registered_room(context: &Context) -> AppResult<bool> {
+    let rooms = context.load_rooms()?;
+    Ok(matches!(
+        context.infer_from_cwd(&rooms),
+        Ok((_, crate::model::SenderProvenance::InferredCwd))
+    ))
+}
+
 fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let profiles = load_profiles(context)?;
@@ -197,18 +207,20 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
     // or a bare participant id with an entry = that participant; any other
     // bare name = a legacy workspace-keyed entry (shown, never stamped).
     let (room, key, participant, legacy) = match args.participant {
-        None => {
-            // Read-only and binding-free: an unbound shell still resolves its
-            // cwd room and sees that room's legacy entry (never stamped).
-            let (room, _) = channel::acting_room(context, &rooms)?;
-            match crate::participant::resolve(context) {
-                Ok(crate::participant::Resolved::Bound { participant, .. }) => {
-                    let id = participant.id;
-                    (room, participant_key(&id), Some(id), false)
-                }
-                _ => (room.clone(), room, None, true),
+        None => match crate::participant::resolve(context) {
+            Ok(crate::participant::Resolved::Bound { participant, .. }) => {
+                let (room, _) = channel::acting_room(context, &rooms)?;
+                let id = participant.id;
+                (room, participant_key(&id), Some(id), false)
             }
-        }
+            // Unbound: the dispatcher lets this through only inside a
+            // registered room (see `cwd_in_registered_room`), whose legacy
+            // workspace entry is shown, never stamped.
+            _ => {
+                let (room, _) = context.infer_from_cwd(&rooms)?;
+                (room.clone(), room, None, true)
+            }
+        },
         Some(target) => {
             if let Some(id) = participant_of_key(&target) {
                 let id = id.to_owned();

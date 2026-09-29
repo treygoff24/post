@@ -104,7 +104,7 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         && resolution_error.is_none()
         && claim_to_restore.is_none()
     {
-        if let Some(marker) = unbound_reader_marker(&cli.command, json)? {
+        if let Some(marker) = unbound_reader_marker(&context, &cli.command, json)? {
             return Ok(marker);
         }
     }
@@ -434,19 +434,30 @@ fn unbound_marker_json(pretty: bool) -> AppResult<String> {
 /// The marker for a reader whose body would guess a room from the working
 /// directory. `inbox` and `watch --snapshot` answer for themselves (their
 /// output has a shape of its own, and an explicit `--room` still runs).
-fn unbound_reader_marker(command: &Command, json: bool) -> AppResult<Option<CommandResult>> {
+fn unbound_reader_marker(
+    context: &Context,
+    command: &Command,
+    json: bool,
+) -> AppResult<Option<CommandResult>> {
     let reader = match command {
         Command::Chat(_) => !migration_fence::classify_write(command),
         Command::Search(_) => true,
         Command::Read(_) => !participant_required(command),
         // `profile` and `profile show` with no target read the acting
         // participant's profile; a named target needs no participant.
-        Command::Profile(args) => matches!(
-            &args.command,
-            None | Some(crate::cli::ProfileCommand::Show(
-                crate::cli::ProfileShowArgs { participant: None }
-            ))
-        ),
+        // Compatibility, and the one exception: unbound inside a registered
+        // room, they still show that room's legacy workspace entry, marked
+        // `participant: "unbound"`, because Porch's launch check runs `post
+        // profile show` in its owner room before it binds and requires that
+        // shape. Remove once Porch checks only after binding.
+        Command::Profile(args) => {
+            matches!(
+                &args.command,
+                None | Some(crate::cli::ProfileCommand::Show(
+                    crate::cli::ProfileShowArgs { participant: None }
+                ))
+            ) && !profile::cwd_in_registered_room(context)?
+        }
         _ => false,
     };
     if !reader {
@@ -530,7 +541,7 @@ fn annotate_bound_now(result: &mut CommandResult, bound_now: &BoundNow) {
 }
 
 fn unbound_json_listing(command: &Command) -> bool {
-    use crate::cli::{OwnerCommand, ParticipantCommand, ProfileCommand, RoomsCommand};
+    use crate::cli::{ParticipantCommand, ProfileCommand, RoomsCommand};
     match command {
         Command::Rooms(args) => !matches!(
             args.command,
@@ -548,7 +559,9 @@ fn unbound_json_listing(command: &Command) -> bool {
             &args.command,
             Some(ProfileCommand::Show(show)) if show.participant.is_some()
         ),
-        Command::Owner(args) => matches!(args.command, None | Some(OwnerCommand::Show)),
+        // `owner show` reports the host's owner record, which does not depend
+        // on who is asking; Porch's launch check also refuses any key it does
+        // not know in it, so it carries no unbound marker.
         _ => false,
     }
 }
