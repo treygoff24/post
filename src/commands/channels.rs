@@ -83,6 +83,11 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         });
     }
 
+    // Members the roster left out (an invalid membership file) are missing from
+    // every `participants` list above: say so beside the listing, not only on
+    // stderr.
+    let skipped_members = roster.skipped().to_vec();
+
     let pending = if let Some(participant) = participant {
         let mut count = 0;
         for address in super::inbox::visible_addresses(context, participant)? {
@@ -148,6 +153,9 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         if let Some(notice) = crate::channel::skipped_notice(&skipped) {
             rendered.push_str(&notice);
         }
+        if let Some(notice) = crate::channel::skipped_members_notice(&skipped_members) {
+            rendered.push_str(&notice);
+        }
         return Ok(CommandResult::success(rendered));
     }
     let count = channels.len();
@@ -168,6 +176,7 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         ),
     );
     object.insert("pending".to_owned(), serde_json::json!(pending));
+    skipped.extend(skipped_members);
     if !skipped.is_empty() {
         object.insert("skipped".to_owned(), serde_json::json!(skipped));
     }

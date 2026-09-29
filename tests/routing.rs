@@ -647,9 +647,21 @@ fn routing_corrupt_participant_channels_do_not_break_other_members() {
         sandbox.run_as_participant(&["chat", "healthy", "--join", "--json"], &healthy, &beta);
     assert!(joined.status.success(), "{}", common::stderr(&joined));
     assert!(common::stderr(&joined).contains("invalid participant channels"));
+    // The listing names the member it left out on stdout (not only a stderr
+    // warning), so a short roster is never mistaken for a complete one.
     let listed = sandbox.run_as_participant(&["channels"], &healthy, &beta);
     assert!(listed.status.success(), "{}", common::stderr(&listed));
-    assert!(common::stderr(&listed).contains("invalid participant channels"));
+    let listed_json: Value = from_stdout(&listed);
+    assert_eq!(
+        listed_json["skipped"][0]["id"],
+        corrupt.as_str(),
+        "{listed_json}"
+    );
+    assert_eq!(
+        listed_json["skipped"].as_array().map(Vec::len),
+        Some(1),
+        "{listed_json}"
+    );
     let doctor = sandbox.run_as_participant(&["doctor"], &healthy, &beta);
     assert_eq!(doctor.status.code(), Some(1));
     let doctor: Value = from_stdout(&doctor);
@@ -788,7 +800,17 @@ fn routing_join_treats_unknown_participant_membership_conservatively() {
 
     let listed = sandbox.run_as_participant(&["channels"], &alpha_actor, &alpha);
     assert!(listed.status.success(), "{}", common::stderr(&listed));
-    assert!(common::stderr(&listed).contains("invalid participant channels"));
+    let listed_json: Value = from_stdout(&listed);
+    assert_eq!(
+        listed_json["skipped"][0]["id"],
+        gamma_actor.as_str(),
+        "{listed_json}"
+    );
+    assert_eq!(
+        listed_json["skipped"].as_array().map(Vec::len),
+        Some(1),
+        "{listed_json}"
+    );
 }
 
 #[test]

@@ -1053,6 +1053,22 @@ impl SkippedFile {
         self.channel = Some(channel.to_owned());
         self
     }
+
+    /// A channel member left out of a roster because its membership file is
+    /// invalid: the entry names the participant and the file's problem, in the
+    /// same `{id, reason}` shape as a skipped message file.
+    pub(crate) fn member(participant_id: &str, error: &AppError) -> Self {
+        let detail = error
+            .details
+            .reason
+            .clone()
+            .unwrap_or_else(|| error.message.clone());
+        Self {
+            id: participant_id.to_owned(),
+            reason: one_line(&format!("membership file is invalid: {detail}"), 300),
+            channel: None,
+        }
+    }
 }
 
 /// Collapse to one printable line of at most `cap` characters.
@@ -1069,6 +1085,33 @@ fn one_line(text: &str, cap: usize) -> String {
 /// `None` when it skipped nothing.
 pub(crate) fn skipped_notice(skipped: &[SkippedFile]) -> Option<String> {
     notice_line(skipped, SkippedDetail::Listed, "--json lists all")
+}
+
+/// The single stdout line a text-mode roster prints when it left members out
+/// because their membership files are invalid, or `None` when it left out none.
+pub(crate) fn skipped_members_notice(skipped: &[SkippedFile]) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for member in skipped.iter().take(BOUNDED_SKIPPED_SHOWN) {
+        parts.push(format!(
+            "{} ({})",
+            crate::output::sanitize_text_header(&member.id),
+            crate::output::sanitize_text_header(&one_line(&member.reason, 80))
+        ));
+    }
+    let more = skipped.len().saturating_sub(BOUNDED_SKIPPED_SHOWN);
+    let tail = if more > 0 {
+        format!(", and {more} more (--json lists all)")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "post: left out {} member(s) whose membership file is invalid: {}{tail}; they are missing from this roster. Repair or remove the file the reason names.\n",
+        skipped.len(),
+        parts.join(", ")
+    ))
 }
 
 /// How much of the skipped-file list a byte-bounded read carries.
@@ -1309,11 +1352,13 @@ fn crossed_report(
                     crate::mailbox::signed_status(Some(owner), message, body, channel)
                 })
                 .map(|status| matches!(status, crate::mailbox::SignedStatus::Verified { .. }));
-            let body = body.trim_end();
+            // An addressed message carries its stored body exactly: the field is
+            // the full body, and `signed_verified` above was computed over these
+            // same bytes. Only a preview of an unaddressed message is trimmed.
             let body = if *addressed {
-                body.to_owned()
+                body.clone()
             } else {
-                preview(body, CROSSED_PREVIEW_CHARS)
+                preview(body.trim_end(), CROSSED_PREVIEW_CHARS)
             };
             CrossedMessage {
                 id: message.id.clone(),
