@@ -595,36 +595,11 @@ pub(crate) fn revive_locked(context: &Context, id: &str) -> AppResult<Option<Par
             }
         }
         gc::Holder::Tombstone { .. } => {
-            let tombstone = gc::latest_tombstone(context, id)?.ok_or_else(|| {
-                AppError::config(
-                    &gc::tombstones_path(context),
-                    "the participant tombstone is no longer readable",
-                )
-            })?;
+            let tombstone = held_tombstone(context, id)?;
             let dir = context.root.join(PARTICIPANTS_DIR).join(id);
             fs::create_dir_all(&dir)
                 .map_err(|error| AppError::io("create participant directory", &dir, error))?;
-            let participant = Participant {
-                version: RECORD_VERSION,
-                id: id.to_owned(),
-                harness: tombstone.harness,
-                conversation_key_digest: tombstone.conversation_key_digest,
-                created: tombstone.created,
-                last_seen: tombstone.last_seen,
-                lease_hours: tombstone.lease_hours.unwrap_or(if tombstone.ephemeral {
-                    EPHEMERAL_LEASE_HOURS
-                } else {
-                    DEFAULT_LEASE_HOURS
-                }),
-                ended_at: None,
-                workspace: tombstone.workspace,
-                workspace_path: tombstone.workspace_path,
-                lineage: None,
-                lineage_since: None,
-                display_name: tombstone.display_name,
-                ephemeral: tombstone.ephemeral,
-                dir,
-            };
+            let participant = from_tombstone(id, tombstone, dir);
             write_record(&participant)?;
             participant
         }
@@ -636,6 +611,69 @@ pub(crate) fn revive_locked(context: &Context, id: &str) -> AppResult<Option<Par
         &revived.id,
     )?;
     Ok(Some(revived))
+}
+
+/// The record `revive_locked` would return for `id`, without bringing it back:
+/// nothing moves, is created or is written. The live record, else the archived
+/// one read in place, else one rebuilt in memory from a tombstone. `None`
+/// means nothing live or collected holds the id. The caller holds the
+/// participants lock.
+pub(crate) fn peek_locked(context: &Context, id: &str) -> AppResult<Option<Participant>> {
+    if let Some(live) = load(context, id)? {
+        return Ok(Some(live));
+    }
+    match gc::holder(context, id)? {
+        gc::Holder::Nobody => Ok(None),
+        gc::Holder::Archived { .. } => {
+            load_in(gc::archived_dir(context, id), id)?
+                .map(Some)
+                .ok_or_else(|| {
+                    AppError::config(
+                        &gc::archived_dir(context, id),
+                        "archived participant record is unreadable",
+                    )
+                })
+        }
+        gc::Holder::Tombstone { .. } => {
+            let tombstone = held_tombstone(context, id)?;
+            let dir = context.root.join(PARTICIPANTS_DIR).join(id);
+            Ok(Some(from_tombstone(id, tombstone, dir)))
+        }
+    }
+}
+
+fn held_tombstone(context: &Context, id: &str) -> AppResult<gc::Tombstone> {
+    gc::latest_tombstone(context, id)?.ok_or_else(|| {
+        AppError::config(
+            &gc::tombstones_path(context),
+            "the participant tombstone is no longer readable",
+        )
+    })
+}
+
+/// The tier-1 record a tombstone recreates under the same id.
+fn from_tombstone(id: &str, tombstone: gc::Tombstone, dir: PathBuf) -> Participant {
+    Participant {
+        version: RECORD_VERSION,
+        id: id.to_owned(),
+        harness: tombstone.harness,
+        conversation_key_digest: tombstone.conversation_key_digest,
+        created: tombstone.created,
+        last_seen: tombstone.last_seen,
+        lease_hours: tombstone.lease_hours.unwrap_or(if tombstone.ephemeral {
+            EPHEMERAL_LEASE_HOURS
+        } else {
+            DEFAULT_LEASE_HOURS
+        }),
+        ended_at: None,
+        workspace: tombstone.workspace,
+        workspace_path: tombstone.workspace_path,
+        lineage: None,
+        lineage_since: None,
+        display_name: tombstone.display_name,
+        ephemeral: tombstone.ephemeral,
+        dir,
+    }
 }
 
 /// Whether the explicit `POST_PARTICIPANT` claim names a record that
@@ -1002,7 +1040,11 @@ pub(crate) fn list_active(context: &Context) -> AppResult<Vec<Participant>> {
 
 pub(crate) fn load(context: &Context, id: &str) -> AppResult<Option<Participant>> {
     validate_participant_id(id)?;
-    let dir = context.root.join(PARTICIPANTS_DIR).join(id);
+    load_in(context.root.join(PARTICIPANTS_DIR).join(id), id)
+}
+
+/// The validated record in `dir`, which is `id`'s live or archived directory.
+fn load_in(dir: PathBuf, id: &str) -> AppResult<Option<Participant>> {
     let path = dir.join(RECORD_FILE);
     let Some(bytes) = read_bounded_optional(&path, MAX_RECORD_BYTES)? else {
         return Ok(None);

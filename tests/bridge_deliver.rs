@@ -1117,6 +1117,37 @@ fn a_refused_letter_does_not_restore_an_archived_recipient() {
     assert_eq!(rig.snapshot(), before, "the archive stayed where it was");
 }
 
+/// A letter refused for its route must leave a gc-archived recipient exactly
+/// where it was: refusal is not a reason to bring an idle participant back.
+#[test]
+fn a_blocked_route_letter_leaves_an_archived_recipient_archived() {
+    let rig = Rig::new();
+    archive_recipient(&rig);
+    fs::write(
+        rig.root().join("rules.json"),
+        json!({"blocked": [{"from": "*", "to": "*", "reason": "no inbound DMs"}]}).to_string(),
+    )
+    .unwrap();
+    let (file, bytes) = rig.standard_letter();
+    let before = rig.snapshot();
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "rejected", Some("blocked_route"));
+    assert_eq!(value["replay"], json!(false));
+    assert!(
+        !rig.root().join("participants").join(&rig.recipient).exists(),
+        "a refused letter restored the archived recipient"
+    );
+    assert!(
+        rig.root()
+            .join("participants-archive")
+            .join(&rig.recipient)
+            .join("channels.json")
+            .is_file(),
+        "the archive still holds the recipient's state"
+    );
+    assert_eq!(rig.snapshot(), before, "nothing moved or was written");
+}
+
 #[test]
 fn a_blocked_route_to_a_workspace_less_recipient_writes_nothing() {
     let rig = Rig::new();

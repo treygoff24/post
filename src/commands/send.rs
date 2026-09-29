@@ -823,6 +823,17 @@ pub(crate) fn ensure_route_allowed(
         })?;
         recipient_workspaces.push(participant.workspace);
     }
+    ensure_workspaces_route_allowed(&rules, sender, target, recipient_workspaces)
+}
+
+/// The rule check itself, for recipients whose workspaces the caller already
+/// holds (`bridge deliver` reads them from a record it has not restored).
+pub(crate) fn ensure_workspaces_route_allowed(
+    rules: &crate::model::RulesConfig,
+    sender: &str,
+    target: &crate::participant::Address,
+    mut recipient_workspaces: Vec<Option<String>>,
+) -> AppResult<()> {
     if target.kind == crate::participant::AddressKind::Workspace && recipient_workspaces.is_empty()
     {
         recipient_workspaces.push(Some(target.name.clone()));
