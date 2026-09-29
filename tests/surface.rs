@@ -464,50 +464,6 @@ fn a_bare_argument_is_the_message_body() {
     assert_eq!(body_of(&sandbox, &reader, &beta, &long.envelope.id), prose);
 }
 
-#[test]
-fn a_bare_argument_that_names_a_file_gets_the_body_file_remedy() {
-    let sandbox = Sandbox::new();
-    let (alpha, beta) = register_alpha_beta(&sandbox);
-    let sender = alpha_participant(&sandbox, "file-shaped-sender", &alpha);
-    let reader = sandbox.bind_claude("file-shaped-reader", &beta, Some("beta"))["id"]
-        .as_str()
-        .expect("participant id")
-        .to_owned();
-    fs::write(alpha.join("notes.txt"), "from the file\n").expect("write the file");
-
-    let refused = sandbox.run_as_participant(
-        &["send", "--to", "beta", "notes.txt", "--json"],
-        &sender,
-        &alpha,
-    );
-    assert_eq!(
-        refused.status.code(),
-        Some(2),
-        "stderr: {}",
-        stderr(&refused)
-    );
-    let envelope: Value = common::from_stderr(&refused);
-    let fix = envelope["error"]["details"]["exact_fix"]
-        .as_str()
-        .expect("a runnable exact_fix")
-        .to_owned();
-    assert!(fix.contains("--body-file"), "fix: {fix}");
-    assert_eq!(
-        count(&sandbox.mail_root.join("beta/inbox")),
-        0,
-        "the refused send delivered nothing"
-    );
-
-    // The suggested fix runs as printed and sends the file's contents.
-    let ran = sandbox.run_fix(&format!("{fix} --json"), &alpha);
-    assert_success(&ran);
-    let sent: SendOutput = from_stdout(&ran);
-    assert_eq!(
-        body_of(&sandbox, &reader, &beta, &sent.envelope.id),
-        "from the file\n"
-    );
-}
-
 /// The old positional FILE, used with a file that is absent, or relative to a
 /// different directory than the one the agent is in, must not send the path as
 /// the message: the receipt would look right and the body would be wrong.
@@ -561,11 +517,19 @@ fn a_path_shaped_bare_argument_is_refused_even_when_the_file_is_absent() {
         &sender,
         &alpha,
     );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&refused)
+    );
     let error: Value = common::from_stderr(&refused);
     let fix = error["error"]["details"]["exact_fix"]
         .as_str()
         .expect("an exact_fix")
         .to_owned();
+    assert!(fix.contains("--body-file"), "fix: {fix}");
+    assert_eq!(delivered(), 0, "the refused send delivered nothing");
     let ran = sandbox.run_fix(&format!("{fix} --json"), &alpha);
     assert_success(&ran);
     let sent: SendOutput = from_stdout(&ran);

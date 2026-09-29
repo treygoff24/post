@@ -28,7 +28,6 @@ pub(super) fn read_send_body(args: &mut SendArgs) -> AppResult<String> {
     read_body_quiet(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: None,
         fix_prefix,
         oversize: args.oversize,
     })
@@ -315,7 +314,6 @@ where
     let body = read_body(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: None,
         fix_prefix: fix_prefix.clone(),
         oversize: args.oversize,
     })?;
@@ -630,7 +628,6 @@ where
     let body = read_body(BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: None,
         fix_prefix: fix_prefix.clone(),
         oversize: args.oversize,
     })?;
@@ -854,7 +851,6 @@ pub(crate) fn ensure_route_allowed(
 pub(super) struct BodySource<'a> {
     pub inline: Option<String>,
     pub body_file: Option<&'a std::path::Path>,
-    pub file: Option<&'a std::path::Path>,
     pub fix_prefix: String,
     pub oversize: bool,
 }
@@ -1015,7 +1011,7 @@ fn read_body_unchecked(source: BodySource<'_>) -> AppResult<String> {
             return Ok(body);
         }
     }
-    if let Some(path) = source.body_file.or(source.file) {
+    if let Some(path) = source.body_file {
         // `-` means stdin here for the same reason it does for `--body`: it is
         // the Unix convention, every other CLI honours it, and post did not --
         // it opened a literal file named "-", failed NotFound, and suggested

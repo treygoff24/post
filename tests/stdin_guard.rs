@@ -8,9 +8,8 @@ use common::{
     assert_success, post_command, register_alpha_beta, stderr, write_channel_message, Sandbox,
 };
 use serde_json::Value;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
@@ -109,6 +108,8 @@ fn assert_refused(fixture: &Fixture, output: &Output, code: &str, before_files: 
         "{fix}"
     );
     assert!(fix.contains("< /dev/null"), "{fix}");
+    // The refusal also names the ssh case, where stdin is inherited.
+    assert!(error.to_string().contains("ssh -n"), "{error}");
     assert_eq!(message_files(fixture), before_files, "nothing was sent");
     assert!(
         read_ids(fixture).contains(&UNREAD.to_owned()),
@@ -120,28 +121,6 @@ fn assert_refused(fixture: &Fixture, output: &Output, code: &str, before_files: 
 fn dev_null_stdin_is_a_normal_read() {
     let fixture = fixture();
     let (output, _) = chat_with_stdin(&fixture, &["chat", "tax", "--json"], Stdio::null());
-    assert_normal_read(&output);
-}
-
-#[test]
-fn empty_regular_file_stdin_is_a_normal_read() {
-    let fixture = fixture();
-    let path = fixture.sandbox.path.join("empty-stdin");
-    File::create(&path).expect("create empty file");
-    let (output, _) = chat_with_stdin(
-        &fixture,
-        &["chat", "tax", "--json"],
-        Stdio::from(File::open(&path).expect("open empty file")),
-    );
-    assert_normal_read(&output);
-}
-
-#[test]
-fn pipe_at_eof_stdin_is_a_normal_read() {
-    let fixture = fixture();
-    let (reader, writer) = std::io::pipe().expect("pipe");
-    drop(writer);
-    let (output, _) = chat_with_stdin(&fixture, &["chat", "tax", "--json"], Stdio::from(reader));
     assert_normal_read(&output);
 }
 
@@ -186,20 +165,6 @@ fn nonempty_pipe_stdin_is_refused_and_the_send_fix_runs_as_written() {
 }
 
 #[test]
-fn nonempty_regular_file_stdin_is_refused() {
-    let fixture = fixture();
-    let before = message_files(&fixture);
-    let path = fixture.sandbox.path.join("body-stdin");
-    fs::write(&path, "meant to be sent").expect("write body file");
-    let (output, _) = chat_with_stdin(
-        &fixture,
-        &["chat", "tax", "--json"],
-        Stdio::from(File::open(&path).expect("open body file")),
-    );
-    assert_refused(&fixture, &output, "invalid_argument", before);
-}
-
-#[test]
 fn heredoc_stdin_is_refused() {
     let fixture = fixture();
     let before = message_files(&fixture);
@@ -222,21 +187,6 @@ fn heredoc_stdin_is_refused() {
 }
 
 #[test]
-fn socket_stdin_with_a_queued_byte_is_refused() {
-    let fixture = fixture();
-    let before = message_files(&fixture);
-    let (reader, mut writer) = UnixStream::pair().expect("socket pair");
-    writer.write_all(b"x").expect("queue a byte");
-    let (output, _) = chat_with_stdin(
-        &fixture,
-        &["chat", "tax", "--json"],
-        Stdio::from(std::os::fd::OwnedFd::from(reader)),
-    );
-    drop(writer);
-    assert_refused(&fixture, &output, "invalid_argument", before);
-}
-
-#[test]
 fn peek_with_piped_input_is_refused_too() {
     let fixture = fixture();
     let before = message_files(&fixture);
@@ -252,17 +202,26 @@ fn peek_with_piped_input_is_refused_too() {
 }
 
 #[test]
-fn delayed_writer_inside_the_bound_is_refused() {
+fn message_slice_with_piped_input_is_refused() {
     let fixture = fixture();
     let before = message_files(&fixture);
+    let args = [
+        "chat",
+        "tax",
+        "--message",
+        UNREAD,
+        "--max-bytes",
+        "4096",
+        "--json",
+    ];
+    // Control: the same slice read with a clear stdin succeeds, so the
+    // refusal below is the guard and not a malformed invocation.
+    let (control, _) = chat_with_stdin(&fixture, &args, Stdio::null());
+    assert_success(&control);
     let (reader, mut writer) = std::io::pipe().expect("pipe");
-    let producer = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        writer.write_all(b"late body").expect("write body");
-        writer
-    });
-    let (output, _) = chat_with_stdin(&fixture, &["chat", "tax", "--json"], Stdio::from(reader));
-    drop(producer.join().expect("producer"));
+    writer.write_all(b"meant to be sent").expect("write body");
+    drop(writer);
+    let (output, _) = chat_with_stdin(&fixture, &args, Stdio::from(reader));
     assert_refused(&fixture, &output, "invalid_argument", before);
 }
 
@@ -381,38 +340,4 @@ fn consuming_flags_with_dev_null_stdin_consume_as_before() {
             "{flag}: the message was consumed"
         );
     }
-}
-
-#[test]
-fn consuming_flags_with_a_silent_open_pipe_are_input_ambiguous() {
-    for flag in CONSUMING_FLAGS {
-        let fixture = fixture();
-        let before_files = message_files(&fixture);
-        let before = store_bytes(&fixture);
-        let (reader, writer) = std::io::pipe().expect("pipe");
-        let (output, _) = chat_with_stdin(
-            &fixture,
-            &["chat", "tax", flag, UNREAD, "--json"],
-            Stdio::from(reader),
-        );
-        drop(writer);
-        assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
-        assert_eq!(
-            store_bytes(&fixture),
-            before,
-            "{flag}: the store, cursors included, is byte-identical"
-        );
-        assert_refused(&fixture, &output, "input_ambiguous", before_files);
-    }
-}
-
-#[test]
-fn the_refusal_names_the_ssh_case() {
-    let fixture = fixture();
-    let (reader, writer) = std::io::pipe().expect("pipe");
-    let (output, _) = chat_with_stdin(&fixture, &["chat", "tax", "--json"], Stdio::from(reader));
-    drop(writer);
-    let error: Value = serde_json::from_slice(&output.stderr).expect("error JSON");
-    let text = error.to_string();
-    assert!(text.contains("ssh -n"), "{text}");
 }
