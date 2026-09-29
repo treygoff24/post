@@ -595,12 +595,13 @@ fn detect_participant_lifecycle(context: &Context, checks: &mut Vec<DoctorCheck>
             }
             Err(_) => String::new(),
         };
+        let auto = super::participant_auto_gc::last_run_summary(context);
         checks.push(check(
             "participants.stale",
             DoctorSeverity::Info,
             &root,
             &format!(
-                "{total} participant(s) are inactive for new recipient selection ({expired} with an expired lease, {no_lease} with no lease record); mail already frozen to them is kept, not reassigned{prune}"
+                "{total} participant(s) are inactive for new recipient selection ({expired} with an expired lease, {no_lease} with no lease record); mail already frozen to them is kept, not reassigned{prune}; {auto}"
             ),
             false,
             "Nothing to repair. Run `post participant gc` to preview the prune (a dry run), then `post participant gc --apply` to do it; a participant with unread or pending mail is kept.",

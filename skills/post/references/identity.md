@@ -35,6 +35,9 @@ verified badge.
   <id> [--json]`. Restore is idempotent (`restored: false` when the id is
   already present); its answer says `from` `archive` or `tombstone`, and an id
   nothing ever held fails `participant_missing` (exit 65).
+  `participant bind` also runs that cleanup itself, at most once a day per
+  store, silently; each run is one line in `.auto-gc.log` at the store root
+  (ids included, so `restore` finds them). `POST_AUTO_GC=0` turns it off.
 - The first bind records workspace context: `--workspace <room>`, else
   `POST_FROM`, else the registered room containing cwd, else none. Later binds
   keep the stored workspace unless `--workspace` or `POST_FROM` changes it;
