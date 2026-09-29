@@ -79,6 +79,29 @@ function samples() {
   return loaded;
 }
 
+// What the real `post watch --snapshot` prints for a reader with no binding, run
+// in a throwaway home and mail root with a cleared environment. Not a fixture:
+// it is the producer's own line, so a change to it in post fails these tests.
+let realUnbound;
+function realUnboundSnapshot() {
+  if (realUnbound !== undefined) return realUnbound;
+  const dir = fs.mkdtempSync(path.join(ROOT, "unbound-"));
+  const result = spawnSync(POST_BIN, ["watch", "--snapshot"], {
+    cwd: dir,
+    env: { PATH: process.env.PATH, HOME: dir, POST_MAIL_ROOT: path.join(dir, "mail") },
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`\`${POST_BIN} watch --snapshot\` failed: ${result.error?.message ?? `exit ${result.status}: ${result.stderr}`}`);
+  }
+  const first = JSON.parse(result.stdout.split("\n").find((line) => line.trim()) ?? "null");
+  if (first?.event !== "unbound" || first.bound !== false) {
+    throw new Error(`an unbound \`watch --snapshot\` no longer prints the unbound marker: ${result.stdout}`);
+  }
+  realUnbound = result.stdout;
+  return realUnbound;
+}
+
 const clone = (value) => structuredClone(value);
 const jsonl = (events) => events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
 const ok = (stdout = "") => ({ ok: true, code: 0, stdout, stderr: "" });
@@ -270,11 +293,20 @@ describe("parsing: a bad line fails the snapshot, a future kind does not (E4, co
     assert.deepEqual({ ok: parsed.ok, events: parsed.events.length, skipped: parsed.skipped }, { ok: true, events: 0, skipped: 1 });
   });
 
-  test("the bound:false marker is reported as unbound, not as an event", () => {
-    const parsed = parseSnapshot(jsonl([{ ok: true, participant: null, bound: false, hint: "not bound yet" }]));
-    assert.deepEqual({ ok: parsed.ok, events: parsed.events.length, unbound: parsed.unbound }, { ok: true, events: 0, unbound: true });
-    // Only a line with no `event` is the marker.
+  test("the unbound marker is reported as unbound, not as an event or a future kind", () => {
+    // The line post prints (src/commands/watch.rs, unbound_snapshot_marker)...
+    const printed = parseSnapshot(jsonl([{ event: "unbound", participant: null, bound: false, hint: "not bound yet" }]));
+    assert.deepEqual({ ok: printed.ok, events: printed.events.length, skipped: printed.skipped, unbound: printed.unbound }, { ok: true, events: 0, skipped: 0, unbound: true });
+    // ...and the bare bound:false object with no `event`.
+    const bare = parseSnapshot(jsonl([{ ok: true, participant: null, bound: false, hint: "not bound yet" }]));
+    assert.deepEqual({ ok: bare.ok, events: bare.events.length, skipped: bare.skipped, unbound: bare.unbound }, { ok: true, events: 0, skipped: 0, unbound: true });
+    // A known event that merely carries bound:false is still just an event.
     assert.equal(parseSnapshot(jsonl([{ ...mailWith("20260923-000001-aaaaa1"), bound: false }])).unbound, false);
+  });
+
+  test("the unbound line the REAL post prints is reported as unbound", () => {
+    const parsed = parseSnapshot(realUnboundSnapshot());
+    assert.deepEqual({ ok: parsed.ok, events: parsed.events.length, skipped: parsed.skipped, unbound: parsed.unbound }, { ok: true, events: 0, skipped: 0, unbound: true });
   });
 
   test("a known event that fails validation still fails the whole snapshot, future kind or not", () => {
@@ -864,7 +896,9 @@ describe("failed scans (E4)", () => {
     ["oversize output", { result: { ok: false, code: null, signal: "SIGKILL", oversize: true, stdout: "", stderr: "" } }, "snapshot_oversize"],
     ["a truncated line", () => ok(jsonl([mailWith("20260923-000001-aaaaa1")]).slice(0, -30)), "snapshot_malformed"],
     ["a known event that fails validation next to a future kind", () => ok(jsonl([{ event: "mail_v9", id: "x" }, mailWith("x", { id: undefined })])), "snapshot_malformed"],
-    ["an unbound participant (the typed marker)", () => ok(jsonl([{ ok: true, participant: null, bound: false, hint: "this session is not bound yet" }])), "snapshot_unbound"],
+    ["an unbound participant (the line the real post prints)", () => ok(realUnboundSnapshot()), "snapshot_unbound"],
+    ["an unbound participant (the printed marker, hand-written)", () => ok(jsonl([{ event: "unbound", participant: null, bound: false, hint: "this session is not bound yet" }])), "snapshot_unbound"],
+    ["an unbound participant (the bare bound:false object)", () => ok(jsonl([{ ok: true, participant: null, bound: false, hint: "this session is not bound yet" }])), "snapshot_unbound"],
   ];
   for (const [label, script, stage] of failures) {
     test(`${label} is failed, never accepted, and never advances state`, async () => {

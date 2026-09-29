@@ -223,12 +223,17 @@ test("a batch of only future kinds is quiet, not UNKNOWN", () => {
 });
 
 test("the unbound-reader marker is no mail and no error", () => {
-  setStub({ events: [{ ok: true, participant: null, bound: false, hint: "this session is not bound yet" }] });
-  const result = run(["--snapshot"]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "");
-  // Only a line with no `event` counts as the marker; a known event that
-  // merely carries bound:false is still validated as an event.
+  // The line post prints (src/commands/watch.rs), and the bare bound:false form.
+  for (const marker of [
+    { event: "unbound", participant: null, bound: false, hint: "this session is not bound yet" },
+    { ok: true, participant: null, bound: false, hint: "this session is not bound yet" },
+  ]) {
+    setStub({ events: [marker] });
+    const result = run(["--snapshot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+  }
+  // A known event that merely carries bound:false is still validated as an event.
   setStub({ events: [{ ...MAIL_A, id: "forged", bound: false }] });
   assert.equal(run(["--snapshot"]).stdout, `${UNKNOWN}\n`);
 });

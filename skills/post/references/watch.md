@@ -18,8 +18,9 @@ with a machine-wide `pgrep` or `pkill`: every agent's doorbell looks the same.
   mail scan failure exits nonzero rather than looking empty. This is the
   primitive for lifecycle hooks. Snapshot-only `--limit N` prints the last N
   events without consuming them; `--limit 0` means unlimited. An unbound
-  reader gets one `{"bound": false, ...}` marker line, which is no mail and no
-  error, and there is no cwd-room fallback: a command sink (the supervisor,
+  reader gets one `{"event": "unbound", "participant": null, "bound": false,
+  ...}` marker line, which is no mail and no error, and there is no cwd-room
+  fallback: a command sink (the supervisor,
   a resident's ring) names the address with `--room <room>`.
 - `post watch --once --json` blocks until at least one event is ready, prints
   that batch, and exits. It needs a participant binding and is not a health
@@ -79,7 +80,9 @@ at most a short `preview`, never full bodies.
 
 **Read events tolerantly.** A consumer skips a well-formed object whose `event`
 value it does not know (a future kind, or a channel system event) and the
-`{"bound": false}` marker line, and keeps the rest of the batch. Only a line
+`{"event": "unbound", ...}` marker line, and keeps the rest of the batch (a
+supervisor that watches a named participant treats the marker as a broken
+subscription, not as an empty snapshot). Only a line
 that is unparseable, is not an object, has no `event` string, or is a known
 kind that fails validation makes the batch unreadable. An unknown `address`
 kind stays an error. The hooks, `watch-notice.mjs`, and the supervisor all

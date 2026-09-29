@@ -354,11 +354,12 @@ function validEvent(event) {
 // Read tolerantly (contract docs/plans/post-just-works-2026-09-28.md section 3):
 // a well-formed object whose `event` value this supervisor does not know is a
 // future kind and is skipped, so it can never stall the mail beside it; the
-// `bound: false` marker an unbound reader prints is reported as `unbound`, not
-// as an event. Anything else that is wrong (an unparseable line, an object with
-// no `event` string, a KNOWN event that fails validation) still fails the whole
-// snapshot. Post terminates every line, so non-empty output that does not end
-// in a newline is truncated.
+// `{"event":"unbound","bound":false}` marker an unbound reader prints is
+// reported as `unbound`, not as an event (and not as an unknown kind, which
+// would read as an empty snapshot). Anything else that is wrong (an
+// unparseable line, an object with no `event` string, a KNOWN event that fails
+// validation) still fails the whole snapshot. Post terminates every line, so
+// non-empty output that does not end in a newline is truncated.
 export function parseSnapshot(stdout) {
   const text = String(stdout ?? "");
   if (text !== "" && !text.endsWith("\n")) return { ok: false, reason: "truncated output" };
@@ -374,7 +375,9 @@ export function parseSnapshot(stdout) {
       return { ok: false, reason: "malformed line" };
     }
     if (event !== null && typeof event === "object" && !Array.isArray(event)) {
-      if (event.event === undefined && event.bound === false) {
+      // Post prints {"event":"unbound","participant":null,"bound":false,...}
+      // (src/commands/watch.rs); the bare `bound:false` object is accepted too.
+      if (event.event === "unbound" || (event.event === undefined && event.bound === false)) {
         unbound = true;
         continue;
       }

@@ -78,7 +78,11 @@ const MAIL = {
   reason: "mail",
 };
 const FUTURE = { event: "future_kind", id: "x", note: "a kind a later post may add" };
-const UNBOUND_MARKER = { ok: true, participant: null, bound: false, hint: "this session is not bound yet; nothing can be addressed to it" };
+// What post prints to an unbound reader (src/commands/watch.rs,
+// unbound_snapshot_marker); contract.test.mjs checks this shape against the real
+// binary. The bare form has no `event` and is accepted too.
+const UNBOUND_MARKER = { event: "unbound", participant: null, bound: false, hint: "this session is not bound yet; nothing can be addressed to it" };
+const BARE_UNBOUND_MARKER = { ok: true, participant: null, bound: false, hint: "this session is not bound yet; nothing can be addressed to it" };
 const jsonl = (...events) => events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
 
 // Per-harness payload shapes. `lazy` marks adapters that may leave a session
@@ -183,9 +187,25 @@ describe("parseSnapshot", () => {
     assert.equal(parsed.malformed, 0);
   });
 
-  test("the unbound marker is recognised, and is neither an event nor malformed", () => {
+  test("the unbound marker is recognised, and is neither an event, a future kind, nor malformed", () => {
     const parsed = parseSnapshot(jsonl(UNBOUND_MARKER));
-    assert.deepEqual({ events: parsed.events.length, unbound: parsed.unbound, malformed: parsed.malformed, nonempty: parsed.nonempty }, { events: 0, unbound: true, malformed: 0, nonempty: 1 });
+    assert.deepEqual(
+      { events: parsed.events.length, unbound: parsed.unbound, skipped: parsed.skipped, malformed: parsed.malformed, nonempty: parsed.nonempty },
+      { events: 0, unbound: true, skipped: 0, malformed: 0, nonempty: 1 }
+    );
+  });
+
+  test("the bare bound:false object with no event is the marker too", () => {
+    const parsed = parseSnapshot(jsonl(BARE_UNBOUND_MARKER));
+    assert.deepEqual(
+      { events: parsed.events.length, unbound: parsed.unbound, skipped: parsed.skipped, malformed: parsed.malformed },
+      { events: 0, unbound: true, skipped: 0, malformed: 0 }
+    );
+  });
+
+  test("the marker beside mail leaves the mail and reports unbound", () => {
+    const parsed = parseSnapshot(jsonl(MAIL, UNBOUND_MARKER));
+    assert.deepEqual({ events: parsed.events.length, unbound: parsed.unbound, skipped: parsed.skipped }, { events: 1, unbound: true, skipped: 0 });
   });
 
   test("a known event that fails validation stays malformed", () => {

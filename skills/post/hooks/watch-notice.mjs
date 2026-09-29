@@ -198,7 +198,8 @@ const KNOWN_EVENTS = new Set(["mail", "channel_message", "unreadable"]);
 // Tolerant reading (contract docs/plans/post-just-works-2026-09-28.md section 3):
 // a well-formed object whose `event` value this notice does not know is a
 // future kind and is skipped without dropping the rest of the batch; so is the
-// `bound: false` marker an unbound reader prints (no mail, not an error). A
+// `{"event":"unbound","bound":false}` marker an unbound reader prints (no mail,
+// not an error). A
 // line that is unparseable, is not an object, has no `event` string, or is a
 // KNOWN event that fails validation still fails the whole batch closed.
 function parseBatch(lines) {
@@ -208,7 +209,9 @@ function parseBatch(lines) {
     try {
       const event = JSON.parse(line);
       if (event && typeof event === "object" && !Array.isArray(event)) {
-        if (event.event === undefined && event.bound === false) continue;
+        // Post prints {"event":"unbound","participant":null,"bound":false,...};
+        // the bare `bound:false` object is accepted too.
+        if (event.event === "unbound" || (event.event === undefined && event.bound === false)) continue;
         if (typeof event.event === "string" && !KNOWN_EVENTS.has(event.event)) continue;
       }
       if (!validSnapshotEvent(event)) return { ok: false, events: [] };

@@ -40,8 +40,8 @@
 //   `participant_missing`; the hook re-runs `participant bind --harness --key`
 //   once (which re-mints the same id) and retries, and never reads the failure
 //   as "no mail";
-// - an unbound reader gets an explicit `bound: false` marker line, which is no
-//   mail and no error;
+// - an unbound reader gets an explicit `{"event":"unbound","bound":false}` marker
+//   line, which is no mail and no error;
 // - a session that has no workspace to talk to (its cwd is not a registered
 //   room) or that nobody is reading (a delegate child) is not minted at session
 //   start. The CLI mints it on its first write; each turn the hook asks
@@ -302,12 +302,20 @@ export function validSnapshotEvent(event) {
   }
 }
 
+// The line an unbound reader gets from `watch --snapshot`. Post prints
+// `{"event":"unbound","participant":null,"bound":false,"hint":...}`
+// (src/commands/watch.rs, unbound_snapshot_marker); the bare `bound:false`
+// object with no `event` is accepted too, as the contract first worded it.
+export function isUnboundMarker(event) {
+  return event.event === "unbound" || (event.event === undefined && event.bound === false);
+}
+
 // One `watch --snapshot` stdout, read tolerantly. Every non-blank line lands in
 // exactly one bucket:
 //   events     a known event that passed validation
 //   skipped    a well-formed object whose `event` value this hook does not know
 //              (a future kind): ignored, and the rest of the batch still counts
-//   unbound    the explicit `bound: false` marker an unbound reader prints: no
+//   unbound    the marker an unbound reader prints (see isUnboundMarker): no
 //              mail, and not an error
 //   malformed  anything else: unparseable, not an object, no `event` string, or
 //              a KNOWN event that failed validation
@@ -325,7 +333,7 @@ export function parseSnapshot(stdout) {
     }
     if (!event || typeof event !== "object" || Array.isArray(event)) {
       parsed.malformed += 1;
-    } else if (event.bound === false && event.event === undefined) {
+    } else if (isUnboundMarker(event)) {
       parsed.unbound = true;
     } else if (typeof event.event === "string" && !KNOWN_EVENTS.has(event.event)) {
       parsed.skipped += 1;
