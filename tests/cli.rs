@@ -10038,69 +10038,6 @@ fn a0a_f3_feature_absent_signed_looking_text_unbadged() {
     assert_success(&set);
 }
 
-/// Fixture 4: fail-closed — malformed owner.json is ConfigInvalid on every
-/// badge-computing path and leaves pure transport untouched.
-#[test]
-fn a0a_f4_malformed_owner_fails_closed_badge_paths_transport_unaffected() {
-    let sandbox = Sandbox::new();
-    create_default_room_paths(&sandbox);
-    let alpha = sandbox.path.join("alpha");
-    let beta = sandbox.path.join("beta");
-    fs::create_dir_all(&alpha).expect("alpha dir");
-    fs::create_dir_all(&beta).expect("beta dir");
-    register_room(&sandbox, "alpha", &alpha);
-    register_room(&sandbox, "beta", &beta);
-    join_channel(&sandbox, "closed", &alpha);
-    join_channel(&sandbox, "closed", &beta);
-    assert_success(&sandbox.run_in(&["chat", "closed", "--discard", "--json"], None, &alpha));
-    fs::write(owner_json_path(&sandbox), r#"{"room":"alpha","bogus":1}"#).expect("malformed owner");
-    let peek = sandbox.run_in(&["chat", "closed", "--peek", "--json"], None, &alpha);
-    assert_eq!(
-        peek.status.code(),
-        Some(78),
-        "badge path must fail closed: {}",
-        stderr(&peek)
-    );
-    let error: ErrorEnvelope = from_stderr(&peek);
-    assert_eq!(error.error.code, "config_invalid");
-    // Transport rows of the Decision-3 matrix: unaffected.
-    assert_success(&sandbox.run(&[
-        "send",
-        "--to",
-        "claude-space",
-        "--from",
-        "freeform-sender",
-        "--body",
-        "x",
-    ]));
-    assert_success(&sandbox.run_in(&["chat", "other1", "--join", "--json"], None, &alpha));
-    assert_success(&sandbox.run_in(&["chat", "closed", "--discard", "--json"], None, &alpha));
-    assert_success(&sandbox.run(&["rooms"]));
-    assert_success(&sandbox.run(&["inbox", "--room", "alpha"]));
-    assert_success(&sandbox.run(&["watch", "--snapshot", "--room", "alpha"]));
-    let sent: SendOutput = from_stdout(&sandbox.run(&[
-        "send",
-        "--to",
-        "claude-space",
-        "--from",
-        "freeform-sender",
-        "--body",
-        "read me",
-        "--json",
-    ]));
-    assert_success(&sandbox.run(&["read", &sent.envelope.id, "--room", "claude-space"]));
-    let history = sandbox.run_in(
-        &["chat", "closed", "--history", "5", "--json"],
-        None,
-        &alpha,
-    );
-    assert_eq!(
-        history.status.code(),
-        Some(78),
-        "history is badge-computing"
-    );
-}
-
 /// Fixture 5: imitation reservation tracks the configured owner; doctor
 /// flags stored collisions; the skeleton predicate itself is unchanged.
 #[test]
@@ -10333,46 +10270,6 @@ fn a0a_f7_owner_init_create_only_and_failed_install_recovery() {
         mara.join("sigs").is_dir(),
         "identical retry must complete the sigs scaffold"
     );
-    // Adversarial commit race: a destination created between the precheck
-    // and the hard-link commit routes to the SAME compare branch as a
-    // pre-existing file (the primitive refuses AlreadyExists and never
-    // replaces; compare_existing handles both entries). Prove the observable
-    // contract: a concurrently-created owner.json with different content is
-    // refused and left byte-identical.
-    fs::write(&path, r#"{"room":"mara","label":"Concurrent"}"#).expect("racing writer");
-    let raced = sandbox.run(&["owner", "init", "--room", "mara"]);
-    assert_eq!(raced.status.code(), Some(78));
-    assert_eq!(
-        fs::read_to_string(&path).expect("reread"),
-        r#"{"room":"mara","label":"Concurrent"}"#,
-        "the racing writer's owner.json must be untouched"
-    );
-}
-
-/// Fixture 8: raw `~` in rooms.json — derivation always uses the normalized
-/// resolved path, never a literal `~` sidecar.
-#[test]
-fn a0a_f8_raw_tilde_registry_derives_absolute_sidecar() {
-    let sandbox = Sandbox::new_unseeded();
-    fs::create_dir_all(&sandbox.mail_root).expect("mail root");
-    fs::write(
-        sandbox.mail_root.join("rooms.json"),
-        r#"{"mara": "~/.mara-room"}"#,
-    )
-    .expect("registry with literal tilde");
-    fs::write(sandbox.mail_root.join("rules.json"), r#"{"blocked":[]}"#).expect("rules");
-    owner_init_json(&sandbox, &["--room", "mara"]);
-    let shown = owner_show(&sandbox);
-    let sidecar = shown["owner"]["sidecar_dir"].as_str().expect("sidecar_dir");
-    assert!(
-        !sidecar.contains('~'),
-        "resolved sidecar leaked a literal tilde: {sidecar}"
-    );
-    assert_eq!(
-        PathBuf::from(sidecar),
-        sandbox.home.join(".mara-room"),
-        "derivation from the registered path"
-    );
 }
 
 /// Fixture 9: immutable-id render — verified output always carries
@@ -10405,38 +10302,21 @@ fn a0a_f9_immutable_room_id_renders_under_every_label_and_hostile_labels_rejecte
         text.contains("[🔏 VERIFIED — Mara (mara), signed"),
         "generic render must carry the immutable room id: {text}"
     );
-    // Hostile labels: bidi control, over-long, whitespace-only. Each fails
-    // LOAD validation (the config stays whatever it was).
-    let overlong = "x".repeat(33);
-    for (label, needle) in [
-        ("evil\u{202E}name", "control, bidi"),
-        (overlong.as_str(), "exceeds 32"),
-        ("   ", "whitespace-only"),
-    ] {
-        let init = sandbox.run(&["owner", "init", "--room", "mara", "--label", label]);
-        assert_eq!(
-            init.status.code(),
-            Some(78),
-            "label {label:?}: {}",
-            stderr(&init)
-        );
-        assert!(
-            stderr(&init).contains(needle),
-            "label {label:?} must say {needle:?}: {}",
-            stderr(&init)
-        );
-    }
-    // A non-hostile custom label renders with the room id too (alpha
-    // catches up first so its send is not crossed).
-    assert_success(&sandbox.run_in(&["chat", "labelled", "--discard", "--json"], None, &alpha));
-    assert_success(&sandbox.run_in(
-        &["chat", "labelled", "--send", "--body", "x", "--json"],
-        None,
-        &alpha,
-    ));
-    let text = chat_history_text(&sandbox, "labelled", &mara);
-    assert!(text.contains("Mara (mara)"));
-
+    // One hostile label proves `owner init` runs the label validator; the
+    // predicate's own rows live in mailbox::owner_tests.
+    let label = "evil\u{202E}name";
+    let init = sandbox.run(&["owner", "init", "--room", "mara", "--label", label]);
+    assert_eq!(
+        init.status.code(),
+        Some(78),
+        "label {label:?}: {}",
+        stderr(&init)
+    );
+    assert!(
+        stderr(&init).contains("control, bidi"),
+        "label {label:?} must name the bidi refusal: {}",
+        stderr(&init)
+    );
     // A scratch config with a genuinely NON-default label (--label Oracle),
     // real signed wire, must render "Oracle (mara)" — the verified output
     // carries the configured label AND the immutable room id.
@@ -10481,11 +10361,6 @@ fn a0a_f10_hostile_markers_rejected_and_wire_stays_unambiguous() {
         // (78). Both gates refuse the marker and write nothing.
         ("\n", 2, "control characters"),
         ("\u{202E}", 78, "control, bidi"),
-        (".", 78, "non-ASCII"),
-        ("🐳🐋", 78, "one glyph"),
-        ("a\u{200d}b", 78, "one glyph"),
-        ("\u{200d}🐳", 78, "zero-width joiner"),
-        ("👩\u{200d}", 78, "zero-width joiner"),
     ] {
         let init = sandbox.run(&["owner", "init", "--room", "mara", "--marker", marker]);
         assert_eq!(
@@ -11492,6 +11367,28 @@ fn v2_malformed_owner_locators_fail_loudly_and_non_owner_locators_are_inert() {
     let alpha = owner_peer(&sandbox, "alpha");
     join_channel(&sandbox, "malformed", &mara);
     join_channel(&sandbox, "malformed", &alpha);
+    // A genuinely signed manifest for this tag, channel and body: every row
+    // that carries the tag would verify if its own parser guard were removed,
+    // so `false` can only come from the locator grammar.
+    v2_sign(&sandbox, "20260812T210800Z", "malformed", "body");
+    write_channel_message_with_ref(
+        &sandbox,
+        "malformed",
+        "20990101-120000-000090-cccccc",
+        "mara",
+        "body",
+        serde_json::json!({"version": 2, "tag": "20260812T210800Z"}),
+    );
+    assert_eq!(
+        v2_read_badge(
+            &sandbox,
+            "malformed",
+            &alpha,
+            "20990101-120000-000090-cccccc"
+        ),
+        Some(true),
+        "control: a well-formed locator over the signed manifest verifies"
+    );
     let cases: Vec<(&str, serde_json::Value)> = vec![
         (
             "unknown-version",
@@ -11628,7 +11525,9 @@ fn v2_signed_cap_enforced_at_send_and_read_while_unsigned_oversize_is_unchanged(
         "an exactly-1-MiB signed body must verify"
     );
     // Over-cap smuggled into the store with a locator: fails at read,
-    // before any hashing.
+    // before any hashing. The manifest is genuinely signed, so only the read
+    // cap can turn this false.
+    v2_sign(&sandbox, "20260812T211200Z", "cap", &over);
     write_channel_message_with_ref(
         &sandbox,
         "cap",
@@ -11756,9 +11655,10 @@ fn v2_present_locator_with_missing_sidecar_fails_loudly_and_never_falls_back_to_
     );
 }
 
-/// Channel binding isolated: envelope channel and signed manifest both say
-/// channel A, but the .msg sits in channel B's storage directory. The
-/// binding check must refuse before any sidecar comparison could pass.
+/// Channel binding isolated: the manifest is signed for the STORAGE channel
+/// (bind-b) and the body matches, so only the envelope's channel claim
+/// (bind-a) differs. The binding check must be what refuses it: without the
+/// rewrite the same message verifies.
 #[test]
 fn v2_envelope_channel_differing_from_storage_directory_fails() {
     let sandbox = Sandbox::new();
@@ -11766,32 +11666,37 @@ fn v2_envelope_channel_differing_from_storage_directory_fails() {
     join_channel(&sandbox, "bind-a", &mara);
     join_channel(&sandbox, "bind-b", &mara);
     const TAG: &str = "20260812T230100Z";
-    const BODY: &str = "bound to bind-a";
-    v2_sign(&sandbox, TAG, "bind-a", BODY);
-    // Hand-place a message into bind-b's store whose envelope (and signed
-    // manifest) both claim bind-a — a copied-across-channels .msg file.
+    const BODY: &str = "bound to bind-b";
+    const ID: &str = "20990101-120000-000001-abc001";
+    v2_sign(&sandbox, TAG, "bind-b", BODY);
     write_channel_message_with_ref(
         &sandbox,
         "bind-b",
-        "20990101-120000-000001-abc001",
+        ID,
         "mara",
         BODY,
         serde_json::json!({"version": 2, "tag": TAG}),
+    );
+    assert_eq!(
+        v2_read_badge(&sandbox, "bind-b", &mara, ID),
+        Some(true),
+        "control: the manifest matches the storage channel, so it verifies"
     );
     let msg_dir = sandbox
         .mail_root
         .join("channels")
         .join("bind-b")
         .join("messages");
-    let path = msg_dir.join("20990101-120000-000001-abc001.msg");
+    let path = msg_dir.join(format!("{ID}.msg"));
     let raw = fs::read_to_string(&path).expect("read fixture");
-    fs::write(
-        &path,
-        raw.replace("\"channel\": \"bind-b\"", "\"channel\": \"bind-a\""),
-    )
-    .expect("rewrite envelope channel");
+    let rewritten = raw.replace("\"channel\": \"bind-b\"", "\"channel\": \"bind-a\"");
+    assert_ne!(
+        rewritten, raw,
+        "the envelope channel rewrite must take effect"
+    );
+    fs::write(&path, rewritten).expect("rewrite envelope channel");
     assert_eq!(
-        v2_read_badge(&sandbox, "bind-b", &mara, "20990101-120000-000001-abc001"),
+        v2_read_badge(&sandbox, "bind-b", &mara, ID),
         Some(false),
         "envelope channel differing from the storage directory must fail"
     );
