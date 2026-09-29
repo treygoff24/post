@@ -20,8 +20,6 @@ use std::time::{Duration, Instant};
 pub(crate) const CURSORS_FILE: &str = "cursors.json";
 pub(crate) const CURSORS_LOCK_FILE: &str = ".cursors.lock";
 pub(crate) const STATE_VERSION: u64 = 1;
-#[allow(dead_code)]
-pub(crate) const SEEN_SET_WARN: usize = 50_000;
 
 const PARTICIPANT_STATE_VERSION: u64 = 2;
 
