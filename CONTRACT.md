@@ -765,7 +765,13 @@ build from a tree with uncommitted tracked changes.
   and never creates cursor state.
 - `post who [--room <name>]... [--text]`: read-only participant directory.
   JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count,
-  bridge_attention?, bridge_health?, doorbell?}`. `bridge_attention` is the number of items in
+  skipped?, bridge_attention?, bridge_health?, doorbell?}`. `skipped` (`[{id,
+  reason}]`, present only when nonempty) names the participant records too
+  damaged to read, which are therefore missing from `participants`; `post
+  participant list` carries the same key, and `--text` prints one `skipped:`
+  line, so an agent that discards stderr still sees the roster has a hole. A
+  workspace scope does not filter them, since a damaged record's workspace is
+  unknowable. `bridge_attention` is the number of items in
   `bridge/health.json`'s `attention` list and is present only when nonzero
   (`post doctor` lists each with its fix); `--text` prints
   `bridge_attention: <n>`. `bridge_health` (`{reason, fix}`) is present only
@@ -1091,6 +1097,21 @@ build from a tree with uncommitted tracked changes.
   pending or held mail (frozen unread mail is retained, never rerouted).
   `post doctor`'s `participants.stale` quotes the same plan's delete and archive
   counts and names `post participant gc` (dry run) and `--apply`.
+- **A collected record named by an explicit claim** (`POST_PARTICIPANT=<id>`
+  after gc archived or deleted it). A write restores the record under the
+  participants lock, but only after the migration fence has admitted the
+  command: a fenced write is refused (`config_invalid`, exit 78) and leaves the
+  store untouched. A command that only reads (`read --peek`, `watch
+  --snapshot`, `who`) restores nothing and creates nothing; it reports
+  `participant_missing` (exit 65; `who` and `participant show` report status
+  `missing` instead) whose fix is `post participant restore <id>`. That verb
+  restores explicitly: `{ok, id, restored, from?, participant}`, where `from`
+  is `archive` or `tombstone` and `restored` is false when the record was
+  already there.
+- **`participant list` and `who` skip damaged records on stdout too.** A record
+  that cannot be read is left out of `participants` and named in `skipped`
+  (`[{id, reason}]`, present only when nonempty), with a stderr warning as
+  before; `who --text` prints one `skipped:` line.
 
 ## Lineage voice withdrawal (amendment, 2026-09-16)
 

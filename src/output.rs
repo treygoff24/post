@@ -1169,6 +1169,11 @@ pub struct WhoOutput {
     pub participants: Vec<WhoParticipant>,
     pub legacy_rooms: Vec<WhoRoom>,
     pub count: usize,
+    /// Participant records that could not be read and are therefore missing
+    /// from `participants`, each with the reason. Present only when there is
+    /// one: a roster without this key is complete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<crate::participant::SkippedParticipant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_note: Option<String>,
     /// How many items the bridge's health file lists under `attention`

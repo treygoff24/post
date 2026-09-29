@@ -137,11 +137,16 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         home: context.home.clone(),
     };
     let mut participants = Vec::new();
-    let participant_records = match crate::participant::list(context) {
-        Ok(participants) => participants,
-        Err(_) if resolution_failed => Vec::new(),
+    // Damaged records are left out of the roster and named in `skipped`, on
+    // stdout: a caller that discards stderr must not read a roster with a
+    // hole in it as complete. A damaged record's workspace is unknowable, so
+    // a workspace scope cannot filter them out either.
+    let (participant_records, skipped) = match crate::participant::list_with_skipped(context) {
+        Ok(listing) => listing,
+        Err(_) if resolution_failed => (Vec::new(), Vec::new()),
         Err(error) => return Err(error),
     };
+    crate::participant::warn_skipped(&skipped);
     for participant in participant_records {
         if let Some(scope) = scope.as_ref() {
             if !participant
@@ -222,6 +227,9 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 entry.pending,
             ));
         }
+        if !skipped.is_empty() {
+            rendered.push_str(&skipped_line(&skipped));
+        }
         if participants
             .iter()
             .any(|participant| matches!(participant.state.as_str(), "stale" | "no lease record"))
@@ -278,12 +286,34 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             participants,
             legacy_rooms,
             count,
+            skipped,
             activity_note,
             bridge_attention,
             bridge_health,
             doorbell: (doorbell.state != "absent").then(|| doorbell.state.to_owned()),
         },
         pretty,
+    )
+}
+
+/// The one text line for participants whose records could not be read. Ids
+/// and reasons come from the store, so both are sanitized like every other
+/// stored value on a `who --text` line.
+fn skipped_line(skipped: &[crate::participant::SkippedParticipant]) -> String {
+    let named = skipped
+        .iter()
+        .map(|record| {
+            format!(
+                "{} ({})",
+                output::sanitize_text_header(&record.id),
+                output::sanitize_text_header(&record.reason)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "skipped: {} participant record(s) could not be read and are missing from this roster: {named}. Fix: repair each participants/<id>/participant.json, or remove that directory if the participant is gone.\n",
+        skipped.len()
     )
 }
 

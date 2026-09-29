@@ -72,6 +72,10 @@ pub struct MissedChannelMessage {
 pub enum MissingClaim<'a> {
     /// `POST_PARTICIPANT=<id>`.
     Explicit { id: &'a str },
+    /// `POST_PARTICIPANT=<id>` naming a record `participant gc` collected
+    /// (`archived` is its tier-2 archive; otherwise tier-1 deleted). A command
+    /// that only reads reports it; one that writes restores it.
+    Collected { id: &'a str, archived: bool },
     /// This session's by-session index entry, naming a record that is gone.
     SessionIndex { harness: &'a str, id: &'a str },
     /// `post participant restore <id>` for an id no record, archive or
@@ -387,6 +391,20 @@ impl AppError {
                 .id(id)
                 .reason("POST_PARTICIPANT does not name an existing record")
             }
+            MissingClaim::Collected { id, archived } => Self::new(
+                ErrorCode::ParticipantMissing,
+                format!(
+                    "POST_PARTICIPANT names participant '{id}', whose record `participant gc` {} while it was idle; a command that only reads does not bring it back",
+                    if archived { "archived" } else { "deleted" }
+                ),
+                format!(
+                    "Run `post participant restore {id}` to bring it back under the same id. A command that writes as this participant (send, chat --join, read) restores it by itself."
+                ),
+            )
+            .exact_fix(format!("post participant restore {id}"))
+            .input(format!("POST_PARTICIPANT={id}"))
+            .id(id)
+            .reason("the record was collected by participant gc, and read-only commands do not restore it"),
             MissingClaim::SessionIndex { harness, id } => Self::new(
                 ErrorCode::ParticipantMissing,
                 format!(

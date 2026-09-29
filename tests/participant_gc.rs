@@ -483,9 +483,10 @@ fn record(sandbox: &Sandbox, id: &str) -> Value {
 }
 
 /// Loom exports one `POST_PARTICIPANT` from a `bind --new` record, and that
-/// record can sit idle past the day gc allows. The claim is repaired, not
-/// reported missing: a reader gets the participant back under the same id (bound
-/// and empty), and a write says so once with `bound_now`.
+/// record can sit idle past the day gc allows. A command that writes repairs
+/// the claim, under the same id, and says so once with `bound_now`. A command
+/// that only reads restores nothing: it is told the claim is collected and how
+/// to bring it back, and the store is untouched.
 #[test]
 fn an_explicit_claim_on_a_deleted_record_gets_the_same_participant_back() {
     let sandbox = Sandbox::new();
@@ -511,13 +512,50 @@ fn an_explicit_claim_on_a_deleted_record_gets_the_same_participant_back() {
     assert!(strings(&applied["deleted"]).contains(&id), "{applied}");
     assert!(!record_path(&sandbox, &id).exists());
 
-    // A reader treats the claim as bound and empty; the record is back, same id.
-    let read = sandbox.run_as_participant(&["inbox", "--json"], &id, &alpha);
-    assert_success(&read);
-    let inbox: Value = from_stdout(&read);
-    assert_ne!(inbox["bound"], json!(false), "{inbox}");
-    assert!(inbox.get("participant_missing").is_none(), "{inbox}");
-    assert!(inbox.get("bound_now").is_none(), "readers keep their shape");
+    // Readers restore nothing. They report the claim as missing, with a fix
+    // that names `participant restore <id>`, and create nothing.
+    let restore_fix = format!("post participant restore {id}");
+    let before = tree(&sandbox.mail_root);
+    for args in [
+        &["inbox", "--json"] as &[&str],
+        &["read", "any-id", "--peek", "--json"],
+        &["watch", "--snapshot", "--json"],
+    ] {
+        let read = sandbox.run_as_participant(args, &id, &alpha);
+        assert_eq!(read.status.code(), Some(65), "{args:?}: {read:?}");
+        let error: ErrorEnvelope = from_stderr(&read);
+        assert_eq!(error.error.code, "participant_missing", "{args:?}");
+        assert_eq!(
+            error.error.details.exact_fix.as_deref(),
+            Some(restore_fix.as_str()),
+            "{args:?}"
+        );
+        assert!(
+            error.error.message.contains("deleted"),
+            "{args:?}: {error:?}"
+        );
+        assert_eq!(
+            tree(&sandbox.mail_root),
+            before,
+            "{args:?} changed the store"
+        );
+        assert!(!record_path(&sandbox, &id).exists(), "{args:?}");
+    }
+    // The diagnostic surfaces carry the same fix as a field and still run.
+    let shown = sandbox.run_as_participant(&["participant", "show", "--json"], &id, &alpha);
+    assert_success(&shown);
+    let shown: Value = from_stdout(&shown);
+    let missing = shown
+        .get("participant_missing")
+        .unwrap_or_else(|| panic!("show lacks participant_missing: {shown}"));
+    assert_eq!(missing["exact_fix"], restore_fix.as_str(), "{shown}");
+    assert_eq!(tree(&sandbox.mail_root), before, "show changed the store");
+
+    // A write brings it back, same id, and says so once.
+    let touched = sandbox.run_as_participant(&["participant", "touch", "--json"], &id, &alpha);
+    assert!(touched.status.success(), "{}", common::stderr(&touched));
+    let touched: Value = from_stdout(&touched);
+    assert_eq!(touched["bound_now"]["id"], id.as_str(), "{touched}");
     let back = record(&sandbox, &id);
     assert_eq!(back["id"], id.as_str());
     assert_eq!(back["ephemeral"], true);
@@ -558,8 +596,8 @@ fn an_explicit_claim_on_a_deleted_record_gets_the_same_participant_back() {
     assert!(second.get("bound_now").is_none(), "{second}");
 }
 
-/// The same repair for a tier-2 record: an archived participant comes back whole
-/// (state included), read or write.
+/// The same for a tier-2 record: a write brings an archived participant back
+/// whole (state included); a reader leaves the archive alone.
 #[test]
 fn an_explicit_claim_on_an_archived_record_restores_it_whole() {
     let sandbox = Sandbox::new();
@@ -590,19 +628,31 @@ fn an_explicit_claim_on_an_archived_record_restores_it_whole() {
         sorted(&[&by_reader, &by_writer])
     );
     let archive = |id: &str| sandbox.mail_root.join("participants-archive").join(id);
+    let memberships_in_archive =
+        |id: &str| fs::read(archive(id).join("channels.json")).expect("state");
     assert!(archive(&by_reader).exists() && !record_path(&sandbox, &by_reader).exists());
 
+    // A reader leaves the archive where it is and says how to restore it.
+    let before = tree(&sandbox.mail_root);
     let read = sandbox.run_as_participant(&["inbox", "--json"], &by_reader, &alpha);
-    assert_success(&read);
-    let inbox: Value = from_stdout(&read);
-    assert_ne!(inbox["bound"], json!(false), "{inbox}");
-    assert!(inbox.get("participant_missing").is_none(), "{inbox}");
-    assert!(record_path(&sandbox, &by_reader).exists());
-    assert!(!archive(&by_reader).exists(), "the archive moved back");
+    assert_eq!(read.status.code(), Some(65), "{read:?}");
+    let error: ErrorEnvelope = from_stderr(&read);
+    assert_eq!(error.error.code, "participant_missing");
     assert_eq!(
-        memberships(&by_reader),
+        error.error.details.exact_fix,
+        Some(format!("post participant restore {by_reader}"))
+    );
+    assert!(error.error.message.contains("archived"), "{error:?}");
+    assert_eq!(
+        tree(&sandbox.mail_root),
+        before,
+        "a reader restores nothing"
+    );
+    assert!(archive(&by_reader).exists() && !record_path(&sandbox, &by_reader).exists());
+    assert_eq!(
+        memberships_in_archive(&by_reader),
         reader_state,
-        "state came back whole"
+        "the archived state is untouched"
     );
 
     let sent = sandbox.run_as_participant(
@@ -648,7 +698,11 @@ fn an_explicit_claim_nothing_can_restore_is_still_participant_missing() {
         .join("participants-archive/claude-b10c0ded");
     fs::create_dir_all(&broken).expect("archive dir");
     fs::write(broken.join("participant.json"), b"not json").expect("garbage record");
-    let refused = sandbox.run_as_participant(&["inbox", "--json"], "claude-b10c0ded", &alpha);
+    let refused = sandbox.run_as_participant(
+        &["send", "--to", "beta", "--json", "--body", "hello"],
+        "claude-b10c0ded",
+        &alpha,
+    );
     assert_eq!(refused.status.code(), Some(65), "{refused:?}");
     let error: ErrorEnvelope = from_stderr(&refused);
     assert_eq!(error.error.code, "participant_missing");
@@ -666,6 +720,57 @@ fn an_explicit_claim_nothing_can_restore_is_still_participant_missing() {
         fs::read(broken.join("participant.json")).expect("the archive is untouched"),
         b"not json"
     );
+}
+
+/// The migration fence decides first. A write whose claim names a collected
+/// record is refused and restores nothing: no record or directory comes back,
+/// no tombstone or index changes, and nothing is stamped alive.
+#[cfg(unix)]
+#[test]
+fn a_fenced_write_with_a_collected_claim_restores_nothing() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let deleted = bound_idle(&sandbox, "claude", "fenced-deleted", 40);
+    let archived = bound_idle(&sandbox, "claude", "fenced-archived", 1);
+    give_state(&sandbox, &archived, "gc-fenced");
+    patch(&sandbox, &archived, |record| {
+        record["last_seen"] = json!(days_ago(60));
+    });
+    let applied = gc(&sandbox, true);
+    assert_eq!(applied["deleted"], json!([deleted]), "{applied}");
+    assert_eq!(applied["archived"], json!([archived]), "{applied}");
+    fs::write(sandbox.mail_root.join(".post-arx.lock"), b"").expect("migration lock");
+    common::write_fence_state_locked(&sandbox.mail_root, 7);
+    let before = tree(&sandbox.mail_root);
+
+    for id in [&deleted, &archived] {
+        for args in [
+            &["send", "--to", "beta", "--json", "--body", "fenced"] as &[&str],
+            &["participant", "touch", "--json"],
+            &["chat", "fenced-room", "--join", "--json"],
+        ] {
+            let output = sandbox.run_as_participant(args, id, &alpha);
+            common::assert_migration_refused(&output);
+            assert_eq!(
+                tree(&sandbox.mail_root),
+                before,
+                "{args:?} as {id} changed the store"
+            );
+        }
+        assert!(!record_path(&sandbox, id).exists(), "{id} came back");
+    }
+
+    // A claim nothing ever held is still the claim's error, not the fence's:
+    // it has nothing to restore, so it never waits on admission.
+    let never = sandbox.run_as_participant(
+        &["send", "--to", "beta", "--json", "--body", "fenced"],
+        "claude-0badf00d",
+        &alpha,
+    );
+    assert_eq!(never.status.code(), Some(65), "{never:?}");
+    let error: ErrorEnvelope = from_stderr(&never);
+    assert_eq!(error.error.code, "participant_missing");
+    assert_eq!(tree(&sandbox.mail_root), before);
 }
 
 /// A participant that `participant gc` already collected is not a send target:
@@ -757,7 +862,7 @@ fn reviving_a_claimed_record_waits_for_the_participants_lock() {
         .expect("open participants lock");
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
     let mut child = common::post_command()
-        .args(["inbox", "--json"])
+        .args(["participant", "touch", "--json"])
         .current_dir(&alpha)
         .env_clear()
         .env("HOME", &sandbox.home)
@@ -767,9 +872,9 @@ fn reviving_a_claimed_record_waits_for_the_participants_lock() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn inbox");
+        .expect("spawn touch");
     for _ in 0..20 {
-        if child.try_wait().expect("probe inbox").is_some() {
+        if child.try_wait().expect("probe touch").is_some() {
             panic!("the claim was revived without the participants lock");
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -779,7 +884,7 @@ fn reviving_a_claimed_record_waits_for_the_participants_lock() {
         "nothing moved while locked"
     );
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
-    let output = child.wait_with_output().expect("wait for inbox");
+    let output = child.wait_with_output().expect("wait for touch");
     assert_success(&output);
     assert!(
         record_path(&sandbox, &id).exists(),

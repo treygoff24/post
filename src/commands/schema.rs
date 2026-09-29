@@ -475,6 +475,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "legacy_rooms (room, live_watch, last_seen?, doorbell_armed? (present and true only when the doorbell supervisor has this room armed))",
             "activity_note? (stale-delivery crash gap: frozen mail is not reassigned)",
             "count",
+            "skipped? ([{id, reason}]: participant records too damaged to read, so missing from participants; present only when there is one, and `post participant list` carries the same key; --text prints one `skipped:` line)",
             "bridge_attention? (integer: how many items bridge/health.json lists under attention; present only when nonzero, and `post doctor` lists each with its fix)",
             "bridge_health? ({reason, fix}; present only on a bridged host whose bridge/health.json is missing, malformed, or has no attention list, when the absent bridge_attention means nothing; `post doctor` reports it as bridge.health_unreadable)",
             "doorbell? (fresh|stale|unreadable: what live_watch could see of doorbell/health.json; present only when that file exists; stale and unreadable count for nothing)",
