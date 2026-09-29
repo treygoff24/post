@@ -128,9 +128,9 @@ function main() {
   // ---- receipt 0: exact event classes in the parsed snapshot ----
   // An unbound reader has no cwd-room fallback (contract section 1), so name
   // the room. Read tolerantly (contract section 3): keep only objects that
-  // carry an `event` string, so a future kind or the `bound: false` marker
-  // line can neither crash this script nor be mistaken for one of the two
-  // classes asserted below.
+  // carry an `event` string, so a future kind or the unbound marker
+  // (`{"event":"unbound","bound":false}`) can neither crash this script nor be
+  // mistaken for one of the two classes asserted below.
   const snapshot = post(["watch", "--snapshot", "--room", "watcher"], { cwd: WATCHER_DIR });
   const events = snapshot.stdout
     .split("\n")

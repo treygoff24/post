@@ -14,8 +14,10 @@
 //
 // Snapshot reading is tolerant of exactly two things (contract section 3): a
 // line whose `event` kind is a string this consumer does not know, and the
-// `{"bound":false}` marker line. Both are skipped. Every other defect,
-// including an unknown address kind, still makes the batch UNKNOWN.
+// unbound marker (`{"event":"unbound","participant":null,"bound":false,...}`,
+// which the real post prints, and the bare `{"bound":false}` object). Both are
+// skipped. Every other defect, including an unknown address kind, still makes
+// the batch UNKNOWN.
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
@@ -24,6 +26,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
+import { parseSnapshot as coreParseSnapshot } from "./mail-hook-core.mjs";
+import { parseSnapshot as supervisorParseSnapshot } from "./doorbell-supervisor.mjs";
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
@@ -145,14 +149,39 @@ function brokenEvents() {
   ];
 }
 
+// What the real `post watch --snapshot` prints for a reader with no binding,
+// run in a throwaway home and mail root with a cleared environment. Not a
+// fixture: it is the producer's own line, so a change to it in post fails here.
+let realUnbound = null;
+function realUnboundSnapshot() {
+  if (realUnbound !== null) return realUnbound;
+  const dir = fs.mkdtempSync(path.join(ROOT, "unbound-"));
+  const result = spawnSync(POST_BIN, ["watch", "--snapshot"], {
+    cwd: dir,
+    env: { PATH: process.env.PATH, HOME: dir, POST_MAIL_ROOT: path.join(dir, "mail") },
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`\`${POST_BIN} watch --snapshot\` failed: ${result.error ? result.error.message : `exit ${result.status}: ${result.stderr}`}`);
+  }
+  const first = JSON.parse(result.stdout.split("\n").find((line) => line.trim()) ?? "null");
+  if (first?.event !== "unbound" || first.bound !== false) {
+    throw new Error(`an unbound \`watch --snapshot\` no longer prints the unbound marker: ${result.stdout}`);
+  }
+  realUnbound = { raw: result.stdout, line: first };
+  return realUnbound;
+}
+
 // Lines every snapshot consumer must skip, not refuse (contract section 3):
-// a future `event` kind, and the typed marker an unbound reader is given.
+// a future `event` kind, and the typed marker an unbound reader is given (as
+// post prints it, and as the bare `{"bound":false}` object).
 function toleratedLines() {
   const { ev } = samples();
   return [
     { ...clone(ev.workspaceMail), id: "20260101-999999-fut000", event: "reaction" },
     { ...clone(ev.channelMessage), id: "20260101-000000-999999-fut001", event: "channel_edited", channel: "tax" },
     { event: "digest_hint", note: "a kind that does not exist yet" },
+    clone(realUnboundSnapshot().line),
     { bound: false },
   ];
 }
@@ -422,6 +451,13 @@ for (const adapter of MAIL_ADAPTERS) {
       assert.ok(!only.context.includes("Direct mail"), only.context);
     });
 
+    test("the unbound line the real post prints is an empty inbox, not UNKNOWN", async () => {
+      const unbound = realUnboundSnapshot().raw;
+      const { context } = await runMail(adapter, { watch: unbound });
+      assert.doesNotMatch(context, UNKNOWN);
+      assert.ok(!context.includes("Direct mail"), context);
+    });
+
     test("malformed version output fails the capability check", async () => {
       const S = samples();
       const probeFailed = /could not verify installed post capabilities/;
@@ -565,6 +601,20 @@ describe("watch-notice", { concurrency: true }, () => {
     assert.ok(!only.stdout.includes("Direct mail"), only.stdout);
   });
 
+  test("the unbound line the real post prints is no mail and no error", async () => {
+    const { raw, watch } = samples();
+    const unbound = realUnboundSnapshot().raw;
+    const [baseline, alone, beside] = await Promise.all([
+      runNotice(raw.watch),
+      runNotice(unbound),
+      runNotice(unbound + jsonl(watch)),
+    ]);
+    assert.equal(alone.status, 0, alone.stderr);
+    assert.equal(alone.stdout, "", "an unbound snapshot alone renders nothing");
+    assert.equal(beside.status, 0, beside.stderr);
+    assert.equal(beside.stdout, baseline.stdout);
+  });
+
   test("any malformed snapshot event makes the batch UNKNOWN", async () => {
     const { watch } = samples();
     await Promise.all(
@@ -578,5 +628,40 @@ describe("watch-notice", { concurrency: true }, () => {
           assert.ok(!result.stdout.includes("bad0") && !result.stdout.includes("#tax"), `${label}: nothing rendered`);
         })
     );
+  });
+});
+
+// ---------------------------------------------- the unbound line, as parsed
+
+// The hooks and watch-notice only ever skip the unbound marker, so their
+// output cannot tell a parser that saw it from one that took it for a future
+// kind. The supervisor can: an unbound snapshot for a named participant is a
+// broken subscription, not an empty inbox. Assert the parsed result itself.
+describe("the real unbound snapshot, parsed", () => {
+  const shape = (parsed) => ({
+    events: parsed.events.length,
+    unbound: parsed.unbound,
+    skipped: parsed.skipped,
+  });
+
+  test("the hook core reports unbound, with nothing skipped as a future kind", () => {
+    const parsed = coreParseSnapshot(realUnboundSnapshot().raw);
+    assert.deepEqual(shape(parsed), { events: 0, unbound: true, skipped: 0 });
+    assert.equal(parsed.malformed, 0);
+  });
+
+  test("the supervisor reports unbound, with nothing skipped as a future kind", () => {
+    const parsed = supervisorParseSnapshot(realUnboundSnapshot().raw);
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(shape(parsed), { events: 0, unbound: true, skipped: 0 });
+  });
+
+  test("a real snapshot with mail keeps its events and is not unbound", () => {
+    const { raw } = samples();
+    for (const parse of [coreParseSnapshot, supervisorParseSnapshot]) {
+      const parsed = parse(raw.watch);
+      assert.equal(parsed.unbound, false);
+      assert.ok(parsed.events.length > 0);
+    }
   });
 });
