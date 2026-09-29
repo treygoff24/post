@@ -538,6 +538,107 @@ pub(crate) fn end(context: &Context, id: &str) -> AppResult<Participant> {
     Ok(participant)
 }
 
+/// The live record for `id`, bringing a collected one back first. The caller
+/// holds the participants lock.
+///
+/// `participant gc` only collects records that hold nothing a session needs:
+/// a tier-1 record is deleted with a tombstone (it held no state, so it is
+/// recreated from the tombstone under the same id), a tier-2 record is moved
+/// whole to the archive (moved back, cursors and inbox included). `None` means
+/// nothing live or collected holds the id. An error means a collected record
+/// exists and could not be brought back.
+pub(crate) fn revive_locked(context: &Context, id: &str) -> AppResult<Option<Participant>> {
+    if let Some(live) = load(context, id)? {
+        return Ok(Some(live));
+    }
+    let revived = match gc::holder(context, id)? {
+        gc::Holder::Nobody => return Ok(None),
+        gc::Holder::Archived { .. } => {
+            gc::restore(context, id)?;
+            match load(context, id) {
+                Ok(Some(record)) => record,
+                unreadable => {
+                    gc::unrestore(context, id)?;
+                    return Err(unreadable.err().unwrap_or_else(|| {
+                        AppError::config(
+                            &gc::archived_dir(context, id),
+                            "archived participant record is unreadable",
+                        )
+                    }));
+                }
+            }
+        }
+        gc::Holder::Tombstone { .. } => {
+            let tombstone = gc::latest_tombstone(context, id)?.ok_or_else(|| {
+                AppError::config(
+                    &gc::tombstones_path(context),
+                    "the participant tombstone is no longer readable",
+                )
+            })?;
+            let dir = context.root.join(PARTICIPANTS_DIR).join(id);
+            fs::create_dir_all(&dir)
+                .map_err(|error| AppError::io("create participant directory", &dir, error))?;
+            let participant = Participant {
+                version: RECORD_VERSION,
+                id: id.to_owned(),
+                harness: tombstone.harness,
+                conversation_key_digest: tombstone.conversation_key_digest,
+                created: tombstone.created,
+                last_seen: tombstone.last_seen,
+                lease_hours: tombstone.lease_hours.unwrap_or(if tombstone.ephemeral {
+                    EPHEMERAL_LEASE_HOURS
+                } else {
+                    DEFAULT_LEASE_HOURS
+                }),
+                ended_at: None,
+                workspace: tombstone.workspace,
+                workspace_path: tombstone.workspace_path,
+                lineage: None,
+                lineage_since: None,
+                display_name: tombstone.display_name,
+                ephemeral: tombstone.ephemeral,
+                dir,
+            };
+            write_record(&participant)?;
+            participant
+        }
+    };
+    write_index(
+        context,
+        &revived.harness,
+        &revived.conversation_key_digest,
+        &revived.id,
+    )?;
+    Ok(Some(revived))
+}
+
+/// The explicit `POST_PARTICIPANT` claim's record, brought back if it was
+/// collected. `None` when there is no explicit claim, or nothing collected
+/// holds its id (it never existed: the claim stays `participant_missing`).
+pub(crate) fn revive_explicit_claim(context: &Context) -> AppResult<Option<Participant>> {
+    let Some(explicit) = env_utf8("POST_PARTICIPANT")? else {
+        return Ok(None);
+    };
+    validate_participant_id(&explicit)?;
+    // A claim nothing ever held is answered without the lock, so a wrong one
+    // still creates nothing; the lock decides only what was collected.
+    if matches!(gc::holder(context, &explicit)?, gc::Holder::Nobody) {
+        return Ok(None);
+    }
+    let _lock = lock(context)?;
+    let Some(mut revived) = revive_locked(context, &explicit)? else {
+        return Ok(None);
+    };
+    // The claim that brought it back is proof of life. A record that kept its
+    // old `last_seen` would be collected again by the next `participant gc`,
+    // and revived again by the next reader, for as long as it stays idle.
+    // (Delivery into a collected record does not do this: mail arriving for a
+    // session is no evidence that the session is there.)
+    revived.last_seen = Some(format_rfc3339(SystemTime::now())?);
+    write_record(&revived)?;
+    Ok(Some(revived))
+}
+
 /// The only participant-minting path. The record is committed before its
 /// by-session cache entry while the one participant lock is held.
 pub(crate) fn bind(
@@ -562,7 +663,9 @@ pub(crate) fn bind(
             .then(|| workspace_context(context, cwd, workspace_override))
             .transpose()?;
         let _lock = lock(context)?;
-        let mut participant = load(context, &explicit)?.ok_or_else(|| {
+        // A collected record comes back under its id: `bind` is the repair
+        // command for a claim that names one.
+        let mut participant = revive_locked(context, &explicit)?.ok_or_else(|| {
             AppError::participant_missing(
                 MissingClaim::Explicit { id: &explicit },
                 ambient_key_available(),
@@ -919,7 +1022,23 @@ fn read_bounded_optional(path: &Path, maximum: u64) -> AppResult<Option<Vec<u8>>
     Ok(Some(bytes))
 }
 
+/// The name the delegation runner sets in every child it starts.
+const DELEGATE_RUN_ENV: &str = "DELEGATE_RUN_ID";
+
+/// Whether this process is a delegate child. A child inherits its parent's
+/// environment, harness conversation keys included (a Codex child launched from
+/// Claude sees the parent's `CLAUDE_CODE_SESSION_ID`), so an ambient key would
+/// resolve to, or lazily mint as, the parent. Delegate children get no ambient
+/// identity: an explicit `POST_PARTICIPANT` (which never reaches the ambient
+/// keys) still works, and nothing else does.
+fn is_delegate_child() -> AppResult<bool> {
+    Ok(env_utf8(DELEGATE_RUN_ENV)?.is_some_and(|value| !value.is_empty()))
+}
+
 fn conversation_binding() -> AppResult<Option<ConversationBinding>> {
+    if is_delegate_child()? {
+        return Ok(None);
+    }
     let claude = env_utf8("CLAUDE_CODE_SESSION_ID")?;
     let thread = env_utf8("CODEX_THREAD_ID")?;
     let session = env_utf8("CODEX_SESSION_ID")?;

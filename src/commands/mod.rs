@@ -46,6 +46,12 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     if let Command::Bridge(args) = cli.command {
         return bridge::run(&context, args, pretty);
     }
+    // A read never reads stdin: input on it is refused before anything is
+    // resolved, admitted, bound, routed, or marked read, and before any
+    // return path (an unbound marker included) could ignore it.
+    if let Command::Read(args) = &cli.command {
+        read::refuse_unintended_stdin(args, json, pretty)?;
+    }
     let writes =
         migration_fence::classify_write(&cli.command) || participant_gc_apply(&cli.command);
     let long_watch = matches!(&cli.command, Command::Watch(args) if !args.snapshot);
@@ -58,11 +64,46 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     // participant at all, carry it as a field and run. Any other resolution
     // failure keeps its old shape: an error for a command that needs a
     // participant, an advisory for the rest.
+    //
+    // The one claim that is repaired rather than reported: an explicit
+    // `POST_PARTICIPANT` naming a record `participant gc` collected (Loom
+    // exports one from a `bind --new` record, and it can sit idle for a day).
+    // Its id is brought back under the lock, as the same participant, before
+    // the command runs.
+    let mut revived_claim = None;
     let (mut resolved_participant, resolution_error) = if explicit_bootstrap {
         (crate::participant::Resolved::Unbound, None)
     } else {
         match crate::participant::resolve(&context) {
             Ok(resolved) => (resolved, None),
+            Err(error)
+                if error.code == ErrorCode::ParticipantMissing
+                    && !tolerates_resolution_error(&cli.command, &error, resolution_required) =>
+            {
+                match crate::participant::revive_explicit_claim(&context) {
+                    Ok(Some(revived)) => {
+                        revived_claim = Some(BoundNow {
+                            id: revived.id.clone(),
+                            workspace: revived.workspace.clone(),
+                        });
+                        (
+                            crate::participant::Resolved::Bound {
+                                participant: Box::new(revived),
+                                provenance: crate::participant::Provenance::ExplicitEnv,
+                            },
+                            None,
+                        )
+                    }
+                    // Never existed: the claim is wrong, and says so.
+                    Ok(None) => return Err(error),
+                    Err(cause) => {
+                        return Err(error.reason(format!(
+                            "the collected record could not be restored: {}",
+                            cause.message
+                        )))
+                    }
+                }
+            }
             Err(error) if tolerates_resolution_error(&cli.command, &error, resolution_required) => {
                 (crate::participant::Resolved::Unbound, Some(error))
             }
@@ -75,11 +116,6 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         if let Some(marker) = unbound_reader_marker(&cli.command, json)? {
             return Ok(marker);
         }
-    }
-    // A read never reads stdin: input on it is refused before anything is
-    // admitted, bound, routed, or marked read.
-    if let Command::Read(args) = &cli.command {
-        read::refuse_unintended_stdin(args, json, pretty)?;
     }
     let mut admission = if writes {
         Some(migration_fence::admit(&context, true)?)
@@ -113,7 +149,10 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
     if !fenced_read && !matches!(&cli.command, Command::Doctor(_)) {
         context.prepare_first_run()?;
     }
-    let mut bound_now = None;
+    // A write that brought its collected participant back says so, like one
+    // that bound its session; a reader treats the participant as bound and
+    // empty, and its output keeps its own shape.
+    let mut bound_now = revived_claim.filter(|_| writes);
     if let Some((harness, key)) = lazy_binding {
         let cwd = std::env::current_dir().map_err(|error| {
             AppError::io(
@@ -321,9 +360,9 @@ fn participant_gc_apply(command: &Command) -> bool {
 /// harness session binds itself; a bare shell mints an identity.
 pub(super) fn unbound_hint() -> &'static str {
     if crate::participant::bind_key_available().unwrap_or(false) {
-        "This session is not bound to a post participant yet, so nothing can be addressed to it. Send a message, or run `post participant bind`, to bind it."
+        "This session is not bound to a post participant yet, so nothing can be addressed to it. Send a message, or run `post participant bind`, to bind it. To look at one room without binding, `post inbox --room <name>` and `post watch --snapshot --room <name>` take the room explicitly."
     } else {
-        "This session is not bound to a post participant yet, so nothing can be addressed to it. Run `post participant bind --new`, then run the printed `export POST_PARTICIPANT=...` command, to bind it."
+        "This session is not bound to a post participant yet, so nothing can be addressed to it. Run `post participant bind --new`, then run the printed `export POST_PARTICIPANT=...` command, to bind it. To look at one room without binding, `post inbox --room <name>` and `post watch --snapshot --room <name>` take the room explicitly."
     }
 }
 

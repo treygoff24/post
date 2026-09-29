@@ -302,6 +302,14 @@ where
     let profile = crate::profile::stamp_for(context, &actor.participant.id, &sender, &rooms);
     let (id_timestamp, sent) = local_timestamp()?;
     let archive = context.root.join("archive");
+    // A letter sent straight to a participant is written into that
+    // participant's own directory. `participant gc` collects idle records
+    // under the participants lock and re-checks each one's inbox under it, so
+    // this write holds the same lock, and first confirms the record is still
+    // there (a collected one comes back under its id) instead of creating a
+    // directory with mail and no record. Routing takes the lock again below,
+    // so it is released before then.
+    let delivery_lock = hold_target_record(context, &target)?;
     let mut inbox = None;
     let mut delivered = None;
     for attempt in 0..256 {
@@ -367,6 +375,7 @@ where
             }
         }
     }
+    drop(delivery_lock);
     let envelope = delivered.ok_or_else(|| {
         AppError::new(
             ErrorCode::IoError,
@@ -652,6 +661,27 @@ fn ensure_remote_route_allowed(
     .input(format!("{sender} -> {address}"))
     .reason(rule.reason.clone())
     .rule(rule.clone()))
+}
+
+/// For a letter addressed to a participant: take the participants lock and
+/// confirm the target's record is still there, bringing a collected one back.
+/// Other targets keep their own stores and need neither.
+fn hold_target_record(
+    context: &Context,
+    target: &crate::participant::Address,
+) -> AppResult<Option<std::fs::File>> {
+    if target.kind != crate::participant::AddressKind::Participant {
+        return Ok(None);
+    }
+    let lock = crate::participant::lock(context)?;
+    if crate::participant::revive_locked(context, &target.name)?.is_none() {
+        return Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("participant target '{}' no longer exists", target.name),
+            "Run `post participant list`, then retry with an existing target.",
+        ));
+    }
+    Ok(Some(lock))
 }
 
 pub(crate) fn ensure_route_allowed(
@@ -940,8 +970,9 @@ pub(crate) fn send_body_flag(inline: Option<&str>, body_file: Option<&std::path:
 
 #[cfg(test)]
 mod tests {
-    use super::{run_with_body, run_with_body_and_id, EnvIdentity};
+    use super::{hold_target_record, run_with_body, run_with_body_and_id, EnvIdentity};
     use crate::cli::SendArgs;
+    use crate::error::ErrorCode;
     use crate::mailbox::Context;
     use crate::model::MailKind;
     use crate::test_support::{test_root, trash_test_root};
@@ -1228,6 +1259,196 @@ mod tests {
             serde_json::from_str(&result.stdout).expect("send receipt JSON");
         assert!(receipt["envelope"]["from_participant"].is_string());
         assert_eq!(receipt["envelope"]["address_kind"], "workspace");
+        trash_test_root(&root);
+    }
+
+    fn participant_target(id: &str) -> crate::participant::Address {
+        crate::participant::Address {
+            kind: crate::participant::AddressKind::Participant,
+            name: id.to_owned(),
+        }
+    }
+
+    /// A letter sent straight to a participant is written into that
+    /// participant's own directory. If `participant gc` collected the record
+    /// between the target being resolved and the write, the write finds it
+    /// again (same id) instead of leaving mail in a directory with no record.
+    #[test]
+    fn a_letter_to_a_participant_collected_meanwhile_finds_its_record_back() {
+        use crate::commands::participant_gc::test_seed::{days_ago, seed_in};
+        let (root, context) = test_context("collected-target");
+        let now = std::time::SystemTime::now();
+        let (id, _) = seed_in(&root, "collected-target", &days_ago(40, now), false, None);
+        let plan = crate::commands::participant_gc::plan(&context, now).expect("plan");
+        let applied =
+            crate::commands::participant_gc::apply_plan(&context, &plan, now, &mut |_| Ok(()))
+                .expect("apply");
+        assert_eq!(applied.deleted, vec![id.clone()]);
+        assert!(crate::participant::load(&context, &id)
+            .expect("load")
+            .is_none());
+
+        let held = hold_target_record(&context, &participant_target(&id))
+            .expect("hold the target's record")
+            .expect("a participant target takes the lock");
+        assert!(
+            crate::participant::load(&context, &id)
+                .expect("load")
+                .is_some(),
+            "the record is back before anything is written into its directory"
+        );
+        drop(held);
+
+        // A target that was never a participant is refused, not created.
+        let refused = hold_target_record(&context, &participant_target("claude-ffffffff"));
+        assert_eq!(
+            refused.expect_err("unknown target").code,
+            ErrorCode::NotFound
+        );
+        assert!(!root.join("participants/claude-ffffffff").exists());
+        // Rooms and lineages keep their own stores and take no lock.
+        let room = crate::participant::Address {
+            kind: crate::participant::AddressKind::Workspace,
+            name: "claude-space".to_owned(),
+        };
+        assert!(hold_target_record(&context, &room).expect("room").is_none());
+        trash_test_root(&root);
+    }
+
+    /// The whole path, not just the helper: a send whose target is collected
+    /// while it is in flight waits for the collection (which holds the lock),
+    /// then finds the record back under its id and delivers into it.
+    #[test]
+    fn a_send_in_flight_while_its_target_is_collected_lands_in_a_record() {
+        use crate::commands::participant_gc::test_seed::{days_ago, seed_in};
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (root, context) = test_context("in-flight");
+        let now = std::time::SystemTime::now();
+        let (target, _) = seed_in(&root, "in-flight-target", &days_ago(40, now), false, None);
+        let plan = crate::commands::participant_gc::plan(&context, now).expect("plan");
+        assert_eq!(plan.actions.len(), 1, "the target is the one candidate");
+
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_context = Context {
+            root: context.root.clone(),
+            home: context.home.clone(),
+        };
+        let to = format!("participant:{target}");
+        let worker = std::thread::spawn(move || {
+            // The actor is per thread, and binding takes the lock: bind first.
+            let identity = test_identity(&worker_context, "in-flight-sender");
+            ready_tx.send(()).expect("ready");
+            go_rx.recv().expect("go");
+            let result = run_with_body(
+                &worker_context,
+                SendArgs {
+                    to,
+                    sender: Some("in-flight-sender".to_owned()),
+                    kind: MailKind::Note,
+                    subject: String::new(),
+                    body: Some("mid-flight".to_owned()),
+                    body_file: None,
+                    oversize: false,
+                    file: None,
+                },
+                true,
+                false,
+                identity,
+                |source| Ok(source.inline.expect("inline body")),
+            );
+            done_tx.send(result.map(|sent| sent.stdout)).expect("done");
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the sender is ready");
+
+        let mut checks = 0;
+        let applied =
+            crate::commands::participant_gc::apply_plan(&context, &plan, now, &mut |step| {
+                if step == crate::commands::participant_gc::Step::BeforeCheck {
+                    checks += 1;
+                    // The collection holds the lock and has not moved anything:
+                    // the send starts now, sees its target, and must wait.
+                    go_tx.send(()).expect("go");
+                    std::thread::sleep(Duration::from_millis(500));
+                    assert!(
+                        done_rx.try_recv().is_err(),
+                        "the send finished while the collection held the lock"
+                    );
+                }
+                Ok(())
+            })
+            .expect("apply");
+        assert_eq!(checks, 1);
+        assert_eq!(
+            applied.deleted,
+            vec![target.clone()],
+            "collected as planned"
+        );
+
+        let receipt = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the send finishes once the lock is free")
+            .expect("and delivers");
+        worker.join().expect("worker");
+        let receipt: serde_json::Value = serde_json::from_str(&receipt).expect("receipt JSON");
+        let letter = receipt["envelope"]["id"].as_str().expect("mail id");
+        assert!(
+            crate::participant::load(&context, &target)
+                .expect("load")
+                .is_some(),
+            "the record is back under its id"
+        );
+        assert!(
+            root.join("participants")
+                .join(&target)
+                .join("inbox")
+                .join(format!("{letter}.mail"))
+                .is_file(),
+            "the letter is in it"
+        );
+        trash_test_root(&root);
+    }
+
+    /// The write takes the participants lock, the one `participant gc` holds
+    /// while it re-checks and removes a record: a send that arrives during a
+    /// collection waits for it rather than writing into a directory being moved.
+    #[test]
+    fn a_letter_to_a_participant_waits_for_the_participants_lock() {
+        let (root, context) = test_context("target-lock");
+        crate::participant::bind_test_actor(&context, "lock-target");
+        let target = participant_target(
+            &crate::participant::resolve(&context)
+                .expect("resolve")
+                .participant()
+                .expect("bound")
+                .id,
+        );
+        let guard = crate::participant::lock(&context).expect("hold the lock");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_context = Context {
+            root: context.root.clone(),
+            home: context.home.clone(),
+        };
+        let worker = std::thread::spawn(move || {
+            let held = hold_target_record(&worker_context, &target).expect("hold");
+            sender.send(()).expect("signal");
+            drop(held);
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_err(),
+            "the send went ahead while the lock was held"
+        );
+        drop(guard);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the send proceeds once the lock is free");
+        worker.join().expect("worker");
         trash_test_root(&root);
     }
 }

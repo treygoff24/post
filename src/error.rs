@@ -375,7 +375,7 @@ impl AppError {
                 Self::new(
                     ErrorCode::ParticipantMissing,
                     format!(
-                        "POST_PARTICIPANT names participant '{id}', but no participant record with that id exists (mistyped, or removed by `post participant gc`)"
+                        "POST_PARTICIPANT names participant '{id}', but no participant record with that id exists (mistyped, or removed and not restorable)"
                     ),
                     fix,
                 )

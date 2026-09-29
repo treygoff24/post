@@ -50,6 +50,14 @@ pub(crate) struct Tombstone {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
+    /// What a recreated record needs beyond the id: a tombstone written before
+    /// these fields existed simply leaves them unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_hours: Option<u64>,
     pub reason: String,
     pub archived_at: String,
 }
@@ -112,11 +120,15 @@ fn archived_digest(context: &Context, id: &str) -> AppResult<Option<String>> {
 }
 
 fn tombstone_digest(context: &Context, id: &str) -> AppResult<Option<String>> {
+    Ok(latest_tombstone(context, id)?.map(|tombstone| tombstone.conversation_key_digest))
+}
+
+/// The newest tombstone for `id`: what a recreated record is built from.
+pub(crate) fn latest_tombstone(context: &Context, id: &str) -> AppResult<Option<Tombstone>> {
     Ok(read_tombstones(context)?
         .into_iter()
         .rev()
-        .find(|tombstone| tombstone.id == id)
-        .map(|tombstone| tombstone.conversation_key_digest))
+        .find(|tombstone| tombstone.id == id))
 }
 
 /// Every readable tombstone, oldest first. An unreadable line is skipped: it
@@ -212,6 +224,16 @@ pub(crate) fn restore(context: &Context, id: &str) -> AppResult<()> {
     let to = context.root.join(PARTICIPANTS_DIR).join(id);
     fs::rename(&from, &to)
         .map_err(|error| AppError::io("restore archived participant", &from, error))
+}
+
+/// Undo `restore` for a record that turned out to be unreadable: an archive
+/// that cannot be read is evidence, so it goes back where it was found rather
+/// than being left half-restored in the registry.
+pub(crate) fn unrestore(context: &Context, id: &str) -> AppResult<()> {
+    let from = context.root.join(PARTICIPANTS_DIR).join(id);
+    let to = archived_dir(context, id);
+    fs::rename(&from, &to)
+        .map_err(|error| AppError::io("return unreadable participant to the archive", &from, error))
 }
 
 /// Remove the by-session index entry for a key, but only while it still names

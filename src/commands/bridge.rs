@@ -336,8 +336,10 @@ fn admission_checks(context: &Context, args: &BridgeDeliverArgs, from: &str) -> 
             return Some(Decision::Rejected("forged_from", detail));
         }
     }
-    // Conclusive lookups only (F3-3).
-    match participant::load(context, &args.participant) {
+    // Conclusive lookups only (F3-3). The caller holds the participants lock,
+    // so a record `participant gc` collected is brought back here (same id)
+    // rather than refused: an idle participant is still a valid recipient.
+    match participant::revive_locked(context, &args.participant) {
         Ok(None) => {
             return Some(Decision::Rejected(
                 "unknown_participant",

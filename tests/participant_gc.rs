@@ -3,7 +3,8 @@
 
 mod common;
 
-use common::{assert_success, from_stdout, register_alpha_beta, Sandbox};
+use common::{assert_success, from_stderr, from_stdout, register_alpha_beta, Sandbox};
+use post::output::ErrorEnvelope;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -474,4 +475,314 @@ fn ephemeral_records_are_collected_after_a_day() {
     assert_eq!(applied["deleted"], json!([id]), "{applied}");
     assert!(record_path(&sandbox, &ordinary).exists());
     assert_eq!(applied["kept"]["recent"], 1);
+}
+
+fn record(sandbox: &Sandbox, id: &str) -> Value {
+    serde_json::from_slice(&fs::read(record_path(sandbox, id)).expect("record on disk"))
+        .expect("record JSON")
+}
+
+/// Loom exports one `POST_PARTICIPANT` from a `bind --new` record, and that
+/// record can sit idle past the day gc allows. The claim is repaired, not
+/// reported missing: a reader gets the participant back under the same id (bound
+/// and empty), and a write says so once with `bound_now`.
+#[test]
+fn an_explicit_claim_on_a_deleted_record_gets_the_same_participant_back() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let minted = sandbox.run_without_identity(
+        &[
+            "participant",
+            "bind",
+            "--new",
+            "--harness",
+            "claude",
+            "--json",
+        ],
+        &alpha,
+    );
+    assert_success(&minted);
+    let minted: Value = from_stdout(&minted);
+    let id = minted["participant"]["id"].as_str().expect("id").to_owned();
+    assert_eq!(minted["participant"]["workspace"], "alpha", "{minted}");
+    let stale = days_ago(2);
+    patch(&sandbox, &id, |record| record["last_seen"] = json!(stale));
+    let applied = gc(&sandbox, true);
+    assert!(strings(&applied["deleted"]).contains(&id), "{applied}");
+    assert!(!record_path(&sandbox, &id).exists());
+
+    // A reader treats the claim as bound and empty; the record is back, same id.
+    let read = sandbox.run_as_participant(&["inbox", "--json"], &id, &alpha);
+    assert_success(&read);
+    let inbox: Value = from_stdout(&read);
+    assert_ne!(inbox["bound"], json!(false), "{inbox}");
+    assert!(inbox.get("participant_missing").is_none(), "{inbox}");
+    assert!(inbox.get("bound_now").is_none(), "readers keep their shape");
+    let back = record(&sandbox, &id);
+    assert_eq!(back["id"], id.as_str());
+    assert_eq!(back["ephemeral"], true);
+    assert_eq!(back["workspace"], "alpha");
+    assert_eq!(back["lease_hours"], 1);
+    assert_ne!(
+        back["last_seen"],
+        json!(stale),
+        "the claim proves it is alive"
+    );
+    assert!(
+        !strings(&gc(&sandbox, false)["deleted"]).contains(&id),
+        "a revived record is not collected again on the next pass"
+    );
+
+    // A write after another collection reports the revival once, with the same
+    // id, and goes out as that participant.
+    patch(&sandbox, &id, |record| record["last_seen"] = json!(stale));
+    let applied = gc(&sandbox, true);
+    assert!(strings(&applied["deleted"]).contains(&id), "{applied}");
+    let sent = sandbox.run_as_participant(
+        &["send", "--to", "beta", "--json", "--body", "back again"],
+        &id,
+        &alpha,
+    );
+    assert!(sent.status.success(), "{}", common::stderr(&sent));
+    let receipt: Value = from_stdout(&sent);
+    assert_eq!(receipt["bound_now"]["id"], id.as_str(), "{receipt}");
+    assert_eq!(receipt["bound_now"]["workspace"], "alpha", "{receipt}");
+    assert_eq!(receipt["envelope"]["from_participant"], id.as_str());
+    let second = sandbox.run_as_participant(
+        &["send", "--to", "beta", "--json", "--body", "and again"],
+        &id,
+        &alpha,
+    );
+    assert_success(&second);
+    let second: Value = from_stdout(&second);
+    assert!(second.get("bound_now").is_none(), "{second}");
+}
+
+/// The same repair for a tier-2 record: an archived participant comes back whole
+/// (state included), read or write.
+#[test]
+fn an_explicit_claim_on_an_archived_record_restores_it_whole() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let by_reader = bound_idle(&sandbox, "claude", "archived-then-read", 1);
+    let by_writer = bound_idle(&sandbox, "claude", "archived-then-written", 1);
+    for id in [&by_reader, &by_writer] {
+        give_state(&sandbox, id, "gc-claim");
+        patch(&sandbox, id, |record| {
+            record["last_seen"] = json!(days_ago(60));
+        });
+    }
+    let memberships = |id: &str| {
+        fs::read(
+            sandbox
+                .mail_root
+                .join("participants")
+                .join(id)
+                .join("channels.json"),
+        )
+        .expect("memberships")
+    };
+    let reader_state = memberships(&by_reader);
+    let writer_state = memberships(&by_writer);
+    let applied = gc(&sandbox, true);
+    assert_eq!(
+        strings(&applied["archived"]),
+        sorted(&[&by_reader, &by_writer])
+    );
+    let archive = |id: &str| sandbox.mail_root.join("participants-archive").join(id);
+    assert!(archive(&by_reader).exists() && !record_path(&sandbox, &by_reader).exists());
+
+    let read = sandbox.run_as_participant(&["inbox", "--json"], &by_reader, &alpha);
+    assert_success(&read);
+    let inbox: Value = from_stdout(&read);
+    assert_ne!(inbox["bound"], json!(false), "{inbox}");
+    assert!(inbox.get("participant_missing").is_none(), "{inbox}");
+    assert!(record_path(&sandbox, &by_reader).exists());
+    assert!(!archive(&by_reader).exists(), "the archive moved back");
+    assert_eq!(
+        memberships(&by_reader),
+        reader_state,
+        "state came back whole"
+    );
+
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "beta",
+            "--json",
+            "--body",
+            "from the archive",
+        ],
+        &by_writer,
+        &alpha,
+    );
+    assert!(sent.status.success(), "{}", common::stderr(&sent));
+    let receipt: Value = from_stdout(&sent);
+    assert_eq!(receipt["bound_now"]["id"], by_writer.as_str(), "{receipt}");
+    assert_eq!(receipt["envelope"]["from_participant"], by_writer.as_str());
+    assert!(!archive(&by_writer).exists());
+    assert_eq!(memberships(&by_writer), writer_state);
+}
+
+/// `participant_missing` stays for a claim nothing ever held, and for a
+/// collected record that cannot be brought back (and then says why).
+#[test]
+fn an_explicit_claim_nothing_can_restore_is_still_participant_missing() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+
+    let never = sandbox.run_as_participant(&["inbox", "--json"], "claude-0badf00d", &alpha);
+    assert_eq!(never.status.code(), Some(65), "{never:?}");
+    let error: ErrorEnvelope = from_stderr(&never);
+    assert_eq!(error.error.code, "participant_missing");
+    assert!(
+        !record_path(&sandbox, "claude-0badf00d").exists(),
+        "nothing was minted"
+    );
+
+    // An archived record that is not a record cannot be restored: the error says
+    // so instead of pretending the id never existed, and nothing is invented.
+    let broken = sandbox
+        .mail_root
+        .join("participants-archive/claude-b10c0ded");
+    fs::create_dir_all(&broken).expect("archive dir");
+    fs::write(broken.join("participant.json"), b"not json").expect("garbage record");
+    let refused = sandbox.run_as_participant(&["inbox", "--json"], "claude-b10c0ded", &alpha);
+    assert_eq!(refused.status.code(), Some(65), "{refused:?}");
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "participant_missing");
+    assert!(
+        error
+            .error
+            .details
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be restored")),
+        "{error:?}"
+    );
+    assert!(!record_path(&sandbox, "claude-b10c0ded").exists());
+    assert_eq!(
+        fs::read(broken.join("participant.json")).expect("the archive is untouched"),
+        b"not json"
+    );
+}
+
+/// A participant that `participant gc` already collected is not a send target:
+/// the send says so and writes nothing, in particular no directory holding mail
+/// and no record. (A send already in flight when the collection happens is the
+/// other case; it finds its record back, see `send::tests`.)
+#[test]
+fn a_letter_sent_to_an_already_collected_participant_is_refused_and_writes_nothing() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let target = bound_idle(&sandbox, "claude", "collected-target", 40);
+    let applied = gc(&sandbox, true);
+    assert_eq!(applied["deleted"], json!([target]), "{applied}");
+    let before = tree(&sandbox.mail_root);
+
+    let sent = sandbox.run_in(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{target}"),
+            "--json",
+            "--body",
+            "are you still there",
+        ],
+        None,
+        &alpha,
+    );
+    assert_eq!(sent.status.code(), Some(66), "{sent:?}");
+    let error: ErrorEnvelope = from_stderr(&sent);
+    assert_eq!(error.error.code, "not_found");
+    assert!(!sandbox
+        .mail_root
+        .join("participants")
+        .join(&target)
+        .exists());
+    let after = tree(&sandbox.mail_root);
+    let created: Vec<_> = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .collect();
+    assert!(
+        created
+            .iter()
+            .all(|path| !path.to_string_lossy().contains(&target)),
+        "nothing was written for the target: {created:?}"
+    );
+}
+
+/// Bringing a collected record back is done under the participants lock, the
+/// lock `participant gc` collects under: a session that claims the record while
+/// the lock is held waits for it rather than racing a collection.
+#[cfg(unix)]
+#[test]
+fn reviving_a_claimed_record_waits_for_the_participants_lock() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let minted = sandbox.run_without_identity(
+        &[
+            "participant",
+            "bind",
+            "--new",
+            "--harness",
+            "claude",
+            "--json",
+        ],
+        &alpha,
+    );
+    assert_success(&minted);
+    let minted: Value = from_stdout(&minted);
+    let id = minted["participant"]["id"].as_str().expect("id").to_owned();
+    patch(&sandbox, &id, |record| {
+        record["last_seen"] = json!(days_ago(2));
+    });
+    let applied = gc(&sandbox, true);
+    assert!(strings(&applied["deleted"]).contains(&id), "{applied}");
+
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(sandbox.mail_root.join(".participants.lock"))
+        .expect("open participants lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut child = common::post_command()
+        .args(["inbox", "--json"])
+        .current_dir(&alpha)
+        .env_clear()
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .env("POST_PARTICIPANT", &id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn inbox");
+    for _ in 0..20 {
+        if child.try_wait().expect("probe inbox").is_some() {
+            panic!("the claim was revived without the participants lock");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !record_path(&sandbox, &id).exists(),
+        "nothing moved while locked"
+    );
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let output = child.wait_with_output().expect("wait for inbox");
+    assert_success(&output);
+    assert!(
+        record_path(&sandbox, &id).exists(),
+        "revived once the lock was free"
+    );
 }

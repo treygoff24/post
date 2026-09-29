@@ -970,6 +970,39 @@ fn an_ended_participant_is_terminal_with_nothing_written() {
     assert_eq!(rig.snapshot(), before);
 }
 
+/// `participant gc` may collect an idle recipient while a letter for it is on
+/// its way. The import holds the participants lock, and brings the record back
+/// under the same id instead of refusing the letter as `unknown_participant`.
+#[test]
+fn a_recipient_collected_by_gc_is_brought_back_not_refused() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    let record = rig
+        .root()
+        .join("participants")
+        .join(&rig.recipient)
+        .join("participant.json");
+    let mut aged = read_json(&record);
+    aged["last_seen"] = json!("2026-01-01T00:00:00Z");
+    fs::write(&record, serde_json::to_vec_pretty(&aged).unwrap()).unwrap();
+    let collected = rig.sandbox.run_without_identity(
+        &["participant", "gc", "--apply", "--json"],
+        &rig.sandbox.path,
+    );
+    assert!(collected.status.success(), "{}", stderr(&collected));
+    assert!(
+        !record.exists(),
+        "gc collected the idle recipient: {}",
+        stdout(&collected)
+    );
+
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "delivered", None);
+    assert!(record.is_file(), "the recipient is back under its own id");
+    assert!(rig.inbox_path().is_file(), "and the letter is in its inbox");
+    assert_eq!(read_json(&record)["id"], json!(rig.recipient));
+}
+
 #[test]
 fn a_blocked_route_to_a_workspace_less_recipient_writes_nothing() {
     let rig = Rig::new();

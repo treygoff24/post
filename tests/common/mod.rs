@@ -300,7 +300,8 @@ impl Sandbox {
             .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("CLAUDE_PID")
             .env_remove("CODEX_THREAD_ID")
-            .env_remove("CODEX_SESSION_ID");
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("DELEGATE_RUN_ID");
         let has_explicit_participant = envs.iter().any(|(key, _)| {
             matches!(
                 *key,
@@ -405,6 +406,7 @@ impl Sandbox {
             .env_remove("CLAUDE_PID")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_SESSION_ID")
+            .env_remove("DELEGATE_RUN_ID")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -813,6 +815,9 @@ pub fn post_command() -> Command {
         .env_remove("CLAUDE_PID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_SESSION_ID")
+        // A run started by a delegation runner carries this; post ignores
+        // ambient harness keys under it, which would blind every keyed test.
+        .env_remove("DELEGATE_RUN_ID")
         .env("POST_PARTICIPANT", "test-default");
     command
 }
