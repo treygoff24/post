@@ -273,3 +273,24 @@ test("an unrelated hook that shares the adapter's basename survives the install"
     assert.deepEqual(after[event].at(-1).hooks, [{ type: "command", command: "node", args: [ADAPTER], timeout: 10 }], event);
   }
 });
+
+test("an upgrade removes an owned registration from an event the adapter no longer uses", () => {
+  // The first doorbell turn-mark commit registered the adapter on PreToolUse.
+  const guard = { type: "command", command: "guard.sh" };
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        { matcher: "Bash", hooks: [guard] },
+        { hooks: [{ type: "command", command: "node", args: [ADAPTER], timeout: 10 }] },
+      ],
+      SubagentStop: [{ hooks: [{ type: "command", command: 'node "$HOME/hooks/post-claude-mail.mjs"' }] }],
+    },
+  };
+  const target = freshSettings(JSON.stringify(settings));
+  assert.equal(run(target, { env: { HOME: ROOT } }).status, 0);
+  const after = JSON.parse(fs.readFileSync(target, "utf8")).hooks;
+  assert.deepEqual(after.PreToolUse, [{ matcher: "Bash", hooks: [guard] }], "the unrelated PreToolUse hook survives, ours is gone");
+  assert.ok(!("SubagentStop" in after), "an event left with nothing but ours is removed");
+  const rerun = run(target, { env: { HOME: ROOT } });
+  assert.match(rerun.stdout, /already registered/);
+});

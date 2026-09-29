@@ -199,7 +199,10 @@ which lets the doorbell ring a Claude pane that Herdr reports `working` only
 because background tasks keep its title spinner going after the main turn has
 ended. The installer owns a registration only when its script is the installed
 adapter path (`$HOME`/`~` expanded) or a file carrying the adapter's header
-line; another tool's `claude-mail.mjs` is left alone.
+line; another tool's `claude-mail.mjs` is left alone. Cleanup visits every
+event in the settings file, so a registration left on an event the adapter no
+longer uses (PreToolUse, from the first turn-mark version) is removed on
+upgrade.
 
 **Idle wake, Claude Code flavor:** Claude Code has a Monitor primitive that
 can own a long-running process and turn output into a session wake. Monitor is

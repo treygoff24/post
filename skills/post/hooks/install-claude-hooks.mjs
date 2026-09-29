@@ -257,7 +257,12 @@ function isIntegrationHook(hook) {
 }
 
 const original = JSON.stringify(config);
-for (const event of EVENTS) {
+// Cleanup visits every event in the file, not only EVENTS: an upgrade from a
+// version that registered the adapter elsewhere (PreToolUse, on the first
+// doorbell turn-mark commit) must not keep launching it there. Only owned
+// registrations are removed; the adapter is re-added for EVENTS alone.
+const visited = new Set([...Object.keys(config.hooks).filter((event) => Array.isArray(config.hooks[event])), ...EVENTS]);
+for (const event of visited) {
   const groups = Array.isArray(config.hooks[event]) ? config.hooks[event] : [];
   const normalized = [];
   for (const group of groups) {
@@ -272,8 +277,10 @@ for (const event of EVENTS) {
       if (hooks.length > 0) normalized.push({ ...group, hooks });
     }
   }
-  normalized.push({ hooks: [canonicalHook()] });
-  config.hooks[event] = normalized;
+  if (EVENTS.includes(event)) normalized.push({ hooks: [canonicalHook()] });
+  else if (normalized.length === groups.length) continue; // nothing of ours here: untouched
+  if (normalized.length === 0) delete config.hooks[event];
+  else config.hooks[event] = normalized;
 }
 
 const configChanged = JSON.stringify(config) !== original;
