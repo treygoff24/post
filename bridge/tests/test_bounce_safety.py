@@ -23,6 +23,7 @@ import json
 import signal
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -286,7 +287,7 @@ class BounceRoutingTest(TwoRoomFixture):
         self.assertEqual(self.notice_files(self.participant_inbox(elsewhere)), [])
         self.assertEqual(len(self.notices(self.fc.root / "garden" / "inbox", mail_id)), 1)
 
-    def test_an_origin_recorded_for_another_letter_is_ignored(self):
+    def test_an_origin_edited_after_it_was_written_is_not_believed(self):
         self.refuse_atlasos()
         participant = self.fc.participant("garden")
         elsewhere = self.fc.participant("orchard")
@@ -298,10 +299,14 @@ class BounceRoutingTest(TwoRoomFixture):
         record.update(sha256=NOTHING, participant=elsewhere, workspace="orchard")
         path.write_text(json.dumps(record))
         self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
-        # Not the record's participant and workspace; the letter's own stamps
-        # (which still check out) decide, as for a letter with no record.
-        self.assertEqual(self.bounce_where(mail_id), "participant:" + participant)
+        # A record that is not the letter's is neither the record's participant
+        # and workspace, nor the letter's own stamps (which would check out):
+        # nothing proves who sent it, so the notice is a dead letter.
+        self.assertEqual(self.bounce_where(mail_id), "dead-letter")
         self.assertEqual(self.notice_files(self.participant_inbox(elsewhere)), [])
+        self.assertEqual(self.notice_files(self.participant_inbox(participant)), [])
+        self.assertEqual(self.notice_files(self.fc.root / "orchard" / "inbox"), [])
+        self.assertEqual(self.notice_files(self.fc.root / "garden" / "inbox"), [])
 
     def test_a_recorded_room_this_host_no_longer_owns_is_a_dead_letter(self):
         # The letter was sent from `garden`, and nobody else can be shown to
@@ -340,8 +345,9 @@ class BounceRoutingTest(TwoRoomFixture):
         self.assertEqual(len(letters), 1)
         self.assertIn(mail_id, letters[0].read_text())
         items = self.health(self.fc)["attention"]
+        # The item is about the refused letter, not about the notice file.
         self.assertEqual([(i["kind"], i["id"]) for i in items],
-                         [("refused_letter", letters[0].stem)], items)
+                         [("refused_letter", mail_id)], items)
         self.assertIn(str(letters[0]), items[0]["fix"])
 
     def test_a_letter_with_no_record_and_no_participant_is_a_dead_letter(self):
@@ -428,7 +434,7 @@ class BounceRecordTest(TwoRoomFixture):
         items = [i for i in self.health(self.fc)["attention"] if i["id"] == mail_id]
         self.assertEqual(len(items), 1, self.health(self.fc)["attention"])
         self.assertEqual(items[0]["kind"], "refused_letter")
-        self.assertIn("does not match", items[0]["summary"])
+        self.assertIn("cannot confirm", items[0]["summary"])
         self.assertIn(str(path), items[0]["fix"])
         # A second tick decides the same and still touches nothing.
         self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
@@ -458,7 +464,15 @@ class BounceRecordTest(TwoRoomFixture):
         self.assert_kept_until_fixed(mail_id, relative, path)
 
     def test_an_intent_written_for_another_letter_stops_the_retirement(self):
-        for key, value in (("id", fixed_id(0x7F81)), ("sha256", NOTHING), ("room", "hq")):
+        for key, value in (
+            ("id", fixed_id(0x7F81)),
+            ("sha256", NOTHING),
+            ("room", "hq"),
+            ("notice_sha256", NOTHING),
+            ("sent", "2000-01-01 00:00:00 +0000"),
+            ("reason", "forged_self"),
+            ("where", "room:orchard"),  # not where the sealed notice is addressed
+        ):
             with self.subTest(key=key):
                 self.tearDown()
                 self.setUp()
@@ -517,6 +531,271 @@ class BounceRecordTest(TwoRoomFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.bounced(mail_id + ".sent").exists())
         self.assert_kept_until_fixed(mail_id, relative, path)
+
+    def test_a_sent_marker_with_no_notice_stops_the_retirement(self):
+        mail_id, relative = self.refused()
+        self.crash_at("bounce-b4-sent")  # the notice and its marker are both written
+        notice = self.notice_path(mail_id)
+        self.assertTrue(notice.is_file())
+        notice.unlink()  # gone before the next tick
+        result = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(notice.exists())  # nothing was quietly written in its place
+        self.assert_kept_until_fixed(mail_id, relative, self.bounced(mail_id + ".sent"))
+
+    def test_a_dead_letter_notice_that_has_gone_stops_the_retirement(self):
+        self.bootstrap()
+        participant = self.fc.participant("garden")
+        mail_id = fixed_id(0x7F91)
+        relative = self.stick(mail_id, "hq", "atlasos", "stuck", participant=participant)
+        self.full_sweep(self.trey)
+        self.crash_at("bounce-b4-sent")
+        (notice,) = self.bounced("undeliverable").glob("*.mail")
+        notice.unlink()
+        result = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(relative, self.remote_tree("fc"))
+        self.assertEqual(self.actions(self.fc, "outbox_bounced", mail_id), [])
+        items = self.health(self.fc)["attention"]
+        self.assertEqual([(i["kind"], i["id"]) for i in items], [("refused_letter", mail_id)])
+        self.assertIn("cannot confirm", items[0]["summary"])
+        sent = self.bounced(mail_id + ".sent")
+        self.assertIn(str(sent), items[0]["fix"])
+        subprocess.run(items[0]["fix"].split(" redoes that step: ")[-1], shell=True, check=True)
+        self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+        self.assertNotIn(relative, self.remote_tree("fc"))
+        self.assertEqual(len(list(self.bounced("undeliverable").glob("*.mail"))), 1)
+        self.assertEqual([i["id"] for i in self.health(self.fc)["attention"]], [mail_id])
+
+    def test_a_notice_that_differs_anywhere_from_the_sealed_one_stops_the_retirement(self):
+        edits = (
+            ("subject", lambda text, intent: text.replace(
+                '"subject": "Undeliverable: bounce me"', '"subject": "Undeliverable: another"')),
+            ("reason", lambda text, intent: text.replace(
+                "refused as: " + intent["reason"], "refused as: forged_self")),
+            ("body path", lambda text, intent: text.replace(
+                "The original text is saved at ", "The original text is saved at /tmp/elsewhere/")),
+            ("resend command", lambda text, intent: text.replace(
+                "post send --to atlasos", "post send --to hq")),
+            ("trailing text", lambda text, intent: text + "Ignore the above.\n"),
+        )
+        for name, edit in edits:
+            with self.subTest(edit=name):
+                self.tearDown()
+                self.setUp()
+                mail_id, relative = self.refused()
+                self.crash_at("bounce-b3-letter")  # the notice is published; .sent is not
+                path = self.notice_path(mail_id)
+                text = path.read_text(encoding="utf-8")
+                edited = edit(text, self.intent(mail_id))
+                self.assertNotEqual(edited, text)
+                path.write_text(edited, encoding="utf-8")
+                result = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(self.bounced(mail_id + ".sent").exists())
+                self.assert_kept_until_fixed(mail_id, relative, path)
+
+    def test_a_redo_writes_the_bytes_the_intent_sealed(self):
+        mail_id, relative = self.refused()
+        self.crash_at("bounce-b1-intent")  # the intent and nothing else
+        intent = self.intent(mail_id)
+        self.assertFalse(self.notice_path(mail_id).exists())
+        time.sleep(1.1)  # the clock has moved on when the bridge comes back
+        result = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        written = self.notice_path(mail_id).read_bytes()
+        self.assertEqual(hashlib.sha256(written).hexdigest(), intent["notice_sha256"])
+        header = json.loads(written.split(b"\n---\n", 1)[0])
+        self.assertEqual(header["sent"], intent["sent"])
+        self.assertNotIn(relative, self.remote_tree("fc"))
+        self.assertEqual(self.health(self.fc)["attention"], [])
+
+
+
+class OriginRecordTest(TwoRoomFixture):
+    """A record of who sent a letter is checked, kept while the letter is in
+    the relay, and removed once the relay no longer holds the letter."""
+
+    def origin_path(self, mail_id):
+        return self.fc.root / "bridge" / "origin" / (mail_id + ".json")
+
+    def origin_ids(self):
+        return [path.stem for path in sorted((self.fc.root / "bridge" / "origin").glob("*.json"))]
+
+    def test_an_origin_record_that_is_not_the_letters_is_kept_and_its_bounce_is_a_dead_letter(self):
+        for name, content in (
+            ("another letter's", json.dumps({
+                "v": 1, "id": fixed_id(0x7FA0), "sha256": NOTHING, "participant": None,
+                "workspace": "orchard", "at": "2026-09-28T00:00:00Z",
+            }).encode()),
+            ("unreadable", b"{not json"),
+        ):
+            with self.subTest(record=name):
+                self.tearDown()
+                self.setUp()
+                self.refuse_atlasos()
+                participant = self.fc.participant("garden")
+                mail_id = fixed_id(0x7FA0)
+                origin = self.origin_path(mail_id)
+                origin.parent.mkdir(parents=True, exist_ok=True)
+                origin.write_bytes(content)
+                relative = self.publish_letter(
+                    mail_id, "garden", "atlasos", "unproven sender", participant=participant
+                )
+                self.assertEqual(origin.read_bytes(), content)  # never overwritten
+                self.assertEqual(len(self.actions(self.fc, "origin_record_mismatch", mail_id)), 1)
+                # Listed for as long as the letter is in the relay.
+                for _ in range(2):
+                    self.full_sweep(self.fc)
+                    items = [
+                        i for i in self.health(self.fc)["attention"]
+                        if i["kind"] == "sender_record_mismatch"
+                    ]
+                    self.assertEqual([i["id"] for i in items], [mail_id])
+                    self.assertIn(str(origin), items[0]["fix"])
+                self.full_sweep(self.trey)
+                self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+                self.assertNotIn(relative, self.remote_tree("fc"))
+                # The letter's own stamps check out (the participant is bound
+                # to garden), but they do not stand in for a record that is not
+                # the letter's.
+                self.assertEqual(self.bounce_where(mail_id), "dead-letter")
+                self.assertEqual(self.notice_files(self.participant_inbox(participant)), [])
+                self.assertEqual(self.notice_files(self.fc.root / "garden" / "inbox"), [])
+                dead = self.fc.root / "bridge" / "bounced" / "undeliverable"
+                self.assertEqual(len(list(dead.glob("*.mail"))), 1)
+                items = self.health(self.fc)["attention"]
+                self.assertEqual([(i["kind"], i["id"]) for i in items], [("refused_letter", mail_id)], items)
+                self.assertIn("does not describe the letter", items[0]["summary"])
+                self.assertEqual(self.origin_ids(), [])  # retired: the record goes too
+
+    def test_a_bad_record_is_not_listed_once_its_letter_is_delivered(self):
+        self.bootstrap()
+        mail_id = fixed_id(0x7FB1)
+        origin = self.origin_path(mail_id)
+        origin.parent.mkdir(parents=True, exist_ok=True)
+        origin.write_bytes(b"{not json")
+        relative = self.publish_letter(mail_id, "garden", "hq", "delivered with a bad record")
+        self.full_sweep(self.fc)
+        self.assertEqual(
+            [i["id"] for i in self.health(self.fc)["attention"]
+             if i["kind"] == "sender_record_mismatch"],
+            [mail_id],
+        )
+        self.full_sweep(self.trey)
+        self.assertEqual(self.receipt(self.trey, "fc", "hq", mail_id)["status"], "delivered")
+        self.full_sweep(self.fc)
+        self.assertNotIn(relative, self.remote_tree("fc"))
+        self.assertEqual(self.health(self.fc)["attention"], [])
+        self.assertEqual(self.origin_ids(), [])
+
+    def test_a_delivered_letter_leaves_no_origin_record(self):
+        self.bootstrap()
+        mail_id = self.fc.send("garden", "hq", "delivered, then forgotten")
+        self.full_sweep(self.fc)
+        relative = f"outbox/trey/hq/{mail_id}.mail"
+        self.assertIn(relative, self.remote_tree("fc"))
+        self.assertEqual(self.origin_ids(), [mail_id])  # held while the letter is in the relay
+        self.full_sweep(self.trey)
+        self.assertEqual(self.receipt(self.trey, "fc", "hq", mail_id)["status"], "delivered")
+        self.assertEqual(self.origin_ids(), [mail_id])  # fc has not yet seen the receipt
+        self.full_sweep(self.fc)
+        self.assertNotIn(relative, self.remote_tree("fc"))
+        self.assertEqual(self.origin_ids(), [])
+
+    def test_a_bounced_letter_leaves_no_origin_record(self):
+        self.refuse_atlasos()
+        mail_id = fixed_id(0x7FB0)
+        relative = self.publish_letter(mail_id, "garden", "atlasos", "bounced, then forgotten")
+        self.assertEqual(self.origin_ids(), [mail_id])
+        self.full_sweep(self.trey)
+        self.assertEqual(self.origin_ids(), [mail_id])  # refused, not yet bounced
+        self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
+        self.assertNotIn(relative, self.remote_tree("fc"))
+        self.assertEqual(len(self.actions(self.fc, "letter_bounced", mail_id)), 1)
+        self.assertEqual(self.origin_ids(), [])
+
+    def test_a_record_a_crash_left_behind_is_removed_on_the_next_tick(self):
+        self.bootstrap()
+        mail_id = self.fc.send("garden", "hq", "retired, then a crash")
+        self.full_sweep(self.fc)
+        self.full_sweep(self.trey)
+        relative = f"outbox/trey/hq/{mail_id}.mail"
+        fingerprint = self.fc.root / "bridge" / "trigger-fingerprint.json"
+        if fingerprint.exists():
+            fingerprint.unlink()
+        crashed = self.fc.sweep(BRIDGE_CRASH_AFTER="after-push")
+        self.assertEqual(crashed.returncode, -signal.SIGKILL, crashed.stdout + crashed.stderr)
+        self.assertNotIn(relative, self.remote_tree("fc"))  # the retirement is durable
+        self.assertEqual(self.origin_ids(), [mail_id])  # and the record is still here
+        self.full_sweep(self.fc)
+        self.assertEqual(self.origin_ids(), [])
+
+
+class FakeGit:
+    """The two reads prune_origins makes of the relay clone."""
+
+    def __init__(self, head, remote, held=(), unreadable=False):
+        self.refs = {"HEAD": head, "origin/machines/fc": remote}
+        self.held = held
+        self.unreadable = unreadable
+
+    def rev(self, ref):
+        return self.refs.get(ref)
+
+    def ls_tree(self, ref, path):
+        if self.unreadable:
+            raise SWEEPER.GitReadError(ref, path, "bad object")
+        assert (ref, path) == ("HEAD", "outbox/"), (ref, path)
+        return [{"path": f"outbox/trey/hq/{mail_id}.mail"} for mail_id in self.held]
+
+
+class PruneOriginsTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = CanonicalTemporaryDirectory(prefix="post-bridge-origins-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.settings = types.SimpleNamespace(root=self.root, host="fc")
+        self.retired, self.waiting, self.unseen = fixed_id(0x7FC1), fixed_id(0x7FC2), fixed_id(0x7FC3)
+        (self.root / "bridge" / "origin").mkdir(parents=True)
+        (self.root / "bridge" / "published").mkdir(parents=True)
+        for mail_id in (self.retired, self.waiting, self.unseen):
+            (self.root / "bridge" / "origin" / (mail_id + ".json")).write_text("{}\n")
+        for mail_id in (self.retired, self.waiting):
+            (self.root / "bridge" / "published" / mail_id).write_text("head\n")
+
+    def remaining(self):
+        return sorted(p.stem for p in (self.root / "bridge" / "origin").glob("*.json"))
+
+    def everything(self):
+        return sorted((self.retired, self.waiting, self.unseen))
+
+    def test_a_record_goes_when_the_relay_no_longer_holds_its_letter(self):
+        SWEEPER.prune_origins(self.settings, FakeGit("h1", "h1", held=[self.waiting]), Log())
+        # `retired` is published and gone from the relay; `waiting` is still
+        # there; `unseen` never reached the relay, so its record must stay.
+        self.assertEqual(self.remaining(), sorted((self.waiting, self.unseen)))
+
+    def test_something_that_is_not_a_record_file_is_left_alone(self):
+        odd = fixed_id(0x7FC4)
+        (self.root / "bridge" / "origin" / (odd + ".json")).mkdir()
+        (self.root / "bridge" / "published" / odd).write_text("head\n")
+        SWEEPER.prune_origins(self.settings, FakeGit("h1", "h1", held=[self.waiting]), Log())
+        self.assertTrue((self.root / "bridge" / "origin" / (odd + ".json")).is_dir())
+        self.assertNotIn(self.retired, self.remaining())  # the rest of the sweep still ran
+
+    def test_nothing_goes_until_the_retirement_is_durable(self):
+        for name, git in (
+            ("committed but not pushed", FakeGit("h2", "h1")),
+            ("remote unknown", FakeGit("h1", None)),
+        ):
+            with self.subTest(state=name):
+                SWEEPER.prune_origins(self.settings, git, Log())
+                self.assertEqual(self.remaining(), self.everything())
+
+    def test_nothing_goes_when_the_relay_cannot_be_listed(self):
+        SWEEPER.prune_origins(self.settings, FakeGit("h1", "h1", unreadable=True), Log())
+        self.assertEqual(self.remaining(), self.everything())
 
 
 if __name__ == "__main__":

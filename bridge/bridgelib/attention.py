@@ -9,10 +9,16 @@ Kinds:
 
 ``refused_letter``
     A letter this host sent was refused for good and its sender could not be
-    told (the notice is a dead letter), the bounce failed this tick, or a
-    record of an earlier bounce attempt does not match the letter and the
-    entry is kept. (When the bounce works the sender gets a system letter and
-    the entry is retired, so nothing stays here.)
+    told (the notice is a dead letter; the item's id is the refused letter's),
+    the bounce failed this tick, or a record of an earlier bounce attempt
+    cannot be confirmed (it does not match the letter, or the notice it says
+    was written is gone) and the entry is kept. (When the bounce works the
+    sender gets a system letter and the entry is retired, so nothing stays
+    here.)
+``sender_record_mismatch``
+    The bridge's record of who sent a letter still in the relay does not
+    describe that letter. It is left alone; if the letter is refused, its
+    notice is a dead letter. Leaves when the letter is retired.
 ``unrelayable_letter``
     A workspace letter in ``archive/`` that cannot be relayed at all.
 ``quarantined_inbound``
@@ -65,12 +71,17 @@ def item(kind, ident, summary, fix):
     }
 
 
-def refused_dead_letter(notice_id, path):
+def refused_dead_letter(mail_id, path, basis=None):
+    reason = (
+        "the bridge's record of who sent it does not describe the letter"
+        if basis == "unproven"
+        else "no participant or room here can be shown to have sent it"
+    )
     return item(
         "refused_letter",
-        notice_id,
-        "A letter this host sent was refused for good, and the bridge could not "
-        "tell its sender: no participant or room here can be shown to have sent it. "
+        mail_id,
+        f"Letter {mail_id}, which this host sent, was refused for good, and the "
+        f"bridge could not tell its sender: {reason}. "
         "The notice is saved at " + str(path) + ".",
         f"Read it with: cat '{path}'. Re-send the letter if it still matters "
         f"(the notice has the command), then delete the notice with: rm '{path}'",
@@ -89,10 +100,11 @@ def refused_bounce_failed(mail_id, host, room, reason, error):
 
 
 def refused_bounce_conflict(mail_id, host, room, reason, error):
-    """A bounce record does not describe the letter; the entry stays in the relay."""
+    """A bounce record cannot be confirmed against the letter; the entry stays
+    in the relay."""
     path = getattr(error, "path", None)
     fix = (
-        f"Move the mismatched file aside and the next tick redoes that step: "
+        f"Move the file named above aside and the next tick redoes that step: "
         f"mv '{path}' '{path}.conflict'"
         if path is not None
         else "Look under bridge/bounced/ in the mail root for the file named above."
@@ -100,9 +112,29 @@ def refused_bounce_conflict(mail_id, host, room, reason, error):
     return item(
         "refused_letter",
         mail_id,
-        f"Letter {mail_id} to {room} on {host} was refused ({reason}) but a record "
-        f"of its bounce does not match the letter, so the bridge kept the letter "
+        f"Letter {mail_id} to {room} on {host} was refused ({reason}) but the "
+        f"bridge cannot confirm the record of its bounce, so it kept the letter "
         f"in the relay and retired nothing: {error}",
+        fix,
+    )
+
+
+def sender_record_mismatch(mail_id, host, room, error):
+    """The origin record of a letter in the relay is not that letter's."""
+    path = getattr(error, "path", None)
+    fix = (
+        f"Nothing is needed unless the letter is refused. To drop the bad "
+        f"record (a refusal is then judged by the letter's own stamps): rm '{path}'"
+        if path is not None
+        else "Nothing is needed unless the letter is refused."
+    )
+    return item(
+        "sender_record_mismatch",
+        mail_id,
+        f"Letter {mail_id} to {room} on {host} is in the relay, but the bridge's "
+        f"record of who sent it does not describe it ({error}). The bridge left "
+        f"the record as it is. If the letter is refused, its notice will be a "
+        f"dead letter, because the bridge cannot show who sent it.",
         fix,
     )
 

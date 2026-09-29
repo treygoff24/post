@@ -353,6 +353,7 @@ class BounceTest(TerminalFixture):
         self.assertIn(mail_id, letters[0].read_text())
         items = self.health(self.fc)["attention"]
         self.assertEqual([i["kind"] for i in items], ["refused_letter"], items)
+        self.assertEqual(items[0]["id"], mail_id)  # the refused letter, not the notice
         self.assertIn(str(letters[0]), items[0]["fix"])
         # It stays listed until the operator deletes the file; the fix is exact.
         self.full_sweep(self.fc)
