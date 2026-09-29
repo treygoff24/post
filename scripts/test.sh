@@ -9,7 +9,9 @@ fi
 kind=${1:-full}
 if [ $# -gt 0 ]; then shift; fi
 case "$kind" in
-  rust) exec cargo test --all-targets --all-features "$@" ;;
+  rust)
+    if [ $# -eq 0 ]; then set -- --all-targets; fi
+    exec cargo test --all-features "$@" ;;
   gate) exec bash scripts/gate.sh "$@" ;;
   full|node|bridge) ;;
   *) echo "usage: scripts/test.sh [full|rust|node|bridge|gate] [cargo test options]" >&2; exit 64 ;;
