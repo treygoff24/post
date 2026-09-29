@@ -1,0 +1,22 @@
+{
+  "name": "test-speed",
+  "root": "/home/trey-agent/Code/post",
+  "cmd": "python3 bench/test-speed.py",
+  "metric": "wall_s",
+  "direction": "lower",
+  "min_effect": "10%",
+  "guard_cmd": null,
+  "holdout_cmd": "python3 bench/test-speed.py gate",
+  "reps": 5,
+  "warmup": 1,
+  "harness_paths": [
+    "bench/test-speed.py"
+  ],
+  "created": "2026-09-29T20:35:34+00:00",
+  "harness_files": {
+    "bench/test-speed.py": "c867361a556acf3a0d438b69bca18f0c4986b613f9283bcd6e12b132a59e7566",
+    "<hc runner>": "a417677f1d06dcb5fbe7158b2b602c2966ce9d6aab7166285e5fdfc497d618d5",
+    "<commands>": "08b549b355a0ada7adbc9ccab4995f1c84c8fbfb785b4eb1a7edfab0ea52e4b5"
+  },
+  "approved": "2026-09-29T20:43:19+00:00"
+}

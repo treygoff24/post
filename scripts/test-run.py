@@ -14,6 +14,12 @@ def main():
     if hasattr(os, "sched_getaffinity"):
         allowed = sorted(os.sched_getaffinity(0))
         os.sched_setaffinity(0, allowed[:cores])
+        available = min(cores, len(allowed))
+    else:
+        available = min(cores, os.cpu_count() or 1)
+    # Waiting on subprocesses benefits from more test threads than CPUs.
+    # Scale the measured four-CPU default down on smaller machines.
+    os.environ.setdefault("RUST_TEST_THREADS", str(min(16, available * 4)))
     os.environ["POST_TEST_WRAPPED"] = "1"
     command = ["bash", "scripts/test.sh", *sys.argv[1:]]
     if shutil.which("testrun"):

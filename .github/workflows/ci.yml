@@ -36,4 +36,4 @@ jobs:
         with:
           python-version: "3.12"
       - name: Gate
-        run: ./scripts/gate.sh
+        run: ./scripts/test.sh gate

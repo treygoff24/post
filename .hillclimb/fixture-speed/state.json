@@ -1,0 +1,22 @@
+{
+  "name": "fixture-speed",
+  "root": "/home/trey-agent/Code/post",
+  "cmd": "python3 bench/test-fixture-speed.py",
+  "metric": "wall_s",
+  "direction": "lower",
+  "min_effect": "10%",
+  "guard_cmd": null,
+  "holdout_cmd": null,
+  "reps": 5,
+  "warmup": 1,
+  "harness_paths": [
+    "bench/test-fixture-speed.py"
+  ],
+  "created": "2026-09-29T21:10:47+00:00",
+  "harness_files": {
+    "bench/test-fixture-speed.py": "7f677b2c5a2ad7e98f9c408a9c662faac87c9186e80dfbe5eefd84a66cacb030",
+    "<hc runner>": "a417677f1d06dcb5fbe7158b2b602c2966ce9d6aab7166285e5fdfc497d618d5",
+    "<commands>": "29db64a0f90198a327d67a2b57393287bc035ffd435e335a9e5e4d02a14f62db"
+  },
+  "approved": "2026-09-29T21:10:47+00:00"
+}

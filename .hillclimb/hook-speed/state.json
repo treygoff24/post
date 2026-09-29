@@ -1,0 +1,22 @@
+{
+  "name": "hook-speed",
+  "root": "/home/trey-agent/Code/post",
+  "cmd": "python3 bench/test-hook-speed.py",
+  "metric": "wall_s",
+  "direction": "lower",
+  "min_effect": "10%",
+  "guard_cmd": null,
+  "holdout_cmd": null,
+  "reps": 5,
+  "warmup": 1,
+  "harness_paths": [
+    "bench/test-hook-speed.py"
+  ],
+  "created": "2026-09-29T21:05:52+00:00",
+  "harness_files": {
+    "bench/test-hook-speed.py": "b29fcdabc642f176f150f42ec2256979929c03f1a89eb4aabb422efb167761fc",
+    "<hc runner>": "a417677f1d06dcb5fbe7158b2b602c2966ce9d6aab7166285e5fdfc497d618d5",
+    "<commands>": "41e9757f210d61941b935ed3849851739f68802e62990c27d2beb9a965ed3816"
+  },
+  "approved": "2026-09-29T21:05:52+00:00"
+}
