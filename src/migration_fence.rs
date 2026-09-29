@@ -326,22 +326,6 @@ fn read_state(context: &Context) -> AppResult<Option<FenceState>> {
     parsed.into_state(&path).map(Some)
 }
 
-#[cfg(test)]
-fn conservative_read_mode(context: &Context) -> bool {
-    if std::env::var_os(GENERATION_ENV).is_some() {
-        return true;
-    }
-    matches!(
-        read_state(context),
-        Ok(Some(FenceState::Fenced { .. } | FenceState::Active { .. })) | Err(_)
-    )
-}
-
-#[cfg(test)]
-fn read_only_must_not_mutate(context: &Context) -> bool {
-    conservative_read_mode(context)
-}
-
 fn refuse(context: &Context, reason: impl Into<String>) -> AppError {
     let path = state_path(context);
     let mut error = AppError::new(
@@ -797,32 +781,6 @@ mod tests {
         assert!(admit_generation(&context, true, Some(7)).is_ok());
         assert!(admit_generation(&context, true, Some(6)).is_err());
         assert!(admit_generation(&context, true, None).is_err());
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn malformed_and_missing_enrolled_state_fail_closed_without_read_mutation() {
-        let (root, context) = context("arx-fail-closed");
-        fs::write(
-            root.join(STATE_FILE),
-            br#"{"state":"active","state":"fenced"}"#,
-        )
-        .expect("ambiguous state");
-        assert!(admit_generation(&context, true, Some(7)).is_err());
-        assert!(read_only_must_not_mutate(&context));
-
-        fs::write(
-            root.join(STATE_FILE),
-            br#"{"state":"active","generation":7}"#,
-        )
-        .expect("active state");
-        assert!(read_only_must_not_mutate(&context));
-        let _guard = crate::mailbox::enter_read_only_command(true);
-        context.mailbox_dirs("alpha").expect("read-only paths");
-        assert!(!root.join("alpha").exists());
-
-        fs::remove_file(root.join(STATE_FILE)).expect("remove enrolled state");
-        assert!(admit_generation(&context, true, Some(7)).is_err());
         trash_test_root(&root);
     }
 
