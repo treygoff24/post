@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    assert_success, from_stdout, register_alpha_beta, write_bad_channel, write_channel_message,
-    write_custom_mail, Sandbox,
+    assert_documented, assert_success, from_stdout, help_options, register_alpha_beta,
+    usage_options, write_bad_channel, write_channel_message, write_custom_mail, Sandbox,
 };
 use post::output::{DoctorOutput, DoctorSeverity, SchemaOutput};
 use serde_json::Value;
@@ -30,16 +30,6 @@ fn keys(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn assert_keys_in_shape(shape: &[String], expected: &[&str]) {
-    let shape = shape.join("\n");
-    for field in expected {
-        assert!(
-            shape.contains(field),
-            "schema shape omitted field {field:?}: {shape}"
-        );
-    }
-}
-
 fn shape_top_level_keys(shape: &[String]) -> BTreeSet<String> {
     shape
         .iter()
@@ -57,16 +47,6 @@ fn shape_top_level_keys(shape: &[String]) -> BTreeSet<String> {
 
 fn expected_keys(fields: &[&str]) -> BTreeSet<String> {
     fields.iter().map(|field| (*field).to_owned()).collect()
-}
-
-fn assert_keys_are_documented(actual: &BTreeSet<String>, shape: &[String]) {
-    let shape = shape.join("\n");
-    for field in actual {
-        assert!(
-            shape.contains(field),
-            "real output field {field:?} is absent from schema shape: {shape}"
-        );
-    }
 }
 
 #[test]
@@ -172,12 +152,17 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
 #[test]
 fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     let sandbox = Sandbox::new();
-    let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
-    let watch = schema
-        .commands
-        .iter()
-        .find(|command| command.name == "watch")
-        .expect("watch command");
+    let output = sandbox.run(&["schema"]);
+    let schema_text = common::stdout(&output);
+    let schema: SchemaOutput = from_stdout(&output);
+    let command = |name: &str| {
+        schema
+            .commands
+            .iter()
+            .find(|command| command.name == name)
+            .unwrap_or_else(|| panic!("{name} command in schema"))
+    };
+    let watch = command("watch");
     assert!(watch
         .side_effects
         .contains("long-running watch requires a bound participant"));
@@ -187,6 +172,33 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
         .contains("snapshot is the read-only unbound exception"));
     assert!(!watch.side_effects.contains("legacy unbound watches"));
     assert!(!watch.side_effects.contains("never emits body content"));
+    assert!(watch.side_effects.contains("deduplicates channel messages"));
+    assert!(watch.side_effects.contains("--snapshot"));
+    assert!(watch
+        .side_effects
+        .contains("never mutates channel seen-sets"));
+    assert!(watch
+        .default_output
+        .contains("mail | unreadable | channel_message"));
+
+    // Channel reads publish membership semantics, not watermarks.
+    let chat = command("chat");
+    assert!(chat.side_effects.contains("consumes only emitted ids"));
+    assert!(chat
+        .side_effects
+        .contains("--seen-by lists members whose seen-set contains an id"));
+    for stale in [
+        "advances the reader's own cursor",
+        "cursors passed an id",
+        "past the sender cursor",
+        "never advances channel cursors",
+        "an invalid value is a loud error",
+    ] {
+        assert!(
+            !schema_text.contains(stale),
+            "stale contract phrase still published: {stale}"
+        );
+    }
 
     let laws = schema.laws.join("\n");
     assert!(laws.contains(
@@ -201,59 +213,8 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     let environment = schema.environment.join("\n");
     assert!(environment.contains("legacy cursor state is never imported or materialized"));
     assert!(!environment.contains("valid legacy channel-state.json imports"));
+    assert!(environment.contains("falls back to auto (presentation never breaks a read"));
 
-    for shape in [
-        &schema.output_shapes.read_json,
-        &schema.output_shapes.read_budget,
-        &schema.output_shapes.read_slice,
-    ] {
-        assert_keys_in_shape(
-            shape,
-            &[
-                "origin",
-                "reply_to_participant",
-                "reply_to_shared",
-                "address",
-                "own",
-                "pending",
-                "already_read",
-            ],
-        );
-    }
-    assert_keys_in_shape(
-        &schema.output_shapes.search,
-        &["own", "pending", "already_read"],
-    );
-    assert_keys_in_shape(&schema.output_shapes.watch, &["digest", "pending"]);
-    assert_keys_in_shape(
-        &schema.output_shapes.inbox,
-        &[
-            "participant",
-            "pending",
-            "pending_by_address",
-            "held",
-            "unread[]",
-            "origin",
-            "reply_to_participant",
-            "reply_to_shared",
-        ],
-    );
-    assert_keys_in_shape(
-        &schema.output_shapes.channels,
-        &["participant", "pending", "channels"],
-    );
-    assert_keys_in_shape(
-        &schema.output_shapes.doctor,
-        &[
-            "participant",
-            "pending",
-            "participant_fix",
-            "participant_error",
-        ],
-    );
-    let doctor = sandbox.run(&["doctor"]);
-    let doctor = json_object(&doctor);
-    assert_keys_are_documented(&keys(&doctor), &schema.output_shapes.doctor);
     macro_rules! assert_shape {
         ($name:literal, $shape:expr, [$($field:literal),* $(,)?]) => {
             assert_eq!(
@@ -638,37 +599,10 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
         .any(|flag| flag.contains("participant binding") && flag.contains("never cwd")));
 }
 
-fn option_names(text: &str) -> BTreeSet<String> {
-    text.split_whitespace()
-        .filter_map(|token| {
-            let token = token.get(token.find("--")?..)?;
-            let name = token
-                .split(|character: char| {
-                    matches!(character, '<' | '>' | '|' | ']' | ')' | ',' | '=')
-                })
-                .next()?;
-            (!name.is_empty()).then(|| name.to_owned())
-        })
-        .collect()
-}
-
-fn declared_option_names(help_options: &str) -> BTreeSet<String> {
-    help_options
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            line.starts_with("--")
-                .then(|| line.split_whitespace().next())
-                .flatten()
-                .map(|token| token.trim_end_matches(',').to_owned())
-        })
-        .collect()
-}
-
 #[test]
 fn schema_matches_catchup_and_search_help_and_json() {
     let sandbox = Sandbox::new();
-    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let (_, beta) = register_alpha_beta(&sandbox);
     write_bad_channel(
         &sandbox,
         "tax",
@@ -759,13 +693,9 @@ fn schema_matches_catchup_and_search_help_and_json() {
         for token in tokens {
             assert!(text.contains(token), "help omitted {token}: {text}");
         }
-        let mut help_options = option_names(&text);
-        for global in ["--json", "--pretty", "--help"] {
-            help_options.remove(global);
-        }
         assert_eq!(
-            help_options,
-            option_names(usage),
+            help_options(&text),
+            usage_options(usage),
             "schema usage and clap help disagree about command options"
         );
     }
@@ -774,9 +704,13 @@ fn schema_matches_catchup_and_search_help_and_json() {
     assert_success(&catchup_output);
     let catchup_json = json_object(&catchup_output);
     let catchup_top = ["ok", "room", "targets", "count"];
-    assert_keys_in_shape(&schema.output_shapes.catchup, &catchup_top);
+    assert_documented(
+        "catchup",
+        &schema.output_shapes.catchup.join("\n"),
+        &catchup_json,
+        "catchup --all",
+    );
     let catchup_top_keys = keys(&catchup_json);
-    assert_keys_are_documented(&catchup_top_keys, &schema.output_shapes.catchup);
     assert_eq!(
         catchup_top_keys,
         catchup_top.iter().map(|key| (*key).to_owned()).collect()
@@ -784,11 +718,8 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let targets = catchup_json["targets"].as_array().expect("catchup targets");
     assert!(targets.iter().any(|target| target["source"] == "mail"));
     assert!(targets.iter().any(|target| target["source"] == "channel"));
-    let target_fields = ["source", "framing", "messages", "count"];
-    assert_keys_in_shape(&schema.output_shapes.catchup, &target_fields);
     for target in targets {
         let actual = keys(target);
-        assert_keys_are_documented(&actual, &schema.output_shapes.catchup);
         assert!(actual.contains("source"));
         assert!(actual.contains("framing"));
         assert!(actual.contains("messages"));
@@ -845,10 +776,13 @@ fn schema_matches_catchup_and_search_help_and_json() {
         "participant",
         "pending",
     ];
-    assert_keys_in_shape(&schema.output_shapes.search, &search_top);
-    assert_keys_in_shape(&schema.output_shapes.search, &["source", "authority"]);
+    assert_documented(
+        "search",
+        &schema.output_shapes.search.join("\n"),
+        &search_json,
+        "search --json",
+    );
     let search_top_keys = keys(&search_json);
-    assert_keys_are_documented(&search_top_keys, &schema.output_shapes.search);
     assert_eq!(
         search_top_keys,
         search_top.iter().map(|key| (*key).to_owned()).collect()
@@ -866,11 +800,8 @@ fn schema_matches_catchup_and_search_help_and_json() {
     let result_fields = [
         "source", "channel", "id", "from", "sent", "subject", "preview", "matched",
     ];
-    assert_keys_in_shape(&schema.output_shapes.search, &result_fields);
-    assert_keys_in_shape(&schema.output_shapes.search, &["kind"]);
     for result in results {
         let actual = keys(result);
-        assert_keys_are_documented(&actual, &schema.output_shapes.search);
         for field in result_fields {
             assert!(
                 actual.contains(field),
@@ -890,30 +821,11 @@ fn schema_matches_catchup_and_search_help_and_json() {
         }
     }
 
+    // The channels keys are pinned by the contract sample and the schema-truth
+    // check; what only this fixture has is a channel the reader is not in.
     let channels_output = sandbox.run_in(&["channels"], None, &beta);
     assert_success(&channels_output);
     let channels_json = json_object(&channels_output);
-    assert_eq!(
-        keys(&channels_json),
-        [
-            "ok",
-            "channels",
-            "count",
-            "archived_hidden",
-            "participant",
-            "pending"
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-    );
-    assert_keys_are_documented(&keys(&channels_json), &schema.output_shapes.channels);
-    assert_keys_in_shape(&schema.output_shapes.channels, &["room", "unread"]);
-    for channel in channels_json["channels"].as_array().expect("channels") {
-        let channel_keys = keys(channel);
-        assert!(channel_keys.contains("room"));
-        assert!(channel_keys.contains("unread"));
-    }
     let private = channels_json["channels"]
         .as_array()
         .expect("channels")
@@ -922,72 +834,6 @@ fn schema_matches_catchup_and_search_help_and_json() {
         .expect("private channel");
     assert_eq!(private["room"], "beta");
     assert!(private["unread"].is_null());
-
-    let alpha_participant = sandbox.test_participant("alpha");
-    let beta_participant = sandbox.test_participant("beta");
-    let sent = sandbox.run_as_participant(
-        &[
-            "send",
-            "--to",
-            "workspace:beta",
-            "--body",
-            "schema inbox fields",
-            "--json",
-        ],
-        &alpha_participant,
-        &alpha,
-    );
-    assert_success(&sent);
-    let sent = json_object(&sent);
-    let sent_id = sent["envelope"]["id"].as_str().expect("sent id");
-    let inbox_output =
-        sandbox.run_as_participant(&["inbox", "--room", "beta"], &beta_participant, &beta);
-    assert_success(&inbox_output);
-    let inbox_json = json_object(&inbox_output);
-    assert_eq!(
-        keys(&inbox_json),
-        [
-            "ok",
-            "room",
-            "participant",
-            "unread",
-            "count",
-            "skipped_unreadable",
-            "unread_count",
-            "pending",
-            "pending_by_address",
-            "held",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-    );
-    assert_keys_are_documented(&keys(&inbox_json), &schema.output_shapes.inbox);
-    let item = inbox_json["unread"]
-        .as_array()
-        .expect("unread")
-        .iter()
-        .find(|item| item["id"] == sent_id)
-        .unwrap_or_else(|| panic!("new inbox item {sent_id}: {inbox_json}"));
-    assert_eq!(
-        keys(item),
-        [
-            "id",
-            "from",
-            "origin",
-            "kind",
-            "subject",
-            "sent",
-            "sender_provenance",
-            "from_participant",
-            "reply_to_participant",
-            "reply_to_shared",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-    );
-    assert_keys_are_documented(&keys(item), &schema.output_shapes.inbox);
 }
 
 #[test]
@@ -1029,24 +875,6 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     let sent = json_object(&sent);
     let mail_id = sent["envelope"]["id"].as_str().expect("mail id").to_owned();
     let schema: SchemaOutput = from_stdout(&sandbox.run(&["schema"]));
-    for (command, tokens) in [
-        (
-            "chat",
-            vec!["--max-bytes", "--message", "--offset", "--length", "--ack"],
-        ),
-        ("read", vec!["--max-bytes", "--offset", "--length", "--ack"]),
-        ("catchup", vec!["--max-bytes"]),
-    ] {
-        let usage = &schema
-            .commands
-            .iter()
-            .find(|item| item.name == command)
-            .expect("command in schema")
-            .usage;
-        for token in tokens {
-            assert!(usage.contains(token), "{command} schema omitted {token}");
-        }
-    }
     for command in ["chat", "read"] {
         let usage = &schema
             .commands
@@ -1056,18 +884,9 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
             .usage;
         let help = sandbox.run(&[command, "--help"]);
         assert_success(&help);
-        let help_text = common::stdout(&help);
-        let options = help_text
-            .split_once("Options:")
-            .map(|(_, options)| options)
-            .expect("clap options section");
-        let mut help_options = declared_option_names(options);
-        for global in ["--json", "--pretty", "--help"] {
-            help_options.remove(global);
-        }
         assert_eq!(
-            help_options,
-            option_names(usage),
+            help_options(&common::stdout(&help)),
+            usage_options(usage),
             "{command} schema usage and clap help disagree"
         );
     }
@@ -1079,10 +898,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     );
     assert_success(&chat_budget);
     let chat_budget = json_object(&chat_budget);
-    assert_keys_are_documented(&keys(&chat_budget), &schema.output_shapes.chat_read);
-    assert_keys_in_shape(
-        &schema.output_shapes.chat_read,
-        &["selected_count", "byte_limit", "omitted"],
+    assert_documented(
+        "chat_read",
+        &schema.output_shapes.chat_read.join("\n"),
+        &chat_budget,
+        "chat --max-bytes",
     );
 
     let chat_slice = sandbox.run_in(
@@ -1101,13 +921,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &beta,
     );
     assert_success(&chat_slice);
-    assert_keys_are_documented(
-        &keys(&json_object(&chat_slice)),
-        &schema.output_shapes.chat_slice,
-    );
-    assert_keys_in_shape(
-        &schema.output_shapes.chat_slice,
-        &["origin", "reply_to_participant", "reply_to_shared"],
+    assert_documented(
+        "chat_slice",
+        &schema.output_shapes.chat_slice.join("\n"),
+        &json_object(&chat_slice),
+        "chat --message",
     );
 
     let beta_participant = sandbox.test_participant("beta");
@@ -1127,10 +945,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     );
     assert_success(&read_budget);
     let read_budget = json_object(&read_budget);
-    assert_keys_are_documented(&keys(&read_budget), &schema.output_shapes.read_budget);
-    assert_keys_are_documented(
-        &keys(&read_budget["envelope"]),
-        &schema.output_shapes.read_budget,
+    assert_documented(
+        "read_budget",
+        &schema.output_shapes.read_budget.join("\n"),
+        &read_budget,
+        "read --max-bytes",
     );
 
     let read_slice = sandbox.run_as_participant(
@@ -1150,10 +969,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     );
     assert_success(&read_slice);
     let read_slice = json_object(&read_slice);
-    assert_keys_are_documented(&keys(&read_slice), &schema.output_shapes.read_slice);
-    assert_keys_are_documented(
-        &keys(&read_slice["envelope"]),
-        &schema.output_shapes.read_slice,
+    assert_documented(
+        "read_slice",
+        &schema.output_shapes.read_slice.join("\n"),
+        &read_slice,
+        "read --offset",
     );
 
     let catchup = sandbox.run_in(
@@ -1163,10 +983,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
     );
     assert_success(&catchup);
     let catchup = json_object(&catchup);
-    assert_keys_are_documented(&keys(&catchup), &schema.output_shapes.catchup);
-    assert_keys_in_shape(
-        &schema.output_shapes.catchup,
-        &["targets[].selected_count", "targets[].has_more"],
+    assert_documented(
+        "catchup",
+        &schema.output_shapes.catchup.join("\n"),
+        &catchup,
+        "catchup --max-bytes",
     );
     for target in catchup["targets"].as_array().expect("catchup targets") {
         let target_keys = keys(target);
@@ -1180,9 +1001,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &beta,
     );
     assert_success(&chat_ack);
-    assert_keys_are_documented(
-        &keys(&json_object(&chat_ack)),
-        &schema.output_shapes.chat_ack,
+    assert_documented(
+        "chat_ack",
+        &schema.output_shapes.chat_ack.join("\n"),
+        &json_object(&chat_ack),
+        "chat --ack",
     );
     let read_ack = sandbox.run_in(
         &["read", &mail_id, "--room", "beta", "--ack", "--json"],
@@ -1190,9 +1013,11 @@ fn schema_matches_budget_slice_and_exact_ack_surfaces() {
         &beta,
     );
     assert_success(&read_ack);
-    assert_keys_are_documented(
-        &keys(&json_object(&read_ack)),
-        &schema.output_shapes.read_ack,
+    assert_documented(
+        "read_ack",
+        &schema.output_shapes.read_ack.join("\n"),
+        &json_object(&read_ack),
+        "read --ack",
     );
 }
 

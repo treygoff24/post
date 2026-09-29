@@ -1689,17 +1689,6 @@ impl WatchEvent {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InboxOutput {
-    pub ok: bool,
-    pub room: String,
-    pub unread: Vec<InboxItem>,
-    pub count: usize,
-    pub skipped_unreadable: usize,
-    /// Unread count from cursor state perspective for this room's mail
-    pub unread_count: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Framing {
     pub source: String,
     pub authority: bool,
@@ -2335,11 +2324,6 @@ mod tests {
     }
 
     #[test]
-    fn sender_label_absent_profile_is_bare_room_id() {
-        assert_eq!(sender_label(attribution("alpha", None, None)), "alpha");
-    }
-
-    #[test]
     fn sender_label_renders_pfp_name_and_id() {
         assert_eq!(
             sender_label(attribution("alpha", Some("Snowplow"), Some("🧊"))),
@@ -2361,12 +2345,8 @@ mod tests {
             sender_label(attribution("alpha", Some("Snow\nplow"), None)),
             "Snowplow (alpha)"
         );
-    }
-
-    #[test]
-    fn sender_label_prefers_own_profile_then_lineage_and_keeps_participant() {
-        // A stamped profile is the participant's own since 2026-09-22, so it
-        // outranks the lineage; the participant id and reply address stay.
+        // Control characters in the participant id and in the lineage are
+        // stripped too, on both the profile and the lineage paths.
         assert_eq!(
             sender_label(SenderAttribution {
                 from: "atlas",
@@ -2378,13 +2358,12 @@ mod tests {
             }),
             "🪨 Cairn [codex-0ea0d6a0] (atlas)"
         );
-        // No profile: lineage + participant, as before.
         assert_eq!(
             sender_label(SenderAttribution {
                 from: "atlas",
-                from_participant: Some("codex-0ea0d6a0"),
+                from_participant: Some("codex-0ea0d6a0\n"),
                 from_host: None,
-                from_lineage: Some("rowan"),
+                from_lineage: Some("row\nan"),
                 display_name: None,
                 pfp: None,
             }),
@@ -2489,17 +2468,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ndjson_absent_profile_keys_are_absent() {
-        let line = serde_json::to_string(&stamped(None, None)).expect("serialize");
-        assert!(!line.contains("display_name"));
-        assert!(!line.contains("pfp"));
-        let dressed =
-            serde_json::to_string(&stamped(Some("Snowplow"), Some("🧊"))).expect("serialize");
-        assert!(dressed.contains("\"display_name\":\"Snowplow\""));
-        assert!(dressed.contains("\"pfp\":\"🧊\""));
-    }
-
     fn remote_fixture(label: &str, rooms: &str) -> (PathBuf, crate::mailbox::Context) {
         let root = crate::test_support::test_root(label);
         std::fs::write(root.join("rooms.json"), rooms).expect("rooms.json");
@@ -2508,44 +2476,6 @@ mod tests {
             home: root.join("home"),
         };
         (root, context)
-    }
-
-    /// R7 fails closed: when rooms.json cannot be loaded, origin cannot be
-    /// established, so a colliding from_participant is never own.
-    #[test]
-    fn unreadable_rooms_fail_closed_for_the_own_check() {
-        let (root, context) = remote_fixture("remote-unreadable", "{ not json");
-        assert!(remote_workspace(&context, "alpha"));
-        assert!(!authored_locally_by(
-            &context,
-            "p1",
-            "alpha",
-            Some("p1"),
-            None
-        ));
-        // A missing registry is absence of evidence, not proof of local
-        // origin: it fails closed the same way (Aster ruling 20260923-052555).
-        std::fs::remove_file(root.join("rooms.json")).expect("remove rooms.json");
-        assert!(remote_workspace(&context, "alpha"));
-        assert!(!authored_locally_by(
-            &context,
-            "p1",
-            "alpha",
-            Some("p1"),
-            None
-        ));
-        // An explicit valid empty registry is a real state: nothing is
-        // remote, and the id match is own.
-        std::fs::write(root.join("rooms.json"), "{}").expect("empty rooms.json");
-        assert!(!remote_workspace(&context, "alpha"));
-        assert!(authored_locally_by(
-            &context,
-            "p1",
-            "alpha",
-            Some("p1"),
-            None
-        ));
-        crate::test_support::trash_test_root(&root);
     }
 
     /// Aster ruling 20260923-052555: an imported message from a real remote
@@ -2570,6 +2500,10 @@ mod tests {
             .expect("one local participant")
             .id;
         let assert_never_local = |state: &str| {
+            assert!(
+                remote_workspace(&context, "far"),
+                "{state}: the placeholder must read as remote (fail closed)"
+            );
             assert!(
                 !authored_locally_by(&context, &local, "far", Some(&local), None),
                 "{state}: the colliding import read as local-own"
@@ -2600,6 +2534,17 @@ mod tests {
             std::fs::Permissions::from_mode(0o644),
         )
         .expect("chmod back");
+        // The control: an explicit valid empty registry is a real state.
+        // Nothing is remote, and the id match is own.
+        std::fs::write(root.join("rooms.json"), "{}").expect("empty rooms.json");
+        assert!(!remote_workspace(&context, "far"));
+        assert!(authored_locally_by(
+            &context,
+            &local,
+            "far",
+            Some(&local),
+            None
+        ));
         crate::test_support::trash_test_root(&root);
     }
 

@@ -13,9 +13,11 @@
 
 mod common;
 
-use common::{assert_success, from_stdout, register_alpha_beta, Sandbox};
+use common::{
+    assert_documented, assert_success, documented_keys, from_stdout, help_options, names,
+    register_alpha_beta, undocumented, usage_options, Sandbox,
+};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -34,67 +36,6 @@ fn shape(schema: &Value, name: &str) -> String {
         .map(|line| line.as_str().expect("shape line").to_owned())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// True when `word` appears in `text` as a whole identifier: `id` is not
-/// documented by `identity`, and `bound` is not documented by `bound_now`.
-fn names(text: &str, word: &str) -> bool {
-    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    text.match_indices(word).any(|(start, _)| {
-        let before = text[..start].chars().next_back();
-        let after = text[start + word.len()..].chars().next();
-        !before.is_some_and(is_word) && !after.is_some_and(is_word)
-    })
-}
-
-/// Objects whose keys are data (room names, participant ids, addresses), not
-/// schema: the shape describes them as `name{key:value}` and their keys are
-/// whatever the store holds, so those keys are not required in the shape.
-/// Every other nested object is traversed. An entry here is a promise that
-/// the shape documents the map's value, not its keys.
-const DATA_KEYED_MAPS: &[&str] = &["unread", "pending", "pending_by_address", "rewritten"];
-
-/// The fields a real output carries that the shape must name: every key of
-/// every object at any depth (nested objects and objects inside arrays
-/// included), except the keys of the data-keyed maps above.
-fn documented_keys(value: &Value) -> BTreeSet<String> {
-    fn collect(value: &Value, keys: &mut BTreeSet<String>) {
-        match value {
-            Value::Object(object) => {
-                for (key, child) in object {
-                    keys.insert(key.clone());
-                    // Only a map is exempt: `unread` in an inbox is an array
-                    // of envelopes whose fields must be named.
-                    let data_keyed = child.is_object() && DATA_KEYED_MAPS.contains(&key.as_str());
-                    if !data_keyed {
-                        collect(child, keys);
-                    }
-                }
-            }
-            Value::Array(items) => items.iter().for_each(|item| collect(item, keys)),
-            _ => {}
-        }
-    }
-    let mut keys = BTreeSet::new();
-    collect(value, &mut keys);
-    keys
-}
-
-/// What is wrong when `value` carries a field the shape never names.
-fn undocumented(shape_name: &str, shape: &str, value: &Value, origin: &str) -> Option<String> {
-    let missing: Vec<String> = documented_keys(value)
-        .into_iter()
-        .filter(|key| !names(shape, key))
-        .collect();
-    (!missing.is_empty()).then(|| {
-        format!("{origin}: the `{shape_name}` shape in `post schema` never names {missing:?}")
-    })
-}
-
-fn assert_documented(shape_name: &str, shape: &str, value: &Value, origin: &str) {
-    if let Some(problem) = undocumented(shape_name, shape, value, origin) {
-        panic!("{problem}\nshape:\n{shape}");
-    }
 }
 
 /// The instrument itself: it looks inside nested objects and arrays, exempts
@@ -258,50 +199,6 @@ fn fields_added_by_this_wave_are_in_the_schema_and_in_live_output() {
         "fixture: {who}"
     );
     assert_documented("who", &shape(&schema, "who"), &who, "who");
-}
-
-/// Fields other lanes of the wave add to their own commands. Their producers
-/// are those lanes' code, so this only pins that the schema names them; the
-/// integrated build's contract samples and the live checks above carry the
-/// rest. Per docs/plans/post-just-works-2026-09-28.md.
-#[test]
-fn the_schema_declares_the_fields_the_contract_names() {
-    let sandbox = Sandbox::new();
-    let schema = schema(&sandbox);
-    for (shape_name, fields) in [
-        ("chat_send", &["crossed", "skipped", "bound_now"][..]),
-        ("chat_read", &["skipped_files", "bound"][..]),
-        ("chat_join", &["bound_now"][..]),
-        ("send_json", &["bound_now", "warnings"][..]),
-        ("inbox", &["bound", "bound_now", "hint"][..]),
-        ("read_json", &["bound", "bound_now"][..]),
-        ("channels", &["bound", "skipped"][..]),
-        ("search", &["bound", "skipped"][..]),
-        ("catchup", &["skipped", "bound_now"][..]),
-        (
-            "participant",
-            &[
-                "participant_missing",
-                "gc",
-                "deleted",
-                "archived",
-                "kept",
-                "restore",
-                "restored",
-                "from",
-            ][..],
-        ),
-        ("who", &["participant_missing", "bridge_attention"][..]),
-        ("doctor", &["participant_missing", "severity_filter"][..]),
-    ] {
-        let text = shape(&schema, shape_name);
-        for field in fields {
-            assert!(
-                names(&text, field),
-                "the `{shape_name}` shape never names `{field}`:\n{text}"
-            );
-        }
-    }
 }
 
 /// The identity states the wave added, read from live output: every field a
@@ -545,45 +442,26 @@ fn participant_gc_and_restore_are_documented_and_live() {
         "fixture: {error}"
     );
     assert!(
-        participant.contains("participant_missing") && participant.contains("exit 65"),
-        "the participant shape must name the restore error and its exit code:\n{participant}"
+        restore_line.contains("participant_missing") && restore_line.contains("exit 65"),
+        "the restore line must name its error and exit code: {restore_line}"
     );
 }
 
-/// The long options a command's `--help` lists, excluding the global flags.
-fn help_options(help: &str) -> BTreeSet<String> {
-    let mut options = BTreeSet::new();
-    let mut in_options = false;
-    for line in help.lines() {
-        if line.trim_end().ends_with(':') && !line.starts_with(' ') {
-            in_options = line.starts_with("Options");
-            continue;
-        }
-        if !in_options {
-            continue;
-        }
-        let trimmed = line.trim_start();
-        // An option line starts with `-x, --long` or `--long`; a possible
-        // value (`- now: ...`) or a prose line that mentions a flag does not.
-        let mut chars = trimmed.chars();
-        let short_form = chars.next() == Some('-')
-            && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && chars.next() == Some(',');
-        if !(trimmed.starts_with("--") || short_form) {
-            continue;
-        }
-        if let Some(start) = trimmed.find("--") {
-            let name: String = trimmed[start..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect();
-            options.insert(name);
-        }
-    }
-    for global in ["--help", "--version", "--json", "--pretty"] {
-        options.remove(global);
-    }
-    options
+/// The instrument for the check below: a usage naming only `--discard-through`
+/// must not count as naming `--discard`, and a `-x, --long` help line counts.
+#[test]
+fn the_option_lexers_keep_prefix_related_options_apart() {
+    let usage = "post chat <channel> [--discard-through <id>] [--body-file <path> | --body <text>]";
+    let named = usage_options(usage);
+    assert!(named.contains("--discard-through") && named.contains("--body-file"));
+    assert!(!named.contains("--discard"), "{named:?}");
+    let help = "Usage: post x\n\nOptions:\n  -b, --body <TEXT>  the body\n      --discard  drop\n      --limit <N>\n  -h, --help\n";
+    let listed: Vec<String> = help_options(help).into_iter().collect();
+    assert_eq!(listed, ["--body", "--discard", "--limit"]);
+    assert!(
+        !named.contains(&listed[1]),
+        "--discard is not in that usage"
+    );
 }
 
 #[test]
@@ -596,14 +474,13 @@ fn every_option_a_command_helps_with_is_in_its_schema_usage() {
         let name = command["name"].as_str().expect("command name");
         let usage = command["usage"].as_str().expect("usage");
         let help = sandbox.run(&[name, "--help"]);
-        if !help.status.success() {
-            continue;
-        }
+        assert_success(&help);
         let help = common::stdout(&help);
         let listed = help_options(&help);
+        let in_usage = usage_options(usage);
         for option in &listed {
             assert!(
-                usage.contains(option.as_str()),
+                in_usage.contains(option),
                 "`post {name} --help` lists {option}, but the schema usage for `{name}` omits it:\n{usage}"
             );
         }

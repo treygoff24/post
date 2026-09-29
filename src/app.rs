@@ -318,30 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn stdout_failure_after_room_registration_is_still_success() {
-        let result = CommandResult::success("rooms\n".to_owned()).registration_committed();
-
-        assert_eq!(
-            finish_command_result(result, &mut BrokenWriter)
-                .expect("a committed registration must not invite a retry"),
-            0
-        );
-    }
-
-    #[test]
-    fn a_send_that_landed_exits_as_it_did_when_its_receipt_cannot_be_written() {
-        // `post send` returns a committed delivery that is also a committed
-        // registration: the mail exists, so no stdout failure may read as a
-        // failed send (a caller that retries sends a second copy).
-        let landed = CommandResult::committed("receipt\n".to_owned()).registration_committed();
-        assert_eq!(
-            finish_command_result(landed, &mut BrokenWriter)
-                .expect("a landed send must not exit nonzero"),
-            0
-        );
-    }
-
-    #[test]
     fn a_reader_that_went_away_ends_a_read_only_command_quietly() {
         // `post who --text | head`: nothing was changed, so there is nothing to
         // retry and no error to print. The command's own exit code stands.

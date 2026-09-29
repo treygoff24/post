@@ -1,7 +1,7 @@
 use post::output::{
     ChannelsOutput, ChatDiscardOutput, ChatDiscardThroughOutput, ChatJoinOutput, ChatReadOutput,
-    ChatSendOutput, DoctorOutput, DoctorSeverity, ErrorEnvelope, InboxOutput, ReadOutput,
-    RoomsOutput, SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
+    ChatSendOutput, DoctorOutput, DoctorSeverity, ErrorEnvelope, ReadOutput, RoomsOutput,
+    SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -27,7 +27,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
 
     let inbox_output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&inbox_output);
-    let inbox: InboxOutput = from_stdout(&inbox_output);
+    let inbox: InboxView = from_stdout(&inbox_output);
     assert_eq!(inbox.room, "claude-space");
     assert_eq!(inbox.count, 1);
     assert_eq!(inbox.unread[0].id, sent.envelope.id);
@@ -47,7 +47,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
 
     let empty_output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&empty_output);
-    let empty: InboxOutput = from_stdout(&empty_output);
+    let empty: InboxView = from_stdout(&empty_output);
     assert_eq!(empty.count, 0);
     assert!(empty.unread.is_empty());
     assert!(sandbox
@@ -177,30 +177,6 @@ fn help_and_schema_keep_command_contract_visible() {
         .global_flags
         .iter()
         .any(|flag| flag.contains("inbox/read/watch/who only")));
-    let watch = schema
-        .commands
-        .iter()
-        .find(|command| command.name == "watch")
-        .expect("watch command in schema");
-    assert_eq!(
-        watch.usage,
-        "post watch [--room <name>]... [--own <room>]... [--once | --snapshot [--limit <n>]] [--from now] [--interval-ms <ms>] [--reason mail|channel|mention]... [--digest] [--text]"
-    );
-    assert!(watch.side_effects.contains("deduplicates channel messages"));
-    assert!(watch.side_effects.contains("--snapshot"));
-    assert!(watch
-        .default_output
-        .contains("mail | unreadable | channel_message"));
-    assert_eq!(
-        schema.output_shapes.watch,
-        vec![
-            "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (true when the acting participant's cursor state could not be read, so everything reads as unseen)",
-            "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
-            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_host?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (as on mail)",
-            "unbound: event=unbound, participant=null, bound=false, hint (the single line `watch --snapshot` prints when the session has no participant and no --room is named, so a hook reading the stream gets an answer, never a cwd-derived room; text mode prints the hint as prose)",
-            "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix), cursor_unusable? (as on mail)",
-        ]
-    );
     assert!(
         schema
             .output_shapes
@@ -3104,7 +3080,7 @@ fn empty_inbox_is_successful_structured_empty_result() {
     let output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&output);
     assert!(output.stderr.is_empty());
-    let inbox: InboxOutput = from_stdout(&output);
+    let inbox: InboxView = from_stdout(&output);
     assert!(inbox.ok);
     assert_eq!(inbox.room, "claude-space");
     assert_eq!(inbox.count, 0);
@@ -3495,28 +3471,6 @@ fn send_to_a_channel_names_the_channel_verb_and_never_publishes_a_command() {
     assert_eq!(
         error.error.details.did_you_mean.as_deref(),
         Some("claude-space")
-    );
-}
-
-/// Three papercuts say `post chat --help` reads as a read-only command because
-/// its first nine usage lines were reads. Sending must be visible at the top.
-#[test]
-fn chat_help_leads_with_a_send_form() {
-    let sandbox = Sandbox::new();
-    let output = sandbox.run(&["chat", "--help"]);
-    let text = String::from_utf8_lossy(&output.stdout);
-    let usage: Vec<&str> = text
-        .lines()
-        .skip_while(|line| !line.starts_with("Usage:"))
-        .take(4)
-        .collect();
-    assert!(
-        usage.iter().any(|line| line.contains("--send")),
-        "a --send form must appear in the first lines of usage, got: {usage:?}"
-    );
-    assert!(
-        text.contains("post send --to"),
-        "chat --help must cross-reference the direct-mail verb"
     );
 }
 
@@ -4206,7 +4160,7 @@ fn inbox_skips_malformed_mail_and_rooms_only_show_recipient_rules() {
     let listed = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert!(listed.status.success());
     assert!(stderr(&listed).contains("skipped malformed pending mail"));
-    let listed: InboxOutput = from_stdout(&listed);
+    let listed: InboxView = from_stdout(&listed);
     assert_eq!(listed.count, 1);
     assert_eq!(listed.skipped_unreadable, 1);
     assert_eq!(listed.unread[0].id, sent.envelope.id);
@@ -4248,7 +4202,7 @@ fn inbox_reports_unreadable_mail_without_hiding_readable_messages() {
         stderr(&output)
     );
     assert!(stderr(&output).contains("skipped unreadable pending mail"));
-    let listed: InboxOutput = from_stdout(&output);
+    let listed: InboxView = from_stdout(&output);
     assert_eq!(listed.count, 1);
     assert_eq!(listed.unread[0].id, sent.envelope.id);
     assert_eq!(listed.skipped_unreadable, 1);
@@ -4657,7 +4611,7 @@ fn inbox_lists_multiple_messages_oldest_first() {
 
     let output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&output);
-    let inbox: InboxOutput = from_stdout(&output);
+    let inbox: InboxView = from_stdout(&output);
     assert_eq!(
         inbox
             .unread
@@ -6794,7 +6748,7 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
         );
     }
 
-    let inbox: InboxOutput = from_stdout(&sandbox.run_as_participant(
+    let inbox: InboxView = from_stdout(&sandbox.run_as_participant(
         &["inbox", "--room", "beta"],
         &beta_participant,
         &beta,
@@ -12420,61 +12374,23 @@ fn doctor_brief_prints_one_line_for_both_outcomes() {
 }
 
 #[test]
-fn schema_describes_seen_set_semantics_not_watermarks() {
-    let sandbox = Sandbox::new();
-    let output = sandbox.run(&["schema"]);
-    assert_eq!(output.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Membership semantics must be what the machine contract publishes.
-    assert!(text.contains("consumes only emitted ids"), "{text}");
-    assert!(
-        text.contains("--seen-by lists members whose seen-set contains an id"),
-        "{text}"
-    );
-    assert!(text.contains("never mutates channel seen-sets"), "{text}");
-    assert!(
-        text.contains("falls back to auto (presentation never breaks a read"),
-        "{text}"
-    );
-    // Watermark-era phrasing must be gone.
-    for stale in [
-        "advances the reader's own cursor",
-        "cursors passed an id",
-        "past the sender cursor",
-        "never advances channel cursors",
-        "an invalid value is a loud error",
-    ] {
-        assert!(
-            !text.contains(stale),
-            "stale contract phrase still published: {stale}"
-        );
-    }
-}
-
-#[test]
-fn doctor_brief_is_human_only_and_conflicts_with_json() {
-    let sandbox = Sandbox::new();
-    let output = sandbox.run(&["--json", "doctor", "--brief"]);
-    assert_ne!(output.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&output.stdout);
-    let err = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{text}{err}");
-    assert!(combined.contains("--brief"), "{combined}");
-    assert!(combined.contains("--json"), "{combined}");
-}
-
-#[test]
 fn global_json_before_any_human_only_flag_is_refused() {
     // clap misses the conflict when --json precedes the subcommand; the
     // dispatcher guard must catch every human-only flag, not just doctor.
     let sandbox = Sandbox::new();
     register_alpha_beta(&sandbox);
-    for args in [
-        vec!["--json", "channels", "--text"],
-        vec!["--json", "who", "--room", "alpha", "--text"],
-        vec!["--json", "inbox", "--room", "alpha", "--text"],
-        vec!["--json", "watch", "--room", "alpha", "--text", "--snapshot"],
-        vec!["--json", "doctor", "--brief"],
+    for (args, flag) in [
+        (vec!["--json", "channels", "--text"], "--text"),
+        (vec!["--json", "who", "--room", "alpha", "--text"], "--text"),
+        (
+            vec!["--json", "inbox", "--room", "alpha", "--text"],
+            "--text",
+        ),
+        (
+            vec!["--json", "watch", "--room", "alpha", "--text", "--snapshot"],
+            "--text",
+        ),
+        (vec!["--json", "doctor", "--brief"], "--brief"),
     ] {
         let out = sandbox.run(&args);
         assert_eq!(
@@ -12486,6 +12402,10 @@ fn global_json_before_any_human_only_flag_is_refused() {
         assert!(
             stderr.contains("--json"),
             "refusal must name the conflict: {stderr}"
+        );
+        assert!(
+            stderr.contains(flag),
+            "refusal must name the human-only flag {flag}: {stderr}"
         );
     }
 }
@@ -12629,6 +12549,10 @@ fn help_and_schema_agree_that_chat_leads_with_sending() {
     assert!(
         first_schema_form.contains("--send"),
         "schema usage must lead with a send form, got: {first_schema_form}"
+    );
+    assert!(
+        help.contains("post send --to"),
+        "chat --help must cross-reference the direct-mail verb"
     );
 }
 
