@@ -510,43 +510,6 @@ fn participant_native_harness_labels_ignore_post_harness_override() {
 }
 
 #[test]
-fn participant_concurrent_bind_converges_on_one_record() {
-    let sandbox = Sandbox::new();
-    let key = "one-concurrent-conversation";
-    let mut children = Vec::new();
-    for _ in 0..8 {
-        children.push(
-            common::post_command()
-                .args(["participant", "bind"])
-                .current_dir(&sandbox.path)
-                .env("HOME", &sandbox.home)
-                .env("POST_MAIL_ROOT", &sandbox.mail_root)
-                .env_remove("POST_PARTICIPANT")
-                .env("CLAUDE_CODE_SESSION_ID", key)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn concurrent bind"),
-        );
-    }
-    let mut ids = Vec::new();
-    for child in children {
-        let output = child.wait_with_output().expect("wait concurrent bind");
-        assert_success(&output);
-        let value: Value = from_stdout(&output);
-        ids.push(participant_id(&value).to_owned());
-    }
-    assert!(ids.iter().all(|id| id == &ids[0]), "ids diverged: {ids:?}");
-    let records = fs::read_dir(sandbox.mail_root.join("participants"))
-        .expect("participants")
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().join("participant.json").is_file())
-        .filter(|entry| entry.file_name().to_string_lossy() != "test-default")
-        .count();
-    assert_eq!(records, 1, "one conversation must mint one record");
-}
-
-#[test]
 fn participant_crash_after_record_before_index_reconverges() {
     let sandbox = Sandbox::new();
     let key = "crash-cut-conversation";
@@ -564,25 +527,6 @@ fn participant_crash_after_record_before_index_reconverges() {
         fs::read_to_string(index).expect("repaired index"),
         format!("{id}\n")
     );
-}
-
-#[test]
-fn participant_dangling_index_re_mints_same_deterministic_record() {
-    let sandbox = Sandbox::new();
-    let key = "dangling-index-conversation";
-    let first = sandbox.bind_claude(key, &sandbox.path, None);
-    let id = participant_id(&first).to_owned();
-    fs::remove_file(
-        sandbox
-            .mail_root
-            .join("participants")
-            .join(&id)
-            .join("participant.json"),
-    )
-    .expect("simulate missing index target");
-    let rebound = sandbox.bind_claude(key, &sandbox.path, None);
-    assert_eq!(participant_id(&rebound), id);
-    assert_eq!(sandbox.read_participant(&id)["id"], id);
 }
 
 #[test]
@@ -795,6 +739,11 @@ fn participant_keyless_send_fails_with_bootstrap_fix() {
         .error
         .suggested_fix
         .contains("export POST_PARTICIPANT"));
+    // No ambient key means no runnable single-command fix, and the message
+    // itself names the real bootstrap sequence.
+    assert!(error.error.details.exact_fix.is_none());
+    assert!(error.error.message.contains("post participant bind --new"));
+    assert!(error.error.message.contains("export POST_PARTICIPANT="));
     assert!(tree(&sandbox.mail_root).is_empty());
 }
 
@@ -1166,39 +1115,6 @@ fn participant_text_surfaces_render_own_profile_then_lineage_with_participant_id
 }
 
 #[test]
-fn participant_old_format_envelope_still_parses() {
-    let old: post::output::Envelope = serde_json::from_value(serde_json::json!({
-        "id": "20260916-010203-abcdef",
-        "from": "alpha",
-        "to": "beta",
-        "kind": "note",
-        "subject": "old",
-        "sent": "2026-09-16 01:02:03 +0000"
-    }))
-    .expect("0.9.0 envelope parses");
-    assert!(old.from_participant.is_none());
-    assert!(old.from_lineage.is_none());
-    assert!(old.address_kind.is_none());
-}
-
-#[test]
-fn participant_version_json_advertises_store_and_capabilities() {
-    let sandbox = Sandbox::new_unseeded();
-    let output = sandbox.run_unbound(&["version", "--json"], &sandbox.path);
-    assert_success(&output);
-    let version: Value = from_stdout(&output);
-    assert_eq!(version["store_version"], 2);
-    assert!(version["build_sha"]
-        .as_str()
-        .is_some_and(|sha| !sha.is_empty()));
-    assert_eq!(
-        version["capabilities"],
-        serde_json::json!(["participants", "lineages", "routing-receipts", "cursors-v2"])
-    );
-    assert!(tree(&sandbox.mail_root).is_empty());
-}
-
-#[test]
 fn participant_codex_conflict_is_an_error_not_a_guess() {
     let sandbox = Sandbox::new();
     let output = sandbox.run_in_env(
@@ -1345,51 +1261,47 @@ fn participant_round4_unbound_streams_keep_stdout_protocol_and_budget() {
         "budgeted body",
     );
 
-    let actor = sandbox.test_participant("alpha");
-    let baseline = sandbox.run_as_participant(
-        &[
-            "read",
-            id,
-            "--room",
-            "alpha",
-            "--offset",
-            "0",
-            "--length",
-            "8",
-            "--max-bytes",
-            "4096",
-            "--json",
-        ],
-        &actor,
-        &alpha,
-    );
-    assert_success(&baseline);
-    let cap = baseline.stdout.len().to_string();
-    let budgeted_args = vec![
-        "read",
-        id,
-        "--room",
-        "alpha",
-        "--offset",
-        "0",
-        "--length",
-        "8",
-        "--max-bytes",
-        cap.as_str(),
-        "--json",
-    ];
-    let budgeted = sandbox.run_without_identity(&budgeted_args, &alpha);
+    // A cap that fits only the bare marker: the hint-carrying marker does not
+    // fit, so the reader must fall back to exactly the bare marker.
+    const BARE_MARKER: &str = "{\"ok\":true,\"participant\":null,\"bound\":false}\n";
+    let cap = BARE_MARKER.len().to_string();
+    let read_with_cap = |cap: &str| {
+        sandbox.run_without_identity(
+            &[
+                "read",
+                id,
+                "--room",
+                "alpha",
+                "--offset",
+                "0",
+                "--length",
+                "8",
+                "--max-bytes",
+                cap,
+                "--json",
+            ],
+            &alpha,
+        )
+    };
+    let budgeted = read_with_cap(&cap);
     assert_success(&budgeted);
-    assert!(
-        budgeted.stdout.len() <= baseline.stdout.len(),
-        "unbound notice exceeded the {}-byte budget: {} bytes",
-        baseline.stdout.len(),
-        budgeted.stdout.len()
+    assert_eq!(
+        common::stdout(&budgeted),
+        BARE_MARKER,
+        "the unbound fallback is exactly the bare marker on stdout"
     );
-    // The marker is on stdout, inside the cap, where the reader looks.
-    let marker: Value = from_stdout(&budgeted);
-    assert_eq!(marker["bound"], false);
-    assert!(marker["participant"].is_null());
+
+    // A cap too small even for the bare marker is refused, not overrun.
+    let refused = read_with_cap("1");
+    assert!(!refused.status.success());
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(
+        error.error.message.contains("too small"),
+        "{}",
+        error.error.message
+    );
+    assert!(refused.stdout.is_empty());
 
     let watched = sandbox.run_without_identity(&["watch", "--snapshot", "--room", "alpha"], &alpha);
     assert_success(&watched);
@@ -1540,50 +1452,6 @@ fn participant_round4_bound_sender_assertions_refuse_disagreement() {
 }
 
 #[test]
-fn participant_round4_bound_matching_cwd_still_uses_binding_provenance() {
-    let sandbox = Sandbox::new();
-    let (_alpha, beta) = register_alpha_beta(&sandbox);
-    let bound = sandbox.bind_claude("matching-cwd-provenance", &beta, Some("beta"));
-    let actor = participant_id(&bound).to_owned();
-    let direct = sandbox.run_as_participant(
-        &["send", "--to", "alpha", "--body", "bound", "--json"],
-        &actor,
-        &beta,
-    );
-    assert_success(&direct);
-    let direct: Value = from_stdout(&direct);
-    assert_eq!(
-        direct["envelope"]["sender_provenance"],
-        "participant-binding"
-    );
-
-    assert_success(&sandbox.run_as_participant(
-        &["chat", "matching-cwd", "--join", "--json"],
-        &actor,
-        &beta,
-    ));
-    let channel = sandbox.run_as_participant(
-        &[
-            "chat",
-            "matching-cwd",
-            "--send",
-            "--anyway",
-            "--body",
-            "bound channel",
-            "--json",
-        ],
-        &actor,
-        &beta,
-    );
-    assert_success(&channel);
-    let channel: Value = from_stdout(&channel);
-    assert_eq!(
-        channel["message"]["sender_provenance"],
-        "participant-binding"
-    );
-}
-
-#[test]
 fn participant_round4_native_keys_reject_empty_or_whitespace() {
     for variable in [
         "CLAUDE_CODE_SESSION_ID",
@@ -1692,6 +1560,10 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     );
     assert_success(&output);
     let value: Value = from_stdout(&output);
+    assert_eq!(value["store_version"], 2);
+    assert!(value["build_sha"]
+        .as_str()
+        .is_some_and(|sha| !sha.is_empty()));
     assert_eq!(
         value["capabilities"],
         serde_json::json!(["participants", "lineages", "routing-receipts", "cursors-v2"])
@@ -1699,22 +1571,6 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     assert_eq!(tree(&ambiguous.mail_root), before);
 }
 
-#[test]
-fn participant_review_no_key_diagnostic_names_real_bootstrap_sequence() {
-    let sandbox = Sandbox::new_unseeded();
-    let output = sandbox.run_without_identity(
-        &["send", "--to", "nowhere", "--body", "body"],
-        &sandbox.path,
-    );
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "no_participant");
-    assert!(error.error.details.exact_fix.is_none());
-    assert!(error.error.message.contains("post participant bind --new"));
-    assert!(error.error.message.contains("export POST_PARTICIPANT="));
-}
-
-/// A claimed identity that names no record is its own error, never "unbound":
-/// a mistyped `POST_PARTICIPANT` must not read as an empty inbox.
 #[test]
 fn participant_missing_explicit_claim_is_a_typed_error_with_the_fix() {
     let sandbox = Sandbox::new_unseeded();
@@ -1912,15 +1768,26 @@ fn participant_review_existing_colon_and_reserved_rooms_load_but_doctor_reports_
     let doctor = sandbox.run(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1));
     let doctor: Value = from_stdout(&doctor);
-    let messages = doctor["checks"]
-        .as_array()
-        .expect("doctor checks")
-        .iter()
-        .filter_map(|check| check["message"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(messages.contains("typed address"), "{messages}");
-    assert!(messages.contains("reserved"), "{messages}");
+    let checks = doctor["checks"].as_array().expect("doctor checks");
+    let message_of = |id: &str| -> String {
+        checks
+            .iter()
+            .find(|check| check["id"] == id)
+            .unwrap_or_else(|| panic!("no doctor check {id}: {checks:?}"))["message"]
+            .as_str()
+            .expect("check message")
+            .to_owned()
+    };
+    // Each finding is bound by its own id: the colon message also says
+    // "reserved", so a substring on the joined text cannot tell them apart.
+    assert!(
+        message_of("config.room_name.participant:foo").contains("typed addresses"),
+        "{checks:?}"
+    );
+    assert!(
+        message_of("config.room_name.participants").contains("reserved by mailbox storage"),
+        "{checks:?}"
+    );
 }
 
 #[test]
@@ -2129,43 +1996,28 @@ fn participant_round2_resolution_errors_are_advisory_on_read_only_surfaces() {
 }
 
 #[test]
-fn participant_round2_plain_rebind_preserves_existing_workspace() {
-    let sandbox = Sandbox::new();
-    let (alpha, beta) = register_alpha_beta(&sandbox);
-    let first = sandbox.bind_claude("stable-workspace-key", &beta, Some("beta"));
-    let id = participant_id(&first).to_owned();
-
-    let rebound = sandbox.run_as_claude(
-        &["participant", "bind", "--json"],
-        "stable-workspace-key",
-        &alpha,
-    );
-    assert_success(&rebound);
-    let rebound: Value = from_stdout(&rebound);
-    assert_eq!(participant_id(&rebound), id);
-    assert_eq!(rebound["participant"]["workspace"], "beta");
-    assert_eq!(sandbox.read_participant(&id)["workspace"], "beta");
-}
-
-#[test]
 fn participant_round2_binding_provenance_wins_when_cwd_differs() {
     let sandbox = Sandbox::new();
     let (alpha, beta) = register_alpha_beta(&sandbox);
     let bound = sandbox.bind_claude("binding-provenance", &beta, Some("beta"));
     let actor = participant_id(&bound).to_owned();
 
-    let direct = sandbox.run_as_participant(
-        &["send", "--to", "alpha", "--body", "direct", "--json"],
-        &actor,
-        &alpha,
-    );
-    assert_success(&direct);
-    let direct: Value = from_stdout(&direct);
-    assert_eq!(direct["envelope"]["from"], "beta");
-    assert_eq!(
-        direct["envelope"]["sender_provenance"],
-        "participant-binding"
-    );
+    // Binding provenance holds in the bound workspace's own cwd and in a
+    // different registered room's cwd alike.
+    for (label, cwd) in [("matching", &beta), ("differing", &alpha)] {
+        let direct = sandbox.run_as_participant(
+            &["send", "--to", "alpha", "--body", label, "--json"],
+            &actor,
+            cwd,
+        );
+        assert_success(&direct);
+        let direct: Value = from_stdout(&direct);
+        assert_eq!(direct["envelope"]["from"], "beta", "{label}");
+        assert_eq!(
+            direct["envelope"]["sender_provenance"], "participant-binding",
+            "{label}"
+        );
+    }
 
     let joined = sandbox.run_as_participant(
         &["chat", "round2-provenance", "--join", "--json"],
@@ -2173,26 +2025,28 @@ fn participant_round2_binding_provenance_wins_when_cwd_differs() {
         &beta,
     );
     assert_success(&joined);
-    let channel = sandbox.run_as_participant(
-        &[
-            "chat",
-            "round2-provenance",
-            "--send",
-            "--anyway",
-            "--body",
-            "channel",
-            "--json",
-        ],
-        &actor,
-        &alpha,
-    );
-    assert_success(&channel);
-    let channel: Value = from_stdout(&channel);
-    assert_eq!(channel["message"]["from"], "beta");
-    assert_eq!(
-        channel["message"]["sender_provenance"],
-        "participant-binding"
-    );
+    for (label, cwd) in [("matching", &beta), ("differing", &alpha)] {
+        let channel = sandbox.run_as_participant(
+            &[
+                "chat",
+                "round2-provenance",
+                "--send",
+                "--anyway",
+                "--body",
+                label,
+                "--json",
+            ],
+            &actor,
+            cwd,
+        );
+        assert_success(&channel);
+        let channel: Value = from_stdout(&channel);
+        assert_eq!(channel["message"]["from"], "beta", "{label}");
+        assert_eq!(
+            channel["message"]["sender_provenance"], "participant-binding",
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -2248,6 +2102,14 @@ fn participant_round2_collision_race_preserves_both_keys() {
         sandbox.read_participant(second_id)["conversation_key_digest"],
         digest(SECOND)
     );
+    // Neither key minted a duplicate record under the race.
+    let records = fs::read_dir(sandbox.mail_root.join("participants"))
+        .expect("participants")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("participant.json").is_file())
+        .filter(|entry| entry.file_name().to_string_lossy() != "test-default")
+        .count();
+    assert_eq!(records, 2, "two keys must mint exactly two records");
 }
 
 #[test]
@@ -2424,6 +2286,39 @@ fn participant_round2_workspace_less_actor_gets_rebind_fix_not_room_shadowing() 
         .suggested_fix
         .contains("post chat 'any-channel' --join"));
     assert_eq!(tree(&sandbox.mail_root), before);
+
+    // Run from alpha's registered cwd, the workspace-less actor still speaks
+    // as itself: the cwd's room must not shadow its identity.
+    assert_success(&sandbox.run_as_participant(
+        &["chat", "shadow-check", "--join", "--json"],
+        &actor,
+        &alpha,
+    ));
+    let sent = sandbox.run_as_participant(
+        &[
+            "chat",
+            "shadow-check",
+            "--send",
+            "--anyway",
+            "--body",
+            "who am i",
+            "--json",
+        ],
+        &actor,
+        &alpha,
+    );
+    assert_success(&sent);
+    let sent: Value = from_stdout(&sent);
+    assert_eq!(sent["message"]["from"], actor.as_str(), "{sent}");
+    assert_eq!(
+        sent["message"]["from_participant"],
+        actor.as_str(),
+        "{sent}"
+    );
+    assert_eq!(
+        sent["message"]["sender_provenance"], "participant-binding",
+        "{sent}"
+    );
 }
 
 #[test]

@@ -3256,47 +3256,58 @@ fn send_to_a_mistyped_room_has_a_did_you_mean_and_a_discovery_hint() {
 
 /// A reader with no participant gets the unbound marker on stdout: it is never
 /// given a room guessed from its working directory, and nothing is created.
-#[test]
-fn unregistered_cwd_read_only_chat_reports_unbound_without_creating_identity() {
-    let sandbox = Sandbox::new();
-    let before = snapshot_tree(&sandbox.mail_root);
-    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
-    assert_success(&output);
-    let text = stdout(&output);
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.contains("not bound to a post participant"), "{text}");
-    assert!(text.contains("post participant bind"), "{text}");
-    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-
-    let json =
-        sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &sandbox.path);
-    assert_success(&json);
-    let marker: serde_json::Value = from_stdout(&json);
-    assert_eq!(marker["ok"], true);
-    assert!(marker["participant"].is_null());
-    assert_eq!(marker["bound"], false);
-    assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
-    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-}
-
-/// A cwd carrying shell metacharacters must reach neither the store nor any
-/// output: the unbound marker names no directory, so there is no `exact_fix`
-/// to inject into (the rule this repo pins for channel names in
+/// A working directory carrying shell metacharacters must reach neither the
+/// store nor any output: the marker names no directory (the rule this repo
+/// pins for channel names in
 /// crossed_send_exact_fix_shell_quotes_channel_metacharacters).
 #[test]
-fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
-    for dirname in ["has space", "has;touch INJECTED", "has'quote"] {
+fn unregistered_cwd_read_only_chat_reports_unbound_and_never_echoes_the_cwd() {
+    for dirname in [
+        None,
+        Some("has space"),
+        Some("has;touch INJECTED"),
+        Some("has'quote"),
+    ] {
         let sandbox = Sandbox::new();
-        let hostile = sandbox.path.join(dirname);
-        fs::create_dir_all(&hostile).expect("create hostile cwd");
+        let cwd = match dirname {
+            None => sandbox.path.clone(),
+            Some(name) => {
+                let hostile = sandbox.path.join(name);
+                fs::create_dir_all(&hostile).expect("create hostile cwd");
+                hostile
+            }
+        };
         let before = snapshot_tree(&sandbox.mail_root);
-        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
+
+        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &cwd);
         assert_success(&output);
         let text = stdout(&output);
-        assert!(!text.contains(dirname), "{text}");
-        assert!(!text.contains("exact_fix"), "{text}");
-        assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-        assert!(!hostile.join("INJECTED").exists());
+        assert_eq!(text.lines().count(), 1, "{dirname:?}: {text}");
+        assert!(
+            text.contains("not bound to a post participant"),
+            "{dirname:?}: {text}"
+        );
+        assert!(
+            text.contains("post participant bind"),
+            "{dirname:?}: {text}"
+        );
+        if let Some(name) = dirname {
+            assert!(!text.contains(name), "{text}");
+        }
+        assert_eq!(snapshot_tree(&sandbox.mail_root), before, "{dirname:?}");
+
+        let json =
+            sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &cwd);
+        assert_success(&json);
+        let marker: serde_json::Value = from_stdout(&json);
+        assert_eq!(marker["ok"], true);
+        assert!(marker["participant"].is_null());
+        assert_eq!(marker["bound"], false);
+        assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        if let Some(name) = dirname {
+            assert!(!stdout(&json).contains(name), "{dirname:?}");
+        }
+        assert_eq!(snapshot_tree(&sandbox.mail_root), before, "{dirname:?}");
     }
 }
 
@@ -9055,14 +9066,38 @@ fn snapshot_does_not_leave_a_live_heartbeat() {
     let sandbox = Sandbox::new();
     let (alpha, _) = register_alpha_beta(&sandbox);
     assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
+    let alpha_id = sandbox.test_participant("alpha");
+    let participants_dir = sandbox.mail_root.join("participants");
+    let alpha_heartbeat = participants_dir.join(&alpha_id).join("watch.heartbeat");
+    let alpha_record = participants_dir.join(&alpha_id).join("participant.json");
+    assert!(!alpha_heartbeat.exists(), "precondition: no heartbeat yet");
+    let record_before = fs::read(&alpha_record).expect("participant record");
+
     assert_success(&sandbox.run(&["watch", "--room", "alpha", "--snapshot"]));
+
     let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    let row = who
+        .participants
+        .iter()
+        .find(|row| row.id == alpha_id)
+        .expect("alpha's participant row");
     assert!(
-        !who.legacy_rooms[0].live_watch,
-        "snapshot must not mint a live presence heartbeat"
+        !row.live_watch,
+        "snapshot must not mint a live participant heartbeat"
     );
-    let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
-    assert!(!hb.exists(), "snapshot must not create watch.heartbeat");
+    assert!(row.watch_last_seen.is_none(), "no heartbeat stamp is read");
+    assert!(
+        !alpha_heartbeat.exists(),
+        "snapshot must not create participants/<id>/watch.heartbeat"
+    );
+    assert_eq!(
+        fs::read(&alpha_record).expect("participant record"),
+        record_before,
+        "snapshot must not renew the participant's lease"
+    );
+    // Legacy room presence stays a compatibility guard.
+    assert!(!who.legacy_rooms[0].live_watch);
+    assert!(!sandbox.mail_root.join("alpha/watch.heartbeat").exists());
 }
 
 #[test]

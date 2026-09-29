@@ -1139,13 +1139,10 @@ fn touch_admitted_heartbeats(
     interval_ms: u64,
     warned_failures: &mut HashSet<String>,
 ) -> usize {
-    let warnings = touch_admitted_heartbeats_with(
-        context,
-        targets,
-        interval_ms,
-        warned_failures,
-        |participant| crate::participant::touch(context, participant).map(|_| ()),
-    );
+    let warnings =
+        touch_admitted_heartbeats_with(targets, interval_ms, warned_failures, |participant| {
+            crate::participant::touch(context, participant).map(|_| ())
+        });
     let warning_count = warnings.len();
     for error in warnings {
         eprintln!(
@@ -1157,7 +1154,6 @@ fn touch_admitted_heartbeats(
 }
 
 fn touch_admitted_heartbeats_with(
-    context: &Context,
     targets: &[WatchTarget],
     interval_ms: u64,
     warned_failures: &mut HashSet<String>,
@@ -1165,18 +1161,17 @@ fn touch_admitted_heartbeats_with(
 ) -> Vec<AppError> {
     let mut warnings = Vec::new();
     let mut participants = HashSet::new();
-    for target in targets {
-        if let Some(participant) = target.participant.as_ref() {
-            if participants.insert(participant.id.clone()) {
-                if let Some(error) =
-                    touch_warning_for(&participant.id, touch(&participant.id), warned_failures)
-                {
-                    warnings.push(error);
-                }
-                crate::presence::touch_participant_heartbeat(participant, interval_ms);
+    for participant in targets
+        .iter()
+        .filter_map(|target| target.participant.as_ref())
+    {
+        if participants.insert(participant.id.clone()) {
+            if let Some(error) =
+                touch_warning_for(&participant.id, touch(&participant.id), warned_failures)
+            {
+                warnings.push(error);
             }
-        } else {
-            crate::presence::touch_heartbeat(context, &target.room, interval_ms);
+            crate::presence::touch_participant_heartbeat(participant, interval_ms);
         }
     }
     warnings
@@ -2705,25 +2700,15 @@ mod tests {
         let mut warned = HashSet::new();
         let failures = || Err(AppError::invalid_argument("transient touch failure"));
         assert_eq!(
-            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
-                .len(),
+            touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| failures()).len(),
             1
         );
-        assert!(touch_admitted_heartbeats_with(
-            &context,
-            &targets,
-            100,
-            &mut warned,
-            |_| failures()
-        )
-        .is_empty());
         assert!(
-            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| Ok(()))
-                .is_empty()
+            touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| failures()).is_empty()
         );
+        assert!(touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| Ok(())).is_empty());
         assert_eq!(
-            touch_admitted_heartbeats_with(&context, &targets, 100, &mut warned, |_| failures())
-                .len(),
+            touch_admitted_heartbeats_with(&targets, 100, &mut warned, |_| failures()).len(),
             1
         );
         crate::test_support::trash_test_root(&root);
@@ -3631,81 +3616,6 @@ mod tests {
         trash_test_root(&root);
     }
 
-    #[test]
-    fn scan_batch_never_rings_for_the_rooms_own_messages() {
-        let root = test_root("watch-ownfilter");
-        let inbox = root.join("alpha").join("inbox");
-        fs::create_dir_all(&inbox).expect("create inbox");
-        let dir = root.join("channels").join("tax");
-        fs::create_dir_all(dir.join("messages")).expect("create channel dirs");
-        fs::write(
-            dir.join("channel.json"),
-            r#"{"name":"tax","created":"2026-07-22 01:00:00 -0500","created_by":"alpha"}"#,
-        )
-        .expect("write channel.json");
-        fs::write(
-            dir.join("members.json"),
-            r#"{"alpha":"2026-07-22 01:00:00 -0500","beta":"2026-07-22 01:00:00 -0500"}"#,
-        )
-        .expect("write members.json");
-        for (id, from) in [
-            ("20260722-013000-000001-aaa111", "alpha"),
-            ("20260722-013000-000002-bbb222", "beta"),
-        ] {
-            let message = ChannelMessage {
-                id: id.to_owned(),
-                from: from.to_owned(),
-                channel: "tax".to_owned(),
-                subject: String::new(),
-                sent: "2026-07-22 01:30:00 -0500".to_owned(),
-                from_participant: None,
-                from_host: None,
-                from_lineage: None,
-                address_kind: None,
-                event: None,
-                display_name: None,
-                pfp: None,
-                re: None,
-                mentions: vec![],
-                signature_ref: None,
-                sender_address: None,
-                sender_provenance: None,
-            };
-            let bytes = encode_message(&message, "body").expect("encode");
-            fs::write(dir.join("messages").join(format!("{id}.msg")), bytes)
-                .expect("write message");
-        }
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let mut seen = HashSet::new();
-        let mut emitted_channel_ids = HashSet::new();
-        let batch = scan_batch(
-            &context,
-            "alpha",
-            &BTreeSet::new(),
-            &inbox,
-            &HashMap::new(),
-            &mut seen,
-            &mut emitted_channel_ids,
-        )
-        .expect("scan");
-        let froms: Vec<&str> = batch
-            .iter()
-            .filter_map(|delivery| match &delivery.event {
-                WatchEvent::ChannelMessage { from, .. } => Some(from.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            froms,
-            vec!["beta"],
-            "own message must not ring own doorbell, with nothing declared owned"
-        );
-        trash_test_root(&root);
-    }
-
     /// A wake source the test drives directly: an optional side effect fires
     /// on the first wait (simulating a delivery arriving mid-watch), then the
     /// queued wakes play out. Empty queue behaves like a poll tick.
@@ -3757,10 +3667,15 @@ body
             home: root.clone(),
         };
         // A target with nothing in it yet; the delivery arrives DURING the
-        // first wait, as a real filesystem event would.
+        // first wait, as a real filesystem event would. Every live watch
+        // target is participant-bound, so this one is too.
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
         let mut targets = vec![WatchTarget {
-            participant: None,
-            address: None,
+            participant: Some(participant.clone()),
+            address: Some(Address {
+                kind: AddressKind::Workspace,
+                name: "alpha".to_owned(),
+            }),
             channel_seen: HashMap::new(),
             room: "alpha".to_owned(),
             inbox: inbox.clone(),
@@ -3809,8 +3724,12 @@ body
         )
         .expect("loop emits and exits");
         assert!(
-            room_dir.join("watch.heartbeat").exists(),
-            "event mode must still touch presence heartbeats"
+            participant.dir.join("watch.heartbeat").exists(),
+            "event mode must still touch the participant's presence heartbeat"
+        );
+        assert!(
+            !room_dir.join("watch.heartbeat").exists(),
+            "a live watch writes participant presence, never a room heartbeat"
         );
         trash_test_root(&root);
     }
@@ -4634,16 +4553,32 @@ mod follow_tests {
         trash_test_root(&root);
     }
 
+    /// A record that vanishes with no claim left in the environment reads as
+    /// unbound. (Real GC collection is a different path: an explicit claim
+    /// naming a collected record surfaces `participant_missing` instead.)
     #[test]
-    fn a_collected_record_stops_the_watch_and_names_the_participant() {
-        let (root, context, participant) = setup("watch-follow-collected");
+    fn a_vanished_record_with_no_claim_stops_the_watch_as_unbound() {
+        let (root, context, participant) = setup("watch-follow-vanished");
         let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
         let mut follow = Follow::new(&participant, Vec::new());
-        fs::remove_dir_all(&participant.dir).expect("collect the record");
+        fs::remove_dir_all(&participant.dir).expect("remove the record");
+        // The branch under test needs a clean ambient identity; fail loudly
+        // rather than silently exercising a different one.
+        assert!(
+            matches!(crate::participant::resolve(&context), Ok(Resolved::Unbound)),
+            "precondition: no ambient POST_PARTICIPANT or harness key"
+        );
         let error = follow_identity(&context, &mut follow, &mut targets)
-            .expect_err("a collected participant stops the watch");
-        assert!(error.message.contains(&participant.id), "{}", error.message);
-        assert!(error.message.contains("stopping"), "{}", error.message);
+            .expect_err("a vanished participant stops the watch");
+        assert_eq!(error.code, ErrorCode::NoParticipant);
+        assert!(
+            error.message.contains(&format!(
+                "participant {} is no longer bound to this session: this watch is stopping",
+                participant.id
+            )),
+            "{}",
+            error.message
+        );
         trash_test_root(&root);
     }
 

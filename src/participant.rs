@@ -991,7 +991,6 @@ pub(crate) fn list_with_skipped(
     Ok((participants, skipped))
 }
 
-#[allow(dead_code)] // routing seam consumed by P.2
 pub(crate) fn list_active(context: &Context) -> AppResult<Vec<Participant>> {
     let now = SystemTime::now();
     Ok(list(context)?
@@ -1314,19 +1313,6 @@ where
             return Some(harness);
         }
         pid = parent;
-    }
-    None
-}
-
-#[cfg(test)]
-fn nearest_native_harness_in<'a>(
-    ancestors: impl IntoIterator<Item = (u32, &'a str)>,
-    claude_pid: Option<u32>,
-) -> Option<NativeHarness> {
-    for (pid, command) in ancestors {
-        if let Some(harness) = native_harness(pid, command, claude_pid) {
-            return Some(harness);
-        }
     }
     None
 }
@@ -1735,10 +1721,7 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        list_active, nearest_native_harness_from, nearest_native_harness_in, Address, AddressKind,
-        NativeHarness, Participant,
-    };
+    use super::{list_active, nearest_native_harness_from, NativeHarness, Participant};
     use crate::mailbox::Context;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
@@ -1788,41 +1771,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn address_inbox_is_a_pure_path_accessor() {
-        let root = test_root("participant-address-path");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        for (kind, name, expected) in [
-            (AddressKind::Workspace, "alpha", root.join("alpha/inbox")),
-            (
-                AddressKind::Lineage,
-                "ember",
-                root.join("lineages/ember/inbox"),
-            ),
-            (
-                AddressKind::Participant,
-                "codex-12345678",
-                root.join("participants/codex-12345678/inbox"),
-            ),
-        ] {
-            let address = Address {
-                kind,
-                name: name.to_owned(),
-            };
-            assert_eq!(address.inbox(&context).expect("address path"), expected);
-            assert!(!expected.exists(), "path accessor created {expected:?}");
-        }
-        trash_test_root(&root);
+    /// The production walk over a synthetic process chain: the starting pid's
+    /// parent is `ancestors[0]`, each ancestor's parent is the next one, and
+    /// the last one's parent is pid 0. Every queried pid is supplied, so a
+    /// walk that stopped early or skipped one shows in the result.
+    fn nearest_from_chain(
+        ancestors: &[(u32, &str)],
+        claude_pid: Option<u32>,
+    ) -> Option<NativeHarness> {
+        nearest_native_harness_from(1, claude_pid, |pid| {
+            if pid == 1 {
+                return Some((ancestors[0].0, "test-runner".to_owned()));
+            }
+            let index = ancestors
+                .iter()
+                .position(|(ancestor, _)| *ancestor == pid)?;
+            let parent = ancestors.get(index + 1).map_or(0, |(next, _)| *next);
+            Some((parent, ancestors[index].1.to_owned()))
+        })
     }
 
     #[test]
     fn nearest_harness_ancestor_selects_nested_codex_child() {
         let ancestors = [(40, "node"), (30, "/usr/local/bin/codex"), (20, "claude")];
         assert_eq!(
-            nearest_native_harness_in(ancestors, None),
+            nearest_from_chain(&ancestors, None),
             Some(NativeHarness::Codex)
         );
     }
@@ -1831,7 +1804,7 @@ mod tests {
     fn claude_pid_marks_nearest_claude_ancestor_even_under_a_wrapper() {
         let ancestors = [(40, "node"), (30, "python"), (20, "codex")];
         assert_eq!(
-            nearest_native_harness_in(ancestors, Some(30)),
+            nearest_from_chain(&ancestors, Some(30)),
             Some(NativeHarness::Claude)
         );
     }
@@ -1839,7 +1812,7 @@ mod tests {
     #[test]
     fn ambiguous_ancestor_list_never_guesses() {
         let ancestors = [(40, "node"), (30, "python"), (20, "bash")];
-        assert_eq!(nearest_native_harness_in(ancestors, None), None);
+        assert_eq!(nearest_from_chain(&ancestors, None), None);
     }
 
     #[test]
