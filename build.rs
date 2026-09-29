@@ -61,7 +61,18 @@ const SKILL_COVERED: [&str; 4] = ["SKILL.md", "references", "hooks", "agents"];
 /// Dot-files (editor and OS litter such as .DS_Store) are not part of the
 /// bundle on either side of the comparison.
 fn skill_manifest() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(SKILL_ROOT);
+    // Read the manifest dir when the script runs, never with `env!`: cargo
+    // reuses a compiled build script across checkouts that share a target
+    // dir, and a path baked in at compile time names whichever checkout
+    // compiled it (on the devbox, an installer's since-deleted temp worktree),
+    // which silently produced an empty manifest.
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let root = Path::new(&manifest_dir).join(SKILL_ROOT);
+    assert!(
+        root.join("SKILL.md").is_file(),
+        "skill bundle missing at {}: refusing to embed an empty skill manifest",
+        root.display()
+    );
     println!("cargo:rerun-if-changed={}", root.display());
     let mut files = Vec::new();
     for covered in SKILL_COVERED {
