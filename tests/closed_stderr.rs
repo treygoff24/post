@@ -1,8 +1,10 @@
 //! A closed stderr never panics post. std's `eprintln!` panics on a failed
 //! write, so a caller that closed the pipe early (`post ... 2>&1 | head -1`)
 //! saw exit 101 and, where the notice came before the effect, no effect at
-//! all. Each test gives post a stderr pipe whose reader is already closed and
-//! checks the exit code and the effect.
+//! all. Each test runs text mode (the pre-effect banners are skipped under
+//! `--json`), first with an open stderr to prove the banner is written, then
+//! with a stderr pipe whose reader is already closed, and checks the exit code
+//! and that the effect still landed.
 
 mod common;
 
@@ -11,14 +13,20 @@ use std::fs;
 use std::path::Path;
 use std::process::{Output, Stdio};
 
-fn run_with_closed_stderr(
+fn run_with_stderr(
     sandbox: &Sandbox,
     participant: &str,
     cwd: &Path,
     args: &[&str],
+    closed: bool,
 ) -> Output {
-    let (reader, writer) = std::io::pipe().expect("stderr pipe");
-    drop(reader);
+    let stderr = if closed {
+        let (reader, writer) = std::io::pipe().expect("stderr pipe");
+        drop(reader);
+        Stdio::from(writer)
+    } else {
+        Stdio::piped()
+    };
     post_command()
         .args(args)
         .current_dir(cwd)
@@ -28,7 +36,7 @@ fn run_with_closed_stderr(
         .env_remove("POST_FROM")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(writer))
+        .stderr(stderr)
         .output()
         .expect("run post")
 }
@@ -52,17 +60,31 @@ fn chat_send_with_a_closed_stderr_sends_and_exits_zero() {
     ));
     let messages = sandbox.mail_root.join("channels/tax/messages");
     let before = count(&messages);
-    // `chat --send` writes "post: sending to #tax as room ..." to stderr
-    // before it sends.
-    let output = run_with_closed_stderr(
+    // Control: with stderr open, text mode writes the banner before sending.
+    let open = run_with_stderr(
         &sandbox,
         &participant,
         &alpha,
-        &["chat", "tax", "--send", "--body", "closed stderr", "--json"],
+        &["chat", "tax", "--send", "--body", "open stderr"],
+        false,
+    );
+    assert_success(&open);
+    assert!(
+        String::from_utf8_lossy(&open.stderr).contains("post: sending to #tax as room"),
+        "the banner precedes the send: {}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    assert_eq!(count(&messages), before + 1, "the control sent");
+    let output = run_with_stderr(
+        &sandbox,
+        &participant,
+        &alpha,
+        &["chat", "tax", "--send", "--body", "closed stderr"],
+        true,
     );
     assert_ne!(output.status.code(), Some(101), "post panicked");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(count(&messages), before + 1, "the message was sent");
+    assert_eq!(count(&messages), before + 2, "the message was sent");
 }
 
 #[test]
@@ -75,14 +97,29 @@ fn send_with_a_closed_stderr_delivers_and_exits_zero() {
         .to_owned();
     let inbox = sandbox.mail_root.join("beta/inbox");
     let before = count(&inbox);
-    // `send` writes "post: sending as ..." to stderr before delivering.
-    let output = run_with_closed_stderr(
+    // Control: with stderr open, text mode writes the banner before delivering.
+    let open = run_with_stderr(
         &sandbox,
         &participant,
         &alpha,
-        &["send", "--to", "beta", "--body", "closed stderr", "--json"],
+        &["send", "--to", "beta", "--body", "open stderr"],
+        false,
+    );
+    assert_success(&open);
+    assert!(
+        String::from_utf8_lossy(&open.stderr).contains("post: sending as 'alpha'"),
+        "the banner precedes delivery: {}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    assert_eq!(count(&inbox), before + 1, "the control delivered");
+    let output = run_with_stderr(
+        &sandbox,
+        &participant,
+        &alpha,
+        &["send", "--to", "beta", "--body", "closed stderr"],
+        true,
     );
     assert_ne!(output.status.code(), Some(101), "post panicked");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(count(&inbox), before + 1, "the mail was delivered");
+    assert_eq!(count(&inbox), before + 2, "the mail was delivered");
 }

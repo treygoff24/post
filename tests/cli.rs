@@ -1,7 +1,7 @@
 use post::output::{
     ChannelsOutput, ChatDiscardOutput, ChatDiscardThroughOutput, ChatJoinOutput, ChatReadOutput,
-    ChatSendOutput, DoctorOutput, DoctorSeverity, ErrorEnvelope, InboxOutput, ReadOutput,
-    RoomsOutput, SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
+    ChatSendOutput, DoctorOutput, DoctorSeverity, ErrorEnvelope, ReadOutput, RoomsOutput,
+    SchemaOutput, SeenByOutput, SendOutput, WatchEvent, WatchReason, WhoOutput,
 };
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -27,7 +27,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
 
     let inbox_output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&inbox_output);
-    let inbox: InboxOutput = from_stdout(&inbox_output);
+    let inbox: InboxView = from_stdout(&inbox_output);
     assert_eq!(inbox.room, "claude-space");
     assert_eq!(inbox.count, 1);
     assert_eq!(inbox.unread[0].id, sent.envelope.id);
@@ -47,7 +47,7 @@ fn full_send_inbox_read_roundtrip_and_every_success_shape_deserializes() {
 
     let empty_output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&empty_output);
-    let empty: InboxOutput = from_stdout(&empty_output);
+    let empty: InboxView = from_stdout(&empty_output);
     assert_eq!(empty.count, 0);
     assert!(empty.unread.is_empty());
     assert!(sandbox
@@ -177,30 +177,6 @@ fn help_and_schema_keep_command_contract_visible() {
         .global_flags
         .iter()
         .any(|flag| flag.contains("inbox/read/watch/who only")));
-    let watch = schema
-        .commands
-        .iter()
-        .find(|command| command.name == "watch")
-        .expect("watch command in schema");
-    assert_eq!(
-        watch.usage,
-        "post watch [--room <name>]... [--own <room>]... [--once | --snapshot [--limit <n>]] [--from now] [--interval-ms <ms>] [--reason mail|channel|mention]... [--digest] [--text]"
-    );
-    assert!(watch.side_effects.contains("deduplicates channel messages"));
-    assert!(watch.side_effects.contains("--snapshot"));
-    assert!(watch
-        .default_output
-        .contains("mail | unreadable | channel_message"));
-    assert_eq!(
-        schema.output_shapes.watch,
-        vec![
-            "mail: event, address{kind,name}, room? (workspace only), id, from, from_participant?, from_lineage?, origin, reply_to_participant?, reply_to_shared, pending?, kind, subject, sent, reason=mail, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (true when the acting participant's cursor state could not be read, so everything reads as unseen)",
-            "unreadable: event, address{kind,name}, room? (workspace only), id, reason=mail|channel, channel? (required for channel; no preview)",
-            "channel_message: event, address{kind,name}, room? (workspace only), channel, id, from, from_participant?, from_host?, from_lineage?, origin, reply_to_participant?, reply_to_shared, subject, sent, reason=channel|mention, preview?, display_name?, pfp?, sender_provenance?, sender_address? (all four only when the sender declared them), cursor_unusable? (as on mail)",
-            "unbound: event=unbound, participant=null, bound=false, hint (the single line `watch --snapshot` prints when the session has no participant and no --room is named, so a hook reading the stream gets an answer, never a cwd-derived room; text mode prints the hint as prose)",
-            "digest: event=digest, address{kind,name}, room? (workspace only), source=mail|channel:<name>, pending?, count, first_id, last_id, from, reason=mail|channel|mention|mixed, preview? (text preview precedes bounds/since suffix), cursor_unusable? (as on mail)",
-        ]
-    );
     assert!(
         schema
             .output_shapes
@@ -3099,7 +3075,7 @@ fn empty_inbox_is_successful_structured_empty_result() {
     let output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&output);
     assert!(output.stderr.is_empty());
-    let inbox: InboxOutput = from_stdout(&output);
+    let inbox: InboxView = from_stdout(&output);
     assert!(inbox.ok);
     assert_eq!(inbox.room, "claude-space");
     assert_eq!(inbox.count, 0);
@@ -3256,47 +3232,58 @@ fn send_to_a_mistyped_room_has_a_did_you_mean_and_a_discovery_hint() {
 
 /// A reader with no participant gets the unbound marker on stdout: it is never
 /// given a room guessed from its working directory, and nothing is created.
-#[test]
-fn unregistered_cwd_read_only_chat_reports_unbound_without_creating_identity() {
-    let sandbox = Sandbox::new();
-    let before = snapshot_tree(&sandbox.mail_root);
-    let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
-    assert_success(&output);
-    let text = stdout(&output);
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.contains("not bound to a post participant"), "{text}");
-    assert!(text.contains("post participant bind"), "{text}");
-    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-
-    let json =
-        sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &sandbox.path);
-    assert_success(&json);
-    let marker: serde_json::Value = from_stdout(&json);
-    assert_eq!(marker["ok"], true);
-    assert!(marker["participant"].is_null());
-    assert_eq!(marker["bound"], false);
-    assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
-    assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-}
-
-/// A cwd carrying shell metacharacters must reach neither the store nor any
-/// output: the unbound marker names no directory, so there is no `exact_fix`
-/// to inject into (the rule this repo pins for channel names in
+/// A working directory carrying shell metacharacters must reach neither the
+/// store nor any output: the marker names no directory (the rule this repo
+/// pins for channel names in
 /// crossed_send_exact_fix_shell_quotes_channel_metacharacters).
 #[test]
-fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
-    for dirname in ["has space", "has;touch INJECTED", "has'quote"] {
+fn unregistered_cwd_read_only_chat_reports_unbound_and_never_echoes_the_cwd() {
+    for dirname in [
+        None,
+        Some("has space"),
+        Some("has;touch INJECTED"),
+        Some("has'quote"),
+    ] {
         let sandbox = Sandbox::new();
-        let hostile = sandbox.path.join(dirname);
-        fs::create_dir_all(&hostile).expect("create hostile cwd");
+        let cwd = match dirname {
+            None => sandbox.path.clone(),
+            Some(name) => {
+                let hostile = sandbox.path.join(name);
+                fs::create_dir_all(&hostile).expect("create hostile cwd");
+                hostile
+            }
+        };
         let before = snapshot_tree(&sandbox.mail_root);
-        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
+
+        let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &cwd);
         assert_success(&output);
         let text = stdout(&output);
-        assert!(!text.contains(dirname), "{text}");
-        assert!(!text.contains("exact_fix"), "{text}");
-        assert_eq!(snapshot_tree(&sandbox.mail_root), before);
-        assert!(!hostile.join("INJECTED").exists());
+        assert_eq!(text.lines().count(), 1, "{dirname:?}: {text}");
+        assert!(
+            text.contains("not bound to a post participant"),
+            "{dirname:?}: {text}"
+        );
+        assert!(
+            text.contains("post participant bind"),
+            "{dirname:?}: {text}"
+        );
+        if let Some(name) = dirname {
+            assert!(!text.contains(name), "{text}");
+        }
+        assert_eq!(snapshot_tree(&sandbox.mail_root), before, "{dirname:?}");
+
+        let json =
+            sandbox.run_without_identity(&["chat", "some-channel", "--peek", "--json"], &cwd);
+        assert_success(&json);
+        let marker: serde_json::Value = from_stdout(&json);
+        assert_eq!(marker["ok"], true);
+        assert!(marker["participant"].is_null());
+        assert_eq!(marker["bound"], false);
+        assert!(marker["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        if let Some(name) = dirname {
+            assert!(!stdout(&json).contains(name), "{dirname:?}");
+        }
+        assert_eq!(snapshot_tree(&sandbox.mail_root), before, "{dirname:?}");
     }
 }
 
@@ -3493,28 +3480,6 @@ fn send_to_a_channel_names_the_channel_verb_and_never_publishes_a_command() {
     );
 }
 
-/// Three papercuts say `post chat --help` reads as a read-only command because
-/// its first nine usage lines were reads. Sending must be visible at the top.
-#[test]
-fn chat_help_leads_with_a_send_form() {
-    let sandbox = Sandbox::new();
-    let output = sandbox.run(&["chat", "--help"]);
-    let text = String::from_utf8_lossy(&output.stdout);
-    let usage: Vec<&str> = text
-        .lines()
-        .skip_while(|line| !line.starts_with("Usage:"))
-        .take(4)
-        .collect();
-    assert!(
-        usage.iter().any(|line| line.contains("--send")),
-        "a --send form must appear in the first lines of usage, got: {usage:?}"
-    );
-    assert!(
-        text.contains("post send --to"),
-        "chat --help must cross-reference the direct-mail verb"
-    );
-}
-
 #[test]
 fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     let sandbox = Sandbox::new_unseeded();
@@ -3533,6 +3498,17 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     assert!(sandbox.mail_root.join("rooms.json").is_file());
     assert!(sandbox.mail_root.join("rules.json").is_file());
     assert!(sandbox.mail_root.join("archive").is_dir());
+    // The documented bootstrap pair: a plain doctor right after the first
+    // --fix must already call the fresh root healthy.
+    let confirmed = sandbox.run(&["doctor"]);
+    assert_success(&confirmed);
+    let report: DoctorOutput = from_stdout(&confirmed);
+    assert!(report.ok, "{:?}", report.checks);
+    assert_eq!(report.status, "healthy");
+    assert!(report
+        .checks
+        .iter()
+        .all(|check| check.severity != DoctorSeverity::Error));
     // Shipped defaults are empty: no room directories until one is registered.
     let workspace = sandbox.home.join("claude-space");
     fs::create_dir_all(&workspace).expect("create room workspace");
@@ -3548,6 +3524,7 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
         .iter()
         .any(|check| check.id.contains("inbox_missing") || check.id.contains("read_missing")));
     assert!(!sandbox.mail_root.join("claude-space/inbox").exists());
+    assert!(!sandbox.mail_root.join("claude-space/read").exists());
     fs::create_dir_all(sandbox.mail_root.join("claude-space/inbox")).expect("create inbox");
 
     fs::write(
@@ -3803,32 +3780,6 @@ fn cursor_degrade_diagnostics_escape_hostile_state_and_paths() {
             .all(|line| !line.starts_with("FORGED root claim")),
         "a hostile root path must not forge a line: {err}"
     );
-}
-
-#[test]
-fn doctor_fix_then_doctor_is_healthy_on_a_fresh_root() {
-    let sandbox = Sandbox::new_unseeded();
-
-    // These are the two commands a set -e bootstrap runs; both must succeed
-    // before an operator can register the first room.
-    let fixed = sandbox.run(&["doctor", "--fix"]);
-    assert_success(&fixed);
-    let fixed_report: DoctorOutput = from_stdout(&fixed);
-    assert!(fixed_report.ok);
-    assert!(fixed_report
-        .checks
-        .iter()
-        .all(|check| check.severity != DoctorSeverity::Error));
-
-    let diagnosed = sandbox.run(&["doctor"]);
-    assert_success(&diagnosed);
-    let report: DoctorOutput = from_stdout(&diagnosed);
-    assert!(report.ok);
-    assert_eq!(report.status, "healthy");
-    assert!(report
-        .checks
-        .iter()
-        .all(|check| check.severity != DoctorSeverity::Error));
 }
 
 #[test]
@@ -4215,7 +4166,7 @@ fn inbox_skips_malformed_mail_and_rooms_only_show_recipient_rules() {
     let listed = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert!(listed.status.success());
     assert!(stderr(&listed).contains("skipped malformed pending mail"));
-    let listed: InboxOutput = from_stdout(&listed);
+    let listed: InboxView = from_stdout(&listed);
     assert_eq!(listed.count, 1);
     assert_eq!(listed.skipped_unreadable, 1);
     assert_eq!(listed.unread[0].id, sent.envelope.id);
@@ -4257,7 +4208,7 @@ fn inbox_reports_unreadable_mail_without_hiding_readable_messages() {
         stderr(&output)
     );
     assert!(stderr(&output).contains("skipped unreadable pending mail"));
-    let listed: InboxOutput = from_stdout(&output);
+    let listed: InboxView = from_stdout(&output);
     assert_eq!(listed.count, 1);
     assert_eq!(listed.unread[0].id, sent.envelope.id);
     assert_eq!(listed.skipped_unreadable, 1);
@@ -4666,7 +4617,7 @@ fn inbox_lists_multiple_messages_oldest_first() {
 
     let output = sandbox.run(&["inbox", "--room", "claude-space"]);
     assert_success(&output);
-    let inbox: InboxOutput = from_stdout(&output);
+    let inbox: InboxView = from_stdout(&output);
     assert_eq!(
         inbox
             .unread
@@ -6803,7 +6754,7 @@ fn watch_snapshot_emits_direct_and_channel_events_without_consuming_anything() {
         );
     }
 
-    let inbox: InboxOutput = from_stdout(&sandbox.run_as_participant(
+    let inbox: InboxView = from_stdout(&sandbox.run_as_participant(
         &["inbox", "--room", "beta"],
         &beta_participant,
         &beta,
@@ -8805,6 +8756,26 @@ fn seen_by_lists_members_past_a_message_read_only() {
     let peek: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "seen", "--peek", "--json"], None, &beta));
     assert_eq!(peek.count, 0);
+    // The reader's own cursor is what a leaking --seen-by would move: leave a
+    // fresh message unread for alpha, query it, and it must still be unread.
+    let second: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--send", "--body", "second", "--json"],
+        None,
+        &beta,
+    ));
+    let unread = |who: &Path| -> usize {
+        let peek: ChatReadOutput =
+            from_stdout(&sandbox.run_in(&["chat", "seen", "--peek", "--json"], None, who));
+        peek.count
+    };
+    assert_eq!(unread(&alpha), 1);
+    let queried: SeenByOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--seen-by", &second.message.id, "--json"],
+        None,
+        &alpha,
+    ));
+    assert!(!queried.seen_by.contains(&alpha_participant));
+    assert_eq!(unread(&alpha), 1, "--seen-by must not mark the id seen");
 }
 
 #[test]
@@ -8830,7 +8801,7 @@ fn history_grep_filters_case_insensitive_regex() {
             "--history",
             "10",
             "--grep",
-            "beta TWO",
+            "beta t.o",
             "--json",
         ],
         None,
@@ -9055,14 +9026,38 @@ fn snapshot_does_not_leave_a_live_heartbeat() {
     let sandbox = Sandbox::new();
     let (alpha, _) = register_alpha_beta(&sandbox);
     assert_success(&sandbox.run_in(&["inbox", "--json"], None, &alpha));
+    let alpha_id = sandbox.test_participant("alpha");
+    let participants_dir = sandbox.mail_root.join("participants");
+    let alpha_heartbeat = participants_dir.join(&alpha_id).join("watch.heartbeat");
+    let alpha_record = participants_dir.join(&alpha_id).join("participant.json");
+    assert!(!alpha_heartbeat.exists(), "precondition: no heartbeat yet");
+    let record_before = fs::read(&alpha_record).expect("participant record");
+
     assert_success(&sandbox.run(&["watch", "--room", "alpha", "--snapshot"]));
+
     let who: WhoOutput = from_stdout(&sandbox.run(&["who", "--room", "alpha"]));
+    let row = who
+        .participants
+        .iter()
+        .find(|row| row.id == alpha_id)
+        .expect("alpha's participant row");
     assert!(
-        !who.legacy_rooms[0].live_watch,
-        "snapshot must not mint a live presence heartbeat"
+        !row.live_watch,
+        "snapshot must not mint a live participant heartbeat"
     );
-    let hb = sandbox.mail_root.join("alpha/watch.heartbeat");
-    assert!(!hb.exists(), "snapshot must not create watch.heartbeat");
+    assert!(row.watch_last_seen.is_none(), "no heartbeat stamp is read");
+    assert!(
+        !alpha_heartbeat.exists(),
+        "snapshot must not create participants/<id>/watch.heartbeat"
+    );
+    assert_eq!(
+        fs::read(&alpha_record).expect("participant record"),
+        record_before,
+        "snapshot must not renew the participant's lease"
+    );
+    // Legacy room presence stays a compatibility guard.
+    assert!(!who.legacy_rooms[0].live_watch);
+    assert!(!sandbox.mail_root.join("alpha/watch.heartbeat").exists());
 }
 
 #[test]
@@ -9162,23 +9157,22 @@ fn who_reports_live_for_ten_second_interval_watch() {
             .any(|entry| entry.id == participant && entry.live_watch),
         "10s-interval watch must read live shortly after first poll"
     );
+    // The stamp must carry the watch's own interval; a fixed or default window
+    // would read live now and expire early for a long-interval watch.
+    let stamp = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join("participants")
+            .join(&participant)
+            .join("watch.heartbeat"),
+    )
+    .expect("participant heartbeat");
+    let mut tokens = stamp.split_whitespace();
+    let seconds = tokens.next().expect("heartbeat seconds");
+    assert!(seconds.parse::<u64>().is_ok(), "{stamp:?}");
+    assert_eq!(tokens.next(), Some("10000"), "{stamp:?}");
     child.kill().expect("stop watch");
     let _ = child.wait();
-    // After exit, stamp ages out: write an interval-aware but old stamp.
-    let hb = sandbox
-        .mail_root
-        .join("participants")
-        .join(&participant)
-        .join("watch.heartbeat");
-    fs::write(&hb, "1 10000\n").expect("stale stamp");
-    let after: WhoOutput = from_stdout(&sandbox.run_as_participant(&["who"], &participant, &alpha));
-    assert!(
-        after
-            .participants
-            .iter()
-            .any(|entry| entry.id == participant && !entry.live_watch),
-        "post-exit stale stamp is not live"
-    );
 }
 
 #[test]
@@ -12410,62 +12404,23 @@ fn doctor_brief_prints_one_line_for_both_outcomes() {
 }
 
 #[test]
-fn schema_describes_seen_set_semantics_not_watermarks() {
-    let output = post_command().args(["schema"]).output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Membership semantics must be what the machine contract publishes.
-    assert!(text.contains("consumes only emitted ids"), "{text}");
-    assert!(
-        text.contains("--seen-by lists members whose seen-set contains an id"),
-        "{text}"
-    );
-    assert!(text.contains("never mutates channel seen-sets"), "{text}");
-    assert!(
-        text.contains("falls back to auto (presentation never breaks a read"),
-        "{text}"
-    );
-    // Watermark-era phrasing must be gone.
-    for stale in [
-        "advances the reader's own cursor",
-        "cursors passed an id",
-        "past the sender cursor",
-        "never advances channel cursors",
-        "an invalid value is a loud error",
-    ] {
-        assert!(
-            !text.contains(stale),
-            "stale contract phrase still published: {stale}"
-        );
-    }
-}
-
-#[test]
-fn doctor_brief_is_human_only_and_conflicts_with_json() {
-    let output = post_command()
-        .args(["--json", "doctor", "--brief"])
-        .output()
-        .unwrap();
-    assert_ne!(output.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&output.stdout);
-    let err = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{text}{err}");
-    assert!(combined.contains("--brief"), "{combined}");
-    assert!(combined.contains("--json"), "{combined}");
-}
-
-#[test]
 fn global_json_before_any_human_only_flag_is_refused() {
     // clap misses the conflict when --json precedes the subcommand; the
     // dispatcher guard must catch every human-only flag, not just doctor.
     let sandbox = Sandbox::new();
     register_alpha_beta(&sandbox);
-    for args in [
-        vec!["--json", "channels", "--text"],
-        vec!["--json", "who", "--room", "alpha", "--text"],
-        vec!["--json", "inbox", "--room", "alpha", "--text"],
-        vec!["--json", "watch", "--room", "alpha", "--text", "--snapshot"],
-        vec!["--json", "doctor", "--brief"],
+    for (args, flag) in [
+        (vec!["--json", "channels", "--text"], "--text"),
+        (vec!["--json", "who", "--room", "alpha", "--text"], "--text"),
+        (
+            vec!["--json", "inbox", "--room", "alpha", "--text"],
+            "--text",
+        ),
+        (
+            vec!["--json", "watch", "--room", "alpha", "--text", "--snapshot"],
+            "--text",
+        ),
+        (vec!["--json", "doctor", "--brief"], "--brief"),
     ] {
         let out = sandbox.run(&args);
         assert_eq!(
@@ -12477,6 +12432,10 @@ fn global_json_before_any_human_only_flag_is_refused() {
         assert!(
             stderr.contains("--json"),
             "refusal must name the conflict: {stderr}"
+        );
+        assert!(
+            stderr.contains(flag),
+            "refusal must name the human-only flag {flag}: {stderr}"
         );
     }
 }
@@ -12620,6 +12579,10 @@ fn help_and_schema_agree_that_chat_leads_with_sending() {
     assert!(
         first_schema_form.contains("--send"),
         "schema usage must lead with a send form, got: {first_schema_form}"
+    );
+    assert!(
+        help.contains("post send --to"),
+        "chat --help must cross-reference the direct-mail verb"
     );
 }
 

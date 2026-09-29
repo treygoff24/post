@@ -5,9 +5,10 @@
 mod common;
 
 use common::{
-    assert_success, from_stdout, post_command, register_alpha_beta, stderr, stdout, Sandbox,
+    assert_success, from_stdout, post_command, register_alpha_beta, stderr, stdout, InboxView,
+    Sandbox,
 };
-use post::output::{InboxOutput, SendOutput};
+use post::output::SendOutput;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -118,7 +119,7 @@ fn without_allow_self_a_room_ping_skips_its_own_sender() {
         .collect();
     assert_success(&sandbox.run_as_participant(&argv, &coordinator, &alpha));
 
-    let inbox: InboxOutput =
+    let inbox: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &coordinator, &alpha));
     assert_eq!(inbox.count, 0, "the control: no flag, no self-delivery");
 }
@@ -145,10 +146,10 @@ fn allow_self_widens_nothing_beyond_the_senders_own_room() {
         "no retargeting note for a room the sender is not in: {}",
         stdout(&sent)
     );
-    let own: InboxOutput =
+    let own: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &coordinator, &alpha));
     assert_eq!(own.count, 0);
-    let theirs: InboxOutput =
+    let theirs: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &peer, &beta));
     assert_eq!(theirs.count, 1);
 }
@@ -178,10 +179,10 @@ fn allow_self_covers_the_senders_own_lineage_and_only_the_sender() {
     assert_success(&sent);
     assert!(stdout(&sent).contains("--allow-self"), "{}", stdout(&sent));
 
-    let own: InboxOutput =
+    let own: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &coordinator, &alpha));
     assert_eq!(own.count, 1, "the sender hears its own lineage ping");
-    let theirs: InboxOutput =
+    let theirs: InboxView =
         from_stdout(&sandbox.run_as_participant(&["inbox", "--json"], &peer, &beta));
     assert_eq!(theirs.count, 0, "the flag reaches the sender, nobody else");
 }
@@ -463,50 +464,6 @@ fn a_bare_argument_is_the_message_body() {
     assert_eq!(body_of(&sandbox, &reader, &beta, &long.envelope.id), prose);
 }
 
-#[test]
-fn a_bare_argument_that_names_a_file_gets_the_body_file_remedy() {
-    let sandbox = Sandbox::new();
-    let (alpha, beta) = register_alpha_beta(&sandbox);
-    let sender = alpha_participant(&sandbox, "file-shaped-sender", &alpha);
-    let reader = sandbox.bind_claude("file-shaped-reader", &beta, Some("beta"))["id"]
-        .as_str()
-        .expect("participant id")
-        .to_owned();
-    fs::write(alpha.join("notes.txt"), "from the file\n").expect("write the file");
-
-    let refused = sandbox.run_as_participant(
-        &["send", "--to", "beta", "notes.txt", "--json"],
-        &sender,
-        &alpha,
-    );
-    assert_eq!(
-        refused.status.code(),
-        Some(2),
-        "stderr: {}",
-        stderr(&refused)
-    );
-    let envelope: Value = common::from_stderr(&refused);
-    let fix = envelope["error"]["details"]["exact_fix"]
-        .as_str()
-        .expect("a runnable exact_fix")
-        .to_owned();
-    assert!(fix.contains("--body-file"), "fix: {fix}");
-    assert_eq!(
-        count(&sandbox.mail_root.join("beta/inbox")),
-        0,
-        "the refused send delivered nothing"
-    );
-
-    // The suggested fix runs as printed and sends the file's contents.
-    let ran = sandbox.run_fix(&format!("{fix} --json"), &alpha);
-    assert_success(&ran);
-    let sent: SendOutput = from_stdout(&ran);
-    assert_eq!(
-        body_of(&sandbox, &reader, &beta, &sent.envelope.id),
-        "from the file\n"
-    );
-}
-
 /// The old positional FILE, used with a file that is absent, or relative to a
 /// different directory than the one the agent is in, must not send the path as
 /// the message: the receipt would look right and the body would be wrong.
@@ -560,11 +517,19 @@ fn a_path_shaped_bare_argument_is_refused_even_when_the_file_is_absent() {
         &sender,
         &alpha,
     );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&refused)
+    );
     let error: Value = common::from_stderr(&refused);
     let fix = error["error"]["details"]["exact_fix"]
         .as_str()
         .expect("an exact_fix")
         .to_owned();
+    assert!(fix.contains("--body-file"), "fix: {fix}");
+    assert_eq!(delivered(), 0, "the refused send delivered nothing");
     let ran = sandbox.run_fix(&format!("{fix} --json"), &alpha);
     assert_success(&ran);
     let sent: SendOutput = from_stdout(&ran);

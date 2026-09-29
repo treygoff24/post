@@ -1,6 +1,9 @@
 #![allow(dead_code)]
-use post::output::{ErrorEnvelope, SendOutput};
+use post::output::{ErrorEnvelope, InboxItem, SendOutput};
+use serde::Deserialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -948,4 +951,139 @@ pub fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>
     let mut found = std::collections::BTreeMap::new();
     walk(root, &mut found);
     found
+}
+
+// Schema-truth helpers shared by tests/schema_truth.rs and tests/schema_surface.rs.
+
+/// True when `word` appears in `text` as a whole identifier: `id` is not
+/// documented by `identity`, and `bound` is not documented by `bound_now`.
+pub fn names(text: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + word.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
+/// Objects whose keys are data (room names, participant ids, addresses), not
+/// schema: the shape describes them as `name{key:value}` and their keys are
+/// whatever the store holds, so those keys are not required in the shape.
+/// Every other nested object is traversed. An entry here is a promise that
+/// the shape documents the map's value, not its keys.
+pub const DATA_KEYED_MAPS: &[&str] = &["unread", "pending", "pending_by_address", "rewritten"];
+
+/// The fields a real output carries that the shape must name: every key of
+/// every object at any depth (nested objects and objects inside arrays
+/// included), except the keys of the data-keyed maps above.
+pub fn documented_keys(value: &Value) -> BTreeSet<String> {
+    fn collect(value: &Value, keys: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    keys.insert(key.clone());
+                    // Only a map is exempt: `unread` in an inbox is an array
+                    // of envelopes whose fields must be named.
+                    let data_keyed = child.is_object() && DATA_KEYED_MAPS.contains(&key.as_str());
+                    if !data_keyed {
+                        collect(child, keys);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, keys)),
+            _ => {}
+        }
+    }
+    let mut keys = BTreeSet::new();
+    collect(value, &mut keys);
+    keys
+}
+
+/// What is wrong when `value` carries a field the shape never names.
+pub fn undocumented(shape_name: &str, shape: &str, value: &Value, origin: &str) -> Option<String> {
+    let missing: Vec<String> = documented_keys(value)
+        .into_iter()
+        .filter(|key| !names(shape, key))
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!("{origin}: the `{shape_name}` shape in `post schema` never names {missing:?}")
+    })
+}
+
+pub fn assert_documented(shape_name: &str, shape: &str, value: &Value, origin: &str) {
+    if let Some(problem) = undocumented(shape_name, shape, value, origin) {
+        panic!("{problem}\nshape:\n{shape}");
+    }
+}
+
+/// The long options a command's `--help` lists, excluding the global flags.
+pub fn help_options(help: &str) -> BTreeSet<String> {
+    let mut options = BTreeSet::new();
+    let mut in_options = false;
+    for line in help.lines() {
+        if line.trim_end().ends_with(':') && !line.starts_with(' ') {
+            in_options = line.starts_with("Options");
+            continue;
+        }
+        if !in_options {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        // An option line starts with `-x, --long` or `--long`; a possible
+        // value (`- now: ...`) or a prose line that mentions a flag does not.
+        let mut chars = trimmed.chars();
+        let short_form = chars.next() == Some('-')
+            && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.next() == Some(',');
+        if !(trimmed.starts_with("--") || short_form) {
+            continue;
+        }
+        if let Some(start) = trimmed.find("--") {
+            let name: String = trimmed[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            options.insert(name);
+        }
+    }
+    for global in ["--help", "--version", "--json", "--pretty"] {
+        options.remove(global);
+    }
+    options
+}
+
+/// The long options a schema usage string names, as whole tokens:
+/// `--discard` and `--discard-through` are two elements, so one cannot stand in for the
+/// other. Value grammar (`<id>`, `auto|full`) is not an option and is skipped.
+pub fn usage_options(usage: &str) -> BTreeSet<String> {
+    usage
+        .split_whitespace()
+        .filter_map(|token| {
+            let token = token.get(token.find("--")?..)?;
+            let name = token
+                .split(|character: char| {
+                    matches!(character, '<' | '>' | '|' | ']' | ')' | ',' | '=')
+                })
+                .next()?;
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// The decode of `post inbox --json` as the producer (`InboxOutputV2` in
+/// src/commands/inbox.rs) emits it today, including the participant and
+/// pending fields. Unknown fields are ignored, so exact key sets are pinned by
+/// the contract samples and schema tests, not here.
+#[derive(Debug, Deserialize)]
+pub struct InboxView {
+    pub ok: bool,
+    pub room: String,
+    pub participant: Option<String>,
+    pub unread: Vec<InboxItem>,
+    pub count: usize,
+    pub skipped_unreadable: usize,
+    pub unread_count: usize,
+    pub pending: usize,
+    pub pending_by_address: std::collections::BTreeMap<String, usize>,
+    pub held: usize,
 }

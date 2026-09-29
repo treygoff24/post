@@ -2273,7 +2273,6 @@ fn send(
     let body = super::send::read_body(super::send::BodySource {
         inline,
         body_file: args.body_file.as_deref(),
-        file: None,
         fix_prefix,
         oversize: args.oversize,
     })?;
