@@ -59,6 +59,16 @@ else
   err "no release binary to emit the schema"
 fi
 
+# The bridge (bridge/, Python) drives the release binary above through
+# `post bridge deliver` and friends, so its suite runs against exactly that
+# build via POST_BIN, like the hook contract suite.
+step "python: bridge"
+if command -v python3 >/dev/null 2>&1; then
+  bridge/tests/run-all.sh || err "bridge tests (bridge/tests/run-all.sh)"
+else
+  err "python3 not found; the bridge suite is part of this gate"
+fi
+
 rust_ver=$(cargo --version 2>/dev/null | awk '{print $2}')
 node_ver=$(node --version 2>/dev/null || echo "absent")
 py_ver=$(python3 --version 2>/dev/null | awk '{print $2}' || echo "absent")
