@@ -1,0 +1,8 @@
+{
+  "host": "REPLACE-WITH-THIS-HOST",
+  "relay_url": "REPLACE-WITH-THE-RELAY-CLONE-ORIGIN-URL",
+  "channels": {
+    "mode": "all",
+    "deny": ["devbox-build", "litigation-work", "wade-overnight", "cos", "cos-urgent"]
+  }
+}

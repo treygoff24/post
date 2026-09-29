@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the post bridge mail sweeper
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=@INTERVAL@
+# systemd's 1 min default let a 15 s timer fire 17 to 43 s apart, past
+# post's 3 x interval_s freshness window for participant sends.
+AccuracySec=1s
+Persistent=true
+Unit=post-bridge.service
+
+[Install]
+WantedBy=timers.target
