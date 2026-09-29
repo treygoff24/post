@@ -68,6 +68,12 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
+    /// How many records the plan deletes and how many it archives: the numbers
+    /// `post participant gc` prints, for a report that has to agree with it.
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        (self.ids(Tier::Delete).len(), self.ids(Tier::Archive).len())
+    }
+
     fn ids(&self, tier: Tier) -> Vec<String> {
         self.actions
             .iter()

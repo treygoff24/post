@@ -316,8 +316,10 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "pending",
             "participant_fix",
             "participant_error",
+            "bound",
             "participant_missing",
-            "severity_filter"
+            "severity_filter",
+            "filtered_out"
         ]
     );
     assert_shape!(
@@ -400,7 +402,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "rooms",
         &schema.output_shapes.rooms,
-        ["ok", "rooms", "count", "set-path:", "rename:"]
+        ["ok", "rooms", "count", "warnings", "set-path:", "rename:"]
     );
     assert_shape!(
         "schema",
@@ -433,6 +435,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "envelope",
             "archived",
             "delivery",
+            "retargeted",
             "bound_now",
             "warnings"
         ]
@@ -592,7 +595,13 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "watch",
         &schema.output_shapes.watch,
-        ["mail:", "unreadable:", "channel_message:", "digest:"]
+        [
+            "mail:",
+            "unreadable:",
+            "channel_message:",
+            "unbound:",
+            "digest:"
+        ]
     );
     assert_shape!(
         "who",
@@ -605,7 +614,9 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "activity_note",
             "count",
             "bridge_attention",
+            "bridge_health",
             "doorbell",
+            "bound",
             "participant_missing"
         ]
     );

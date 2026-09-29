@@ -603,13 +603,21 @@ fn read_health_json(path: &Path) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
 }
 
-/// Freshness per the participant-mail rule: `ticked_at` is no older than
-/// three times `interval_s` and never further ahead than MAX_CLOCK_SKEW.
-fn health_is_fresh(
+/// How old the bridge's last health tick is, and whether that is fresh.
+pub(crate) struct HealthTick {
+    /// Time since `ticked_at`; zero for a stamp slightly ahead of this clock.
+    pub age: std::time::Duration,
+    pub fresh: bool,
+}
+
+/// Read `ticked_at` and `interval_s` from a parsed health file. Err covers a
+/// missing or malformed stamp or interval; a stale tick is `Ok` with
+/// `fresh: false`, so callers can say how old it is.
+fn health_tick_of(
     value: &serde_json::Value,
     path: &Path,
     now: std::time::SystemTime,
-) -> Result<(), String> {
+) -> Result<HealthTick, String> {
     let Some(ticked_at) = value
         .get("ticked_at")
         .and_then(serde_json::Value::as_str)
@@ -631,13 +639,40 @@ fn health_is_fresh(
         ));
     };
     let window = std::time::Duration::from_secs_f64(interval * 3.0);
-    let fresh = match now.duration_since(ticked_at) {
-        Ok(age) => age <= window,
+    Ok(match now.duration_since(ticked_at) {
+        Ok(age) => HealthTick {
+            age,
+            fresh: age <= window,
+        },
         // A stamp from the future is clock skew, allowed only briefly; it
         // never earns a second freshness window.
-        Err(ahead) => ahead.duration() <= MAX_CLOCK_SKEW,
-    };
-    if !fresh {
+        Err(ahead) => HealthTick {
+            age: std::time::Duration::ZERO,
+            fresh: ahead.duration() <= MAX_CLOCK_SKEW,
+        },
+    })
+}
+
+/// The age and freshness of `bridge/health.json`'s last tick. Err says why the
+/// file cannot vouch for anything: missing, unreadable, malformed, or without
+/// a usable `ticked_at`/`interval_s`.
+pub(crate) fn health_tick(
+    context: &Context,
+    now: std::time::SystemTime,
+) -> Result<HealthTick, String> {
+    let path = bridge_dir(context).join("health.json");
+    let value = read_health_json(&path)?;
+    health_tick_of(&value, &path, now)
+}
+
+/// Freshness per the participant-mail rule: `ticked_at` is no older than
+/// three times `interval_s` and never further ahead than MAX_CLOCK_SKEW.
+fn health_is_fresh(
+    value: &serde_json::Value,
+    path: &Path,
+    now: std::time::SystemTime,
+) -> Result<(), String> {
+    if !health_tick_of(value, path, now)?.fresh {
         return Err(format!(
             "{} is stale: ticked_at is older than three times interval_s or more than {} s ahead",
             path.display(),

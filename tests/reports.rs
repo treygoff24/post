@@ -202,19 +202,51 @@ fn doctor_severity_trims_the_report_and_says_so() {
         error.checks
     );
     assert!(!error.checks.is_empty());
-    assert_eq!(error.count, error.checks.len());
+    // The filter chooses which checks are listed; the verdict covers them all.
+    assert_eq!(error.count, full.count, "{:?}", error.checks);
+    assert_eq!(error.status, full.status);
+    assert!(!error.ok);
+    assert_eq!(
+        error.filtered_out,
+        Some(full.count - error.checks.len()),
+        "the hidden warnings are counted: {:?}",
+        error.checks
+    );
+    assert!(error.filtered_out.unwrap_or(0) > 0);
+    assert_eq!(full.filtered_out, None, "no filter, no field");
+    assert_eq!(warn.filtered_out, Some(0), "warn hides only info lines");
 
-    // Once the error is repaired, the same store is clean at `error` and
-    // degraded (warnings remain) at `warn`, and each says which lens it used.
+    // Once the error is repaired, `--severity error` lists nothing, but it
+    // must not call the store healthy while a bridge warning remains: an
+    // agent that gates on it would miss the stuck letter.
     fs::create_dir(sandbox.mail_root.join("archive")).expect("repair the archive");
+    let (gated_code, gated) = doctor(&sandbox, &["--severity", "error"]);
+    assert_eq!(gated_code, Some(1), "{:?}", gated.checks);
+    assert!(gated.checks.is_empty(), "{:?}", gated.checks);
+    assert!(!gated.ok);
+    assert_eq!(gated.status, "degraded");
+    assert_eq!(gated.count, 1);
+    assert_eq!(gated.filtered_out, Some(1));
+    assert_eq!(gated.severity_filter.as_deref(), Some("error"));
+    let brief = sandbox.run(&["doctor", "--severity", "error", "--brief"]);
+    assert_eq!(brief.status.code(), Some(1));
+    assert!(
+        stdout(&brief).contains("1 findings, 1 of them hidden by --severity error"),
+        "{}",
+        stdout(&brief)
+    );
+    let (degraded_code, degraded) = doctor(&sandbox, &["--severity", "warn"]);
+    assert_eq!(degraded_code, Some(1));
+    assert_eq!(degraded.status, "degraded");
+    assert_eq!(degraded.filtered_out, Some(0));
+
+    // With nothing hidden, `--severity error` is healthy and says so.
+    fs::remove_file(sandbox.mail_root.join("bridge/health.json")).expect("clear the bridge item");
     let (clean_code, clean) = doctor(&sandbox, &["--severity", "error"]);
     assert_eq!(clean_code, Some(0), "{:?}", clean.checks);
     assert!(clean.ok);
     assert_eq!(clean.status, "healthy");
-    assert_eq!(clean.severity_filter.as_deref(), Some("error"));
-    let (degraded_code, degraded) = doctor(&sandbox, &["--severity", "warn"]);
-    assert_eq!(degraded_code, Some(1));
-    assert_eq!(degraded.status, "degraded");
+    assert_eq!(clean.filtered_out, Some(0));
 
     let refused = sandbox.run(&["doctor", "--severity", "info"]);
     assert_eq!(
@@ -284,19 +316,27 @@ fn doctor_shows_the_bridges_attention_items_with_their_fixes() {
     );
 }
 
+/// The shapes a bridge's health file can be in without giving a usable
+/// `attention` list.
+const UNUSABLE_BRIDGE_HEALTH: [(&str, Option<&str>); 4] = [
+    ("absent", None),
+    ("malformed", Some("{ this is not json")),
+    ("no attention key", Some(r#"{"v":1,"ok":true}"#)),
+    ("wrong type", Some(r#"{"attention":"none"}"#)),
+];
+
+/// A host with no bridge (no `bridge/config.json`) has nothing to report, so
+/// whatever is or is not in a stray health file is silence, not a warning.
 #[test]
-fn doctor_tolerates_an_absent_or_broken_bridge_health_file() {
+fn doctor_is_silent_about_bridge_health_on_an_unbridged_host() {
     let sandbox = Sandbox::new();
     healthy_store(&sandbox);
     let health = sandbox.mail_root.join("bridge/health.json");
 
-    for (label, contents) in [
-        ("absent", None),
-        ("malformed", Some("{ this is not json")),
-        ("no attention key", Some(r#"{"v":1,"ok":true}"#)),
-        ("empty attention", Some(r#"{"attention":[]}"#)),
-        ("wrong type", Some(r#"{"attention":"none"}"#)),
-    ] {
+    for (label, contents) in UNUSABLE_BRIDGE_HEALTH
+        .into_iter()
+        .chain([("empty attention", Some(r#"{"attention":[]}"#))])
+    {
         if let Some(contents) = contents {
             write(&health, contents);
         }
@@ -309,6 +349,240 @@ fn doctor_tolerates_an_absent_or_broken_bridge_health_file() {
             ids(&report)
         );
     }
+}
+
+/// A bridge that is configured but whose health cannot be read is not a
+/// bridge with nothing to report: doctor said healthy while refused letters
+/// sat unlisted. It is a warning with a fix, and `who` says it too.
+#[test]
+fn doctor_and_who_warn_when_a_bridged_hosts_health_cannot_be_read() {
+    let sandbox = Sandbox::new();
+    healthy_store(&sandbox);
+    write(
+        &sandbox.mail_root.join("bridge/config.json"),
+        r#"{"host":"trey"}"#,
+    );
+    let health = sandbox.mail_root.join("bridge/health.json");
+
+    for (label, contents) in UNUSABLE_BRIDGE_HEALTH {
+        if let Some(contents) = contents {
+            write(&health, contents);
+        }
+        let (code, report) = doctor(&sandbox, &[]);
+        assert_eq!(code, Some(1), "{label}: {:?}", report.checks);
+        assert_eq!(report.status, "degraded", "{label}");
+        assert!(!report.ok, "{label}");
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.id == "bridge.health_unreadable")
+            .unwrap_or_else(|| panic!("{label}: {:?}", ids(&report)));
+        assert_eq!(check.severity, post::output::DoctorSeverity::Warning);
+        assert!(
+            check.message.contains("bridge/health.json")
+                && check.message.contains("would not show up"),
+            "{label}: {}",
+            check.message
+        );
+        assert!(
+            check.suggested_fix.contains("post-bridge status"),
+            "{label}: {}",
+            check.suggested_fix
+        );
+
+        let who = who_json(&sandbox);
+        let unreadable = &who["bridge_health"];
+        assert!(
+            unreadable["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("bridge/health.json")),
+            "{label}: {who}"
+        );
+        assert!(
+            unreadable["fix"]
+                .as_str()
+                .is_some_and(|fix| fix.contains("post-bridge status")),
+            "{label}: {who}"
+        );
+        assert!(who.get("bridge_attention").is_none(), "{label}: {who}");
+        let text = stdout(&sandbox.run(&["who", "--text"]));
+        assert!(
+            text.contains("bridge_health: ") && text.contains("Fix: "),
+            "{label}: {text}"
+        );
+    }
+
+    // A readable health file with nothing to report is healthy and silent.
+    write(&health, r#"{"attention":[]}"#);
+    let (code, report) = doctor(&sandbox, &[]);
+    assert_eq!(code, Some(0), "{:?}", report.checks);
+    assert!(!ids(&report).iter().any(|id| id.starts_with("bridge.")));
+    let who = who_json(&sandbox);
+    assert!(who.get("bridge_health").is_none(), "{who}");
+    assert!(!stdout(&sandbox.run(&["who", "--text"])).contains("bridge_health"));
+}
+
+/// A `POST_PARTICIPANT` that names no record is a diagnosis, not a store
+/// fault: doctor and who show it as `bound: false` plus `participant_missing`
+/// (claim, id, message, fixes) and keep their own exit codes. Doctor used to
+/// call it an error finding and the store broken.
+#[test]
+fn doctor_and_who_report_a_missing_participant_claim_as_a_field() {
+    let sandbox = Sandbox::new();
+    healthy_store(&sandbox);
+    let cwd = sandbox.path.clone();
+
+    // `--fix` is a writer, so nothing outside doctor itself adds the field.
+    for args in [
+        &["doctor"][..],
+        &["doctor", "--fix"],
+        &["doctor", "--severity", "error"],
+    ] {
+        let output = sandbox.run_unbound(args, &cwd);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            stdout(&output)
+        );
+        let value: Value = from_stdout(&output);
+        assert_eq!(value["status"], "healthy", "{args:?}: {value}");
+        assert_eq!(value["ok"], true, "{args:?}");
+        assert_eq!(value["bound"], false, "{args:?}: {value}");
+        let missing = &value["participant_missing"];
+        assert_eq!(missing["claim"], "POST_PARTICIPANT", "{args:?}: {value}");
+        assert_eq!(missing["id"], "missing-test-participant", "{args:?}");
+        assert_eq!(
+            missing["exact_fix"], "post participant bind --new",
+            "{args:?}"
+        );
+        assert!(missing["message"].is_string() && missing["suggested_fix"].is_string());
+        assert_eq!(value["participant"]["status"], "missing", "{args:?}");
+        assert!(
+            value["participant"]["fix"]
+                .as_str()
+                .is_some_and(|fix| fix.contains("post participant bind --new")),
+            "{args:?}: {value}"
+        );
+        assert!(
+            !value["checks"]
+                .as_array()
+                .expect("checks")
+                .iter()
+                .any(|check| check["id"] == "participant.binding.invalid"),
+            "a missing claim is not a finding: {value}"
+        );
+    }
+
+    // The one-line form does not hide it either.
+    let brief = sandbox.run_unbound(&["doctor", "--brief"], &cwd);
+    assert_eq!(brief.status.code(), Some(0));
+    let line = stdout(&brief);
+    assert!(
+        line.starts_with("post doctor: ok")
+            && line.contains("names no record")
+            && line.contains("post participant bind --new"),
+        "{line}"
+    );
+
+    // Who: the acting participant is `missing` with the fix, in JSON and text.
+    let output = sandbox.run_unbound(&["who"], &cwd);
+    assert_eq!(output.status.code(), Some(0));
+    let who: Value = from_stdout(&output);
+    assert_eq!(who["participant"]["status"], "missing", "{who}");
+    assert!(
+        who["participant"]["fix"]
+            .as_str()
+            .is_some_and(|fix| fix.contains("post participant bind --new")),
+        "{who}"
+    );
+    assert_eq!(who["bound"], false, "{who}");
+    assert_eq!(who["participant_missing"]["id"], "missing-test-participant");
+    assert!(who.get("hint").is_none(), "the claim, not a hint: {who}");
+    let text = stdout(&sandbox.run_unbound(&["who", "--text"], &cwd));
+    assert!(
+        text.contains("participant: missing (")
+            && text.contains("missing-test-participant")
+            && text.contains("Fix: ")
+            && !text.contains("participant: unbound"),
+        "{text}"
+    );
+
+    // No claim at all is still just unbound, with no `participant_missing`.
+    let unbound = sandbox.run_without_identity(&["who"], &cwd);
+    let unbound: Value = from_stdout(&unbound);
+    assert_eq!(unbound["participant"]["status"], "unbound", "{unbound}");
+    assert!(unbound.get("participant_missing").is_none(), "{unbound}");
+}
+
+/// The prune numbers in `participants.stale` are the plan `post participant
+/// gc` makes, and its fix names the dry run and `--apply`.
+#[test]
+fn doctors_prune_numbers_are_the_ones_participant_gc_reports() {
+    let sandbox = Sandbox::new();
+    healthy_store(&sandbox);
+    // Three expired leases gc collects, and one whose lease ran out two hours
+    // ago, which it keeps: a count of every stale record (four) would be wrong.
+    seed_stale_participants(&sandbox, 3, 0);
+    write(
+        &sandbox
+            .mail_root
+            .join("participants/recent-session/participant.json"),
+        &format!(
+            "{}\n",
+            json!({
+                "version": 1,
+                "id": "recent-session",
+                "harness": "claude",
+                "conversation_key_digest": format!("{:064x}", 99),
+                "created": "2026-09-27 00:00:00 +0000",
+                "last_seen": rfc3339(SystemTime::now() - Duration::from_secs(2 * 3600)),
+                "lease_hours": 1,
+                "workspace": Value::Null,
+                "workspace_path": Value::Null,
+                "lineage": Value::Null,
+                "lineage_since": Value::Null,
+            })
+        ),
+    );
+
+    let gc = sandbox.run(&["participant", "gc"]);
+    assert_eq!(gc.status.code(), Some(0), "{}", stderr(&gc));
+    let gc: Value = from_stdout(&gc);
+    let deleted = gc["deleted"].as_array().expect("deleted").len();
+    let archived = gc["archived"].as_array().expect("archived").len();
+    assert_eq!(
+        deleted, 3,
+        "fixture: gc collects the long-expired ones: {gc}"
+    );
+
+    let (_, report) = doctor(&sandbox, &[]);
+    let stale = report
+        .checks
+        .iter()
+        .find(|check| check.id == "participants.stale")
+        .unwrap_or_else(|| panic!("{:?}", ids(&report)));
+    assert!(
+        stale.message.starts_with("4 participant(s)"),
+        "the count of stale records is not the prune count: {}",
+        stale.message
+    );
+    assert!(
+        stale.message.contains(&format!(
+            "`post participant gc` would delete {deleted} and archive {archived} participant record(s)"
+        )),
+        "{}",
+        stale.message
+    );
+    assert!(
+        stale.suggested_fix.contains("`post participant gc`")
+            && stale.suggested_fix.contains("dry run")
+            && stale
+                .suggested_fix
+                .contains("`post participant gc --apply`"),
+        "{}",
+        stale.suggested_fix
+    );
 }
 
 #[test]
@@ -499,6 +773,50 @@ fn who_ignores_a_doorbell_file_that_cannot_vouch_and_says_so() {
 // Task 8: rooms on a bridged host
 // ---------------------------------------------------------------------------
 
+/// `YYYY-MM-DDTHH:MM:SS+00:00`, the bridge's stamp format.
+fn rfc3339(at: SystemTime) -> String {
+    let seconds = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("after epoch")
+        .as_secs() as i64;
+    let (days, rem) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    )
+}
+
+/// A bridge health file whose last tick was `age` ago (a 30 s tick interval,
+/// so anything past 90 s is stale) with nothing held or needing attention.
+fn write_bridge_health(sandbox: &Sandbox, age: Duration) {
+    write(
+        &sandbox.mail_root.join("bridge/health.json"),
+        &json!({
+            "v": 1,
+            "ok": true,
+            "ticked_at": rfc3339(SystemTime::now() - age),
+            "interval_s": 30,
+            "attention": [],
+            "local_held": {"faults": 0, "candidates_unaccounted": 0},
+        })
+        .to_string(),
+    );
+}
+
+/// A bridged host as it looks while the bridge is running: `devbox` has
+/// published `tax` and `hq`, and the bridge ticked a moment ago.
 fn bridged_sandbox() -> Sandbox {
     let sandbox = Sandbox::new();
     healthy_store(&sandbox);
@@ -510,6 +828,7 @@ fn bridged_sandbox() -> Sandbox {
         &sandbox.mail_root.join("bridge/rooms/peers/devbox.json"),
         r#"{"v":1,"host":"devbox","rooms":["tax","hq"]}"#,
     );
+    write_bridge_health(&sandbox, Duration::from_secs(5));
     sandbox
 }
 
@@ -651,4 +970,200 @@ fn rooms_rename_refuses_a_peers_name_too() {
     );
     let listing: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
     assert!(listing.rooms.iter().any(|room| room.name == "scratch"));
+}
+
+// ---------------------------------------------------------------------------
+// The peer-name check is only as good as its evidence
+// ---------------------------------------------------------------------------
+
+/// `post rooms add <name> <path>` on `sandbox`, parsed as loose JSON.
+fn add_room(sandbox: &Sandbox, name: &str) -> (Option<i32>, Value, String) {
+    let path = checkout(sandbox, name);
+    let output = sandbox.run(&["rooms", "add", name, &path]);
+    let parsed = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    (output.status.code(), parsed, stderr(&output))
+}
+
+fn warnings_of(receipt: &Value) -> Vec<String> {
+    receipt["warnings"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|warning| warning.as_str().expect("warning text").to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A bridged host whose bridge has stopped, broken its files, or never
+/// published: a name that nothing lists is accepted, but the receipt says the
+/// peers' names could not be verified and how old the evidence is. Refusing
+/// here would strand a host whose bridge is down; accepting in silence (the
+/// old behavior) hid the risk.
+#[test]
+fn rooms_add_on_a_bridged_host_says_when_peer_names_could_not_be_verified() {
+    // Fresh and clean: no warning at all, and no `warnings` key.
+    let sandbox = bridged_sandbox();
+    let (code, receipt, err) = add_room(&sandbox, "fresh-room");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(receipt.get("warnings").is_none(), "{receipt}");
+
+    // Not bridged: never checked, never mentioned.
+    let sandbox = Sandbox::new();
+    healthy_store(&sandbox);
+    let (code, receipt, err) = add_room(&sandbox, "unbridged-room");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(receipt.get("warnings").is_none(), "{receipt}");
+
+    // (label, how to spoil the evidence, what the warning must say)
+    type Spoil = fn(&Sandbox);
+    let scenarios: [(&str, Spoil, &[&str]); 5] = [
+        (
+            "no health file",
+            |sandbox| fs::remove_file(sandbox.mail_root.join("bridge/health.json")).expect("rm"),
+            &["bridge/health.json", "how old it is cannot be told"],
+        ),
+        (
+            "stale health",
+            |sandbox| write_bridge_health(sandbox, Duration::from_secs(2 * 3600 + 120)),
+            &["is stale", "last confirmed its state 2 h ago"],
+        ),
+        (
+            "malformed publication",
+            |sandbox| {
+                write(
+                    &sandbox.mail_root.join("bridge/rooms/peers/devbox.json"),
+                    "{ nope",
+                )
+            },
+            &["devbox.json is not valid JSON", "s ago"],
+        ),
+        (
+            "malformed ownership memory",
+            |sandbox| write(&sandbox.mail_root.join("bridge/rooms/owners.json"), "[1,2]"),
+            &["owners.json is not a JSON object", "s ago"],
+        ),
+        (
+            "an enrolled peer has published nothing",
+            |sandbox| {
+                write(
+                    &sandbox.mail_root.join("bridge/registry/hosts.json"),
+                    r#"{"v":1,"hosts":["devbox","trey","laptop"]}"#,
+                )
+            },
+            &["host 'laptop' has published no rooms file", "s ago"],
+        ),
+    ];
+    for (label, spoil, expected) in scenarios {
+        let sandbox = bridged_sandbox();
+        spoil(&sandbox);
+        let (code, receipt, err) = add_room(&sandbox, "quiet-room");
+        assert_eq!(code, Some(0), "{label}: {err}");
+        let warnings = warnings_of(&receipt);
+        assert_eq!(warnings.len(), 1, "{label}: {receipt}");
+        assert!(
+            warnings[0].contains("could not be verified for 'quiet-room'"),
+            "{label}: {}",
+            warnings[0]
+        );
+        for wanted in expected {
+            assert!(
+                warnings[0].contains(wanted),
+                "{label}: missing {wanted:?} in {}",
+                warnings[0]
+            );
+        }
+        // It registered: the warning is not a refusal.
+        let listing: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
+        assert!(
+            listing.rooms.iter().any(|room| room.name == "quiet-room"),
+            "{label}"
+        );
+    }
+}
+
+/// A publication the bridge has not confirmed lately still names the room, so
+/// it still refuses; the message carries the evidence's age so a reader can
+/// judge whether the peer still publishes it.
+#[test]
+fn a_stale_publication_that_names_the_room_refuses_and_gives_its_age() {
+    let sandbox = bridged_sandbox();
+    write_bridge_health(&sandbox, Duration::from_secs(3 * 86_400 + 60));
+    let path = checkout(&sandbox, "tax");
+    let refused = sandbox.run(&["rooms", "add", "tax", &path]);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&refused)
+    );
+    let error: ErrorEnvelope = from_stderr(&refused);
+    let message = &error.error.message;
+    assert!(
+        message.contains("published by peer host 'devbox'")
+            && message.contains("may be out of date")
+            && message.contains("last confirmed its state 3 d ago"),
+        "{message}"
+    );
+    assert_eq!(error.error.details.host.as_deref(), Some("devbox"));
+
+    // With no health file the age cannot be told, and the message says so.
+    fs::remove_file(sandbox.mail_root.join("bridge/health.json")).expect("rm health");
+    let refused = sandbox.run(&["rooms", "add", "tax", &path]);
+    assert_eq!(refused.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert!(
+        error.error.message.contains("how old it is cannot be told"),
+        "{}",
+        error.error.message
+    );
+
+    // Fresh evidence refuses without the qualifier.
+    write_bridge_health(&sandbox, Duration::from_secs(5));
+    let refused = sandbox.run(&["rooms", "add", "tax", &path]);
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert!(
+        !error.error.message.contains("out of date"),
+        "{}",
+        error.error.message
+    );
+}
+
+/// `rename` takes the same evidence: with a broken publication it proceeds and
+/// its receipt says the peer names could not be verified.
+#[test]
+fn rooms_rename_says_when_peer_names_could_not_be_verified() {
+    let sandbox = bridged_sandbox();
+    let path = checkout(&sandbox, "scratch");
+    assert_success(&sandbox.run(&["rooms", "add", "scratch", &path]));
+
+    let clean = sandbox.run(&["rooms", "rename", "scratch", "notes", "--dry-run"]);
+    assert_eq!(clean.status.code(), Some(0), "stderr: {}", stderr(&clean));
+    let clean: Value = from_stdout(&clean);
+    assert!(
+        !warnings_of(&clean)
+            .iter()
+            .any(|warning| warning.contains("could not be verified")),
+        "fresh evidence adds no peer warning: {clean}"
+    );
+
+    write(
+        &sandbox.mail_root.join("bridge/rooms/peers/devbox.json"),
+        "{ nope",
+    );
+    let renamed = sandbox.run(&["rooms", "rename", "scratch", "notes"]);
+    assert_success(&renamed);
+    let renamed: Value = from_stdout(&renamed);
+    let peer_warnings: Vec<String> = warnings_of(&renamed)
+        .into_iter()
+        .filter(|warning| warning.contains("could not be verified for 'notes'"))
+        .collect();
+    assert_eq!(peer_warnings.len(), 1, "{renamed}");
+    assert!(
+        peer_warnings[0].contains("devbox.json is not valid JSON"),
+        "{}",
+        peer_warnings[0]
+    );
+    let listing: RoomsOutput = from_stdout(&sandbox.run(&["rooms"]));
+    assert!(listing.rooms.iter().any(|room| room.name == "notes"));
 }

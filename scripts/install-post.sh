@@ -8,9 +8,15 @@
 #    on a host must be traceable to a branch other hosts can fetch: an install
 #    of an unpushed or abandoned-branch commit leaves a running binary whose
 #    build id names a commit that exists on no remote (the devbox ran one for
-#    days). The script fetches origin, then asks `git branch -r --contains`;
-#    the branches found are recorded in the receipt. --allow-unreachable
-#    installs anyway and records reachable=false, for the rare deliberate case.
+#    days). The script runs `git fetch --prune origin`, then asks
+#    `git branch -r --contains`; the branches found are recorded in the
+#    receipt. The fetch must succeed: a stale clone still holds the
+#    remote-tracking ref of a branch that was deleted on origin, so judging by
+#    what was fetched last time can call an abandoned commit reachable. When
+#    the fetch fails (or there is no origin) the script refuses and says so.
+#    --allow-unreachable installs anyway, for the rare deliberate case, and
+#    the receipt records reachable=false (origin was asked and no branch holds
+#    the commit) or reachable="unverified" (origin could not be asked).
 # 1. Refuse a <bin-dir>/post that is a symlink or not a regular file: the
 #    install would silently replace the link with a file.
 # 2. Check out <commit> in a temporary git worktree and run
@@ -58,8 +64,8 @@
 #   1  installed; served skill drift (a changed, missing, or extra file).
 #   2  usage.
 #   3  nothing installed; post is untouched: refused target, a commit no origin
-#      branch contains, build or smoke failure, unusable backup, or a failed
-#      backup or staging step.
+#      branch contains or origin that could not be fetched, build or smoke
+#      failure, unusable backup, or a failed backup or staging step.
 #   4  installed; served skill not verified: the path could not be checked
 #      (verdict unchecked), or a rendered copy's fenced file differs (verdict
 #      unverified).
@@ -93,7 +99,7 @@ while [ "$#" -gt 0 ]; do
     --served) [ "$#" -ge 2 ] || die "--served needs a value" 2; served="$2"; shift ;;
     --receipt) [ "$#" -ge 2 ] || die "--receipt needs a value" 2; receipt="$2"; shift ;;
     --repo) [ "$#" -ge 2 ] || die "--repo needs a value" 2; repo="$2"; shift ;;
-    -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,78p' "$0"; exit 0 ;;
     -*) die "unknown option: $1" 2 ;;
     *) [ -z "$commit" ] || die "one commit only" 2; commit="$1" ;;
   esac
@@ -123,17 +129,22 @@ full_sha=$(git -C "$repo" rev-parse --verify --quiet "${commit}^{commit}") || di
 short_sha=$(git -C "$repo" rev-parse --short "$full_sha")
 
 # Traceability: refuse a commit no branch on origin contains, before the
-# (slow) build. Fetch first so a branch pushed since the last fetch counts, and
-# a branch deleted since does not; a failed fetch falls back to what was last
-# fetched, which can only under-report reachability, never over-report it.
+# (slow) build. Fetch with --prune first so a branch pushed since the last
+# fetch counts and a branch deleted since does not. A fetch that fails proves
+# nothing either way (the cached refs may name a branch origin has dropped), so
+# it is a refusal, not a fallback. reachable is true, false (origin says no
+# branch holds it), or unverified (origin could not be asked).
 origin_branches=""
 reachable=true
 refuse_unreachable_commit() {
-  local why=""
+  local why="" verdict=false
   if ! git -C "$repo" remote get-url origin >/dev/null 2>&1; then
     why="this checkout has no origin remote to check it against"
+    verdict=unverified
+  elif ! GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch --quiet --prune origin >&2; then
+    why="could not fetch origin, so whether a branch there still holds it is unknown (the branches fetched earlier may since have been deleted)"
+    verdict=unverified
   else
-    GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch --quiet origin >&2 || note "could not fetch origin; checking the branches fetched last time"
     # `git branch -r --contains` lists every remote's branches; only origin's
     # count, and origin/HEAD is a pointer, not a branch.
     origin_branches=$(git -C "$repo" branch -r --contains "$full_sha" --format='%(refname)' 2>/dev/null |
@@ -142,8 +153,8 @@ refuse_unreachable_commit() {
   fi
   [ -n "$why" ] || return 0
   if [ "$allow_unreachable" -eq 1 ]; then
-    reachable=false
-    note "WARNING: $short_sha is not traceable to a branch ($why); installing anyway because of --allow-unreachable, and the receipt says so"
+    reachable=$verdict
+    note "WARNING: $short_sha is not traceable to a branch ($why); installing anyway because of --allow-unreachable, and the receipt records reachable=$verdict"
     return 0
   fi
   die "refusing to install $short_sha: $why. Every installed build must be traceable to a branch other hosts can fetch. Push the branch that holds it (git push origin <branch>; a Forgejo push needs no authorization) and rerun, or pass --allow-unreachable for a deliberate exception. Nothing was installed."
@@ -355,7 +366,7 @@ record = {
     "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     "commit": os.environ["COMMIT"],
     "build_sha": os.environ["BUILD_SHA"],
-    "reachable": os.environ["REACHABLE"] == "true",
+    "reachable": {"true": True, "false": False}.get(os.environ["REACHABLE"], os.environ["REACHABLE"]),
     "origin_branches": [name for name in os.environ["ORIGIN_BRANCHES"].split(",") if name],
     "binary_sha256": os.environ["BINARY_SHA256"],
     "bin_path": os.environ["BIN_PATH"],

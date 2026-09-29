@@ -233,6 +233,45 @@ fn with_timeout_kills_a_command_that_outlives_its_limit() {
     assert!(elapsed < Duration::from_secs(30), "took {elapsed:?}");
 }
 
+/// The command itself exits on SIGTERM, but a grandchild in its group traps
+/// it. Stopping at the command's exit would leave that grandchild running
+/// after the limit; the group gets SIGKILL after the grace period regardless.
+/// The grandchild's output goes to /dev/null so that a regression fails on the
+/// survivor check below instead of blocking on the inherited pipe for 300 s.
+#[test]
+fn with_timeout_kills_a_grandchild_that_ignores_sigterm_after_the_command_exits() {
+    let root = scratch("term-trap");
+    let pidfile = root.join("grandchild.pid");
+    let script = format!(
+        r#"( trap '' TERM; exec sleep 300 >/dev/null 2>&1 ) &
+echo $! > "{}"
+sleep 300"#,
+        pidfile.display()
+    );
+    let (output, elapsed) = with_timeout(&["1", "sh", "-c", &script]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(124), "stderr: {stderr}");
+    assert!(elapsed < Duration::from_secs(30), "took {elapsed:?}");
+
+    let grandchild = fs::read_to_string(&pidfile).expect("the command started its grandchild");
+    let grandchild = grandchild.trim();
+    // SIGKILL is prompt; give the reaper a moment.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(grandchild) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let survived = alive(grandchild);
+    if survived {
+        // Do not leave the 300 s sleep behind when the assertion fails.
+        let _ = Command::new("kill").args(["-9", grandchild]).status();
+    }
+    assert!(
+        !survived,
+        "the grandchild {grandchild} that ignores SIGTERM outlived the limit"
+    );
+    fs::remove_dir_all(&root).expect("remove scratch");
+}
+
 #[test]
 fn with_timeout_refuses_bad_arguments_and_missing_commands() {
     for args in [

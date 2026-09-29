@@ -47,33 +47,92 @@ fn names(text: &str, word: &str) -> bool {
     })
 }
 
-/// The fields a real output carries that the shape must name: the top-level
-/// keys, and the keys of the objects inside its top-level arrays. Nested
-/// objects that may be keyed by data (`unread{address:count}`) are skipped.
+/// Objects whose keys are data (room names, participant ids, addresses), not
+/// schema: the shape describes them as `name{key:value}` and their keys are
+/// whatever the store holds, so those keys are not required in the shape.
+/// Every other nested object is traversed. An entry here is a promise that
+/// the shape documents the map's value, not its keys.
+const DATA_KEYED_MAPS: &[&str] = &["unread", "pending", "pending_by_address", "rewritten"];
+
+/// The fields a real output carries that the shape must name: every key of
+/// every object at any depth (nested objects and objects inside arrays
+/// included), except the keys of the data-keyed maps above.
 fn documented_keys(value: &Value) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    let Some(object) = value.as_object() else {
-        return keys;
-    };
-    for (key, child) in object {
-        keys.insert(key.clone());
-        if let Some(items) = child.as_array() {
-            for item in items.iter().filter_map(Value::as_object) {
-                keys.extend(item.keys().cloned());
+    fn collect(value: &Value, keys: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    keys.insert(key.clone());
+                    // Only a map is exempt: `unread` in an inbox is an array
+                    // of envelopes whose fields must be named.
+                    let data_keyed = child.is_object() && DATA_KEYED_MAPS.contains(&key.as_str());
+                    if !data_keyed {
+                        collect(child, keys);
+                    }
+                }
             }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, keys)),
+            _ => {}
         }
     }
+    let mut keys = BTreeSet::new();
+    collect(value, &mut keys);
     keys
 }
 
-fn assert_documented(shape_name: &str, shape: &str, value: &Value, origin: &str) {
+/// What is wrong when `value` carries a field the shape never names.
+fn undocumented(shape_name: &str, shape: &str, value: &Value, origin: &str) -> Option<String> {
     let missing: Vec<String> = documented_keys(value)
         .into_iter()
         .filter(|key| !names(shape, key))
         .collect();
+    (!missing.is_empty()).then(|| {
+        format!("{origin}: the `{shape_name}` shape in `post schema` never names {missing:?}")
+    })
+}
+
+fn assert_documented(shape_name: &str, shape: &str, value: &Value, origin: &str) {
+    if let Some(problem) = undocumented(shape_name, shape, value, origin) {
+        panic!("{problem}\nshape:\n{shape}");
+    }
+}
+
+/// The instrument itself: it looks inside nested objects and arrays, exempts
+/// only data-keyed maps, and reports a nested field the shape never names.
+#[test]
+fn the_field_check_reaches_nested_objects_and_exempts_only_data_keyed_maps() {
+    let value = json!({
+        "envelope": {"kind": "note", "extra": {"deep": 1}},
+        "items": [{"inner": {"leaf": 1}}],
+        "pending": {"lineage:ember": 1},
+        "unread": [{"id": "m1"}],
+    });
+    let keys = documented_keys(&value);
+    for wanted in [
+        "envelope", "kind", "extra", "deep", "items", "inner", "leaf", "id",
+    ] {
+        assert!(keys.contains(wanted), "{wanted} missing from {keys:?}");
+    }
     assert!(
-        missing.is_empty(),
-        "{origin}: the `{shape_name}` shape in `post schema` never names {missing:?}\nshape:\n{shape}"
+        !keys.contains("lineage:ember"),
+        "a data-keyed map's keys are data: {keys:?}"
+    );
+
+    let shape = "envelope ({kind})\nitems[]";
+    let problem = undocumented(
+        "s",
+        shape,
+        &json!({"envelope": {"kind": 1, "secret": 2}}),
+        "t",
+    )
+    .expect("a nested field the shape never names is caught");
+    assert!(
+        problem.contains("secret") && !problem.contains("kind"),
+        "{problem}"
+    );
+    assert_eq!(
+        undocumented("s", shape, &json!({"envelope": {"kind": 1}}), "t"),
+        None
     );
 }
 
@@ -110,6 +169,7 @@ fn every_contract_sample_field_is_in_the_schema() {
     assert!(samples.len() >= 10, "the contract ships its samples");
 
     let mut checked = 0;
+    let mut problems = Vec::new();
     for (name, text) in samples {
         let shape_name = shape_for_sample(name);
         let shape = shape(&schema, shape_name);
@@ -126,10 +186,11 @@ fn every_contract_sample_field_is_in_the_schema() {
         for document in documents {
             let value: Value = serde_json::from_str(document)
                 .unwrap_or_else(|error| panic!("{name} is not JSON: {error}\n{document}"));
-            assert_documented(shape_name, &shape, &value, name);
+            problems.extend(undocumented(shape_name, &shape, &value, name));
             checked += 1;
         }
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(checked >= samples.len(), "every sample was read");
 }
 
@@ -232,6 +293,77 @@ fn the_schema_declares_the_fields_the_contract_names() {
             );
         }
     }
+}
+
+/// The identity states the wave added, read from live output: every field a
+/// missing claim, an unbound watch, `participant gc`, and a `bind --new` record
+/// print is named in the schema, and the status values `participant show`
+/// answers with are all listed.
+#[test]
+fn the_identity_states_are_documented_and_live() {
+    let sandbox = Sandbox::new();
+    let schema = schema(&sandbox);
+    let participant = shape(&schema, "participant");
+    for word in [
+        "bound",
+        "unbound",
+        "missing",
+        "archived",
+        "ephemeral",
+        "lease_hours",
+        "applied",
+    ] {
+        assert!(names(&participant, word), "participant shape lacks {word}");
+    }
+    let cwd = sandbox.path.clone();
+
+    // A claim that names no record: show, who, doctor.
+    let show = sandbox.run_unbound(&["participant", "show"], &cwd);
+    assert_success(&show);
+    let show: Value = from_stdout(&show);
+    assert_eq!(show["status"], "missing", "fixture: {show}");
+    assert_documented("participant", &participant, &show, "participant show");
+    let gc = sandbox.run_unbound(&["participant", "gc"], &cwd);
+    assert_success(&gc);
+    let gc: Value = from_stdout(&gc);
+    assert!(gc.get("applied").is_some(), "fixture: {gc}");
+    assert_documented("participant", &participant, &gc, "participant gc");
+    let who = sandbox.run_unbound(&["who"], &cwd);
+    let who: Value = from_stdout(&who);
+    assert!(who.get("participant_missing").is_some(), "fixture: {who}");
+    assert_documented("who", &shape(&schema, "who"), &who, "who, claim missing");
+    let doctor = sandbox.run_unbound(&["doctor", "--fix"], &cwd);
+    let doctor: Value = from_stdout(&doctor);
+    assert!(
+        doctor.get("participant_missing").is_some(),
+        "fixture: {doctor}"
+    );
+    assert_documented(
+        "doctor",
+        &shape(&schema, "doctor"),
+        &doctor,
+        "doctor, claim missing",
+    );
+
+    // No claim at all: the unbound snapshot line a hook reads.
+    let snapshot = sandbox.run_without_identity(&["watch", "--snapshot"], &cwd);
+    assert_success(&snapshot);
+    let line: Value = from_stdout(&snapshot);
+    assert_eq!(line["event"], "unbound", "fixture: {line}");
+    assert_documented("watch", &shape(&schema, "watch"), &line, "watch --snapshot");
+
+    // A `bind --new` record is ephemeral with a one-hour lease.
+    let bound = sandbox.run_in_env(&["participant", "bind", "--new", "--json"], None, &cwd, &[]);
+    assert_success(&bound);
+    let bound: Value = from_stdout(&bound);
+    assert_eq!(bound["participant"]["ephemeral"], true, "fixture: {bound}");
+    assert_eq!(bound["participant"]["lease_hours"], 1, "fixture: {bound}");
+    assert_documented(
+        "participant",
+        &participant,
+        &bound,
+        "participant bind --new",
+    );
 }
 
 /// The long options a command's `--help` lists, excluding the global flags.

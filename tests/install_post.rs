@@ -971,6 +971,104 @@ fn allow_unreachable_installs_an_unpushed_commit_and_records_the_exception() {
     assert_eq!(receipt["origin_branches"], serde_json::json!([]));
 }
 
+/// A clone that cannot reach origin still holds the remote-tracking refs it
+/// fetched last time. Those say nothing about origin now, so a failed fetch
+/// refuses instead of falling back to them.
+#[test]
+fn a_failed_fetch_refuses_even_when_the_cached_refs_hold_the_commit() {
+    let mut rig = Rig::new();
+    let live = rig.live("fetch fails");
+    rig.unpushed_commit();
+    rig.push_to("worktree-fix", false);
+    let cached = git(&rig.repo, &["branch", "-r", "--contains", "HEAD"]);
+    assert!(
+        cached.contains("origin/worktree-fix"),
+        "the cached refs hold the commit: {cached}"
+    );
+    let gone = rig.sandbox.path.join("origin-is-gone.git");
+    git(
+        &rig.repo,
+        &["remote", "set-url", "origin", &gone.display().to_string()],
+    );
+    for args in [&[][..], &["--dry-run"][..]] {
+        let output = rig.run_with(None, &[], args);
+        assert_code(&output, 3);
+        let text = stderr(&output);
+        assert!(
+            text.contains(&format!("refusing to install {}", rig.short_sha))
+                && text.contains("could not fetch origin")
+                && text.contains("--allow-unreachable"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("building"),
+            "the refusal comes before the build: {text}"
+        );
+        assert_eq!(fs::read(rig.target()).expect("post"), live);
+        assert!(!rig.receipt.exists());
+    }
+}
+
+#[test]
+fn allow_unreachable_after_a_failed_fetch_records_unverified_not_reachable() {
+    let mut rig = Rig::new();
+    let live = rig.live("fetch fails, allowed");
+    rig.unpushed_commit();
+    rig.push_to("worktree-fix", false);
+    let gone = rig.sandbox.path.join("origin-is-gone.git");
+    git(
+        &rig.repo,
+        &["remote", "set-url", "origin", &gone.display().to_string()],
+    );
+    let output = rig.run_with(None, &[], &["--allow-unreachable"]);
+    assert_code(&output, 0);
+    let text = stderr(&output);
+    assert!(
+        text.contains("WARNING") && text.contains("reachable=unverified"),
+        "{text}"
+    );
+    assert_backed_up_and_installed(&rig, &live);
+    let receipt = rig.receipt();
+    assert_eq!(receipt["reachable"], "unverified");
+    assert_eq!(
+        receipt["origin_branches"],
+        serde_json::json!([]),
+        "nothing is claimed from the cached refs"
+    );
+}
+
+/// The remote-tracking ref of a branch deleted on origin lingers in a clone
+/// until a fetch prunes it. An abandoned commit must not pass on it.
+#[test]
+fn a_branch_deleted_on_origin_no_longer_makes_its_commit_reachable() {
+    let mut rig = Rig::new();
+    let live = rig.live("abandoned");
+    rig.unpushed_commit();
+    rig.push_to("worktree-fix", false);
+    git(&rig.origin, &["branch", "-D", "worktree-fix"]);
+    let cached = git(&rig.repo, &["branch", "-r", "--contains", "HEAD"]);
+    assert!(
+        cached.contains("origin/worktree-fix"),
+        "the clone still holds the deleted branch's ref: {cached}"
+    );
+    let output = rig.run(&[]);
+    assert_code(&output, 3);
+    let text = stderr(&output);
+    assert!(
+        text.contains(&format!("refusing to install {}", rig.short_sha))
+            && text.contains("no branch on origin contains it"),
+        "{text}"
+    );
+    assert_eq!(fs::read(rig.target()).expect("post"), live);
+    assert!(!rig.receipt.exists());
+
+    // With the override it installs and says false: origin answered, and no
+    // branch there holds the commit.
+    assert_code(&rig.run_with(None, &[], &["--allow-unreachable"]), 0);
+    assert_eq!(rig.receipt()["reachable"], false);
+    assert_eq!(rig.receipt()["origin_branches"], serde_json::json!([]));
+}
+
 #[test]
 fn a_checkout_with_no_origin_cannot_vouch_for_a_commit() {
     let rig = Rig::new();
@@ -985,6 +1083,10 @@ fn a_checkout_with_no_origin_cannot_vouch_for_a_commit() {
     );
     assert_eq!(fs::read(rig.target()).expect("post"), live);
     assert!(!rig.receipt.exists());
+
+    // Overridden, nothing was checked against anything: unverified, not false.
+    assert_code(&rig.run_with(None, &[], &["--allow-unreachable"]), 0);
+    assert_eq!(rig.receipt()["reachable"], "unverified");
 }
 
 #[test]

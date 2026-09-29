@@ -91,12 +91,15 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .reason("duplicate room name under ASCII case folding"));
     }
 
-    if let Some(published) = peer_published_room(context, &args.name) {
+    let peers = peer_name_check(context, &args.name);
+    let peer_warning = peers.evidence.warning(&args.name);
+    if let Some(published) = peers.published {
         return Err(peer_published_error(PeerPublished {
             context,
             rooms: &rooms,
             requested: &args.name,
             published,
+            evidence: &peers.evidence,
             fix_for: &|candidate| {
                 format!(
                     "post rooms add {} {}",
@@ -128,7 +131,7 @@ fn add(context: &Context, args: RoomsAddArgs, pretty: bool) -> AppResult<Command
         .rule(rule.clone()));
     }
 
-    let result = render(&rooms, &rules, pretty)?;
+    let result = render_with_warnings(&rooms, &rules, peer_warning.into_iter().collect(), pretty)?;
     context.write_rooms(&rooms)?;
     for warning in warnings {
         eprintln!("{warning}");
@@ -330,13 +333,17 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
     }
     // An interrupted rename of this same pair resumes even if a peer has since
     // published the name: refusing would strand a half-moved store.
+    let mut peer_warning = None;
     if !resuming {
-        if let Some(published) = peer_published_room(context, &args.new) {
+        let peers = peer_name_check(context, &args.new);
+        peer_warning = peers.evidence.warning(&args.new);
+        if let Some(published) = peers.published {
             return Err(peer_published_error(PeerPublished {
                 context,
                 rooms: &rooms,
                 requested: &args.new,
                 published,
+                evidence: &peers.evidence,
                 fix_for: &|candidate| {
                     format!(
                         "post rooms rename {} {}",
@@ -512,6 +519,9 @@ fn rename(context: &Context, args: RoomsRenameArgs, pretty: bool) -> AppResult<C
     )?;
 
     let mut warnings = rename_warnings(context, &args.old, &args.new, bridged);
+    if let Some(warning) = peer_warning {
+        warnings.push(warning);
+    }
     if let Some(journal) = &journal {
         warnings.insert(0, resume_warning(journal));
     }
@@ -739,24 +749,157 @@ struct PublishedRoom {
 /// Bytes read from one bridge room-publication file before it is distrusted.
 const PEER_ROOMS_MAX_BYTES: u64 = 256 * 1024;
 
+/// What the bridge's peer-room files are worth right now.
+enum PeerEvidence {
+    /// No bridge on this host: there is nothing to check and nothing to say.
+    Unbridged,
+    /// The bridge ticked recently and every publication read cleanly.
+    Fresh,
+    /// The names cannot be trusted as current: the bridge's last tick is old,
+    /// its health file is missing or malformed, or a publication is absent or
+    /// unreadable. `age` is how long ago the bridge last confirmed its state,
+    /// when `bridge/health.json` says.
+    Unverified {
+        reason: String,
+        age: Option<std::time::Duration>,
+    },
+}
+
+impl PeerEvidence {
+    /// The evidence's age, said the way a person reads it.
+    fn age_text(&self) -> Option<String> {
+        match self {
+            PeerEvidence::Unverified { age, .. } => Some(match age {
+                Some(age) => format!(
+                    "the bridge last confirmed its state {} ago",
+                    describe_age(*age)
+                ),
+                None => "how old it is cannot be told".to_owned(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The `warnings` entry for a name accepted without fresh evidence.
+    fn warning(&self, name: &str) -> Option<String> {
+        let PeerEvidence::Unverified { reason, .. } = self else {
+            return None;
+        };
+        Some(format!(
+            "peer host room names could not be verified for '{name}': {reason}; {}. The name was accepted; if a peer host publishes it, the bridge reports a name collision that `post doctor` lists.",
+            self.age_text().unwrap_or_default()
+        ))
+    }
+}
+
+/// A duration as one rounded unit: `45 s`, `12 min`, `3 h`, `2 d`.
+fn describe_age(age: std::time::Duration) -> String {
+    let seconds = age.as_secs();
+    match seconds {
+        0..=119 => format!("{seconds} s"),
+        120..=7199 => format!("{} min", seconds / 60),
+        7200..=172_799 => format!("{} h", seconds / 3600),
+        _ => format!("{} d", seconds / 86_400),
+    }
+}
+
+/// The result of asking whether a peer host publishes a room name: the
+/// publisher when one does, and how far to trust the answer.
+struct PeerNameCheck {
+    published: Option<PublishedRoom>,
+    evidence: PeerEvidence,
+}
+
+/// Look `name` up in the bridge's peer publications and judge the evidence.
+/// A publication is only as current as the bridge's last tick, so a name the
+/// files list still refuses (with the evidence's age when it is old), while a
+/// name they do not list is accepted with a warning unless the evidence is
+/// fresh. A host with no `bridge/config.json` is never checked.
+fn peer_name_check(context: &Context, name: &str) -> PeerNameCheck {
+    let config = match crate::bridge_topology::load_config(context) {
+        Ok(None) => {
+            return PeerNameCheck {
+                published: None,
+                evidence: PeerEvidence::Unbridged,
+            }
+        }
+        Ok(Some(config)) => config,
+        Err(error) => {
+            return PeerNameCheck {
+                published: None,
+                evidence: PeerEvidence::Unverified {
+                    reason: error,
+                    age: crate::bridge_topology::health_tick(context, std::time::SystemTime::now())
+                        .ok()
+                        .map(|tick| tick.age),
+                },
+            }
+        }
+    };
+    let (published, mut problems) = lookup_published_room(context, &config.host, name);
+    // Every enrolled peer should have published something by now; one that has
+    // not leaves its names unknown.
+    if let Ok(peers) = crate::bridge_topology::enrolled_peers(context, &config) {
+        let peers_dir = crate::bridge_topology::bridge_dir(context)
+            .join("rooms")
+            .join("peers");
+        for peer in peers {
+            if fs::symlink_metadata(peers_dir.join(format!("{peer}.json"))).is_err() {
+                problems.push(format!("host '{peer}' has published no rooms file here"));
+            }
+        }
+    }
+    let tick = crate::bridge_topology::health_tick(context, std::time::SystemTime::now());
+    let age = tick.as_ref().ok().map(|tick| tick.age);
+    match &tick {
+        Ok(tick) if !tick.fresh => problems.insert(
+            0,
+            "bridge/health.json is stale, so the publications may be out of date".to_owned(),
+        ),
+        Err(reason) => problems.insert(0, reason.clone()),
+        Ok(_) => {}
+    }
+    let evidence = if problems.is_empty() {
+        PeerEvidence::Fresh
+    } else {
+        PeerEvidence::Unverified {
+            reason: problems.join("; "),
+            age,
+        }
+    };
+    PeerNameCheck {
+        published,
+        evidence,
+    }
+}
+
 /// The peer host that publishes `name` (ASCII case-insensitive), if this host
 /// is bridged and a peer's rooms publication or the ownership memory names
-/// it. Reads `bridge/rooms/peers/<host>.json` (`{"v":1,"host":..,"rooms":[..]}`)
-/// and `bridge/rooms/owners.json` (`{"<room>":{"host":..}}`), both written by
-/// the bridge. Those files are advisory here: an absent, oversize, or
-/// malformed one is skipped, never an error, so a broken bridge cannot stop
-/// `post rooms add` from working.
-fn peer_published_room(context: &Context, name: &str) -> Option<PublishedRoom> {
-    let own_host = bridge_host_id(context)?;
+/// it, with a description of every file that could not be read. Reads
+/// `bridge/rooms/peers/<host>.json` (`{"v":1,"host":..,"rooms":[..]}`) and
+/// `bridge/rooms/owners.json` (`{"<room>":{"host":..}}`), both written by the
+/// bridge. An absent, oversize, or malformed file is skipped and reported,
+/// never an error, so a broken bridge cannot stop `post rooms add` from working.
+fn lookup_published_room(
+    context: &Context,
+    own_host: &str,
+    name: &str,
+) -> (Option<PublishedRoom>, Vec<String>) {
+    let mut problems = Vec::new();
     let rooms_dir = crate::bridge_topology::bridge_dir(context).join("rooms");
     let peers_dir = rooms_dir.join("peers");
-    let mut files: Vec<PathBuf> = fs::read_dir(&peers_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect();
+    let mut files: Vec<PathBuf> = match fs::read_dir(&peers_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            problems.push(format!("cannot list {}: {error}", peers_dir.display()));
+            Vec::new()
+        }
+    };
     files.sort();
     for path in files {
         let Some(host) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -765,16 +908,25 @@ fn peer_published_room(context: &Context, name: &str) -> Option<PublishedRoom> {
         if host == own_host || !crate::bridge_topology::valid_host(host) {
             continue;
         }
-        let Ok(Some(bytes)) = crate::bridge_topology::read_regular(&path, PEER_ROOMS_MAX_BYTES)
-        else {
-            continue;
+        let bytes = match crate::bridge_topology::read_regular(&path, PEER_ROOMS_MAX_BYTES) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
+            Err(error) => {
+                problems.push(error);
+                continue;
+            }
         };
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            problems.push(format!("{} is not valid JSON", path.display()));
             continue;
         };
         // The file must vouch for itself: a stray `owners.json` or a copy under
         // another host's name is not a publication by `host`.
         if value.get("host").and_then(serde_json::Value::as_str) != Some(host) {
+            problems.push(format!(
+                "{} does not name '{host}' as its host",
+                path.display()
+            ));
             continue;
         }
         let published = value
@@ -785,27 +937,53 @@ fn peer_published_room(context: &Context, name: &str) -> Option<PublishedRoom> {
             .filter_map(serde_json::Value::as_str)
             .find(|room| room.eq_ignore_ascii_case(name));
         if let Some(room) = published {
-            return Some(PublishedRoom {
-                name: room.to_owned(),
-                host: host.to_owned(),
-            });
+            return (
+                Some(PublishedRoom {
+                    name: room.to_owned(),
+                    host: host.to_owned(),
+                }),
+                problems,
+            );
         }
     }
-    let owners =
-        crate::bridge_topology::read_regular(&rooms_dir.join("owners.json"), PEER_ROOMS_MAX_BYTES)
-            .ok()
-            .flatten()?;
-    let owners: serde_json::Value = serde_json::from_slice(&owners).ok()?;
-    owners.as_object()?.iter().find_map(|(room, record)| {
-        let host = record.get("host")?.as_str()?;
-        (room.eq_ignore_ascii_case(name)
-            && host != own_host
-            && crate::bridge_topology::valid_host(host))
-        .then(|| PublishedRoom {
-            name: room.clone(),
-            host: host.to_owned(),
+    let owners_path = rooms_dir.join("owners.json");
+    let owners = match crate::bridge_topology::read_regular(&owners_path, PEER_ROOMS_MAX_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return (None, problems),
+        Err(error) => {
+            problems.push(error);
+            return (None, problems);
+        }
+    };
+    let Some(owners) = serde_json::from_slice::<serde_json::Value>(&owners)
+        .ok()
+        .filter(serde_json::Value::is_object)
+    else {
+        problems.push(format!("{} is not a JSON object", owners_path.display()));
+        return (None, problems);
+    };
+    let found = owners.as_object().and_then(|owners| {
+        owners.iter().find_map(|(room, record)| {
+            let host = record.get("host")?.as_str()?;
+            (room.eq_ignore_ascii_case(name)
+                && host != own_host
+                && crate::bridge_topology::valid_host(host))
+            .then(|| PublishedRoom {
+                name: room.clone(),
+                host: host.to_owned(),
+            })
         })
-    })
+    });
+    (found, problems)
+}
+
+/// The publisher of `name`, ignoring how trustworthy the answer is: enough to
+/// tell whether a suggested candidate name is taken.
+fn peer_published_room(context: &Context, name: &str) -> Option<PublishedRoom> {
+    let config = crate::bridge_topology::load_config(context)
+        .ok()
+        .flatten()?;
+    lookup_published_room(context, &config.host, name).0
 }
 
 /// Everything `peer_published_error` needs about one refused name.
@@ -814,6 +992,7 @@ struct PeerPublished<'a> {
     rooms: &'a RoomMap,
     requested: &'a str,
     published: PublishedRoom,
+    evidence: &'a PeerEvidence,
     fix_for: &'a dyn Fn(&str) -> String,
     retry: &'a str,
 }
@@ -829,10 +1008,18 @@ fn peer_published_error(dup: PeerPublished) -> AppError {
         name: published_name,
         host,
     } = dup.published;
+    // Evidence that is not fresh still refuses, but says how old it is, so the
+    // reader can weigh a publication the bridge has not confirmed lately.
+    let stale = match dup.evidence.age_text() {
+        Some(age) => format!(
+            " (the publication may be out of date: {age}; if '{host}' no longer publishes it, restore the bridge and retry)"
+        ),
+        None => String::new(),
+    };
     let mut error = AppError::new(
         ErrorCode::InvalidArgument,
         format!(
-            "room '{}' is published by peer host '{host}' on the bridge (as '{published_name}'): a checkout on this machine needs its own name",
+            "room '{}' is published by peer host '{host}' on the bridge (as '{published_name}'){stale}: a checkout on this machine needs its own name",
             dup.requested
         ),
         match &candidate {
@@ -1533,6 +1720,16 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn render(rooms: &RoomMap, rules: &RulesConfig, pretty: bool) -> AppResult<CommandResult> {
+    render_with_warnings(rooms, rules, Vec::new(), pretty)
+}
+
+/// The rooms listing, with the `warnings` an `add` carries on stdout.
+fn render_with_warnings(
+    rooms: &RoomMap,
+    rules: &RulesConfig,
+    warnings: Vec<String>,
+    pretty: bool,
+) -> AppResult<CommandResult> {
     let output_rooms: Vec<_> = rooms
         .iter()
         .map(|(name, path)| {
@@ -1554,6 +1751,7 @@ fn render(rooms: &RoomMap, rules: &RulesConfig, pretty: bool) -> AppResult<Comma
         ok: true,
         rooms: output_rooms,
         count,
+        warnings,
     };
     CommandResult::json(&output, pretty)
 }
