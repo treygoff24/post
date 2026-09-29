@@ -179,13 +179,13 @@ pub(crate) enum BridgeHealth {
     Unavailable(String),
 }
 
+/// How far ahead of this host's clock a bridge stamp may be.
+pub(crate) const MAX_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Read `bridge/health.json` against `now`. Fresh means `ticked_at` is no
 /// older than three times `interval_s`, and not further in the future than
 /// that either (a far-future stamp could vouch forever). Unknown keys are
 /// ignored; the bridge adds counters over time.
-/// How far ahead of this host's clock a bridge stamp may be.
-pub(crate) const MAX_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_secs(5);
-
 pub(crate) fn bridge_health(context: &Context, now: std::time::SystemTime) -> BridgeHealth {
     let path = bridge_dir(context).join("health.json");
     let value = match read_health_json(&path) {
@@ -331,7 +331,8 @@ pub(crate) fn channel_relay_status(
     let config_path = bridge_dir(context).join("config.json");
     let config_bytes = match read_regular(&config_path, CONFIG_MAX_BYTES) {
         Ok(Some(bytes)) => bytes,
-        _ => return LocalOnly("no bridge config".to_owned()),
+        Ok(None) => return LocalOnly("no bridge config".to_owned()),
+        Err(reason) => return LocalOnly(format!("bridge config unusable: {reason}")),
     };
     let config: serde_json::Value = match serde_json::from_slice(&config_bytes) {
         Ok(value) => value,
@@ -787,7 +788,10 @@ fn topology_unavailable(raw: &str, detail: String) -> crate::error::AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_refuses_channel_name, unheld_room_letters, Context};
+    use super::{
+        bridge_refuses_channel_name, channel_relay_status, unheld_room_letters, ChannelRelayStatus,
+        Context,
+    };
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
     use std::path::Path;
@@ -851,6 +855,30 @@ mod tests {
             );
             fs::remove_file(marker).expect("remove marker");
         }
+        trash_test_root(&root);
+    }
+
+    /// A missing config is "no bridge config"; a config that is there but
+    /// cannot be used (not a regular file) says so, not that it is absent.
+    #[test]
+    fn relay_status_names_why_the_config_is_unusable() {
+        let root = test_root("bridge-config-reason");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let reason = || match channel_relay_status(&context, "general", true) {
+            ChannelRelayStatus::LocalOnly(reason) => reason,
+            _ => panic!("a channel send without a usable config is local only"),
+        };
+        assert_eq!(reason(), "no bridge config");
+        let config = root.join("bridge").join("config.json");
+        fs::create_dir_all(&config).expect("config as a directory");
+        let unusable = reason();
+        assert!(
+            unusable.contains("not a regular file") && unusable != "no bridge config",
+            "{unusable}"
+        );
         trash_test_root(&root);
     }
 }
