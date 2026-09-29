@@ -506,7 +506,7 @@ impl SendArgs {
      post chat <CHANNEL> --send --body <TEXT>             (send a short line; argv only)\n       \
        ...prose belongs on stdin or in a file. A body on argv is parsed by your shell first:\n       \
        ...backticks and $(...) inside double quotes execute and splice their output into the message.\n       \
-       ...add [--anyway] to send past unread messages, [--re ID] to reply, [--oversize] to exceed the size cap\n       \
+       ...add [--re ID] to reply, [--oversize] to exceed the size cap; a send always delivers and its receipt lists what crossed it\n       \
      post chat <CHANNEL> [--framing auto|full|compact] (read new messages; default oldest 25 unread)\n       \
      post chat <CHANNEL> --peek [--framing MODE]     (read without advancing)\n       \
      post chat <CHANNEL> --limit <N> [--framing MODE] (oldest N unread; --limit 0 = all)\n       \
@@ -517,7 +517,7 @@ impl SendArgs {
      post chat <CHANNEL> --discard                   (mark all unread seen without printing)\n       \
      post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
-     post chat <CHANNEL> --join [--description TEXT] (join, creating on first join)\n\n\
+     post chat <CHANNEL> --join [--description TEXT] [--create] (join; creates the channel on first join, spelled lowercase-with-hyphens; --create forces a new one beside a look-alike)\n\n\
      post chat <CHANNEL> --leave                      (leave for this participant only)\n       \
      post chat <CHANNEL> --archive | --unarchive      (hide from / restore to `post channels`; never deletes)\n\n\
      These forms are alternatives; pass exactly one. --body/--body-file imply --send.\n\
@@ -531,7 +531,7 @@ pub(crate) struct ChatArgs {
     /// Join the channel (creates it on first join); recorded in history.
     /// Unread starts at the join instant — pre-join messages are history,
     /// readable with --history; --backlog restores the old all-unread join.
-    #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway"])]
+    #[arg(long, conflicts_with_all = ["send", "peek", "discard", "body", "body_file", "subject", "seen_by", "history", "since", "limit", "grep", "re"])]
     pub join: bool,
 
     /// With --join: keep the whole backlog unread instead of starting unread
@@ -539,18 +539,24 @@ pub(crate) struct ChatArgs {
     #[arg(long, requires = "join")]
     pub backlog: bool,
 
+    /// With --join: create the channel even when a similarly named one exists
+    /// (a different spelling, or one typo away). Without it, joining a name
+    /// that looks like an existing channel is refused and names that channel.
+    #[arg(long, requires = "join")]
+    pub create: bool,
+
     /// Archive the channel for everyone on this host: hidden from `post
     /// channels` and Porch, never deleted. Any participant may archive; a new
     /// post in the channel un-archives it automatically.
-    #[arg(long, conflicts_with_all = ["unarchive", "leave", "join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
+    #[arg(long, conflicts_with_all = ["unarchive", "leave", "join", "send", "peek", "discard", "body", "body_file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
     pub archive: bool,
 
     /// Return an archived channel to the live `post channels` listing.
-    #[arg(long, conflicts_with_all = ["archive", "leave", "join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
+    #[arg(long, conflicts_with_all = ["archive", "leave", "join", "send", "peek", "discard", "body", "body_file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
     pub unarchive: bool,
 
     /// Leave the channel for this participant only; preserves every seen id.
-    #[arg(long, conflicts_with_all = ["join", "send", "peek", "discard", "body", "body_file", "file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "anyway", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
+    #[arg(long, conflicts_with_all = ["join", "send", "peek", "discard", "body", "body_file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description"])]
     pub leave: bool,
 
     /// Set or update the channel description (norms carrier); with --join.
@@ -562,8 +568,9 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["peek", "discard", "seen_by"])]
     pub send: bool,
 
-    /// Deliver even when unseen messages from others exist in the channel.
-    #[arg(long, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
+    /// Accepted and ignored: a send always delivers. Habitual commands that
+    /// still pass it keep working; the receipt reports what crossed instead.
+    #[arg(long, hide = true)]
     pub anyway: bool,
 
     /// Reply to a prior message id (or unique prefix) in this channel.
@@ -577,7 +584,7 @@ pub(crate) struct ChatArgs {
     /// Inline message body text; implies --send. A shell can expand `$1.63B`
     /// inside double quotes or end single quotes at an apostrophe; use
     /// --body-file or stdin for shell-sensitive prose.
-    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "file", "peek", "discard", "seen_by"])]
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "peek", "discard", "seen_by"])]
     pub body: Option<String>,
 
     /// Read the message body from this UTF-8 file; implies --send.
@@ -585,7 +592,7 @@ pub(crate) struct ChatArgs {
         long = "body-file",
         value_name = "PATH",
         value_hint = clap::ValueHint::FilePath,
-        conflicts_with_all = ["file", "peek", "discard", "seen_by"]
+        conflicts_with_all = ["peek", "discard", "seen_by"]
     )]
     pub body_file: Option<PathBuf>,
 
@@ -601,28 +608,26 @@ pub(crate) struct ChatArgs {
     #[arg(long = "signature-ref", value_name = "TAG", value_parser = nonempty_without_controls, conflicts_with_all = ["join", "peek", "discard", "seen_by", "history", "since", "limit", "grep"])]
     pub signature_ref: Option<String>,
 
-    /// Deprecated positional spelling of --body-file; requires --send.
-    #[arg(
-        value_name = "FILE",
-        value_hint = clap::ValueHint::FilePath,
-        requires = "send"
-    )]
-    pub file: Option<PathBuf>,
+    /// Never a body and never a file. Captured only so a stray word after the
+    /// channel (`post chat ops --send "hello"`) gets an answer that names the
+    /// real body forms instead of opening a file called `hello`.
+    #[arg(value_name = "STRAY", hide = true, num_args = 0..)]
+    pub stray: Vec<String>,
 
     /// Read without advancing the cursor.
     #[arg(long)]
     pub peek: bool,
 
     /// Show the last N messages regardless of read state; never advances the cursor.
-    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file", "seen_by", "anyway", "re"])]
+    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "seen_by", "re"])]
     pub history: Option<usize>,
 
     /// Filter --history by case-insensitive regex (requires --history).
-    #[arg(long, value_name = "PATTERN", requires = "history", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file", "seen_by", "anyway", "re", "limit", "since"])]
+    #[arg(long, value_name = "PATTERN", requires = "history", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "seen_by", "re", "limit", "since"])]
     pub grep: Option<String>,
 
     /// Only messages with id strictly after this id (ignores the cursor); never advances the cursor.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"], value_parser = nonempty_without_controls)]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "seen_by", "re", "grep"], value_parser = nonempty_without_controls)]
     pub since: Option<String>,
 
     /// Advance the cursor past every unread message without printing them.
@@ -632,7 +637,7 @@ pub(crate) struct ChatArgs {
     /// Bounded catch-up: consume only the oldest N unread (default 25 when
     /// omitted). `--limit 0` means unlimited. Use `--peek` for the newest-slice
     /// glance without advancing the cursor.
-    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "file", "seen_by", "anyway", "re", "grep"])]
+    #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "history", "since", "body", "body_file", "seen_by", "re", "grep"])]
     pub limit: Option<usize>,
 
     /// Mark every currently unseen message at or before MSG_ID (full id, or a
@@ -644,12 +649,12 @@ pub(crate) struct ChatArgs {
         long = "discard-through",
         value_name = "MSG_ID",
         value_parser = nonempty_without_controls,
-        conflicts_with_all = ["send", "join", "peek", "discard", "seen_by", "body", "body_file", "file", "history", "since", "limit", "grep", "anyway", "re", "subject", "oversize", "description"]
+        conflicts_with_all = ["send", "join", "peek", "discard", "seen_by", "body", "body_file", "history", "since", "limit", "grep", "re", "subject", "oversize", "description"]
     )]
     pub discard_through: Option<String>,
 
     /// List member participants whose seen-set contains this message (read-only).
-    #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "file", "history", "since", "limit", "anyway", "re", "grep", "subject", "oversize"])]
+    #[arg(long = "seen-by", value_name = "MSG_ID", value_parser = nonempty_without_controls, conflicts_with_all = ["send", "join", "peek", "discard", "body", "body_file", "history", "since", "limit", "re", "grep", "subject", "oversize"])]
     pub seen_by: Option<String>,
 
     /// Banner form for body-returning reads: auto (default, quiet), full
@@ -658,7 +663,7 @@ pub(crate) struct ChatArgs {
     /// bodies and must not look like they honored it.
     /// Presentation when absent: POST_FRAMING env (auto|full|compact), else
     /// auto. An explicit value always wins over the environment.
-    #[arg(long, value_enum, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file"])]
+    #[arg(long, value_enum, conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file"])]
     pub framing: Option<FramingMode>,
 
     /// Read one channel message body by UTF-8 byte range without consuming it.
@@ -668,7 +673,7 @@ pub(crate) struct ChatArgs {
         value_name = "ID",
         value_parser = nonempty_without_controls,
         requires = "max_bytes",
-        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "file", "history", "since", "limit", "grep", "anyway", "re", "subject", "oversize", "description", "signature_ref"]
+        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "history", "since", "limit", "grep", "re", "subject", "oversize", "description", "signature_ref"]
     )]
     pub message: Option<String>,
 
@@ -678,7 +683,7 @@ pub(crate) struct ChatArgs {
         long,
         value_name = "ID",
         value_parser = nonempty_without_controls,
-        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "file", "history", "since", "limit", "grep", "anyway", "re", "subject", "oversize", "description", "signature_ref", "message", "offset", "length", "max_bytes", "framing"]
+        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "history", "since", "limit", "grep", "re", "subject", "oversize", "description", "signature_ref", "message", "offset", "length", "max_bytes", "framing"]
     )]
     pub ack: Option<String>,
 
@@ -706,7 +711,7 @@ pub(crate) struct ChatArgs {
         long = "max-bytes",
         value_name = "N",
         value_parser = positive_bytes,
-        conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "file", "subject", "oversize", "description", "anyway", "re", "signature_ref"]
+        conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "subject", "oversize", "description", "re", "signature_ref"]
     )]
     pub max_bytes: Option<usize>,
 }

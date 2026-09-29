@@ -1,7 +1,7 @@
-use crate::channel::ChannelPaths;
+use crate::channel::{ChannelUse, Scan, SkippedFile};
 use crate::cli::{FramingMode, SearchArgs};
 use crate::command_result::CommandResult;
-use crate::error::{AppError, AppResult, ErrorCode};
+use crate::error::{AppError, AppResult};
 use crate::mailbox::{self, Context};
 use crate::output::{self, Framing, SearchOutput, SearchResult};
 
@@ -27,6 +27,8 @@ pub(super) fn run(
     let framing = mailbox::resolve_framing(args.framing);
     let pattern = LiteralPattern::new(&args.pattern);
     let mut matches = MatchAccumulator::new(args.limit);
+    // Files a scan could not parse: skipped, then reported once on stdout.
+    let mut skipped: Vec<SkippedFile> = Vec::new();
 
     let search_mail = !args.archived && (args.channel.is_none() || args.mail);
     let search_channels = !args.mail;
@@ -38,35 +40,51 @@ pub(super) fn run(
             }
         }
 
-        if let Some(channel_name) = args.channel.as_deref() {
+        if let Some(channel_arg) = args.channel.as_deref() {
+            // `#ops` as rendered is the channel `ops`.
+            let channel_name = crate::channel::strip_channel_sigil(context, channel_arg);
+            let channel_name = channel_name.as_str();
             require_channel(context, channel_name)?;
-            let items = crate::cursor_state::eligibility::visible_channel(
+            let scan = crate::cursor_state::eligibility::visible_channel_with(
                 context,
                 participant,
                 channel_name,
+                Scan::Tolerant,
             )?;
-            collect_channel(context, channel_name, items, &pattern, &mut matches);
+            skipped.extend(scan.skipped.into_iter().map(|f| f.in_channel(channel_name)));
+            collect_channel(context, channel_name, scan.items, &pattern, &mut matches);
         } else if args.archived {
-            for summary in crate::channel::list_channels(context)? {
+            let (summaries, unreadable) =
+                crate::channel::list_channels_with(context, Scan::Tolerant)?;
+            skipped.extend(unreadable);
+            for summary in summaries {
                 if summary.archived.is_none() {
                     continue;
                 }
                 let name = summary.info.name;
-                let items = crate::cursor_state::eligibility::archived_channel(
+                let scan = crate::cursor_state::eligibility::archived_channel_with(
                     context,
                     participant,
                     &name,
+                    Scan::Tolerant,
                 )?;
-                collect_channel(context, &name, items, &pattern, &mut matches);
+                skipped.extend(scan.skipped.into_iter().map(|f| f.in_channel(&name)));
+                collect_channel(context, &name, scan.items, &pattern, &mut matches);
             }
         } else if search_channels {
             for channel_name in crate::channel_state::effective_channels(context, participant)? {
-                let items = crate::cursor_state::eligibility::visible_channel(
+                let scan = crate::cursor_state::eligibility::visible_channel_with(
                     context,
                     participant,
                     &channel_name,
+                    Scan::Tolerant,
                 )?;
-                collect_channel(context, &channel_name, items, &pattern, &mut matches);
+                skipped.extend(
+                    scan.skipped
+                        .into_iter()
+                        .map(|f| f.in_channel(&channel_name)),
+                );
+                collect_channel(context, &channel_name, scan.items, &pattern, &mut matches);
             }
         }
     }
@@ -109,6 +127,9 @@ pub(super) fn run(
         .map_err(|error| AppError::invalid_argument(format!("serialize search: {error}")))?;
         let object = value.as_object_mut().expect("search output is an object");
         object.insert("pending".to_owned(), serde_json::json!(pending));
+        if !skipped.is_empty() {
+            object.insert("skipped".to_owned(), serde_json::json!(skipped));
+        }
         object.insert(
             "participant".to_owned(),
             serde_json::Value::String(resolved.participant().map_or_else(
@@ -131,6 +152,9 @@ pub(super) fn run(
             framing,
             search_channels,
         ));
+        if let Some(notice) = crate::channel::skipped_notice(&skipped) {
+            rendered.push_str(&notice);
+        }
         rendered
     };
 
@@ -353,20 +377,15 @@ fn collect_channel(
 }
 
 fn require_channel(context: &Context, channel_name: &str) -> AppResult<()> {
-    let paths = ChannelPaths::new(context, channel_name)?;
+    let paths = crate::channel::ChannelPaths::new(context, channel_name)?;
     if paths.exists() {
         return Ok(());
     }
-    Err(AppError::new(
-        ErrorCode::NotFound,
-        format!("channel '{channel_name}' does not exist"),
-        format!(
-            "Create it with `post chat {} --join`.",
-            mailbox::shell_quote(channel_name)
-        ),
-    )
-    .input(channel_name)
-    .reason("no channel.json under the channels directory"))
+    Err(crate::channel::channel_not_found(
+        context,
+        channel_name,
+        ChannelUse::Read,
+    ))
 }
 
 fn preview(body: &str) -> String {

@@ -28,7 +28,7 @@ pub(super) fn run(
     let selector = if args.mail {
         Selector::Mail
     } else if let Some(channel) = args.channel {
-        Selector::Channel(channel)
+        Selector::Channel(crate::channel::strip_channel_sigil(context, &channel))
     } else {
         // No selector is intentionally the same operation as --all.
         Selector::All
@@ -40,6 +40,8 @@ pub(super) fn run(
         let mut delta = Delta::default();
         let mut mail_addresses = BTreeMap::new();
         let mut targets = Vec::new();
+        // Message files a scan could not parse: skipped, reported once.
+        let mut skipped: Vec<crate::channel::SkippedFile> = Vec::new();
 
         match selector {
             Selector::Mail => {
@@ -57,8 +59,14 @@ pub(super) fn run(
             Selector::Channel(channel_name) => {
                 let paths = member_channel_paths(context, &channel_name, &participant)?;
                 let owner = mailbox::resolve_owner(context)?;
-                let (messages, ids) =
-                    collect_channel(context, &participant, &channel_name, &paths, owner.as_ref())?;
+                let (messages, ids) = collect_channel(
+                    context,
+                    &participant,
+                    &channel_name,
+                    &paths,
+                    owner.as_ref(),
+                    &mut skipped,
+                )?;
                 if !ids.is_empty() {
                     delta.channel_seen.push((channel_name.clone(), ids));
                 }
@@ -95,6 +103,7 @@ pub(super) fn run(
                         &channel_name,
                         &paths,
                         owner.as_ref(),
+                        &mut skipped,
                     ) {
                         Ok(result) => result,
                         Err(error) => {
@@ -125,59 +134,88 @@ pub(super) fn run(
             Some(max_bytes) => {
                 let remainders =
                     CatchupRemainderIndex::new(context, &participant, &targets, &room, max_bytes)?;
+                // The skipped-file list grows with the number of corrupt files and
+                // the budget does not: a bounded read carries a count and the
+                // first few ids, and names the command that lists them all.
+                let list_all = "post channels --json";
                 let admission = if json_output {
                     let json_sizes = CatchupJsonSizes::new(&targets, framing, pretty)?;
-                    super::byte_budget::admit_prefix_measured(
+                    super::byte_budget::admit_with_skipped_detail(
+                        !skipped.is_empty(),
                         selected_count,
-                        max_bytes,
-                        |count| {
-                            measure_budgeted_catchup_json(
-                                &room,
-                                &targets,
-                                count,
+                        |detail| {
+                            let report =
+                                crate::channel::BoundedSkipped::new(&skipped, detail, list_all);
+                            super::byte_budget::admit_prefix_measured(
+                                selected_count,
                                 max_bytes,
-                                pretty,
-                                &json_sizes,
-                                &remainders,
-                            )
-                        },
-                        |count| {
-                            render_budgeted_catchup_json(
-                                &room,
-                                &targets,
-                                count,
-                                framing,
-                                max_bytes,
-                                pretty,
-                                &remainders,
+                                |count| {
+                                    measure_budgeted_catchup_json(
+                                        &room,
+                                        &targets,
+                                        count,
+                                        max_bytes,
+                                        pretty,
+                                        &json_sizes,
+                                        &remainders,
+                                        &report,
+                                    )
+                                },
+                                |count| {
+                                    render_budgeted_catchup_json(
+                                        &room,
+                                        &targets,
+                                        count,
+                                        framing,
+                                        max_bytes,
+                                        pretty,
+                                        &remainders,
+                                        &report,
+                                    )
+                                },
                             )
                         },
                     )?
                 } else {
                     let text_sizes = CatchupTextSizes::new(&targets);
-                    super::byte_budget::admit_prefix_measured(
+                    // The skipped-files line rides in front of the body, so it
+                    // is charged to the byte budget in measure and render alike,
+                    // and it shrinks before it would cost a message.
+                    super::byte_budget::admit_with_skipped_detail(
+                        !skipped.is_empty(),
                         selected_count,
-                        max_bytes,
-                        |count| {
-                            Ok(measure_budgeted_catchup_text(
-                                &room,
-                                &targets,
-                                count,
-                                framing,
+                        |detail| {
+                            let notice =
+                                crate::channel::bounded_skipped_notice(&skipped, detail, list_all)
+                                    .unwrap_or_default();
+                            super::byte_budget::admit_prefix_measured(
+                                selected_count,
                                 max_bytes,
-                                &text_sizes,
-                                &remainders,
-                            ))
-                        },
-                        |count| {
-                            Ok(render_budgeted_catchup_text(
-                                &room,
-                                &targets,
-                                count,
-                                framing,
-                                max_bytes,
-                                &remainders,
-                            ))
+                                |count| {
+                                    Ok(notice.len().saturating_add(measure_budgeted_catchup_text(
+                                        &room,
+                                        &targets,
+                                        count,
+                                        framing,
+                                        max_bytes,
+                                        &text_sizes,
+                                        &remainders,
+                                    )))
+                                },
+                                |count| {
+                                    Ok(format!(
+                                        "{notice}{}",
+                                        render_budgeted_catchup_text(
+                                            &room,
+                                            &targets,
+                                            count,
+                                            framing,
+                                            max_bytes,
+                                            &remainders,
+                                        )
+                                    ))
+                                },
+                            )
                         },
                     )?
                 };
@@ -193,21 +231,36 @@ pub(super) fn run(
                     return Err(null_stdout_refusal(&selector_for_refusal, selected_count));
                 }
                 if json_output {
+                    #[derive(Serialize)]
+                    struct CatchupReceipt<'a> {
+                        #[serde(flatten)]
+                        catchup: CatchupOutput,
+                        /// Message files that could not be parsed and were left out.
+                        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+                        skipped: &'a [crate::channel::SkippedFile],
+                    }
                     output::json(
-                        &CatchupOutput {
-                            ok: true,
-                            room: room.clone(),
-                            targets,
-                            count: selected_count,
-                            selected_count: None,
-                            has_more: None,
-                            byte_limit: None,
-                            omitted: None,
+                        &CatchupReceipt {
+                            catchup: CatchupOutput {
+                                ok: true,
+                                room: room.clone(),
+                                targets,
+                                count: selected_count,
+                                selected_count: None,
+                                has_more: None,
+                                byte_limit: None,
+                                omitted: None,
+                            },
+                            skipped: &skipped,
                         },
                         pretty,
                     )?
                 } else {
-                    render_text(&room, &targets, selected_count, framing)
+                    format!(
+                        "{}{}",
+                        crate::channel::skipped_notice(&skipped).unwrap_or_default(),
+                        render_text(&room, &targets, selected_count, framing)
+                    )
                 }
             }
         };
@@ -260,6 +313,15 @@ struct CatchupBudgetView<'a> {
     byte_limit: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     omitted: Option<output::ByteOmission>,
+    /// Message files that could not be parsed and were left out: the first few
+    /// only, with the full count and the command that lists them all beside it
+    /// (a bounded read cannot afford an unbounded list).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    skipped: &'a [crate::channel::SkippedFile],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_hint: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -379,6 +441,7 @@ fn catchup_target_budget_view<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one more borrowed view of the same result
 fn render_budgeted_catchup_json(
     room: &str,
     targets: &[CatchupTarget],
@@ -387,6 +450,7 @@ fn render_budgeted_catchup_json(
     max_bytes: usize,
     pretty: bool,
     remainders: &CatchupRemainderIndex,
+    skipped: &crate::channel::BoundedSkipped,
 ) -> AppResult<String> {
     output::json(
         &catchup_budget_view(
@@ -396,11 +460,13 @@ fn render_budgeted_catchup_json(
             framing,
             max_bytes,
             remainders,
+            skipped,
         ),
         pretty,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // one more borrowed view of the same result
 fn measure_budgeted_catchup_json(
     room: &str,
     targets: &[CatchupTarget],
@@ -409,6 +475,7 @@ fn measure_budgeted_catchup_json(
     pretty: bool,
     sizes: &CatchupJsonSizes,
     remainders: &CatchupRemainderIndex,
+    skipped: &crate::channel::BoundedSkipped,
 ) -> AppResult<usize> {
     let selected_count = targets.iter().map(CatchupTarget::count).sum();
     let omitted = remainders.omission(admitted_count);
@@ -422,6 +489,9 @@ fn measure_budgeted_catchup_json(
             has_more: admitted_count < selected_count,
             byte_limit: max_bytes,
             omitted,
+            skipped: &skipped.shown,
+            skipped_total: skipped.total,
+            skipped_hint: skipped.hint.as_deref(),
         },
         pretty,
     )
@@ -435,6 +505,7 @@ fn catchup_budget_view<'a>(
     framing: FramingMode,
     max_bytes: usize,
     remainders: &CatchupRemainderIndex,
+    skipped: &'a crate::channel::BoundedSkipped,
 ) -> CatchupBudgetView<'a> {
     let admitted = prefix_counts(targets, admitted_count);
     let views = targets
@@ -453,6 +524,9 @@ fn catchup_budget_view<'a>(
         has_more: admitted_count < selected_count,
         byte_limit: max_bytes,
         omitted,
+        skipped: &skipped.shown,
+        skipped_total: skipped.total,
+        skipped_hint: skipped.hint.as_deref(),
     }
 }
 
@@ -883,13 +957,11 @@ fn member_channel_paths(
     let paths = ChannelPaths::new(context, channel_name)?;
     let quoted = mailbox::shell_quote(channel_name);
     if !paths.exists() {
-        return Err(AppError::new(
-            ErrorCode::NotFound,
-            format!("channel '{channel_name}' does not exist"),
-            format!("Create it with `post chat {quoted} --join`."),
-        )
-        .input(channel_name)
-        .reason("no channel.json under the channels directory"));
+        return Err(crate::channel::channel_not_found(
+            context,
+            channel_name,
+            crate::channel::ChannelUse::Read,
+        ));
     }
     let membership = crate::channel_state::ParticipantChannels::load(participant)?;
     if !membership.effective(context, participant, channel_name)? {
@@ -932,10 +1004,22 @@ fn collect_channel(
     channel_name: &str,
     _paths: &ChannelPaths,
     owner: Option<&crate::mailbox::ResolvedOwner>,
+    skipped: &mut Vec<crate::channel::SkippedFile>,
 ) -> AppResult<(Vec<ChatMessageItem>, Vec<String>)> {
     let mut messages = Vec::new();
     let mut seen_ids = Vec::new();
-    for item in cursor_state::eligibility::unread_channel(context, participant, channel_name)? {
+    let scan = cursor_state::eligibility::unread_channel_with(
+        context,
+        participant,
+        channel_name,
+        crate::channel::Scan::Tolerant,
+    )?;
+    skipped.extend(
+        scan.skipped
+            .into_iter()
+            .map(|file| file.in_channel(channel_name)),
+    );
+    for item in scan.items {
         let message = item.message;
         let body = item.body;
         let signed_verified = mailbox::signed_status(owner, &message, &body, channel_name)
@@ -1080,7 +1164,11 @@ fn render_channel_item(rendered: &mut String, item: &ChatMessageItem) {
         output::reply_address(item.reply_to_participant.as_deref(), &item.reply_to_shared),
         message.re.as_deref(),
         &message.subject,
-        message.event.as_deref(),
+        message
+            .event
+            .as_deref()
+            .map(crate::channel::event_label)
+            .as_deref(),
     ));
     if let Some(verified) = item.signed_verified {
         rendered.push_str(if verified {
@@ -1188,7 +1276,8 @@ mod tests {
 
         let paths = ChannelPaths::new(&context, "tax").expect("channel paths");
         let (_selected, selected_ids) =
-            collect_channel(&context, &participant, "tax", &paths, None).expect("collect");
+            collect_channel(&context, &participant, "tax", &paths, None, &mut Vec::new())
+                .expect("collect");
         write_message(late_id);
 
         ParticipantCursors::consume_channel(&context, &participant, "tax", &selected_ids)

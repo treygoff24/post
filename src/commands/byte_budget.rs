@@ -1,3 +1,4 @@
+use crate::channel::SkippedDetail;
 use crate::error::{AppError, AppResult, ErrorCode};
 use serde::Serialize;
 
@@ -144,6 +145,32 @@ pub(super) fn admit_prefix_measured(
         count: admitted_count,
         rendered,
     })
+}
+
+/// Admit a bounded read that reports skipped files, at the fullest report that
+/// costs the reader no message. `attempt` runs an admission with the report at
+/// the given detail. The listed report (a few ids and reasons) is preferred;
+/// when it admits fewer messages than the count-only report, or does not fit at
+/// all, the count-only report wins: corrupt files never push a readable
+/// message out of a tight budget, they only shrink their own line.
+pub(super) fn admit_with_skipped_detail(
+    has_skipped: bool,
+    selected_count: usize,
+    mut attempt: impl FnMut(SkippedDetail) -> AppResult<PrefixAdmission>,
+) -> AppResult<PrefixAdmission> {
+    let listed = attempt(SkippedDetail::Listed);
+    if !has_skipped || matches!(&listed, Ok(admission) if admission.count >= selected_count) {
+        return listed;
+    }
+    match (listed, attempt(SkippedDetail::CountOnly)) {
+        (Ok(listed), Ok(counted)) => Ok(if listed.count >= counted.count {
+            listed
+        } else {
+            counted
+        }),
+        (Ok(listed), Err(_)) => Ok(listed),
+        (Err(_), counted) => counted,
+    }
 }
 
 pub(super) fn checked_render(rendered: String, max_bytes: usize) -> AppResult<String> {

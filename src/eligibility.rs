@@ -1,5 +1,5 @@
 use super::{routing, ParticipantCursors};
-use crate::channel::{self, ChannelPaths};
+use crate::channel::{self, ChannelPaths, Scan, SkippedFile};
 use crate::channel_state::ParticipantChannels;
 use crate::error::{AppError, AppResult};
 use crate::mailbox::{parse_mail, Context};
@@ -31,6 +31,14 @@ pub(crate) struct EligibleChannelMessage {
     pub body: String,
     pub own: bool,
     pub already_read: bool,
+}
+
+/// A channel projection plus the message files it could not parse. A `Strict`
+/// scan never returns a non-empty `skipped`: it fails on the first bad file.
+#[derive(Debug, Default)]
+pub(crate) struct ChannelScan {
+    pub items: Vec<EligibleChannelMessage>,
+    pub skipped: Vec<SkippedFile>,
 }
 
 #[derive(Debug, Default)]
@@ -357,15 +365,31 @@ pub(crate) fn unread_channel(
     participant: &Participant,
     channel_name: &str,
 ) -> AppResult<Vec<EligibleChannelMessage>> {
+    Ok(unread_channel_with(context, participant, channel_name, Scan::Strict)?.items)
+}
+
+/// `unread_channel`, optionally skipping (and reporting) unparseable files.
+///
+/// An unknown event kind is a system event this build cannot name, not
+/// conversation: it is never unread, so it can neither ring a doorbell nor sit
+/// in front of a cursor.
+pub(crate) fn unread_channel_with(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+    scan: Scan,
+) -> AppResult<ChannelScan> {
     let Some(start) = channel_history_floor(context, participant, channel_name)? else {
-        return Ok(Vec::new());
+        return Ok(ChannelScan::default());
     };
-    Ok(all_channel_messages(context, participant, channel_name)?
-        .into_iter()
-        .filter(|item| {
-            !item.own && !item.already_read && !is_channel_history(&item.message.id, &start)
-        })
-        .collect())
+    let mut all = all_channel_messages(context, participant, channel_name, scan)?;
+    all.items.retain(|item| {
+        !item.own
+            && !item.already_read
+            && !is_channel_history(&item.message.id, &start)
+            && !channel::is_opaque_event(&item.message)
+    });
+    Ok(all)
 }
 
 /// The unread projection without re-reading messages this participant already
@@ -420,7 +444,7 @@ pub(crate) fn unread_channel_skipping_consumed(
         }
         let parsed = channel::parse_channel_message(&path)?;
         let own = message_is_own(context, participant, &parsed.message);
-        if own {
+        if own || channel::is_opaque_event(&parsed.message) {
             continue;
         }
         unread.push(EligibleChannelMessage {
@@ -437,62 +461,95 @@ pub(crate) fn unread_channel_skipping_consumed(
 
 /// Complete channel history for an effective member. Read state and sender
 /// status are annotations, not visibility filters.
+#[allow(dead_code)] // strict form kept beside `visible_channel_with`
 pub(crate) fn visible_channel(
     context: &Context,
     participant: &Participant,
     channel_name: &str,
 ) -> AppResult<Vec<EligibleChannelMessage>> {
+    Ok(visible_channel_with(context, participant, channel_name, Scan::Strict)?.items)
+}
+
+pub(crate) fn visible_channel_with(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+    scan: Scan,
+) -> AppResult<ChannelScan> {
     let membership = ParticipantChannels::load(participant)?;
     if !membership.effective(context, participant, channel_name)? {
-        return Ok(Vec::new());
+        return Ok(ChannelScan::default());
     }
-    all_channel_messages(context, participant, channel_name)
+    all_channel_messages(context, participant, channel_name, scan)
 }
 
 /// Every unseen message from someone else, IGNORING the membership start:
 /// the `--peek` domain. A peek consumes nothing, so it may glance at history
 /// a fresh member never saw; it is the one unseen-message surface that is not
 /// a report of unread (Trey-approved join-from-now design, 2026-09-23).
-pub(crate) fn unseen_channel_including_history(
+pub(crate) fn unseen_channel_including_history_with(
     context: &Context,
     participant: &Participant,
     channel_name: &str,
-) -> AppResult<Vec<EligibleChannelMessage>> {
-    Ok(visible_channel(context, participant, channel_name)?
-        .into_iter()
-        .filter(|item| !item.own && !item.already_read)
-        .collect())
+    scan: Scan,
+) -> AppResult<ChannelScan> {
+    let mut all = visible_channel_with(context, participant, channel_name, scan)?;
+    all.items
+        .retain(|item| !item.own && !item.already_read && !channel::is_opaque_event(&item.message));
+    Ok(all)
 }
 
 /// Every message of an ARCHIVED channel, membership not required. Archived
 /// history is the one channel surface open to non-members (Trey ruling
 /// 2026-09-22): it is how a host's agents find a channel to resurrect.
 /// A live channel returns nothing here; join it to read it.
+#[allow(dead_code)] // strict form kept beside `archived_channel_with`
 pub(crate) fn archived_channel(
     context: &Context,
     participant: &Participant,
     channel_name: &str,
 ) -> AppResult<Vec<EligibleChannelMessage>> {
+    Ok(archived_channel_with(context, participant, channel_name, Scan::Strict)?.items)
+}
+
+pub(crate) fn archived_channel_with(
+    context: &Context,
+    participant: &Participant,
+    channel_name: &str,
+    scan: Scan,
+) -> AppResult<ChannelScan> {
     let paths = ChannelPaths::new(context, channel_name)?;
     if !paths.exists() || crate::channel_archive::effective_mark(&paths)?.is_none() {
-        return Ok(Vec::new());
+        return Ok(ChannelScan::default());
     }
-    all_channel_messages(context, participant, channel_name)
+    all_channel_messages(context, participant, channel_name, scan)
 }
 
 fn all_channel_messages(
     context: &Context,
     participant: &Participant,
     channel_name: &str,
-) -> AppResult<Vec<EligibleChannelMessage>> {
+    scan: Scan,
+) -> AppResult<ChannelScan> {
     let cursors = ParticipantCursors::load(context, participant);
     let paths = ChannelPaths::new(context, channel_name)?;
     if !paths.exists() {
-        return Ok(Vec::new());
+        return Ok(ChannelScan::default());
     }
     let mut visible = Vec::new();
+    let mut skipped = Vec::new();
     for path in channel::message_files(&paths.messages)? {
-        let parsed = channel::parse_channel_message(&path)?;
+        let parsed = match channel::parse_channel_message(&path) {
+            Ok(parsed) => parsed,
+            Err(error) if scan == Scan::Tolerant => match SkippedFile::from_error(&path, &error) {
+                Some(file) => {
+                    skipped.push(file);
+                    continue;
+                }
+                None => return Err(error),
+            },
+            Err(error) => return Err(error),
+        };
         let own = message_is_own(context, participant, &parsed.message);
         let already_read = cursors.channel_has_seen(channel_name, &parsed.message.id);
         visible.push(EligibleChannelMessage {
@@ -504,7 +561,10 @@ fn all_channel_messages(
         });
     }
     visible.sort_by(|left, right| left.message.id.cmp(&right.message.id));
-    Ok(visible)
+    Ok(ChannelScan {
+        items: visible,
+        skipped,
+    })
 }
 
 /// Own means authored by this local participant; remote-origin mail never is.

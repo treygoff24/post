@@ -1,4 +1,4 @@
-use crate::channel::list_channels;
+use crate::channel::{list_channels_with, Scan};
 use crate::cli::ChannelsArgs;
 use crate::command_result::CommandResult;
 use crate::cursor_state::{eligibility, routing};
@@ -7,7 +7,9 @@ use crate::mailbox::Context;
 use crate::output::{self, ChannelListItem, ChannelsOutput};
 
 pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppResult<CommandResult> {
-    let summaries = list_channels(context)?;
+    // One unreadable channel file or message never fails the listing: it is
+    // skipped and reported (contract 2026-09-28 section 3).
+    let (summaries, mut skipped) = list_channels_with(context, Scan::Tolerant)?;
 
     let resolved = crate::participant::resolve(context)?;
     let participant = resolved.participant();
@@ -35,7 +37,18 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
             .is_some_and(|actor| effective_members.iter().any(|member| member.id == actor.id));
         let unread = match (participant, is_member) {
             (Some(actor), true) => {
-                Some(eligibility::unread_channel(context, actor, &summary.info.name)?.len())
+                let scan = eligibility::unread_channel_with(
+                    context,
+                    actor,
+                    &summary.info.name,
+                    Scan::Tolerant,
+                )?;
+                skipped.extend(
+                    scan.skipped
+                        .into_iter()
+                        .map(|file| file.in_channel(&summary.info.name)),
+                );
+                Some(scan.items.len())
             }
             _ => None,
         };
@@ -132,6 +145,9 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
                 "({archived_hidden} archived channel(s) hidden; `post channels --archived --text` lists them)\n"
             ));
         }
+        if let Some(notice) = crate::channel::skipped_notice(&skipped) {
+            rendered.push_str(&notice);
+        }
         return Ok(CommandResult::success(rendered));
     }
     let count = channels.len();
@@ -152,6 +168,9 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         ),
     );
     object.insert("pending".to_owned(), serde_json::json!(pending));
+    if !skipped.is_empty() {
+        object.insert("skipped".to_owned(), serde_json::json!(skipped));
+    }
     let rendered = output::json(&value, pretty)?;
     Ok(CommandResult::success(rendered))
 }
