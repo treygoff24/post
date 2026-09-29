@@ -1,0 +1,15 @@
+[Unit]
+Description=Post bridge mail sweeper
+
+[Service]
+Type=oneshot
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/.local/bin/post-bridge-sweep
+TimeoutStartSec=5min
+Environment="POST_MAIL_ROOT=@POST_MAIL_ROOT@"
+Environment="BRIDGE_REPO=@BRIDGE_REPO@"
+Environment="BRIDGE_HOST=@BRIDGE_HOST@"
+Environment="BRIDGE_SSH_KEY=@BRIDGE_SSH_KEY@"
+Environment="POST_BIN=@POST_BIN@"
+Environment="BRIDGE_TICK_DEADLINE_SECONDS=240"
+Environment="BRIDGE_INTERVAL_SECONDS=@INTERVAL@"

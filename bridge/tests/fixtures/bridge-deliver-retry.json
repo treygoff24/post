@@ -1,0 +1,13 @@
+{
+  "admitted_at": null,
+  "detail": "--sha256 0000000000000000000000000000000000000000000000000000000000000000 but the file digest is 0000000000000000000000000000000000000000000000000000000000000000",
+  "mail_id": "20260101-000001-a00001",
+  "ok": true,
+  "outcome": "retry",
+  "participant": "claude-dd611847",
+  "reason": "digest_mismatch",
+  "replay": false,
+  "schema": "post.bridge-deliver.v1",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_host": "peer-host"
+}

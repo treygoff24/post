@@ -1,0 +1,13 @@
+{
+  "admitted_at": "2026-01-01T00:00:00Z",
+  "detail": null,
+  "mail_id": "20260101-000001-a00001",
+  "ok": true,
+  "outcome": "delivered",
+  "participant": "claude-dd611847",
+  "reason": null,
+  "replay": false,
+  "schema": "post.bridge-deliver.v1",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_host": "peer-host"
+}
