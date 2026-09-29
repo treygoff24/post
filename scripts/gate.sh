@@ -12,6 +12,7 @@
 # (shellcheck 0.10 vs 0.11 and gitleaks 8.16 vs 8.30 each cost us a round trip).
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
+. scripts/test-env.sh
 
 fail=0
 err() { printf 'GATE FAIL: %s\n' "$*" >&2; fail=1; }
@@ -42,9 +43,9 @@ step "release"; build_release_bin || err "cargo build --release (or its executab
 # this release build via POST_BIN.
 if command -v node >/dev/null 2>&1; then
   step "node: hooks"
-  node --test skills/post/hooks/*.test.mjs || err "node hooks tests"
+  node scripts/test-node.mjs skills/post/hooks/*.test.mjs || err "node hooks tests"
   step "node: launcher"
-  node --test launcher/*.test.mjs || err "node launcher tests"
+  node scripts/test-node.mjs launcher/*.test.mjs || err "node launcher tests"
 else
   err "node not found; the hook and launcher suites are part of this gate"
 fi
@@ -63,6 +64,7 @@ fi
 # build via POST_BIN, like the hook contract suite.
 step "python: bridge"
 if command -v python3 >/dev/null 2>&1; then
+  python3 scripts/test_runner_test.py || err "test runner resource and exit checks"
   bridge/tests/run-all.sh || err "bridge tests (bridge/tests/run-all.sh)"
 else
   err "python3 not found; the bridge suite is part of this gate"

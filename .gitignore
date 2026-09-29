@@ -1,4 +1,6 @@
 /target/
+/.hillclimb/*/runs/
+/.hillclimb/cargo-target
 
 # Machine-local agent complaint log — never ships
 .papercuts.jsonl
