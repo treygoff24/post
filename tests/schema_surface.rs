@@ -1243,6 +1243,18 @@ fn doctor_reports_legacy_state_as_info_and_downgrades_inert_legacy_errors() {
     assert_eq!(info.severity, DoctorSeverity::Info);
 
     fs::write(&legacy, b"not json").expect("malformed legacy state");
+    // With no cursors.json the malformed legacy file is the only channel
+    // state, so it is a real error and the run must not report healthy.
+    let diagnosed = sandbox.run(&["doctor"]);
+    assert_eq!(diagnosed.status.code(), Some(1), "{diagnosed:?}");
+    let report: DoctorOutput = from_stdout(&diagnosed);
+    let live_invalid = report
+        .checks
+        .iter()
+        .find(|check| check.id == "channel_state.claude-space.invalid")
+        .expect("live legacy check");
+    assert_eq!(live_invalid.severity, DoctorSeverity::Error);
+
     let cursor = room_dir.join("cursors.json");
     fs::write(
         &cursor,

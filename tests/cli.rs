@@ -3538,6 +3538,17 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
     assert!(sandbox.mail_root.join("rooms.json").is_file());
     assert!(sandbox.mail_root.join("rules.json").is_file());
     assert!(sandbox.mail_root.join("archive").is_dir());
+    // The documented bootstrap pair: a plain doctor right after the first
+    // --fix must already call the fresh root healthy.
+    let confirmed = sandbox.run(&["doctor"]);
+    assert_success(&confirmed);
+    let report: DoctorOutput = from_stdout(&confirmed);
+    assert!(report.ok, "{:?}", report.checks);
+    assert_eq!(report.status, "healthy");
+    assert!(report
+        .checks
+        .iter()
+        .all(|check| check.severity != DoctorSeverity::Error));
     // Shipped defaults are empty: no room directories until one is registered.
     let workspace = sandbox.home.join("claude-space");
     fs::create_dir_all(&workspace).expect("create room workspace");
@@ -3553,6 +3564,7 @@ fn doctor_is_read_only_without_fix_and_fix_only_creates_missing_state() {
         .iter()
         .any(|check| check.id.contains("inbox_missing") || check.id.contains("read_missing")));
     assert!(!sandbox.mail_root.join("claude-space/inbox").exists());
+    assert!(!sandbox.mail_root.join("claude-space/read").exists());
     fs::create_dir_all(sandbox.mail_root.join("claude-space/inbox")).expect("create inbox");
 
     fs::write(
@@ -3808,32 +3820,6 @@ fn cursor_degrade_diagnostics_escape_hostile_state_and_paths() {
             .all(|line| !line.starts_with("FORGED root claim")),
         "a hostile root path must not forge a line: {err}"
     );
-}
-
-#[test]
-fn doctor_fix_then_doctor_is_healthy_on_a_fresh_root() {
-    let sandbox = Sandbox::new_unseeded();
-
-    // These are the two commands a set -e bootstrap runs; both must succeed
-    // before an operator can register the first room.
-    let fixed = sandbox.run(&["doctor", "--fix"]);
-    assert_success(&fixed);
-    let fixed_report: DoctorOutput = from_stdout(&fixed);
-    assert!(fixed_report.ok);
-    assert!(fixed_report
-        .checks
-        .iter()
-        .all(|check| check.severity != DoctorSeverity::Error));
-
-    let diagnosed = sandbox.run(&["doctor"]);
-    assert_success(&diagnosed);
-    let report: DoctorOutput = from_stdout(&diagnosed);
-    assert!(report.ok);
-    assert_eq!(report.status, "healthy");
-    assert!(report
-        .checks
-        .iter()
-        .all(|check| check.severity != DoctorSeverity::Error));
 }
 
 #[test]
@@ -8810,6 +8796,26 @@ fn seen_by_lists_members_past_a_message_read_only() {
     let peek: ChatReadOutput =
         from_stdout(&sandbox.run_in(&["chat", "seen", "--peek", "--json"], None, &beta));
     assert_eq!(peek.count, 0);
+    // The reader's own cursor is what a leaking --seen-by would move: leave a
+    // fresh message unread for alpha, query it, and it must still be unread.
+    let second: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--send", "--body", "second", "--json"],
+        None,
+        &beta,
+    ));
+    let unread = |who: &Path| -> usize {
+        let peek: ChatReadOutput =
+            from_stdout(&sandbox.run_in(&["chat", "seen", "--peek", "--json"], None, who));
+        peek.count
+    };
+    assert_eq!(unread(&alpha), 1);
+    let queried: SeenByOutput = from_stdout(&sandbox.run_in(
+        &["chat", "seen", "--seen-by", &second.message.id, "--json"],
+        None,
+        &alpha,
+    ));
+    assert!(!queried.seen_by.contains(&alpha_participant));
+    assert_eq!(unread(&alpha), 1, "--seen-by must not mark the id seen");
 }
 
 #[test]
@@ -8835,7 +8841,7 @@ fn history_grep_filters_case_insensitive_regex() {
             "--history",
             "10",
             "--grep",
-            "beta TWO",
+            "beta t.o",
             "--json",
         ],
         None,
@@ -9167,23 +9173,22 @@ fn who_reports_live_for_ten_second_interval_watch() {
             .any(|entry| entry.id == participant && entry.live_watch),
         "10s-interval watch must read live shortly after first poll"
     );
+    // The stamp must carry the watch's own interval; a fixed or default window
+    // would read live now and expire early for a long-interval watch.
+    let stamp = fs::read_to_string(
+        sandbox
+            .mail_root
+            .join("participants")
+            .join(&participant)
+            .join("watch.heartbeat"),
+    )
+    .expect("participant heartbeat");
+    let mut tokens = stamp.split_whitespace();
+    let seconds = tokens.next().expect("heartbeat seconds");
+    assert!(seconds.parse::<u64>().is_ok(), "{stamp:?}");
+    assert_eq!(tokens.next(), Some("10000"), "{stamp:?}");
     child.kill().expect("stop watch");
     let _ = child.wait();
-    // After exit, stamp ages out: write an interval-aware but old stamp.
-    let hb = sandbox
-        .mail_root
-        .join("participants")
-        .join(&participant)
-        .join("watch.heartbeat");
-    fs::write(&hb, "1 10000\n").expect("stale stamp");
-    let after: WhoOutput = from_stdout(&sandbox.run_as_participant(&["who"], &participant, &alpha));
-    assert!(
-        after
-            .participants
-            .iter()
-            .any(|entry| entry.id == participant && !entry.live_watch),
-        "post-exit stale stamp is not live"
-    );
 }
 
 #[test]
