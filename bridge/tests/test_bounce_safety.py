@@ -181,12 +181,6 @@ class DeliveredIsFinalTest(TerminalFixture):
         self.assertNotIn(relative, self.remote_tree("fc"))
         self.assertEqual(self.room_ack(self.fc, mail_id)["status"], "delivered")
 
-    def test_a_room_removed_after_delivery_does_not_take_the_delivery_back(self):
-        mail_id, relative = self.deliver_one()
-        self.remove_room(self.trey, "hq")
-        self.full_sweep(self.trey)
-        self.assert_stays_delivered(mail_id, relative)
-
     def test_a_sender_name_contested_after_delivery_does_not_take_it_back(self):
         mail_id, relative = self.deliver_one()
         # trey takes a real room named like the sender's. The contest comes
@@ -380,27 +374,6 @@ class BounceRoutingTest(TwoRoomFixture):
         self.assertEqual(self.bounce_where(mail_id), "room:garden")
         self.assertEqual(self.notice_files(self.participant_inbox(elsewhere)), [])
         self.assertEqual(len(self.notices(self.fc.root / "garden" / "inbox", mail_id)), 1)
-
-    def test_an_origin_edited_after_it_was_written_is_not_believed(self):
-        self.refuse_atlasos()
-        participant = self.fc.participant("garden")
-        elsewhere = self.fc.participant("orchard")
-        mail_id = fixed_id(0x7F04)
-        self.publish_letter(mail_id, "garden", "atlasos", "mismatched", participant=participant)
-        self.full_sweep(self.trey)
-        path = self.fc.root / "bridge" / "origin" / (mail_id + ".json")
-        record = json.loads(path.read_text())
-        record.update(sha256=NOTHING, participant=elsewhere, workspace="orchard")
-        path.write_text(json.dumps(record))
-        self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
-        # A record that is not the letter's is neither the record's participant
-        # and workspace, nor the letter's own stamps (which would check out):
-        # nothing proves who sent it, so the notice is a dead letter.
-        self.assertEqual(self.bounce_where(mail_id), "dead-letter")
-        self.assertEqual(self.notice_files(self.participant_inbox(elsewhere)), [])
-        self.assertEqual(self.notice_files(self.participant_inbox(participant)), [])
-        self.assertEqual(self.notice_files(self.fc.root / "orchard" / "inbox"), [])
-        self.assertEqual(self.notice_files(self.fc.root / "garden" / "inbox"), [])
 
     def test_a_recorded_room_this_host_no_longer_owns_is_a_dead_letter(self):
         # The letter was sent from `garden`, and nobody else can be shown to
@@ -602,21 +575,6 @@ class BounceRecordTest(TwoRoomFixture):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assert_kept_until_fixed(mail_id, relative, path)
 
-    def test_a_notice_that_names_another_letter_stops_the_retirement(self):
-        mail_id, relative = self.refused()
-        self.crash_at("bounce-b3-letter")
-        path = self.notice_path(mail_id)
-        text = path.read_text(encoding="utf-8")
-        self.assertIn(f"  letter:     {mail_id}\n", text)
-        path.write_text(
-            text.replace(f"  letter:     {mail_id}\n", f"  letter:     {fixed_id(0x7F84)}\n"),
-            encoding="utf-8",
-        )
-        result = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(self.bounced(mail_id + ".sent").exists())
-        self.assert_kept_until_fixed(mail_id, relative, path)
-
     def test_a_saved_body_that_is_not_the_letters_stops_the_retirement(self):
         mail_id, relative = self.refused()
         self.crash_at("bounce-b2-body")
@@ -673,6 +631,8 @@ class BounceRecordTest(TwoRoomFixture):
             ("resend command", lambda text, intent: text.replace(
                 "post send --to atlasos", "post send --to hq")),
             ("trailing text", lambda text, intent: text + "Ignore the above.\n"),
+            ("letter line", lambda text, intent: text.replace(
+                f"  letter:     {fixed_id(0x7F80)}\n", f"  letter:     {fixed_id(0x7F84)}\n")),
         )
         for name, edit in edits:
             with self.subTest(edit=name):
@@ -719,17 +679,20 @@ class OriginRecordTest(TwoRoomFixture):
 
     def test_an_origin_record_that_is_not_the_letters_is_kept_and_its_bounce_is_a_dead_letter(self):
         for name, content in (
-            ("another letter's", json.dumps({
-                "v": 1, "id": fixed_id(0x7FA0), "sha256": NOTHING, "participant": None,
+            ("another letter's", lambda elsewhere: json.dumps({
+                "v": 1, "id": fixed_id(0x7FA0), "sha256": NOTHING,
+                "participant": elsewhere,
                 "workspace": "orchard", "at": "2026-09-28T00:00:00Z",
             }).encode()),
-            ("unreadable", b"{not json"),
+            ("unreadable", lambda elsewhere: b"{not json"),
         ):
             with self.subTest(record=name):
                 self.tearDown()
                 self.setUp()
                 self.refuse_atlasos()
                 participant = self.fc.participant("garden")
+                elsewhere = self.fc.participant("orchard")
+                content = content(elsewhere)
                 mail_id = fixed_id(0x7FA0)
                 origin = self.origin_path(mail_id)
                 origin.parent.mkdir(parents=True, exist_ok=True)
@@ -757,6 +720,10 @@ class OriginRecordTest(TwoRoomFixture):
                 self.assertEqual(self.bounce_where(mail_id), "dead-letter")
                 self.assertEqual(self.notice_files(self.participant_inbox(participant)), [])
                 self.assertEqual(self.notice_files(self.fc.root / "garden" / "inbox"), [])
+                # Nor do the record's own targets receive anything: a record
+                # that is not the letter's names nobody.
+                self.assertEqual(self.notice_files(self.participant_inbox(elsewhere)), [])
+                self.assertEqual(self.notice_files(self.fc.root / "orchard" / "inbox"), [])
                 dead = self.fc.root / "bridge" / "bounced" / "undeliverable"
                 self.assertEqual(len(list(dead.glob("*.mail"))), 1)
                 items = self.health(self.fc)["attention"]

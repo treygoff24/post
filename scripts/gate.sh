@@ -28,19 +28,18 @@ step "clippy";  cargo clippy --all-targets --all-features -- -D warnings || err 
 test_timeout="${GATE_TEST_TIMEOUT:-1200}"
 step "test";    python3 scripts/with-timeout.py "$test_timeout" cargo test --all-targets --all-features \
   || err "cargo test (failed, or exceeded the ${test_timeout} s limit: GATE_TEST_TIMEOUT)"
-step "release"; cargo build --release || err "cargo build --release"
+# POST_BIN comes from the build's own compiler-artifact message (see
+# scripts/build-release-bin.sh), never from a second cargo invocation.
+# shellcheck source=scripts/build-release-bin.sh
+. scripts/build-release-bin.sh
+step "release"; build_release_bin || err "cargo build --release (or its executable path)"
 
 # The launcher and hook suites exercise the release binary built above, so they
 # run after it and not before.
 #
 # The contract suite (skills/post/hooks/contract.test.mjs) takes its samples from
 # `post contract samples` of the binary under test, so it is pointed at exactly
-# this release build rather than a guessed path.
-if release_bin=$(node scripts/cargo-release-bin.mjs); then
-  export POST_BIN="$release_bin"
-else
-  err "resolve release binary via cargo metadata"
-fi
+# this release build via POST_BIN.
 if command -v node >/dev/null 2>&1; then
   step "node: hooks"
   node --test skills/post/hooks/*.test.mjs || err "node hooks tests"

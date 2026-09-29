@@ -5,14 +5,12 @@ Issues and PRs welcome.
 The gate, run before every commit and by CI on Linux and macOS:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo build --release                 # the launcher tests exercise this binary
-node --test skills/post/hooks/*.test.mjs
-node --test launcher/*.test.mjs
-target/release/post schema >/dev/null
+./scripts/gate.sh
 ```
+
+It runs format, clippy, the Rust tests, the release build, the hook and launcher suites against that build, and `post schema`.
+
+The gate takes the release binary path from the build itself and exports it as `POST_BIN`; a standalone run of the hook or launcher tests (`node --test ...`) outside the gate should set `POST_BIN` to the built binary.
 
 Invariants to respect in any change (the rest are in `AGENTS.md` and `CONTRACT.md`):
 
