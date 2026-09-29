@@ -612,8 +612,9 @@ build from a tree with uncommitted tracked changes.
   messages[]}` (at most 10 messages, newest last, each `{id, from,
   display_name?, sent, addressed_to_you, body}` plus `signed_verified?`,
   `sender_address?`, and `sender_provenance?` when they apply): the whole body
-  for a message addressed to the sender, a 300-character preview otherwise;
-  text mode prints them after the sent line. The crossed messages stay unread.
+  for a message addressed to the sender (the stored body byte for byte, trailing
+  whitespace kept, so it is the same bytes `signed_verified` covers), a
+  300-character preview otherwise; text mode prints them after the sent line. The crossed messages stay unread.
   System join/profile events never count as crossed. A plain read whose stdout is the null device is refused
   before anything is emitted, consuming nothing; `--discard` is the deliberate
   way to mark every currently-existing unseen message seen without printing
@@ -688,7 +689,11 @@ build from a tree with uncommitted tracked changes.
   mode.
   `--seen-by <id>` is a read-only listing of member participants whose seen-set
   contains that message (`cursor` fields in JSON output are max-seen-id
-  summaries for compatibility, never the model). Consuming reads fail closed:
+  summaries for compatibility, never the model). A member left out of the roster
+  because its membership file is invalid is named on stdout in `skipped`
+  (`[{id, reason}]`, the participant id), and `post channels` lists such members
+  in its own `skipped` the same way, so a short roster is never mistaken for a
+  complete one. Consuming reads fail closed:
   an unreadable/unparseable unseen `.msg` file makes a plain read return
   `config_invalid` with the seen-set untouched (a read consumes only messages
   it emitted, never one it could not). Non-consuming `--history`/`--since`

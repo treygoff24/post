@@ -1198,6 +1198,18 @@ pub struct SeenByOutput {
     pub message_id: String,
     pub seen_by: Vec<String>,
     pub count: usize,
+    /// Members left out of the roster because their membership file is
+    /// invalid, as `{id, reason}`. Absent when none were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedMember>,
+}
+
+/// A channel member a roster left out because its membership file is invalid:
+/// the same `{id, reason}` shape as a skipped message file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedMember {
+    pub id: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

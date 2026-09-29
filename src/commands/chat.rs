@@ -2481,7 +2481,8 @@ fn seen_by(
     let paths = member_channel_paths(context, channel_name)?;
     let message_id = channel::resolve_message_id(&paths, msg_id_or_prefix)?;
     let mut seen = Vec::new();
-    for member in crate::channel_state::effective_participants(context, channel_name)? {
+    let mut roster = crate::channel_state::ChannelRoster::new(context);
+    for member in roster.effective_participants(channel_name)? {
         let state = ParticipantCursors::load(context, &member);
         if state.channel_has_seen(channel_name, &message_id) {
             seen.push(member.id);
@@ -2489,7 +2490,10 @@ fn seen_by(
     }
     seen.sort();
     let count = seen.len();
-    let rendered = if json_output {
+    // A member with an invalid membership file is not in the roster, so it
+    // cannot be reported as having seen or not seen anything: name it.
+    let skipped = roster.skipped().to_vec();
+    let mut rendered = if json_output {
         output::json(
             &output::SeenByOutput {
                 ok: true,
@@ -2497,6 +2501,13 @@ fn seen_by(
                 message_id: message_id.clone(),
                 seen_by: seen.clone(),
                 count,
+                skipped: skipped
+                    .iter()
+                    .map(|member| output::SkippedMember {
+                        id: member.id.clone(),
+                        reason: member.reason.clone(),
+                    })
+                    .collect(),
             },
             pretty,
         )?
@@ -2508,6 +2519,11 @@ fn seen_by(
             seen.join(", ")
         )
     };
+    if !json_output {
+        if let Some(notice) = channel::skipped_members_notice(&skipped) {
+            rendered.push_str(&notice);
+        }
+    }
     Ok(CommandResult::success(rendered))
 }
 

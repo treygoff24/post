@@ -10903,6 +10903,54 @@ fn a0a_r2_crossed_preview_signed_verified_field_contract() {
     );
 }
 
+/// The crossed receipt's `body` for an addressed message is the full stored
+/// body. A signed message is verified over that complete body, so a receipt
+/// that trimmed it would show `signed_verified: true` beside text that differs
+/// from the verified bytes.
+#[test]
+fn crossed_receipt_returns_a_verified_body_byte_for_byte() {
+    let sandbox = Sandbox::new();
+    let mara = configured_mara(&sandbox).0;
+    let alpha = owner_peer(&sandbox, "alpha");
+    join_channel(&sandbox, "cross", &alpha);
+    join_channel(&sandbox, "cross", &mara);
+    const TS: &str = "20260101T020000Z";
+    const OWNED: &str = "signed and newline terminated";
+    sign_for_owner(&sandbox, TS, OWNED);
+    let stored = format!("\u{1F9D4}\u{1F50F} {OWNED} [signed:{TS}]\n");
+    let signed: ChatSendOutput = from_stdout(&sandbox.run_in(
+        &[
+            "chat",
+            "cross",
+            "--send",
+            "--body",
+            stored.as_str(),
+            "--json",
+        ],
+        None,
+        &mara,
+    ));
+    let sent = sandbox.run_in(
+        &["chat", "cross", "--send", "--body", "my draft", "--json"],
+        None,
+        &alpha,
+    );
+    assert_eq!(sent.status.code(), Some(0), "{}", stderr(&sent));
+    let receipt: serde_json::Value = from_stdout(&sent);
+    let entry = receipt["crossed"]["messages"]
+        .as_array()
+        .expect("crossed messages")
+        .iter()
+        .find(|item| item["id"] == signed.message.id.as_str())
+        .expect("the signed owner message crossed");
+    assert_eq!(entry["signed_verified"], true, "{receipt}");
+    assert_eq!(
+        entry["body"],
+        stored.as_str(),
+        "the receipt body must be the verified bytes: {receipt}"
+    );
+}
+
 /// A0b r2 item 11: doctor's ssh-keygen presence probe is PATH/metadata only
 /// and must NEVER execute ssh-keygen (a bare interactive invocation prompts
 /// to CREATE a key). A recording stub proves non-execution; an empty PATH

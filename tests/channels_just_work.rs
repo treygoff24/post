@@ -401,6 +401,36 @@ fn a_clean_send_carries_no_crossed_block() {
     );
 }
 
+/// An addressed message rides in the receipt as its full stored body, trailing
+/// whitespace included: the field is documented as the full body, and a reader
+/// comparing it with the file (or with the bytes a signature covered) must find
+/// them equal. Only the 300-character preview of an unaddressed message may be
+/// trimmed.
+#[test]
+fn an_addressed_crossed_body_keeps_its_trailing_whitespace() {
+    let (sandbox, _alpha, beta) = ops_room();
+    let stored = "@beta the deploy is stuck  \n\n\t \n";
+    write_raw_message(&sandbox, "ops", A, json!({"mentions": ["beta"]}), stored);
+
+    let sent = ok_json(
+        &sandbox,
+        &["chat", "ops", "--send", "--body", "on it", "--json"],
+        &beta,
+    );
+    let messages = sent["crossed"]["messages"]
+        .as_array()
+        .expect("crossed messages");
+    let addressed = messages
+        .iter()
+        .find(|message| message["id"] == A)
+        .unwrap_or_else(|| panic!("the addressed message crossed: {sent}"));
+    assert_eq!(addressed["addressed_to_you"], true, "{sent}");
+    assert_eq!(
+        addressed["body"], stored,
+        "an addressed body is the stored body, byte for byte: {sent}"
+    );
+}
+
 #[test]
 fn crossed_text_receipt_lists_addressed_messages_first_and_in_full() {
     let (sandbox, alpha, beta) = ops_room();
@@ -1209,4 +1239,104 @@ fn a_bounded_catchup_caps_its_skipped_list_and_never_loses_a_message_to_it() {
         .expect("ops target");
     assert_eq!(ops["count"], 2, "{caught}");
     assert_eq!(caught["skipped_total"], 60, "{caught}");
+}
+
+// ---------------------------------------------------------------------------
+// 5. A roster says who it left out.
+// ---------------------------------------------------------------------------
+
+/// A member whose membership file is invalid cannot be placed in a channel, so
+/// a roster leaves it out. That must be visible where the roster is read, on
+/// stdout, in the `skipped: [{id, reason}]` shape the other listings use; a
+/// stderr warning alone leaves a caller reading a short roster as a complete
+/// one.
+#[test]
+fn a_roster_names_the_member_it_left_out_for_an_invalid_membership_file() {
+    let (sandbox, alpha, _beta) = ops_room();
+    write_channel_message(&sandbox, "ops", A, "alpha", "", "hello from alpha");
+    let alpha_id = sandbox.test_participant("alpha");
+    let beta_id = sandbox.test_participant("beta");
+    let mut both = vec![alpha_id.clone(), beta_id.clone()];
+    both.sort();
+
+    // Baseline: both members are listed and nothing is skipped.
+    let channels = ok_json(&sandbox, &["channels", "--json"], &alpha);
+    assert_eq!(
+        channel_row(&channels, "ops")["participants"],
+        json!(both),
+        "{channels}"
+    );
+    assert!(channels.get("skipped").is_none(), "{channels}");
+
+    // Beta's membership file goes bad.
+    let state = sandbox
+        .mail_root
+        .join("participants")
+        .join(&beta_id)
+        .join("channels.json");
+    fs::write(&state, "{ not json").expect("corrupt beta's membership file");
+
+    // `channels`: beta is missing from the roster and named in `skipped`.
+    let output = run(&sandbox, &["channels", "--json"], &alpha);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).is_empty(),
+        "the left-out member is reported on stdout, not as a stderr warning: {}",
+        stderr(&output)
+    );
+    let channels: Value = from_stdout(&output);
+    assert_eq!(
+        channel_row(&channels, "ops")["participants"],
+        json!([alpha_id]),
+        "{channels}"
+    );
+    let skipped = channels["skipped"].as_array().expect("skipped list");
+    assert_eq!(skipped.len(), 1, "{channels}");
+    assert_eq!(skipped[0]["id"], beta_id.as_str(), "{channels}");
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("membership file is invalid")),
+        "{channels}"
+    );
+
+    let output = run(&sandbox, &["channels", "--text"], &alpha);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&beta_id) && stdout(&output).contains("left out 1 member(s)"),
+        "text names the member it left out: {}",
+        stdout(&output)
+    );
+
+    // `chat --seen-by` reads the same roster and says the same thing.
+    let output = run(&sandbox, &["chat", "ops", "--seen-by", A, "--json"], &alpha);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let seen: Value = from_stdout(&output);
+    let skipped = seen["skipped"].as_array().expect("skipped list");
+    assert_eq!(skipped.len(), 1, "{seen}");
+    assert_eq!(skipped[0]["id"], beta_id.as_str(), "{seen}");
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("membership file is invalid")),
+        "{seen}"
+    );
+
+    let output = run(&sandbox, &["chat", "ops", "--seen-by", A], &alpha);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&beta_id) && stdout(&output).contains("left out 1 member(s)"),
+        "text names the member it left out: {}",
+        stdout(&output)
+    );
+
+    // Repaired, the roster is whole again and the field disappears.
+    fs::remove_file(&state).expect("repair beta's membership file");
+    let channels = ok_json(&sandbox, &["channels", "--json"], &alpha);
+    assert!(channels.get("skipped").is_none(), "{channels}");
+    let seen = ok_json(&sandbox, &["chat", "ops", "--seen-by", A, "--json"], &alpha);
+    assert!(seen.get("skipped").is_none(), "{seen}");
 }

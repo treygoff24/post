@@ -248,13 +248,6 @@ pub(crate) fn effective_channels(
     Ok(names.into_iter().collect())
 }
 
-pub(crate) fn effective_participants(
-    context: &Context,
-    channel: &str,
-) -> AppResult<Vec<Participant>> {
-    participants_for_channel(context, channel)
-}
-
 pub(crate) fn participants_for_join_validation(
     context: &Context,
     channel: &str,
@@ -377,10 +370,6 @@ pub(crate) fn participants_for_join_validation(
     Ok(participants)
 }
 
-fn participants_for_channel(context: &Context, channel: &str) -> AppResult<Vec<Participant>> {
-    ChannelRoster::new(context).effective_participants(channel)
-}
-
 /// A channel's legacy workspace membership (`members.json`), read on first
 /// need and reused for every participant asked about that channel.
 struct LegacyMembers<'a> {
@@ -413,9 +402,15 @@ impl<'a> LegacyMembers<'a> {
 /// channels` asked per channel, rereading every participant record, its
 /// channel state, and the channel's members.json once per participant: 44
 /// channels at 4,139 participants took 1.6 s (post-gxz).
+///
+/// A participant whose membership file is invalid cannot be placed in any
+/// channel, so the roster leaves it out and records it in `skipped` (after the
+/// first `effective_participants`): a caller that prints a roster must print
+/// those entries beside it, or the roster silently under-reports.
 pub(crate) struct ChannelRoster<'a> {
     context: &'a Context,
     participants: Option<Vec<(Participant, ParticipantChannels)>>,
+    skipped: Vec<crate::channel::SkippedFile>,
 }
 
 impl<'a> ChannelRoster<'a> {
@@ -423,7 +418,14 @@ impl<'a> ChannelRoster<'a> {
         Self {
             context,
             participants: None,
+            skipped: Vec::new(),
         }
+    }
+
+    /// Members left out for an invalid membership file. Filled by the first
+    /// `effective_participants` call.
+    pub(crate) fn skipped(&self) -> &[crate::channel::SkippedFile] {
+        &self.skipped
     }
 
     pub(crate) fn effective_participants(&mut self, channel: &str) -> AppResult<Vec<Participant>> {
@@ -440,30 +442,35 @@ impl<'a> ChannelRoster<'a> {
     }
 
     fn load(&mut self) -> AppResult<&[(Participant, ParticipantChannels)]> {
-        Ok(match &mut self.participants {
-            Some(participants) => participants,
-            empty => empty.insert(roster(self.context)?),
-        })
+        if self.participants.is_none() {
+            let (participants, skipped) = roster(self.context)?;
+            self.participants = Some(participants);
+            self.skipped = skipped;
+        }
+        Ok(self.participants.as_deref().unwrap_or_default())
     }
 }
 
-fn roster(context: &Context) -> AppResult<Vec<(Participant, ParticipantChannels)>> {
+type Roster = (
+    Vec<(Participant, ParticipantChannels)>,
+    Vec<crate::channel::SkippedFile>,
+);
+
+fn roster(context: &Context) -> AppResult<Roster> {
     let mut participants = Vec::new();
+    let mut skipped = Vec::new();
     for participant in crate::participant::list(context)? {
         let state = match ParticipantChannels::load(&participant) {
             Ok(state) => state,
             Err(error) if error.code == crate::error::ErrorCode::ConfigInvalid => {
-                eprintln!(
-                    "post: warning: skipped invalid participant channels {:?}: {:?}",
-                    participant.id, error.message
-                );
+                skipped.push(crate::channel::SkippedFile::member(&participant.id, &error));
                 continue;
             }
             Err(error) => return Err(error),
         };
         participants.push((participant, state));
     }
-    Ok(participants)
+    Ok((participants, skipped))
 }
 
 fn join_evidence(
