@@ -1304,18 +1304,19 @@ three-way signed 2026-08-12). Post carries evidence, never credentials:
   `agent-session --doctor` checks that seam.
 - Read surfaces render provenance as frozen evidence sentences (ratified
   copy, 2026-08-12; the `inferred-cwd` wording is locked). Every known
-  provenance sentence renders on every full-message text read — mail read
-  and channel reads alike, under every framing mode. The declared-env path
-  can claim a protected room from anywhere, so its evidence is never
-  sacrificed to display economy (M1 review ruling, 2026-08-12). A present
-  `sender_address` renders on both text surfaces as a sanitized line worded
-  as a self-declared instance tag, opaque and non-routable — never as a
-  credential. JSON surfaces always carry the raw fields, including the
-  inbox listing, watch channel-message NDJSON events, and crossed-send
-  bounce payloads (concurrent sends are exactly when instance attribution
-  matters). Unknown provenance values render silence — post never invents
-  copy for evidence it does not recognize. Messages without the fields
-  render byte-identically to before.
+  provenance sentence renders on a mail text read under `--framing full` and
+  `compact`; the quiet default (auto) omits it, and channel text reads carry
+  no evidence lines (Trey ruling, 2026-09-29). The declared-env path can
+  claim a protected room from anywhere, so under the opt-in framings its
+  evidence is never sacrificed to display economy (M1 review ruling,
+  2026-08-12). A present `sender_address` renders on the same framed mail
+  read as a sanitized line worded as a self-declared instance tag, opaque
+  and non-routable — never as a credential. JSON surfaces always carry the
+  raw fields, including the inbox listing, watch channel-message NDJSON
+  events, and crossed-send bounce payloads (concurrent sends are exactly
+  when instance attribution matters). Unknown provenance values render
+  silence — post never invents copy for evidence it does not recognize.
+  Messages without the fields render byte-identically to before.
 
 ## Behavior changes at 0.5.0 (amendment, 2026-08-12)
 

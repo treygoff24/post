@@ -407,7 +407,7 @@ pub(crate) fn unread_channel_with(
 /// event-wake scans. Every pass that owes complete validation -- startup,
 /// `--once`, `--snapshot`, the periodic reconciliation pass, and full-history
 /// readers (read, chat, catchup, channels, search) -- uses `unread_channel`
-/// (or `visible_channel`) instead. Its one behavioral difference is not
+/// (or `visible_channel_with`) instead. Its one behavioral difference is not
 /// observable as a lost report: a corrupt message which is ALREADY consumed
 /// does not fail this projection (the consumed id is excluded before its
 /// content is used, so it could not be delivered either way), and the complete
@@ -461,15 +461,6 @@ pub(crate) fn unread_channel_skipping_consumed(
 
 /// Complete channel history for an effective member. Read state and sender
 /// status are annotations, not visibility filters.
-#[allow(dead_code)] // strict form kept beside `visible_channel_with`
-pub(crate) fn visible_channel(
-    context: &Context,
-    participant: &Participant,
-    channel_name: &str,
-) -> AppResult<Vec<EligibleChannelMessage>> {
-    Ok(visible_channel_with(context, participant, channel_name, Scan::Strict)?.items)
-}
-
 pub(crate) fn visible_channel_with(
     context: &Context,
     participant: &Participant,
@@ -503,15 +494,6 @@ pub(crate) fn unseen_channel_including_history_with(
 /// history is the one channel surface open to non-members (Trey ruling
 /// 2026-09-22): it is how a host's agents find a channel to resurrect.
 /// A live channel returns nothing here; join it to read it.
-#[allow(dead_code)] // strict form kept beside `archived_channel_with`
-pub(crate) fn archived_channel(
-    context: &Context,
-    participant: &Participant,
-    channel_name: &str,
-) -> AppResult<Vec<EligibleChannelMessage>> {
-    Ok(archived_channel_with(context, participant, channel_name, Scan::Strict)?.items)
-}
-
 pub(crate) fn archived_channel_with(
     context: &Context,
     participant: &Participant,

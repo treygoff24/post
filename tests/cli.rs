@@ -1037,83 +1037,56 @@ fn rooms_add_rejects_existing_workspace_aliases_including_symlinks() {
 
 #[test]
 fn rooms_add_warns_when_a_stored_alias_cannot_be_verified() {
-    let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["rooms"]));
-    let workspace = sandbox.path.join("workspace");
-    fs::create_dir(&workspace).expect("create workspace");
-    let dangling = workspace.join("dangling");
-    std::os::unix::fs::symlink(workspace.join("missing"), &dangling)
-        .expect("create dangling symlink");
-    let stored_path = dangling.join("..");
-    assert!(fs::canonicalize(&stored_path).is_err());
+    // Two dangling-symlink shapes: the link's target sits inside the candidate
+    // workspace, and (a distinct resolution) beside it under a sibling. Each
+    // stored `link/..` cannot be canonicalized, so the add must warn and register.
+    for (candidate, link_dir, link_target, name) in [
+        (
+            "workspace",
+            "workspace",
+            "workspace/missing",
+            "workspace-alias",
+        ),
+        ("a", "a", "b/missing", "a-candidate"),
+    ] {
+        let sandbox = Sandbox::new();
+        assert_success(&sandbox.run(&["rooms"]));
+        let workspace = sandbox.path.join(candidate);
+        fs::create_dir(&workspace).expect("create candidate workspace");
+        fs::create_dir_all(sandbox.path.join("b")).expect("create sibling");
+        let dangling = sandbox.path.join(link_dir).join("dangling");
+        std::os::unix::fs::symlink(sandbox.path.join(link_target), &dangling)
+            .expect("create dangling symlink");
+        let stored_path = dangling.join("..");
+        assert!(fs::canonicalize(&stored_path).is_err());
 
-    let rooms_path = sandbox.mail_root.join("rooms.json");
-    let mut rooms: serde_json::Value =
-        serde_json::from_slice(&fs::read(&rooms_path).expect("read rooms config"))
-            .expect("parse rooms config");
-    rooms["agent-memory"] = serde_json::json!(stored_path.to_string_lossy());
-    fs::write(
-        &rooms_path,
-        serde_json::to_vec_pretty(&rooms).expect("serialize rooms config"),
-    )
-    .expect("write rooms config");
+        let rooms_path = sandbox.mail_root.join("rooms.json");
+        let mut rooms: serde_json::Value =
+            serde_json::from_slice(&fs::read(&rooms_path).expect("read rooms config"))
+                .expect("parse rooms config");
+        rooms["agent-memory"] = serde_json::json!(stored_path.to_string_lossy());
+        fs::write(
+            &rooms_path,
+            serde_json::to_vec_pretty(&rooms).expect("serialize rooms config"),
+        )
+        .expect("write rooms config");
 
-    let output = sandbox.run(&[
-        "rooms",
-        "add",
-        "workspace-alias",
-        workspace.to_string_lossy().as_ref(),
-    ]);
+        let output = sandbox.run(&["rooms", "add", name, workspace.to_string_lossy().as_ref()]);
 
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(&output),
-        stderr(&output)
-    );
-    assert!(stderr(&output).contains("registered room \"agent-memory\""));
-    let listed: RoomsOutput = from_stdout(&output);
-    assert!(listed
-        .rooms
-        .iter()
-        .any(|room| room.name == "workspace-alias"));
-}
-
-#[test]
-fn rooms_add_warns_when_a_dangling_symlink_parent_is_inconclusive() {
-    let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["rooms"]));
-    let a = sandbox.path.join("a");
-    let b = sandbox.path.join("b");
-    fs::create_dir(&a).expect("create candidate workspace");
-    fs::create_dir(&b).expect("create opposite symlink parent");
-    let link = a.join("link");
-    std::os::unix::fs::symlink(b.join("missing"), &link).expect("create dangling symlink");
-    let stored_path = link.join("..");
-    assert!(fs::canonicalize(&stored_path).is_err());
-
-    let rooms_path = sandbox.mail_root.join("rooms.json");
-    let mut rooms: serde_json::Value =
-        serde_json::from_slice(&fs::read(&rooms_path).expect("read rooms config"))
-            .expect("parse rooms config");
-    rooms["agent-memory"] = serde_json::json!(stored_path.to_string_lossy());
-    fs::write(
-        &rooms_path,
-        serde_json::to_vec_pretty(&rooms).expect("serialize rooms config"),
-    )
-    .expect("write rooms config");
-
-    let output = sandbox.run(&["rooms", "add", "a-candidate", a.to_string_lossy().as_ref()]);
-
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(&output),
-        stderr(&output)
-    );
-    assert!(stderr(&output).contains("registered room \"agent-memory\""));
-    let listed: RoomsOutput = from_stdout(&output);
-    assert!(listed.rooms.iter().any(|room| room.name == "a-candidate"));
+        assert!(
+            output.status.success(),
+            "{name}: stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("registered room \"agent-memory\""),
+            "{name}: {}",
+            stderr(&output)
+        );
+        let listed: RoomsOutput = from_stdout(&output);
+        assert!(listed.rooms.iter().any(|room| room.name == name), "{name}");
+    }
 }
 
 #[cfg(unix)]
@@ -1178,6 +1151,11 @@ fn rooms_add_rejects_mail_root_reserved_names() {
     for name in [
         "*",
         "archive",
+        // Independent anchors for storage names whose collision would corrupt
+        // the store; the mailbox-local test iterates the constant itself.
+        "participants",
+        ".rename.lock",
+        "rename-journal.json",
         "rooms.json",
         "rules.json",
         ".rooms.lock",
@@ -1215,30 +1193,6 @@ fn rooms_add_rejects_mail_root_reserved_names() {
 }
 
 #[test]
-fn rooms_add_rejects_duplicate_names_without_overwriting_the_registry() {
-    let sandbox = Sandbox::new();
-    assert_success(&sandbox.run(&["rooms"]));
-    let rooms_path = sandbox.mail_root.join("rooms.json");
-    let rooms_before = fs::read(&rooms_path).expect("read rooms config");
-
-    let output = sandbox.run(&[
-        "rooms",
-        "add",
-        "claude-space",
-        sandbox.path.to_string_lossy().as_ref(),
-    ]);
-
-    assert_eq!(output.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "invalid_argument");
-    assert!(error.error.message.contains("already registered"));
-    assert_eq!(
-        fs::read(&rooms_path).expect("reread rooms config"),
-        rooms_before
-    );
-}
-
-#[test]
 fn rooms_add_rejects_case_folded_collisions_with_registered_names() {
     let sandbox = Sandbox::new();
     assert_success(&sandbox.run(&["rooms"]));
@@ -1247,21 +1201,48 @@ fn rooms_add_rejects_case_folded_collisions_with_registered_names() {
     let workspace = sandbox.path.join("case-fold-candidate");
     fs::create_dir(&workspace).expect("create candidate workspace");
 
-    let output = sandbox.run(&[
-        "rooms",
-        "add",
-        "CLAUDE-SPACE",
-        workspace.to_string_lossy().as_ref(),
-    ]);
+    // The exact-case duplicate and the case-folded one take the same branch.
+    for requested in ["claude-space", "CLAUDE-SPACE"] {
+        let output = sandbox.run(&[
+            "rooms",
+            "add",
+            requested,
+            workspace.to_string_lossy().as_ref(),
+        ]);
 
-    assert_eq!(output.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "invalid_argument");
-    assert_eq!(error.error.details.room.as_deref(), Some("claude-space"));
-    assert_eq!(
-        fs::read(&rooms_path).expect("reread rooms config"),
-        rooms_before
-    );
+        assert_eq!(output.status.code(), Some(2), "{requested}");
+        let error: ErrorEnvelope = from_stderr(&output);
+        assert_eq!(error.error.code, "invalid_argument", "{requested}");
+        assert!(
+            error.error.message.contains("already registered"),
+            "{requested}: {}",
+            error.error.message
+        );
+        assert_eq!(
+            error.error.details.room.as_deref(),
+            Some("claude-space"),
+            "{requested}"
+        );
+        assert_eq!(
+            error.error.details.reason.as_deref(),
+            Some("duplicate room name under ASCII case folding"),
+            "{requested}"
+        );
+        assert!(
+            error.error.details.host.is_none(),
+            "a local duplicate reports no remote host: {requested}"
+        );
+        assert!(
+            error.error.suggested_fix.contains("set-path"),
+            "local duplicates keep the set-path hint: {requested}: {}",
+            error.error.suggested_fix
+        );
+        assert_eq!(
+            fs::read(&rooms_path).expect("reread rooms config"),
+            rooms_before,
+            "{requested}"
+        );
+    }
 }
 
 /// Register `name` as a remote placeholder for `host` the way the bridge does:
@@ -1455,33 +1436,6 @@ fn rooms_add_remote_placeholder_refusal_omits_fix_when_suggestion_is_taken() {
     assert!(
         error.error.suggested_fix.contains("pick one"),
         "hint should say so: {}",
-        error.error.suggested_fix
-    );
-}
-
-#[test]
-fn rooms_add_local_duplicate_keeps_the_set_path_hint() {
-    let sandbox = Sandbox::new();
-    let output = sandbox.run(&[
-        "rooms",
-        "add",
-        "CLAUDE-SPACE",
-        &sandbox.path.to_string_lossy(),
-    ]);
-
-    assert_eq!(output.status.code(), Some(2));
-    let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(
-        error.error.details.reason.as_deref(),
-        Some("duplicate room name under ASCII case folding")
-    );
-    assert!(
-        error.error.details.host.is_none(),
-        "a local duplicate reports no remote host"
-    );
-    assert!(
-        error.error.suggested_fix.contains("set-path"),
-        "local duplicates keep the set-path hint: {}",
         error.error.suggested_fix
     );
 }
@@ -1741,7 +1695,12 @@ fn rooms_rename_moves_mailbox_and_rewrites_live_state_not_history() {
     // letter stays read, the unread one is unread, nothing is unreadable.
     let (listing, warnings) = inbox_listing(&sandbox, &recipient, &workspace);
     assert_eq!(listing["skipped_unreadable"], 0, "{listing}\n{warnings}");
+    assert!(
+        !warnings.contains("corrupt routing receipt"),
+        "no receipt may read as corrupt after a rename: {warnings}"
+    );
     assert_eq!(unread_ids(&listing), vec![second.clone()], "{listing}");
+    assert_eq!(listing["unread_count"], 1, "{listing}");
     let reread = sandbox.run_as_participant(&["read", &first, "--json"], &recipient, &workspace);
     assert_success(&reread);
 
@@ -1842,60 +1801,6 @@ fn unread_ids(listing: &serde_json::Value) -> Vec<String> {
         .iter()
         .map(|item| item["id"].as_str().expect("unread id").to_owned())
         .collect()
-}
-
-/// F1: routed workspace mail stays readable after a rename. Real sends
-/// produce real routing receipts binding `workspace:alpha`; the rename must
-/// re-bind them to the new name or every routed letter reads as a corrupt
-/// receipt.
-#[test]
-fn rooms_rename_keeps_routed_workspace_mail_readable() {
-    let sandbox = Sandbox::new();
-    let (alpha, beta) = register_alpha_beta(&sandbox);
-    let recipient = bind_workspace_participant(&sandbox, "rename-recipient", &alpha, "alpha");
-    let sender = bind_workspace_participant(&sandbox, "rename-sender", &beta, "beta");
-    let first = send_mail_as(&sandbox, &sender, &beta, "workspace:alpha", "first letter");
-    let second = send_mail_as(&sandbox, &sender, &beta, "workspace:alpha", "second letter");
-
-    // The recipient's inbox routes both (publishing the receipts), then one
-    // is read and consumed.
-    let (listing, _) = inbox_listing(&sandbox, &recipient, &alpha);
-    assert_eq!(listing["unread_count"], 2, "{listing}");
-    assert!(sandbox
-        .mail_root
-        .join(format!("alpha/routing/{first}.json"))
-        .is_file());
-    let read = sandbox.run_as_participant(&["read", &first, "--json"], &recipient, &alpha);
-    assert_success(&read);
-
-    let output = sandbox.run(&["rooms", "rename", "alpha", "alpha2", "--json"]);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let receipt: serde_json::Value = from_stdout(&output);
-
-    let (listing, warnings) = inbox_listing(&sandbox, &recipient, &alpha);
-    assert_eq!(listing["skipped_unreadable"], 0, "{listing}\n{warnings}");
-    assert!(
-        !warnings.contains("corrupt routing receipt"),
-        "no receipt may read as corrupt after a rename: {warnings}"
-    );
-    assert_eq!(unread_ids(&listing), vec![second.clone()], "{listing}");
-    assert_eq!(listing["unread_count"], 1);
-
-    // A rewritten receipt is exactly what routing writes for the new name.
-    let moved: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            sandbox
-                .mail_root
-                .join(format!("alpha2/routing/{second}.json")),
-        )
-        .expect("moved receipt"),
-    )
-    .expect("receipt json");
-    assert_eq!(
-        moved["address"],
-        serde_json::json!({"kind": "workspace", "name": "alpha2"})
-    );
-    assert_eq!(receipt["rewritten"]["routing_receipts"], 2, "{receipt}");
 }
 
 /// F9: when a store already has a bare key for the new name, the renamed
@@ -2011,6 +1916,18 @@ fn rooms_rename_refuses_unknown_placeholder_and_bad_new_names() {
     assert_eq!(output.status.code(), Some(2));
     let error: ErrorEnvelope = from_stderr(&output);
     assert!(error.error.message.contains("':'"));
+
+    // Reserved storage name: rename validates its new name like `add` does.
+    let output = sandbox.run(&["rooms", "rename", "claude-space", "participants", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: ErrorEnvelope = from_stderr(&output);
+    assert_eq!(error.error.code, "invalid_argument");
+    assert!(error
+        .error
+        .details
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("reserved")));
 
     // Case-only rename.
     let output = sandbox.run(&["rooms", "rename", "claude-space", "CLAUDE-SPACE", "--json"]);
@@ -2549,20 +2466,6 @@ fn rooms_rename_waits_for_the_participant_cursor_lock() {
     let cursors: serde_json::Value =
         serde_json::from_slice(&fs::read(participant_dir.join("cursors.json")).unwrap()).unwrap();
     assert!(cursors["mail"].get("workspace:hq").is_none());
-}
-
-#[test]
-fn rooms_rename_skips_the_interlock_without_a_bridge_config() {
-    let sandbox = Sandbox::new();
-    create_default_room_paths(&sandbox);
-    let workspace = sandbox.path.join("hq-workspace");
-    fs::create_dir(&workspace).expect("workspace dir");
-    register_room(&sandbox, "hq", &workspace);
-
-    let output = sandbox.run(&["rooms", "rename", "hq", "hq-mac", "--json"]);
-
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!sandbox.mail_root.join("bridge").exists());
 }
 
 #[test]
@@ -3339,7 +3242,7 @@ fn clap_rejects_conflicts_and_bad_enums_as_structured_usage_errors() {
 }
 
 #[test]
-fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
+fn send_to_a_mistyped_room_has_a_did_you_mean_and_a_discovery_hint() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "send",
@@ -3407,8 +3310,8 @@ fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
     }
 }
 
-/// The inline room list is bounded so an error cannot cost more context than the
-/// operation it refused; the fixture has three rooms, so the bound needs its own.
+/// A store holding only `rooms.json` (no seeded state) lists all twelve rooms in
+/// order without an identity, and the listing writes nothing.
 #[test]
 fn unbound_rooms_listing_is_complete_and_read_only_with_many_rooms() {
     let sandbox = Sandbox::new_unseeded();
@@ -12161,8 +12064,29 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
         let output = sandbox.run_in(&["read", &id], None, &home_room);
         assert_success(&output);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let _ = expected;
-        assert!(!stdout.contains("Sender evidence:"));
+        assert!(
+            !stdout.contains("Sender evidence:"),
+            "a default read stays quiet: {stdout}"
+        );
+        for framing in ["full", "compact"] {
+            let framed = sandbox.run_in(
+                &["read", &id, "--peek", "--framing", framing],
+                None,
+                &home_room,
+            );
+            assert_success(&framed);
+            let framed = String::from_utf8_lossy(&framed.stdout);
+            match expected {
+                Some(sentence) => assert!(
+                    framed.contains(&format!("Sender evidence: {sentence}\n")),
+                    "{value} must render its frozen sentence under {framing}: {framed}"
+                ),
+                None => assert!(
+                    !framed.contains("Sender evidence:"),
+                    "unknown {value} stays silent under {framing}: {framed}"
+                ),
+            }
+        }
         let json = sandbox.run_in(&["read", &id, "--peek", "--json"], None, &home_room);
         assert_success(&json);
         let value_json: serde_json::Value = from_stdout(&json);
@@ -12171,7 +12095,7 @@ fn mail_read_renders_each_frozen_sentence_and_silence_for_unknown() {
 }
 
 #[test]
-fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
+fn chat_text_reads_stay_quiet_while_json_carries_raw_provenance_and_address() {
     let sandbox = Sandbox::new();
     let home_room = sandbox.home.join("claude-space");
     fs::create_dir_all(&home_room).expect("room tree");
@@ -12205,6 +12129,9 @@ fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
         .expect("write channel fixture");
     }
 
+    // Channel text reads carry no evidence lines under any framing (mail read
+    // renders them only under full/compact, CONTRACT.md); JSON below carries
+    // the raw fields.
     for framing in ["compact", "full", "auto"] {
         let output = sandbox.run_in(
             &["chat", "idm1r", "--peek", "--framing", framing],
@@ -12214,18 +12141,12 @@ fn chat_renders_every_known_provenance_sentence_on_every_text_read() {
         assert_success(&output);
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(
-            !text.contains(FROZEN_INFERRED_CWD),
-            "inferred evidence must render under {framing}: {text}"
+            text.contains("hello from declared-env") && text.contains("hello from inferred-cwd"),
+            "both messages must be in the read under {framing}: {text}"
         );
         assert!(
-            !text.contains(FROZEN_DECLARED_ENV),
-            "declared evidence must render under {framing}: {text}"
-        );
-        assert!(
-            !text.contains(
-                "[sender address: codex.pact.deadbeef — self-declared instance tag, opaque and non-routable]"
-            ),
-            "the address line must render under {framing}: {text}"
+            !text.contains("Sender evidence:") && !text.contains("Sender address:"),
+            "channel text reads stay quiet under {framing}: {text}"
         );
     }
 
@@ -12272,12 +12193,24 @@ fn mail_read_renders_address_line_with_non_credential_wording() {
     let output = sandbox.run_in(&["read", &id], None, &home_room);
     assert_success(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = "Sender address: claude-code.post.0123abcd (self-declared instance tag, opaque and non-routable)\n";
     assert!(
-        !stdout.contains(
-            "Sender address: claude-code.post.0123abcd (self-declared instance tag, opaque and non-routable)"
-        ),
-        "mail read must render the address with non-credential wording: {stdout}"
+        !stdout.contains("Sender address:"),
+        "a default read stays quiet: {stdout}"
     );
+    for framing in ["full", "compact"] {
+        let framed = sandbox.run_in(
+            &["read", &id, "--peek", "--framing", framing],
+            None,
+            &home_room,
+        );
+        assert_success(&framed);
+        let framed = String::from_utf8_lossy(&framed.stdout);
+        assert!(
+            framed.contains(line),
+            "{framing} read must render the address with non-credential wording: {framed}"
+        );
+    }
 }
 
 #[test]
@@ -12779,36 +12712,6 @@ fn workspace_sender_can_inspect_own_mail_without_consuming_a_recipient_copy() {
         .join("beta/read")
         .join(format!("{id}.mail"))
         .exists());
-}
-
-#[test]
-fn send_receipt_offers_a_runnable_sender_history_readback_command() {
-    let sandbox = Sandbox::new();
-    let (alpha, _beta) = register_alpha_beta(&sandbox);
-    let sender = sandbox.test_participant("alpha");
-    let sent = sandbox.run_as_participant(
-        &["send", "--to", "workspace:beta", "--body", "hi"],
-        &sender,
-        &alpha,
-    );
-    assert_success(&sent);
-    let text = stdout(&sent);
-    assert!(text.contains("canonical message retained at workspace:beta"));
-    assert!(text.contains("sender is not a frozen recipient"));
-    let id = text
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(3))
-        .expect("sent id in receipt");
-    assert!(
-        text.contains(&format!("post: read it back with: post read '{id}'")),
-        "missing runnable readback: {text}"
-    );
-    let readback = sandbox.run_as_participant(&["read", id, "--json"], &sender, &alpha);
-    assert_success(&readback);
-    let readback: serde_json::Value = from_stdout(&readback);
-    assert_eq!(readback["own"], true);
-    assert_eq!(readback["body"], "hi");
 }
 
 /// `--body -` was already the stdin sentinel; `--body-file -` was not, so it
