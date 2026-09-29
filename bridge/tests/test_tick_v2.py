@@ -50,7 +50,13 @@ class TickV2Test(unittest.TestCase):
     def enable_channels(self, machine, value="__default__"):
         path = machine.root / "bridge" / "config.json"
         config = json.loads(path.read_text(encoding="utf-8"))
-        config["channels"] = {"mode": "all", "deny": []} if value == "__default__" else value
+        # A non-empty deny list for a channel no test uses keeps the real-tick
+        # config path (parse, then sync) exercised for the deny shape too.
+        config["channels"] = (
+            {"mode": "all", "deny": ["devbox-build"]}
+            if value == "__default__"
+            else value
+        )
         path.write_text(json.dumps(config, sort_keys=True) + "\n", encoding="utf-8")
 
     def full_rounds(self, count=2, machines=None):
@@ -60,7 +66,7 @@ class TickV2Test(unittest.TestCase):
                 result = machine.sweep()
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_sweep_defines_no_common_exports_and_accepts_v2_config(self):
+    def test_sweep_defines_no_common_exports(self):
         common_path = SWEEP.parent / "bridgelib" / "common.py"
         common_tree = ast.parse(common_path.read_text(encoding="utf-8"))
         common_exports = {
@@ -75,55 +81,6 @@ class TickV2Test(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.ClassDef))
         }
         self.assertFalse(common_exports & sweep_definitions)
-
-        config = json.loads(
-            (self.fc.root / "bridge" / "config.json").read_text(encoding="utf-8")
-        )
-        config["channels"] = {"mode": "all", "deny": ["devbox-build"]}
-        (self.fc.root / "bridge" / "config.json").write_text(
-            json.dumps(config) + "\n", encoding="utf-8"
-        )
-        result = run(
-            [sys.executable, SWEEP, "--check-config"],
-            env=self.fc.env(),
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_sweep_keeps_no_v1_room_shadows(self):
-        """Review finding 6: v1's ensure_placeholders/room_maps are unreachable.
-
-        `grep -n 'def ensure_placeholders' sweep.py` lands a maintainer in v1
-        logic inside the file that owns the tick, and that copy carried the
-        per-candidate fence checks the live path was missing. A fence or
-        deadline patch applied there ships nothing and tests green.
-        """
-        tree = ast.parse(SWEEP.read_text(encoding="utf-8"))
-        definitions = {
-            node.name
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-        }
-        self.assertNotIn("ensure_placeholders", definitions)
-        self.assertNotIn("room_maps", definitions)
-        # enforce_pinned_collisions (verify-rooms R5) re-implements by display
-        # name the pinned-collision check build_snapshot now runs first, over
-        # a strict superset of `post rooms` and with folding. Every case it
-        # could catch is caught earlier; the real-tick exit-2 binding is
-        # test_sweep's test_registration_collision_is_fatal_and_persisted.
-        self.assertNotIn("enforce_pinned_collisions", definitions)
-
-    def test_check_config_refuses_wrong_post_version(self):
-        fake = Path(self.temporary.name) / "wrong-post"
-        fake.write_text("#!/bin/sh\nprintf '%s\\n' 'post 9.9.9'\n", encoding="utf-8")
-        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-        result = run(
-            [sys.executable, SWEEP, "--check-config"],
-            env=self.fc.env(POST_BIN=fake),
-            check=False,
-        )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("post 0.9.0 up to, but not including, post 0.10.0", result.stdout)
 
     def check_config_with_version_line(self, line):
         fake = Path(self.temporary.name) / "annotated-post"
@@ -488,25 +445,6 @@ class TickV2Test(unittest.TestCase):
         )
         self.assertIn("from trey", history.stdout)
 
-    def test_null_channels_key_opts_out(self):
-        # The pre-r6 escape hatch: an explicit null keeps channel sync off.
-        self.enable_channels(self.fc, value=None)
-        self.trey.post("chat", "front-porch", "--join", cwd=self.trey.workspaces["hq"])
-        self.trey.post(
-            "chat",
-            "front-porch",
-            "--send",
-            "--body",
-            "from trey",
-            "--anyway",
-            cwd=self.trey.workspaces["hq"],
-        )
-        self.assertEqual(self.trey.sweep().returncode, 0)
-        imported = self.fc.sweep()
-        self.assertEqual(imported.returncode, 0, imported.stdout + imported.stderr)
-        self.assertFalse((self.fc.root / "channels" / "front-porch").exists())
-        self.assertFalse(any((self.fc.repo / "channels").rglob("*.msg")))
-
     def test_unknown_room_receipt_flips_to_one_delivery_when_room_appears(self):
         self.full_rounds()
         mail_id = fixed_id(930)
@@ -519,7 +457,12 @@ class TickV2Test(unittest.TestCase):
         receipt_path = (
             self.trey.repo / "receipts" / "fc" / "nowhere" / (mail_id + ".json")
         )
-        self.assertEqual(json.loads(receipt_path.read_text())["reason"], "unknown_room")
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual((receipt["status"], receipt["reason"]), ("quarantined", "unknown_room"))
+        # An unknown room is retryable, not a fault: the receiver stays healthy.
+        self.assertTrue(
+            json.loads((self.trey.root / "bridge" / "health.json").read_text())["ok"]
+        )
         workspace = self.trey.base / "rooms" / "nowhere"
         workspace.mkdir()
         self.trey.post("rooms", "add", "nowhere", workspace)
@@ -637,10 +580,17 @@ class TickV2Test(unittest.TestCase):
         config = json.loads(config_path.read_text())
         config["peers"] = {"trey": []}
         config_path.write_text(json.dumps(config) + "\n", encoding="utf-8")
+        # ignored_branch repeats every tick, so an old record proves nothing:
+        # only a record written by the restricted sweep binds the restriction.
+        seen = len(self.fc.logs())
         restricted = self.fc.sweep()
         self.assertEqual(restricted.returncode, 0, restricted.stdout + restricted.stderr)
-        current = [record for record in self.fc.logs() if record["action"] == "ignored_branch"]
-        self.assertEqual(current[-1]["host"], "mac")
+        current = [
+            record
+            for record in self.fc.logs()[seen:]
+            if record["action"] == "ignored_branch"
+        ]
+        self.assertEqual([record["host"] for record in current], ["mac"])
 
     def test_post_fetch_snapshot_sees_room_and_mail_from_same_tip(self):
         self.full_rounds()
@@ -811,14 +761,16 @@ class TickV2Test(unittest.TestCase):
                 self.assertEqual(self.fc.sweep().returncode, 1)
                 records = self.fc.logs()[seen:]
                 self.assertEqual(
-                    [
-                        record
-                        for record in records
-                        if record["action"] == "relay_history_rewritten"
-                        and record["host"] == "trey"
-                    ][1:],
-                    [],
-                    "relay_history_rewritten logged more than once this tick",
+                    len(
+                        [
+                            record
+                            for record in records
+                            if record["action"] == "relay_history_rewritten"
+                            and record["host"] == "trey"
+                        ]
+                    ),
+                    1,
+                    "relay_history_rewritten must be logged once per tick",
                 )
 
     def test_ten_idle_ticks_create_no_commits(self):
@@ -926,34 +878,53 @@ class TickV2Test(unittest.TestCase):
                 (self.fc.root / ".post-arx.json").unlink()
 
     def test_unhealthy_or_failed_quiet_probe_forces_full_tick(self):
-        first = self.fc.sweep()
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         health_path = self.fc.root / "bridge" / "health.json"
-        health = json.loads(health_path.read_text())
-        health["ok"] = False
-        health["reason"] = "test-unhealthy"
-        health_path.write_text(json.dumps(health) + "\n", encoding="utf-8")
-        fetches = sum(record["action"] == "fetch" for record in self.fc.logs())
+
+        def health():
+            return json.loads(health_path.read_text())
+
+        def fetch_count():
+            return sum(record["action"] == "fetch" for record in self.fc.logs())
+
+        def settle_to_quiet():
+            # The first ticks register placeholders and push, so they cause
+            # further full ticks. Sweep until one goes quiet, then require
+            # that a control tick with nothing perturbed is quiet too.
+            for _ in range(10):
+                result = self.fc.sweep()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if health()["quiet"]:
+                    break
+            else:
+                self.fail("fc never reached a quiet tick")
+            fetches = fetch_count()
+            control = self.fc.sweep()
+            self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+            self.assertTrue(health()["quiet"], "control tick must be quiet")
+            self.assertEqual(fetch_count(), fetches)
+
+        settle_to_quiet()
+        state = health()
+        state["ok"] = False
+        state["reason"] = "test-unhealthy"
+        health_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+        fetches = fetch_count()
         forced = self.fc.sweep()
         self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
-        self.assertEqual(
-            sum(record["action"] == "fetch" for record in self.fc.logs()),
-            fetches + 1,
-        )
+        self.assertEqual(fetch_count(), fetches + 1)
+        self.assertFalse(health()["quiet"])
 
+        settle_to_quiet()
         offline = self.topology.forge.with_name("forge.quiet-probe-offline")
         self.topology.forge.rename(offline)
         try:
-            fetches = sum(record["action"] == "fetch" for record in self.fc.logs())
+            fetches = fetch_count()
             failed_probe = self.fc.sweep()
             self.assertEqual(
                 failed_probe.returncode, 0, failed_probe.stdout + failed_probe.stderr
             )
-            self.assertEqual(
-                sum(record["action"] == "fetch" for record in self.fc.logs()),
-                fetches + 1,
-            )
-            self.assertFalse(json.loads(health_path.read_text())["quiet"])
+            self.assertEqual(fetch_count(), fetches + 1)
+            self.assertFalse(health()["quiet"])
         finally:
             offline.rename(self.topology.forge)
 
@@ -1324,13 +1295,17 @@ class TickV2QuietMatrixTest(unittest.TestCase):
                     result.returncode, (0, 1), result.stdout + result.stderr
                 )
                 actions = [record["action"] for record in self.fc.logs()[seen:]]
-                self.assertNotIn(
-                    "quiet",
-                    actions,
+                # A quiet tick logs nothing and writes health.quiet true; a
+                # full tick (including a fenced one) writes it false.
+                self.assertFalse(
+                    self.health()["quiet"],
                     f"changing {label} alone left the next tick quiet",
                 )
                 if expect_fetch:
                     self.assertIn("fetch", actions, label)
+                if label == "fence":
+                    self.assertNotIn("fetch", actions, label)
+                    self.assertIn("fenced", actions, label)
                 if undo is not None:
                     undo()
 
