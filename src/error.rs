@@ -74,6 +74,9 @@ pub enum MissingClaim<'a> {
     Explicit { id: &'a str },
     /// This session's by-session index entry, naming a record that is gone.
     SessionIndex { harness: &'a str, id: &'a str },
+    /// `post participant restore <id>` for an id no record, archive or
+    /// tombstone holds.
+    Restore { id: &'a str },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +397,17 @@ impl AppError {
             .exact_fix("post participant bind")
             .id(id)
             .reason("the session index names a record that does not exist"),
+            MissingClaim::Restore { id } => Self::new(
+                ErrorCode::ParticipantMissing,
+                format!(
+                    "participant '{id}' cannot be restored: no record, archive or tombstone holds that id (mistyped, or it never existed on this host), or the collected record is unreadable"
+                ),
+                "Run `post participant list` to see the ids that exist; only an id that `participant gc` collected can be restored.",
+            )
+            .exact_fix("post participant list")
+            .input(format!("post participant restore {id}"))
+            .id(id)
+            .reason("nothing live or collected holds this id"),
         }
     }
 

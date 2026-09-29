@@ -53,7 +53,7 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         read::refuse_unintended_stdin(args, json, pretty)?;
     }
     let writes =
-        migration_fence::classify_write(&cli.command) || participant_gc_apply(&cli.command);
+        migration_fence::classify_write(&cli.command) || participant_registry_write(&cli.command);
     let long_watch = matches!(&cli.command, Command::Watch(args) if !args.snapshot);
     let explicit_bootstrap = explicit_participant_bootstrap(&cli.command);
     let participant_is_required = participant_required(&cli.command);
@@ -327,6 +327,7 @@ fn tolerates_resolution_error(
                 | ParticipantCommand::Bind(_)
                 | ParticipantCommand::List
                 | ParticipantCommand::Gc(_)
+                | ParticipantCommand::Restore(_)
         ),
         Command::Identity(args) => {
             matches!(
@@ -345,13 +346,16 @@ fn tolerates_resolution_error(
     }
 }
 
-fn participant_gc_apply(command: &Command) -> bool {
+/// The participant commands that change the participant registry without
+/// being a participant's own lifecycle: `gc --apply` collects records, and
+/// `restore` brings one back. Both take the migration fence like any writer.
+fn participant_registry_write(command: &Command) -> bool {
     matches!(
         command,
         Command::Participant(crate::cli::ParticipantArgs {
             command: crate::cli::ParticipantCommand::Gc(crate::cli::ParticipantGcArgs {
                 apply: true
-            }),
+            }) | crate::cli::ParticipantCommand::Restore(_),
         })
     )
 }

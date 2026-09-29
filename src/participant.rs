@@ -629,14 +629,74 @@ pub(crate) fn revive_explicit_claim(context: &Context) -> AppResult<Option<Parti
     let Some(mut revived) = revive_locked(context, &explicit)? else {
         return Ok(None);
     };
-    // The claim that brought it back is proof of life. A record that kept its
-    // old `last_seen` would be collected again by the next `participant gc`,
-    // and revived again by the next reader, for as long as it stays idle.
-    // (Delivery into a collected record does not do this: mail arriving for a
-    // session is no evidence that the session is there.)
-    revived.last_seen = Some(format_rfc3339(SystemTime::now())?);
-    write_record(&revived)?;
+    mark_alive_locked(&mut revived)?;
     Ok(Some(revived))
+}
+
+/// A revived record is stamped as seen now, when it came back because someone
+/// asked for it (a session claiming it, or `participant restore`). A record
+/// that kept its old `last_seen` would be collected again by the next
+/// `participant gc`, and revived again, for as long as it stays idle. Delivery
+/// into a collected record does not do this: mail arriving for a session is no
+/// evidence that the session is there. The caller holds the participants lock.
+fn mark_alive_locked(participant: &mut Participant) -> AppResult<()> {
+    participant.last_seen = Some(format_rfc3339(SystemTime::now())?);
+    write_record(participant)
+}
+
+/// What `participant restore` did.
+pub(crate) struct Restored {
+    pub participant: Participant,
+    /// Where the record came back from: `archive` (whole, state included) or
+    /// `tombstone` (recreated; it held no state). `None` when it was already
+    /// there and nothing changed.
+    pub from: Option<&'static str>,
+}
+
+/// Bring a collected participant back on request, under the participants lock
+/// and by the same restore an explicit claim and a bridge delivery use.
+/// Idempotent: a record that is already there is returned untouched. An id
+/// nothing holds, and a collected record that cannot be brought back, are both
+/// `participant_missing` (the second says why); neither creates anything.
+pub(crate) fn restore(context: &Context, id: &str) -> AppResult<Restored> {
+    validate_participant_id(id)?;
+    let present = |participant| Restored {
+        participant,
+        from: None,
+    };
+    let missing = || AppError::participant_missing(MissingClaim::Restore { id }, false);
+    if let Some(participant) = load(context, id)? {
+        return Ok(present(participant));
+    }
+    // An id nothing ever held is answered without the lock, so asking for a
+    // wrong one creates nothing.
+    if matches!(gc::holder(context, id)?, gc::Holder::Nobody) {
+        return Err(missing());
+    }
+    let _lock = lock(context)?;
+    // Decided under the lock: the record may have come back in the meantime.
+    if let Some(participant) = load(context, id)? {
+        return Ok(present(participant));
+    }
+    let from = match gc::holder(context, id)? {
+        gc::Holder::Nobody => return Err(missing()),
+        gc::Holder::Archived { .. } => "archive",
+        gc::Holder::Tombstone { .. } => "tombstone",
+    };
+    let revived = revive_locked(context, id).map_err(|cause| {
+        missing().reason(format!(
+            "the collected record could not be restored: {}",
+            cause.message
+        ))
+    })?;
+    let Some(mut participant) = revived else {
+        return Err(missing());
+    };
+    mark_alive_locked(&mut participant)?;
+    Ok(Restored {
+        participant,
+        from: Some(from),
+    })
 }
 
 /// The only participant-minting path. The record is committed before its

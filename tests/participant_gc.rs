@@ -786,3 +786,250 @@ fn reviving_a_claimed_record_waits_for_the_participants_lock() {
         "revived once the lock was free"
     );
 }
+
+fn restore(sandbox: &Sandbox, id: &str) -> std::process::Output {
+    sandbox.run_without_identity(&["participant", "restore", id, "--json"], &sandbox.path)
+}
+
+/// `participant restore` on a tier-2 record: the archive comes back whole, the
+/// answer says where from, and asking again changes nothing.
+#[test]
+fn participant_restore_brings_an_archived_record_back_whole_and_is_idempotent() {
+    let sandbox = Sandbox::new();
+    let id = bound_idle(&sandbox, "claude", "restore-archived", 1);
+    give_state(&sandbox, &id, "gc-restore");
+    let dir = sandbox.mail_root.join("participants").join(&id);
+    let memberships = fs::read(dir.join("channels.json")).expect("memberships exist");
+    patch(&sandbox, &id, |record| {
+        record["last_seen"] = json!(days_ago(60));
+    });
+    assert_eq!(gc(&sandbox, true)["archived"], json!([id]));
+    let archive = sandbox.mail_root.join("participants-archive").join(&id);
+    assert!(archive.exists() && !dir.exists());
+
+    let output = restore(&sandbox, &id);
+    assert_success(&output);
+    let restored: Value = from_stdout(&output);
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert_eq!(restored["id"], id.as_str());
+    assert_eq!(restored["restored"], true, "{restored}");
+    assert_eq!(restored["from"], "archive", "{restored}");
+    assert_eq!(restored["participant"]["id"], id.as_str());
+    assert!(!archive.exists(), "the archive moved back");
+    assert_eq!(
+        fs::read(dir.join("channels.json")).expect("memberships restored"),
+        memberships,
+        "state came back byte for byte"
+    );
+    assert_eq!(
+        show_key(&sandbox, "claude", "restore-archived")["bound"],
+        true
+    );
+    assert!(
+        !strings(&gc(&sandbox, false)["archived"]).contains(&id),
+        "a restored record is proof of life: the next pass keeps it"
+    );
+
+    // Again: already present is ok with nothing changed.
+    let before = tree(&sandbox.mail_root);
+    let again = restore(&sandbox, &id);
+    assert_success(&again);
+    let again: Value = from_stdout(&again);
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["restored"], false, "{again}");
+    assert!(again.get("from").is_none(), "{again}");
+    assert_eq!(again["participant"]["id"], id.as_str());
+    assert_eq!(tree(&sandbox.mail_root), before, "nothing was written");
+}
+
+/// A tier-1 record held no state; restoring it recreates the same participant
+/// (id, lease, workspace, display name) and its session mapping.
+#[test]
+fn participant_restore_recreates_a_deleted_record_under_its_own_id() {
+    let sandbox = Sandbox::new();
+    let id = bound_idle(&sandbox, "claude", "restore-deleted", 40);
+    patch(&sandbox, &id, |record| {
+        record["display_name"] = json!("Ember");
+        record["lease_hours"] = json!(12);
+    });
+    let original = record(&sandbox, &id);
+    assert_eq!(gc(&sandbox, true)["deleted"], json!([id]));
+    assert!(!record_path(&sandbox, &id).exists());
+    assert_eq!(
+        show_key(&sandbox, "claude", "restore-deleted")["bound"],
+        false
+    );
+
+    let output = restore(&sandbox, &id);
+    assert_success(&output);
+    let restored: Value = from_stdout(&output);
+    assert_eq!(restored["restored"], true, "{restored}");
+    assert_eq!(restored["from"], "tombstone", "{restored}");
+    let back = record(&sandbox, &id);
+    for field in [
+        "id",
+        "harness",
+        "conversation_key_digest",
+        "created",
+        "workspace",
+        "display_name",
+        "lease_hours",
+        "ephemeral",
+    ] {
+        assert_eq!(back[field], original[field], "{field}: {back}");
+    }
+    assert_ne!(back["last_seen"], original["last_seen"], "stamped alive");
+    let shown = show_key(&sandbox, "claude", "restore-deleted");
+    assert_eq!(shown["bound"], true, "{shown}");
+    assert_eq!(shown["participant"]["id"], id.as_str(), "{shown}");
+
+    let again = restore(&sandbox, &id);
+    assert_success(&again);
+    let again: Value = from_stdout(&again);
+    assert_eq!(again["restored"], false, "{again}");
+}
+
+/// An id nothing holds is `participant_missing` and creates nothing, not even
+/// the participants lock; a collected record that is not a record is the same
+/// error, says why, and is left where it was.
+#[test]
+fn participant_restore_of_an_id_nothing_holds_is_participant_missing() {
+    let sandbox = Sandbox::new();
+    let kept = bound_idle(&sandbox, "claude", "restore-neighbor", 1);
+    // Binding took the participants lock and left its file behind; without it
+    // the comparison below can tell whether a wrong id takes the lock.
+    fs::remove_file(sandbox.mail_root.join(".participants.lock")).expect("lock file");
+    let before = tree(&sandbox.mail_root);
+
+    let never = restore(&sandbox, "claude-0badf00d");
+    assert_eq!(never.status.code(), Some(65), "{never:?}");
+    let error: ErrorEnvelope = from_stderr(&never);
+    assert_eq!(error.error.code, "participant_missing");
+    assert_eq!(error.error.details.id.as_deref(), Some("claude-0badf00d"));
+    assert_eq!(tree(&sandbox.mail_root), before, "nothing was created");
+    assert!(record_path(&sandbox, &kept).exists());
+
+    let malformed = restore(&sandbox, "../escape");
+    assert_eq!(malformed.status.code(), Some(2), "{malformed:?}");
+    assert_eq!(tree(&sandbox.mail_root), before);
+
+    let broken = sandbox
+        .mail_root
+        .join("participants-archive/claude-b10c0ded");
+    fs::create_dir_all(&broken).expect("archive dir");
+    fs::write(broken.join("participant.json"), b"not json").expect("garbage record");
+    let refused = restore(&sandbox, "claude-b10c0ded");
+    assert_eq!(refused.status.code(), Some(65), "{refused:?}");
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "participant_missing");
+    assert!(
+        error
+            .error
+            .details
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be restored")),
+        "{error:?}"
+    );
+    assert!(!record_path(&sandbox, "claude-b10c0ded").exists());
+    assert_eq!(
+        fs::read(broken.join("participant.json")).expect("the archive is untouched"),
+        b"not json"
+    );
+}
+
+/// Restoring and applying a collection change the participant registry, so a
+/// migration fence refuses them like any other writer, and nothing moves.
+#[cfg(unix)]
+#[test]
+fn participant_restore_and_gc_apply_are_refused_under_a_migration_fence() {
+    let sandbox = Sandbox::new();
+    let collected = bound_idle(&sandbox, "claude", "fenced-restore", 40);
+    assert_eq!(gc(&sandbox, true)["deleted"], json!([collected]));
+    let idle = bound_idle(&sandbox, "claude", "fenced-gc", 40);
+    fs::write(sandbox.mail_root.join(".post-arx.lock"), b"").expect("migration lock");
+    common::write_fence_state_locked(&sandbox.mail_root, 7);
+
+    common::assert_migration_refused(&restore(&sandbox, &collected));
+    assert!(!record_path(&sandbox, &collected).exists());
+    let applied =
+        sandbox.run_without_identity(&["participant", "gc", "--apply", "--json"], &sandbox.path);
+    common::assert_migration_refused(&applied);
+    assert!(
+        record_path(&sandbox, &idle).exists(),
+        "nothing was collected"
+    );
+}
+
+/// A session whose own `POST_PARTICIPANT` names nothing can still restore some
+/// other participant: `restore` acts on the id it is given, not on the claim.
+#[test]
+fn participant_restore_runs_for_a_session_with_a_stale_claim() {
+    let sandbox = Sandbox::new();
+    let id = bound_idle(&sandbox, "claude", "restore-by-stale", 40);
+    assert_eq!(gc(&sandbox, true)["deleted"], json!([id]));
+
+    let output = sandbox.run_as_participant(
+        &["participant", "restore", &id, "--json"],
+        "claude-0badf00d",
+        &sandbox.path,
+    );
+    assert_success(&output);
+    let restored: Value = from_stdout(&output);
+    assert_eq!(restored["restored"], true, "{restored}");
+    assert!(record_path(&sandbox, &id).exists());
+    assert!(
+        !record_path(&sandbox, "claude-0badf00d").exists(),
+        "the stale claim itself was not revived or minted"
+    );
+}
+
+/// Restoring takes the participants lock, the one `participant gc` collects
+/// under, so it cannot race a collection.
+#[cfg(unix)]
+#[test]
+fn participant_restore_waits_for_the_participants_lock() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let sandbox = Sandbox::new();
+    let id = bound_idle(&sandbox, "claude", "restore-locked", 40);
+    assert_eq!(gc(&sandbox, true)["deleted"], json!([id]));
+
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(sandbox.mail_root.join(".participants.lock"))
+        .expect("open participants lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut child = common::post_command()
+        .args(["participant", "restore", &id, "--json"])
+        .current_dir(&sandbox.path)
+        .env_clear()
+        .env("HOME", &sandbox.home)
+        .env("POST_MAIL_ROOT", &sandbox.mail_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn restore");
+    for _ in 0..20 {
+        if child.try_wait().expect("probe restore").is_some() {
+            panic!("the record was restored without the participants lock");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !record_path(&sandbox, &id).exists(),
+        "nothing came back while locked"
+    );
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let output = child.wait_with_output().expect("wait for restore");
+    assert_success(&output);
+    assert!(record_path(&sandbox, &id).exists());
+}

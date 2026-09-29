@@ -205,6 +205,7 @@ pub(super) fn run(
         ParticipantCommand::Touch => lifecycle(context, false, pretty),
         ParticipantCommand::End => lifecycle(context, true, pretty),
         ParticipantCommand::Gc(args) => super::participant_gc::run(context, args.apply, pretty),
+        ParticipantCommand::Restore(args) => restore(context, &args.id, pretty),
         ParticipantCommand::List => {
             let participants = participant::list(context)?;
             let count = participants.len();
@@ -242,6 +243,37 @@ fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandRes
             fix: None,
             participant_error: None,
             participant_missing: None,
+        },
+        pretty,
+    )
+}
+
+#[derive(Serialize)]
+struct RestoreOutput {
+    ok: bool,
+    id: String,
+    /// False when the record was already there and nothing changed.
+    restored: bool,
+    /// `archive` (the whole record, state included) or `tombstone` (recreated
+    /// from what the tombstone kept; it held no state). Absent when nothing
+    /// was restored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'static str>,
+    participant: Participant,
+}
+
+/// `participant restore <id>`: the same restore an explicit claim and a bridge
+/// delivery use, on its own. Idempotent; an id nothing holds is
+/// `participant_missing` and creates nothing.
+fn restore(context: &Context, id: &str, pretty: bool) -> AppResult<CommandResult> {
+    let restored = participant::restore(context, id)?;
+    CommandResult::json(
+        &RestoreOutput {
+            ok: true,
+            id: restored.participant.id.clone(),
+            restored: restored.from.is_some(),
+            from: restored.from,
+            participant: restored.participant,
         },
         pretty,
     )
