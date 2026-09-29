@@ -970,6 +970,150 @@ fn an_ended_participant_is_terminal_with_nothing_written() {
     assert_eq!(rig.snapshot(), before);
 }
 
+/// `participant gc` may collect an idle recipient while a letter for it is on
+/// its way. The import holds the participants lock, and brings the record back
+/// under the same id instead of refusing the letter as `unknown_participant`.
+#[test]
+fn a_recipient_collected_by_gc_is_brought_back_not_refused() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    let record = rig
+        .root()
+        .join("participants")
+        .join(&rig.recipient)
+        .join("participant.json");
+    let mut aged = read_json(&record);
+    aged["last_seen"] = json!("2026-01-01T00:00:00Z");
+    fs::write(&record, serde_json::to_vec_pretty(&aged).unwrap()).unwrap();
+    let collected = rig.sandbox.run_without_identity(
+        &["participant", "gc", "--apply", "--json"],
+        &rig.sandbox.path,
+    );
+    assert!(collected.status.success(), "{}", stderr(&collected));
+    assert!(
+        !record.exists(),
+        "gc collected the idle recipient: {}",
+        stdout(&collected)
+    );
+
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "delivered", None);
+    assert!(record.is_file(), "the recipient is back under its own id");
+    assert!(rig.inbox_path().is_file(), "and the letter is in its inbox");
+    assert_eq!(read_json(&record)["id"], json!(rig.recipient));
+}
+
+/// Give the recipient real state (a channel membership), let it go idle past
+/// the archive limit, and run `participant gc --apply`. Returns the state file's
+/// bytes; the record is then in the archive, not in `participants/`.
+fn archive_recipient(rig: &Rig) -> Vec<u8> {
+    let joined = rig.sandbox.run_as_participant(
+        &["chat", "bridge-archive", "--join", "--json"],
+        &rig.recipient,
+        &rig.sandbox.path,
+    );
+    assert!(joined.status.success(), "{}", stderr(&joined));
+    let dir = rig.root().join("participants").join(&rig.recipient);
+    let state = fs::read(dir.join("channels.json")).expect("the membership is state");
+    let record = dir.join("participant.json");
+    let mut aged = read_json(&record);
+    aged["last_seen"] = json!("2026-01-01T00:00:00Z");
+    fs::write(&record, serde_json::to_vec_pretty(&aged).unwrap()).unwrap();
+    let collected = rig.sandbox.run_without_identity(
+        &["participant", "gc", "--apply", "--json"],
+        &rig.sandbox.path,
+    );
+    assert!(collected.status.success(), "{}", stderr(&collected));
+    let collected: Value = serde_json::from_slice(&collected.stdout).expect("gc JSON");
+    assert_eq!(
+        collected["archived"],
+        json!([rig.recipient]),
+        "gc archived the idle recipient: {collected}"
+    );
+    assert!(!record.exists());
+    state
+}
+
+/// The archived case: a recipient with state is moved whole to the archive, and
+/// a delivery restores it (state included) under the lock, then delivers.
+#[test]
+fn a_recipient_archived_by_gc_is_restored_whole_and_delivered_to() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    let state = archive_recipient(&rig);
+    let archive = rig.root().join("participants-archive").join(&rig.recipient);
+    assert!(archive.is_dir(), "the record is in the archive");
+
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "delivered", None);
+    let dir = rig.root().join("participants").join(&rig.recipient);
+    assert_eq!(
+        read_json(&dir.join("participant.json"))["id"],
+        json!(rig.recipient)
+    );
+    assert!(!archive.exists(), "the archive moved back");
+    assert_eq!(
+        fs::read(dir.join("channels.json")).unwrap(),
+        state,
+        "its state came back byte for byte"
+    );
+    assert_eq!(fs::read(rig.inbox_path()).unwrap(), bytes);
+    assert!(rig.record_path().is_file());
+}
+
+/// A crash after D1 leaves only the admission record. If gc archives the idle
+/// recipient before the rerun, the record is inside the archive: the delivery
+/// restores it, finds its own admission record, and completes it as a replay
+/// (same `admitted_at`) instead of failing to write a second one.
+#[test]
+fn a_rerun_after_the_recipient_was_archived_finds_its_admission_record() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    crash(&rig, "d1", &file, &bytes);
+    let admitted = read_json(&rig.record_path())["admitted_at"].clone();
+    archive_recipient(&rig);
+    assert!(!rig.record_path().exists(), "the record is in the archive");
+
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "delivered", None);
+    assert_eq!(value["replay"], json!(true), "{value}");
+    assert_eq!(value["admitted_at"], admitted, "the original admitted_at");
+    assert_eq!(fs::read(rig.inbox_path()).unwrap(), bytes);
+}
+
+/// The admission record that comes back with the archive is the letter's
+/// identity: different bytes under the same id are still an `id_collision`, and
+/// nothing is delivered.
+#[test]
+fn different_bytes_after_the_recipient_was_archived_are_still_an_id_collision() {
+    let rig = Rig::new();
+    let (file, bytes) = rig.standard_letter();
+    crash(&rig, "d1", &file, &bytes);
+    archive_recipient(&rig);
+    let (other_file, other_bytes) = rig.letter_file(&rig.envelope(), "other");
+    assert_ne!(bytes, other_bytes);
+
+    let value = rig.deliver(&other_file, &other_bytes);
+    assert_outcome(&value, "rejected", Some("id_collision"));
+    assert!(!rig.inbox_path().exists(), "nothing was delivered");
+}
+
+/// The restore belongs to admission, after the checks that need no recipient: a
+/// letter refused for its sender (`forged_from`) leaves an archived recipient in
+/// the archive.
+#[test]
+fn a_refused_letter_does_not_restore_an_archived_recipient() {
+    let rig = Rig::new();
+    archive_recipient(&rig);
+    let mut envelope = rig.envelope();
+    envelope.insert("from".into(), json!("space"));
+    let (file, bytes) = rig.letter_file(&envelope, "forged");
+    let before = rig.snapshot();
+    let value = rig.deliver(&file, &bytes);
+    assert_outcome(&value, "rejected", Some("forged_from"));
+    assert_eq!(rig.snapshot(), before, "the archive stayed where it was");
+}
+
 #[test]
 fn a_blocked_route_to_a_workspace_less_recipient_writes_nothing() {
     let rig = Rig::new();

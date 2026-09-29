@@ -2027,6 +2027,42 @@ fn routing_read_with_piped_stdin_refuses_before_consuming_or_binding() {
     assert_success(&read);
 }
 
+/// The guard runs before every return path, the unbound marker included: a
+/// session with no participant used to get its marker back for `read --peek`
+/// and silently drop the pipe. Input is refused the same way it is for a bound
+/// reader; without input the marker still answers.
+#[test]
+fn routing_unbound_read_peek_refuses_piped_stdin_instead_of_ignoring_it() {
+    let sandbox = Sandbox::new_unseeded();
+    let before = tree(&sandbox.mail_root);
+
+    let refused = sandbox.run_in_env(
+        &["read", "any-message-id", "--peek", "--json"],
+        Some("input the read would drop\n"),
+        &sandbox.path,
+        &[],
+    );
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert!(common::stdout(&refused).is_empty(), "no marker on stdout");
+    let error: post::output::ErrorEnvelope = common::from_stderr(&refused);
+    assert_eq!(error.error.code, "invalid_argument");
+    let fix = error.error.details.exact_fix.expect("exact fix");
+    assert!(
+        fix.starts_with("post read ") && fix.contains(" --peek") && fix.ends_with(" < /dev/null"),
+        "{fix}"
+    );
+    assert_eq!(tree(&sandbox.mail_root), before);
+
+    // Without input the unbound reader still gets its marker.
+    let marker = sandbox.run_without_identity(
+        &["read", "any-message-id", "--peek", "--json"],
+        &sandbox.path,
+    );
+    assert_success(&marker);
+    let marker: Value = common::from_stdout(&marker);
+    assert_eq!(marker["bound"], false, "{marker}");
+}
+
 #[test]
 fn routing_watch_digest_keeps_pending_separate_from_delivered() {
     let sandbox = Sandbox::new();

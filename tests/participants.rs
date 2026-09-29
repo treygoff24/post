@@ -631,6 +631,16 @@ fn participant_read_only_unbound_commands_create_nothing() {
             "{} hint does not name the fix: {value}",
             args[0]
         );
+        // A command sink never binds a session: it is pointed at the explicit
+        // room forms instead of being left with only "bind".
+        assert!(
+            value["hint"].as_str().is_some_and(|hint| {
+                hint.contains("post inbox --room <name>")
+                    && hint.contains("post watch --snapshot --room <name>")
+            }),
+            "{} hint does not name the room forms: {value}",
+            args[0]
+        );
         assert_eq!(
             tree(&sandbox.mail_root),
             before,
@@ -638,6 +648,114 @@ fn participant_read_only_unbound_commands_create_nothing() {
             args[0]
         );
     }
+}
+
+/// A delegated child inherits its parent's harness environment, conversation
+/// key included, and must not become the parent. With `DELEGATE_RUN_ID` set and
+/// no `POST_PARTICIPANT`, ambient harness keys are ignored: a reader gets the
+/// unbound marker, a writer fails `no_participant` with the ephemeral-bind fix,
+/// and nothing is minted or touched. An explicit claim still works.
+#[test]
+fn participant_delegate_child_without_a_claim_is_unbound_not_its_parent() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    let parent = sandbox.bind_claude("parent-conversation", &alpha, None);
+    let parent_id = participant_id(&parent).to_owned();
+    let inherited = [
+        ("CLAUDE_CODE_SESSION_ID", "parent-conversation"),
+        ("DELEGATE_RUN_ID", "loom-run-1"),
+    ];
+
+    // Control: the same ambient key, outside a delegated run, is the parent.
+    let control = sandbox.run_as_claude(
+        &["participant", "show", "--json"],
+        "parent-conversation",
+        &alpha,
+    );
+    assert_success(&control);
+    let control: Value = from_stdout(&control);
+    assert_eq!(control["bound"], true, "{control}");
+    assert_eq!(
+        control["participant"]["id"],
+        parent_id.as_str(),
+        "{control}"
+    );
+
+    let before = tree(&sandbox.mail_root);
+
+    // A reader gets the marker, not the parent's inbox.
+    let reader = sandbox.run_in_env(&["inbox", "--json"], None, &alpha, &inherited);
+    assert_success(&reader);
+    let marker: Value = from_stdout(&reader);
+    assert_eq!(marker["bound"], false, "{marker}");
+    assert!(marker["participant"].is_null(), "{marker}");
+    assert!(marker["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("post participant bind --new")));
+
+    // A writer fails with the fix for a session that has no participant.
+    let writer = sandbox.run_in_env(
+        &["send", "--json", "--to", "beta", "--body", "child words"],
+        None,
+        &alpha,
+        &inherited,
+    );
+    assert_eq!(writer.status.code(), Some(65), "{writer:?}");
+    let error: ErrorEnvelope = from_stderr(&writer);
+    assert_eq!(error.error.code, "no_participant");
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("post participant bind --new"));
+    assert!(error
+        .error
+        .suggested_fix
+        .contains("export POST_PARTICIPANT"));
+    assert_eq!(
+        tree(&sandbox.mail_root),
+        before,
+        "the child neither minted a participant nor touched the parent's"
+    );
+
+    // An explicit claim is the child's own choice and still works, as itself.
+    let claimed = sandbox.run_in_env(
+        &["send", "--json", "--to", "beta", "--body", "claimed words"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", parent_id.as_str()),
+            ("CLAUDE_CODE_SESSION_ID", "parent-conversation"),
+            ("DELEGATE_RUN_ID", "loom-run-1"),
+        ],
+    );
+    assert!(claimed.status.success(), "{}", common::stderr(&claimed));
+    let receipt: Value = from_stdout(&claimed);
+    assert_eq!(
+        receipt["envelope"]["from_participant"],
+        parent_id.as_str(),
+        "{receipt}"
+    );
+    assert!(receipt.get("bound_now").is_none(), "{receipt}");
+
+    // A stale claim in a child is told the fix that works there: the inherited
+    // key is no way out of it, so it is not offered.
+    let stale = sandbox.run_in_env(
+        &["inbox", "--json"],
+        None,
+        &alpha,
+        &[
+            ("POST_PARTICIPANT", "claude-0badf00d"),
+            ("CLAUDE_CODE_SESSION_ID", "parent-conversation"),
+            ("DELEGATE_RUN_ID", "loom-run-1"),
+        ],
+    );
+    assert_eq!(stale.status.code(), Some(65), "{stale:?}");
+    let error: ErrorEnvelope = from_stderr(&stale);
+    assert_eq!(error.error.code, "participant_missing");
+    assert_eq!(
+        error.error.details.exact_fix.as_deref(),
+        Some("post participant bind --new")
+    );
 }
 
 /// A session with no ambient harness key has nothing to bind to: a writer
@@ -1731,6 +1849,74 @@ fn participant_missing_dangling_session_index_is_loud_and_diagnosable() {
     let rebound: Value = from_stdout(&rebound);
     assert_eq!(participant_id(&rebound), id);
     assert_success(&sandbox.run_as_claude(&["inbox"], "dangling-key", &sandbox.path));
+}
+
+/// In text mode a claim that names no record leaves a `missing` line on stderr
+/// with the error's own fix, never the `unbound` line: its bare `bind` fix is
+/// wrong when a stale `POST_PARTICIPANT` would keep winning over the new
+/// binding. A session with no claim at all is still `unbound`, and `--json`
+/// carries the state as a field instead of a stderr line.
+#[test]
+fn a_missing_claim_is_missing_not_unbound_in_text_mode() {
+    let sandbox = Sandbox::new_unseeded();
+    let stale = [("POST_PARTICIPANT", "missing-test-participant")];
+    let stale_with_key = [
+        ("POST_PARTICIPANT", "missing-test-participant"),
+        ("CLAUDE_CODE_SESSION_ID", "ambient-key"),
+    ];
+    for (envs, fix) in [
+        (&stale[..], "post participant bind --new"),
+        (
+            &stale_with_key[..],
+            "unset POST_PARTICIPANT && post participant bind",
+        ),
+    ] {
+        let output = sandbox.run_in_env(&["participant", "list"], None, &sandbox.path, envs);
+        assert_success(&output);
+        let text = common::stderr(&output);
+        assert!(
+            text.lines()
+                .any(|line| line == format!("participant: missing (run: {fix})")),
+            "{text}"
+        );
+        assert!(!text.contains("participant: unbound"), "{text}");
+    }
+
+    let bound = sandbox.bind_claude("dangling-text-key", &sandbox.path, None);
+    let record = sandbox
+        .mail_root
+        .join("participants")
+        .join(participant_id(&bound));
+    fs::remove_dir_all(&record).expect("remove the record but leave the index");
+    let output =
+        sandbox.run_as_claude(&["participant", "list"], "dangling-text-key", &sandbox.path);
+    assert_success(&output);
+    let text = common::stderr(&output);
+    assert!(
+        text.lines()
+            .any(|line| line == "participant: missing (run: post participant bind)"),
+        "{text}"
+    );
+    assert!(!text.contains("participant: unbound"), "{text}");
+
+    let json = sandbox.run_in_env(
+        &["participant", "list", "--json"],
+        None,
+        &sandbox.path,
+        &stale,
+    );
+    assert_success(&json);
+    assert!(!common::stderr(&json).contains("participant:"));
+
+    let none = sandbox.run_without_identity(&["participant", "list"], &sandbox.path);
+    assert_success(&none);
+    let text = common::stderr(&none);
+    assert!(
+        text.lines()
+            .any(|line| line == "participant: unbound (run: post participant bind)"),
+        "{text}"
+    );
+    assert!(!text.contains("participant: missing"), "{text}");
 }
 
 #[test]

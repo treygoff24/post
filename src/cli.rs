@@ -210,6 +210,15 @@ pub(crate) enum ParticipantCommand {
     List,
     /// Collect participant records that hold nothing (dry run unless --apply).
     Gc(ParticipantGcArgs),
+    /// Bring back a participant that `participant gc` collected, under the same id. Already present is ok with restored: false.
+    Restore(ParticipantRestoreArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ParticipantRestoreArgs {
+    /// The participant id to restore (as `participant list` and `participant gc` print it).
+    #[arg(value_name = "ID", value_parser = nonempty_without_controls)]
+    pub id: String,
 }
 
 #[derive(Debug, Args)]

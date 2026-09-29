@@ -184,18 +184,12 @@ fn decide(
         Err(reason) => return Decision::Retry("import_record_unreadable", reason),
         Ok(Some(record)) => {
             *replay = true;
-            if record.source_host != args.source_host || record.sha256 != digest {
-                return Decision::Rejected(
-                    "id_collision",
-                    format!(
-                        "mail {} was already admitted from {} with sha256 {}",
-                        args.mail_id, record.source_host, record.sha256
-                    ),
-                );
-            }
             // A valid, matching record is proof the admission checks passed;
             // they are not re-run (rev 3.1 correction 2).
-            record
+            match same_admission(args, digest, record) {
+                Ok(record) => record,
+                Err(decision) => return decision,
+            }
         }
         Ok(None) => {
             let inbox = inbox_file(context, &args.participant, &args.mail_id);
@@ -220,9 +214,22 @@ fn decide(
             if let Some(refusal) = admission_checks(context, args, &from) {
                 return refusal;
             }
-            match write_record(context, args, digest, &from_participant) {
-                Ok(record) => record,
-                Err(decision) => return decision,
+            // The checks bring back a recipient `participant gc` archived, and
+            // an archive carries the participant's admission records: this
+            // letter's may be there now. Look again before writing one.
+            match load_record(context, &args.participant, &args.mail_id) {
+                Err(reason) => return Decision::Retry("import_record_unreadable", reason),
+                Ok(Some(record)) => {
+                    *replay = true;
+                    match same_admission(args, digest, record) {
+                        Ok(record) => record,
+                        Err(decision) => return decision,
+                    }
+                }
+                Ok(None) => match write_record(context, args, digest, &from_participant) {
+                    Ok(record) => record,
+                    Err(decision) => return decision,
+                },
             }
         }
     };
@@ -254,6 +261,25 @@ fn decide(
     Decision::Delivered {
         admitted_at: record.admitted_at,
     }
+}
+
+/// An existing admission record answers this delivery only when it is for the
+/// same letter: the same source host and the same bytes.
+fn same_admission(
+    args: &BridgeDeliverArgs,
+    digest: &str,
+    record: AdmissionRecord,
+) -> Result<AdmissionRecord, Decision> {
+    if record.source_host != args.source_host || record.sha256 != digest {
+        return Err(Decision::Rejected(
+            "id_collision",
+            format!(
+                "mail {} was already admitted from {} with sha256 {}",
+                args.mail_id, record.source_host, record.sha256
+            ),
+        ));
+    }
+    Ok(record)
 }
 
 /// Structural envelope checks; they read only the bytes and this host's
@@ -336,8 +362,10 @@ fn admission_checks(context: &Context, args: &BridgeDeliverArgs, from: &str) -> 
             return Some(Decision::Rejected("forged_from", detail));
         }
     }
-    // Conclusive lookups only (F3-3).
-    match participant::load(context, &args.participant) {
+    // Conclusive lookups only (F3-3). The caller holds the participants lock,
+    // so a record `participant gc` collected is brought back here (same id)
+    // rather than refused: an idle participant is still a valid recipient.
+    match participant::revive_locked(context, &args.participant) {
         Ok(None) => {
             return Some(Decision::Rejected(
                 "unknown_participant",
