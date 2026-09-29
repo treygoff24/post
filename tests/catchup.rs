@@ -358,7 +358,10 @@ fn fenced_catchup_refuses_before_cursor_or_room_mutation() {
     assert_migration_refused(&output);
     assert!(output.stdout.is_empty());
     assert!(!sandbox.mail_root.join("dest").exists());
-    assert!(!sandbox.mail_root.join("dest/cursors.json").exists());
+    assert!(!sandbox
+        .mail_root
+        .join("participants/test-default/cursors.json")
+        .exists());
     let after = fs::read_dir(&sandbox.mail_root)
         .expect("mail root")
         .map(|entry| entry.expect("entry").file_name())

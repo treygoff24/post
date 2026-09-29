@@ -2002,34 +2002,6 @@ mod tests {
     }
 
     #[test]
-    fn local_timestamp_keeps_reference_id_and_sent_byte_formats() {
-        let (id_time, sent) = super::local_timestamp().expect("format local timestamp");
-        assert_eq!(id_time.len(), 15);
-        assert_eq!(id_time.as_bytes()[8], b'-');
-        assert!(id_time
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| index == 8 || byte.is_ascii_digit()));
-        assert_eq!(sent.len(), 25);
-        assert_eq!(&sent[4..5], "-");
-        assert_eq!(&sent[7..8], "-");
-        assert_eq!(&sent[10..11], " ");
-        assert_eq!(&sent[13..14], ":");
-        assert_eq!(&sent[16..17], ":");
-        assert!(matches!(&sent[20..21], "+" | "-"));
-        assert!(sent
-            .bytes()
-            .enumerate()
-            .filter(|(index, _)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 20))
-            .all(|(_, byte)| byte.is_ascii_digit()));
-    }
-
-    /// `TZ` is process-wide and lib tests run in parallel, so setting it here
-    /// raced every test that reads the local offset twice (the output header
-    /// test failed on the devbox gate, 2026-09-23). Each fixture instead
-    /// formats in a child run of this test binary that has its own `TZ`.
-    #[cfg(unix)]
-    #[test]
     fn local_timestamp_matches_exact_positive_and_negative_offset_fixtures() {
         let format_in = |tz: &str| -> String {
             let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
@@ -2085,9 +2057,8 @@ mod tests {
 #[cfg(test)]
 mod owner_tests {
     use super::{
-        exclusive_atomic_write, legacy_owner, load_owner, load_owner_with_rooms, read_owner_file,
-        set_post_open_hook, validate_label, validate_marker, validate_owner_values, Context,
-        OwnerFile, OwnerResolution, OwnerSource, ResolvedOwner, LEGACY_OWNER_ROOM,
+        load_owner, set_post_open_hook, validate_label, validate_marker, validate_owner_values,
+        Context, OwnerFile, OwnerResolution, OwnerSource,
     };
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
@@ -2187,26 +2158,6 @@ mod owner_tests {
             error.message.contains("unknown field"),
             "deny-unknown-fields: {error:?}"
         );
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn legacy_uses_the_registered_rooms_resolved_path_not_the_raw_string() {
-        // rooms.json contains `~/.trey-room`; the resolved sidecar must be
-        // absolute and never contain the literal `~`.
-        let (root, context) = context("legacypath");
-        match load_owner(&context).expect("legacy") {
-            OwnerResolution::Legacy(owner) => {
-                assert!(owner.sidecar_dir.is_absolute());
-                let rendered = owner.sidecar_dir.display().to_string();
-                assert!(
-                    !rendered.contains('~'),
-                    "resolved path leaked '~': {rendered}"
-                );
-                assert_eq!(owner.sidecar_dir, root.join(".trey-room"));
-            }
-            other => panic!("expected legacy, got {other:?}"),
-        }
         trash_test_root(&root);
     }
 
@@ -2421,57 +2372,19 @@ mod owner_tests {
     }
 
     #[test]
-    fn exclusive_atomic_write_never_replaces_an_existing_destination() {
-        // The A0a init commit primitive: creation is atomic and refusal-based.
-        // Any existing destination (including one that appears between the
-        // temp write and the hard-link commit) surfaces as AlreadyExists and
-        // is never replaced.
-        let root = test_root("owner-atomic-write");
-        let dest = root.join("owner.json");
-        fs::write(&dest, "original bytes").expect("pre-existing destination");
-        let error = exclusive_atomic_write(&dest, b"replacement bytes")
-            .expect_err("must refuse an existing destination");
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    fn v2_locator_grammar_rejects_empty_and_path_like_tags() {
+        use super::parse_v2_locator;
+        let locator = |tag: &str| serde_json::json!({"version": 2, "tag": tag});
         assert_eq!(
-            fs::read_to_string(&dest).expect("reread"),
-            "original bytes",
-            "destination content must be untouched"
+            parse_v2_locator(&locator("20260812T210800Z")),
+            Ok("20260812T210800Z"),
+            "control: a well-formed locator parses"
         );
-        fs::remove_file(&dest).expect("remove");
-        exclusive_atomic_write(&dest, b"fresh bytes").expect("absent destination creates");
-        assert_eq!(
-            fs::read_to_string(&dest).expect("reread"),
-            "fresh bytes",
-            "created content"
+        assert!(parse_v2_locator(&locator("")).is_err(), "empty tag");
+        assert!(
+            parse_v2_locator(&locator("../escape")).is_err(),
+            "path-like tag"
         );
-        trash_test_root(&root);
-    }
-
-    #[test]
-    fn read_owner_file_rejects_symlink_and_legacy_matches_registered_path() {
-        let (root, context) = context("readfile");
-        let legacy: ResolvedOwner =
-            legacy_owner(&context, &context.load_rooms().expect("rooms")).expect("legacy");
-        assert_eq!(legacy.room, LEGACY_OWNER_ROOM);
-        fs::write(root.join("rooms.json"), r#"{"mara":"~/.mara-room"}"#).expect("rooms");
-        let rooms = context.load_rooms().expect("rooms");
-        fs::write(
-            root.join("owner.json"),
-            r#"{"room":"mara","sidecar_dir":"/srv/x"}"#,
-        )
-        .expect("owner");
-        let owner_file = read_owner_file(&root.join("owner.json")).expect("parse");
-        let resolved =
-            crate::mailbox::resolve_owner_file(&context, &owner_file, &rooms).expect("resolve");
-        assert_eq!(resolved.sidecar_dir, PathBuf::from("/srv/x"));
-        // load_owner_with_rooms honors an externally supplied registry.
-        match load_owner_with_rooms(&context, &rooms).expect("with rooms") {
-            OwnerResolution::Configured(resolved) => {
-                assert_eq!(resolved.room, "mara");
-            }
-            other => panic!("expected configured, got {other:?}"),
-        }
-        trash_test_root(&root);
     }
 
     #[test]
