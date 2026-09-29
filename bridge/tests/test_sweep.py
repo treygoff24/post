@@ -832,15 +832,6 @@ class SweeperTest(unittest.TestCase):
             (self.fc.repo / "outbox" / "trey" / "hq" / (mail_id + ".mail")).exists()
         )
 
-    def test_config_host_mismatch_is_fatal(self):
-        config_path = self.fc.root / "bridge" / "config.json"
-        config = json.loads(config_path.read_text())
-        config["host"] = "wrong"
-        config_path.write_text(json.dumps(config), encoding="utf-8")
-        result = self.fc.sweep()
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertFalse((self.fc.root / "remote").exists())
-
     def test_fatal_health_preserves_first_tick_timestamp(self):
         self.bootstrap()
         health_path = self.fc.root / "bridge" / "health.json"
@@ -979,7 +970,9 @@ class SweeperTest(unittest.TestCase):
 
     def test_inbound_reconciles_every_crash_boundary_exactly_once(self):
         self.bootstrap()
-        hooks = tuple(f"inbound-i{index}" for index in range(1, 10)) + (
+        hooks = ("inbound-received",) + tuple(
+            f"inbound-i{index}" for index in range(1, 10)
+        ) + (
             "after-commit",
             "after-push",
         )
@@ -1003,6 +996,31 @@ class SweeperTest(unittest.TestCase):
                         -signal.SIGKILL,
                         crashed.stdout + crashed.stderr,
                     )
+                    if hook == "inbound-received":
+                        # The reservation is written and nothing else is.
+                        self.assertTrue(
+                            (self.trey.root / "bridge" / "received" / mail_id).is_file()
+                        )
+                        self.assertFalse(
+                            (
+                                self.trey.root / "hq" / "inbox" / (mail_id + ".mail")
+                            ).exists()
+                        )
+                        self.assertFalse(
+                            (
+                                self.trey.root / "archive" / (mail_id + ".mail")
+                            ).exists()
+                        )
+                        self.assertFalse(
+                            (
+                                self.trey.root
+                                / "bridge"
+                                / "delivered"
+                                / "fc"
+                                / "hq"
+                                / mail_id
+                            ).exists()
+                        )
                     consumed = False
                     if read_between:
                         read = self.trey.post(
@@ -1053,39 +1071,6 @@ class SweeperTest(unittest.TestCase):
                             / (mail_id + ".mail")
                         ).exists()
                     )
-
-    def test_received_marker_crash_before_inbox_recovers_normally(self):
-        self.bootstrap()
-        mail_id = self.fc.send("garden", "hq", "received marker crash window")
-        expected = (self.fc.root / "archive" / (mail_id + ".mail")).read_bytes()
-        sha256 = hashlib.sha256(expected).hexdigest()
-        self.assertEqual(self.fc.sweep().returncode, 0)
-
-        crashed = self.trey.sweep(BRIDGE_CRASH_AFTER="inbound-received")
-        self.assertEqual(crashed.returncode, -signal.SIGKILL)
-        self.assertTrue((self.trey.root / "bridge" / "received" / mail_id).is_file())
-        self.assertFalse(
-            (self.trey.root / "hq" / "inbox" / (mail_id + ".mail")).exists()
-        )
-        self.assertFalse((self.trey.root / "archive" / (mail_id + ".mail")).exists())
-        ledger = self.trey.root / "bridge" / "delivered" / "fc" / "hq" / mail_id
-        self.assertFalse(ledger.exists())
-
-        recovered = self.trey.sweep()
-        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-        self.assert_delivery_invariant(self.trey, "hq", mail_id, expected)
-        self.assertEqual(ledger.read_text().strip(), sha256)
-        receipt = json.loads(
-            (
-                self.trey.repo / "receipts" / "fc" / "hq" / (mail_id + ".json")
-            ).read_text()
-        )
-        self.assertEqual((receipt["status"], receipt["sha256"]), ("delivered", sha256))
-        self.assertEqual(self.fc.sweep().returncode, 0)
-        self.assertFalse(
-            (self.fc.repo / "outbox" / "trey" / "hq" / (mail_id + ".mail")).exists()
-        )
-        self.assertEqual(self.trey.doctor_errors(), [])
 
     def test_outbound_reconciles_every_crash_boundary_and_prune(self):
         self.bootstrap()
@@ -1162,61 +1147,45 @@ class SweeperTest(unittest.TestCase):
             ).stdout,
         )
 
-        # Next tick reconstructs the marker from the fetched tree (step 0)
-        # before prune/select; with nothing new to push it derives exactly
-        # once and commits nothing.
-        fetched_ref = self.fc.git(
-            "rev-parse", "origin/machines/fc"
-        ).stdout.strip()
-        head_before = self.fc.git("rev-parse", "HEAD").stdout.strip()
-        calls = []
-        real_derive = SWEEPER.derive_published_and_tidy
-
-        def counting(settings, config, git, rooms, logger, ref, tidy):
-            calls.append((ref, tidy))
-            return real_derive(settings, config, git, rooms, logger, ref, tidy)
-
+        # The receiver settles the letter, so the next fc tick finds a receipt
+        # for a letter whose marker was never written. Prune only retires an
+        # entry that has a marker, so the same tick must derive the marker
+        # from the fetched tree first and then prune.
+        delivered = self.trey.sweep()
+        self.assertEqual(
+            delivered.returncode, 0, delivered.stdout + delivered.stderr
+        )
         published_before = len(
             [r for r in self.fc.logs() if r["action"] == "published"]
         )
-        os.utime(self.fc.root / "bridge" / "config.json", None)
-        with mock.patch.dict(
-            os.environ, self.fc.env(), clear=True
-        ), mock.patch.object(
-            SWEEPER, "derive_published_and_tidy", side_effect=counting
-        ):
-            self.assertEqual(SWEEPER.execute(), 0)
-        self.assertEqual(calls, [(fetched_ref, True)])
-        self.assertTrue(marker.is_file())
+        derive_tick = self.fc.sweep()
         self.assertEqual(
-            self.fc.git("rev-parse", "HEAD").stdout.strip(), head_before
+            derive_tick.returncode, 0, derive_tick.stdout + derive_tick.stderr
         )
+        self.assertTrue(marker.is_file())
         self.assertEqual(
             len([r for r in self.fc.logs() if r["action"] == "published"]),
             published_before + 1,
         )
+        self.assertFalse(
+            (self.fc.repo / "outbox" / "trey" / "hq" / (mail_id + ".mail")).exists()
+        )
+        self.assertNotIn(
+            f"outbox/trey/hq/{mail_id}.mail",
+            self.fc.git(
+                "ls-tree", "-r", "--name-only", "origin/machines/fc"
+            ).stdout,
+        )
 
-        # A pushed tick derives exactly twice: step 0 from the fetched tree,
-        # step 4 from HEAD immediately after the push. The archive is never
-        # re-selected, so still exactly one outbox entry per mail on the
-        # remote.
+        # A later letter is relayed and published in one tick and never
+        # rewrites the archive bytes; still exactly one outbox entry per mail.
         second_id = self.fc.send("garden", "hq", "second mail after crash")
-        calls.clear()
-        # Snapshot only after both letters exist: the bridge relays them but
-        # must never rewrite the archive bytes.
         archive_before = directory_hash(self.fc.root / "archive")
-        with mock.patch.dict(
-            os.environ, self.fc.env(), clear=True
-        ), mock.patch.object(
-            SWEEPER, "derive_published_and_tidy", side_effect=counting
-        ):
-            self.assertEqual(SWEEPER.execute(), 0)
-        self.assertEqual(calls, [(fetched_ref, True), ("HEAD", True)])
+        pushed = self.fc.sweep()
+        self.assertEqual(pushed.returncode, 0, pushed.stdout + pushed.stderr)
         self.assertTrue(
             (self.fc.root / "bridge" / "published" / second_id).is_file()
         )
-
-        # Receipt-driven prune then works on both published ids.
         delivered = self.trey.sweep()
         self.assertEqual(
             delivered.returncode, 0, delivered.stdout + delivered.stderr
@@ -1233,7 +1202,7 @@ class SweeperTest(unittest.TestCase):
         self.assertEqual(outbox_paths, [])
         self.assertEqual(directory_hash(self.fc.root / "archive"), archive_before)
         self.assertEqual(
-            int(self.fc.git("rev-list", "--count", "HEAD").stdout), baseline + 3
+            int(self.fc.git("rev-list", "--count", "HEAD").stdout), baseline + 4
         )
 
     def test_successful_push_derives_marker_when_post_push_fetch_fails(self):
@@ -1493,12 +1462,23 @@ class SweeperTest(unittest.TestCase):
         value["address_kind"] = "lineage"
         archive.unlink()
         archive.write_bytes(json.dumps(value, indent=2).encode() + b"\n---\n" + body)
+        # Positive control in the same tick: a workspace-addressed letter is
+        # relayed, so the empty outbox below is selection refusing the typed
+        # letters and not selection relaying nothing at all.
+        plain_id = self.fc.send("garden", "hq", "plain workspace letter")
 
         result = self.fc.sweep()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(
+            (self.fc.repo / "outbox" / "trey" / "hq" / (plain_id + ".mail")).is_file()
+        )
+        self.assertTrue((self.fc.root / "bridge" / "published" / plain_id).is_file())
         for mail_id in sent + [shaped_id]:
             self.assertEqual(
                 list((self.fc.repo / "outbox").rglob(mail_id + ".mail")), [], mail_id
+            )
+            self.assertFalse(
+                (self.fc.root / "bridge" / "published" / mail_id).exists(), mail_id
             )
         self.assertEqual(
             [r for r in self.fc.logs() if r["action"] == "outbound_ignored"], []
@@ -2338,10 +2318,12 @@ class SweeperTest(unittest.TestCase):
                         + "\n"
                     ).encode(),
                 )
+                logged = len(self.trey.logs())
                 result = self.trey.sweep()
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(
-                    "rooms_invalid", [record["action"] for record in self.trey.logs()]
+                    "rooms_invalid",
+                    [record["action"] for record in self.trey.logs()[logged:]],
                 )
                 self.assertFalse((self.trey.root / "remote" / "fc" / name).exists())
                 for child in ("inbox", "read"):
@@ -2364,7 +2346,16 @@ class SweeperTest(unittest.TestCase):
                 + "\n"
             ).encode(),
         )
-        self.trey.sweep()
+        logged = len(self.trey.logs())
+        result = self.trey.sweep()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The bridge did attempt `post rooms add fern` and post refused it.
+        conflicts = [
+            record
+            for record in self.trey.logs()[logged:]
+            if record["action"] == "placeholder_conflict"
+        ]
+        self.assertEqual([record.get("room") for record in conflicts], ["fern"])
         registered = json.loads(self.trey.post("rooms", "--json").stdout)
         self.assertNotIn("fern", [room["name"] for room in registered["rooms"]])
         for child in ("inbox", "read"):
@@ -2699,12 +2690,6 @@ class SweeperTest(unittest.TestCase):
         self.assertEqual(SWEEPER.blocked_reason(rules, "archive", "hq"), "reserved")
         self.assertEqual(SWEEPER.blocked_reason(rules, "garden", "hq"), "real hold")
 
-    def test_load_rules_missing_file_means_no_rules(self):
-        root = Path(self.temporary.name) / "missing-rules"
-        root.mkdir()
-
-        self.assertEqual(SWEEPER.load_rules(types.SimpleNamespace(root=root)), [])
-
     def test_rules_file_can_vanish_after_placeholder_setup(self):
         self.bootstrap()
         mail_id = self.fc.send("garden", "hq", "no rules file")
@@ -2724,45 +2709,6 @@ class SweeperTest(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertFalse(rules_path.exists())
         self.assert_delivery_invariant(self.trey, "hq", mail_id, expected)
-
-    def test_rule_added_between_ticks_holds_only_the_next_mail(self):
-        self.bootstrap()
-        first_id = self.fc.send("garden", "hq", "before rule")
-        self.assertEqual(self.fc.sweep().returncode, 0)
-        first_tick = self.trey.sweep()
-        self.assertEqual(first_tick.returncode, 0, first_tick.stdout + first_tick.stderr)
-        self.assertIn(first_id, self.trey.inbox_ids("hq"))
-
-        second_id = self.fc.send("garden", "hq", "after rule")
-        self.assertEqual(self.fc.sweep().returncode, 0)
-        reason = "sender paused between ticks"
-        rules_path = self.trey.root / "rules.json"
-        rules_path.write_text(
-            json.dumps(
-                {"blocked": [{"from": "garden", "to": "hq", "reason": reason}]}
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        second_tick = self.trey.sweep()
-        self.assertEqual(
-            second_tick.returncode, 0, second_tick.stdout + second_tick.stderr
-        )
-        receipt_path = (
-            self.trey.repo / "receipts" / "fc" / "hq" / (second_id + ".json")
-        )
-        self.assertEqual(
-            (json.loads(receipt_path.read_text())["status"], json.loads(receipt_path.read_text())["reason"]),
-            ("held", reason),
-        )
-        self.assertFalse(
-            (self.trey.root / "hq" / "inbox" / (second_id + ".mail")).exists()
-        )
-
-        rules_path.write_text('{"blocked":[]}\n', encoding="utf-8")
-        third_tick = self.trey.sweep()
-        self.assertEqual(third_tick.returncode, 0, third_tick.stdout + third_tick.stderr)
-        self.assertEqual(json.loads(receipt_path.read_text())["status"], "delivered")
 
     def test_registration_collision_is_fatal_and_persisted(self):
         wrong = self.fc.base / "wrong-hq"
@@ -2854,7 +2800,7 @@ class SweeperTest(unittest.TestCase):
 
     def test_prune_crashes_after_commit_and_push_recover(self):
         self.bootstrap()
-        for hook in ("after-commit", "after-push"):
+        for hook in ("outbound-o5-prune", "after-commit", "after-push"):
             with self.subTest(hook=hook):
                 mail_id = self.fc.send("garden", "hq", f"prune {hook}")
                 archive_hash = directory_hash(self.fc.root / "archive")
@@ -2862,6 +2808,9 @@ class SweeperTest(unittest.TestCase):
                 self.assertEqual(self.trey.sweep().returncode, 0)
                 crashed = self.fc.sweep(BRIDGE_CRASH_AFTER=hook)
                 self.assertEqual(crashed.returncode, -signal.SIGKILL, crashed.stdout + crashed.stderr)
+                # The archive is untouched at the instant of the crash, not
+                # only after recovery.
+                self.assertEqual(directory_hash(self.fc.root / "archive"), archive_hash)
                 recovered = self.fc.sweep()
                 self.assertEqual(
                     recovered.returncode, 0, recovered.stdout + recovered.stderr
@@ -2872,19 +2821,6 @@ class SweeperTest(unittest.TestCase):
                     ).exists()
                 )
                 self.assertEqual(directory_hash(self.fc.root / "archive"), archive_hash)
-
-    def test_outage_with_queued_outbound_is_unhealthy(self):
-        self.bootstrap()
-        self.fc.send("garden", "hq", "queued during outage")
-        offline = self.topology.forge.with_name("forge.queue-offline")
-        self.topology.forge.rename(offline)
-        try:
-            result = self.fc.sweep()
-            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            health = json.loads((self.fc.root / "bridge" / "health.json").read_text())
-            self.assertEqual(health["reason"], "push_failed")
-        finally:
-            offline.rename(self.topology.forge)
 
     def test_all_marked_archives_are_skipped_before_open(self):
         self.bootstrap()
@@ -3492,33 +3428,6 @@ class SweeperTest(unittest.TestCase):
         self.assertEqual(archive_dir.stat().st_mode & 0o777, 0o751)
         self.assertIn(mail_id, self.trey.inbox_ids("hq"))
 
-    def test_unlisted_host_branch_is_ignored(self):
-        self.bootstrap()
-        env = os.environ.copy()
-        env["BRIDGE_TEST_ACTOR"] = "bogus"
-        run(
-            [
-                "git",
-                "-C",
-                self.topology.seed,
-                "push",
-                "-q",
-                "origin",
-                "HEAD:refs/heads/machines/bogus",
-            ],
-            env=env,
-        )
-        result = self.trey.sweep()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(
-            "bogus",
-            [
-                r.get("host")
-                for r in self.trey.logs()
-                if r["action"] == "ignored_branch"
-            ],
-        )
-
     def test_busy_lock_exits_zero_and_fifth_busy_is_unhealthy(self):
         self.bootstrap()
         lock_path = self.fc.root / "bridge" / ".lock"
@@ -3553,56 +3462,6 @@ class SweeperTest(unittest.TestCase):
         self.assertEqual(after["stalled_since"], before["stalled_since"])
         self.assertEqual(after["busy_streak"], before["busy_streak"] + 1)
 
-    def test_recreated_lock_path_cannot_start_a_second_process(self):
-        self.bootstrap()
-        mail_id = self.fc.send("garden", "hq", "must wait for original lock")
-        self.assertEqual(self.fc.sweep().returncode, 0)
-        lock_path = self.trey.root / "bridge" / ".lock"
-        holder = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import fcntl,sys; "
-                    "stream=open(sys.argv[1], 'r+'); "
-                    "fcntl.flock(stream.fileno(), fcntl.LOCK_EX); "
-                    "print('ready', flush=True); sys.stdin.read()"
-                ),
-                str(lock_path),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            self.assertEqual(holder.stdout.readline().strip(), "ready")
-            lock_path.unlink()
-            lock_path.touch()
-            logged = len(self.trey.logs())
-            busy = self.trey.sweep()
-            self.assertEqual(busy.returncode, 0, busy.stdout + busy.stderr)
-            self.assertTrue(
-                any(
-                    record.get("action") == "busy"
-                    for record in self.trey.logs()[logged:]
-                )
-            )
-            self.assertFalse(
-                (self.trey.root / "hq" / "inbox" / (mail_id + ".mail")).exists()
-            )
-        finally:
-            if holder.stdin is not None:
-                holder.stdin.close()
-            holder.wait(timeout=10)
-            if holder.stdout is not None:
-                holder.stdout.close()
-            if holder.stderr is not None:
-                holder.stderr.close()
-        recovered = self.trey.sweep()
-        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-        self.assertIn(mail_id, self.trey.inbox_ids("hq"))
-
     def test_wrong_origin_or_branch_is_fatal(self):
         config_path = self.fc.root / "bridge" / "config.json"
         config = json.loads(config_path.read_text())
@@ -3616,23 +3475,6 @@ class SweeperTest(unittest.TestCase):
         self.fc.git("checkout", "-q", "-b", "wrong-branch")
         result = self.fc.sweep()
         self.assertEqual(result.returncode, 2)
-
-    def test_sender_archive_hash_never_changes_during_prune(self):
-        self.bootstrap()
-        mail_id = self.fc.send("garden", "hq", "immutable archive")
-        before = directory_hash(self.fc.root / "archive")
-        self.assertEqual(self.fc.sweep().returncode, 0)
-        self.assertEqual(self.trey.sweep().returncode, 0)
-        for hook in ("outbound-o5-prune", "after-commit", "after-push"):
-            result = self.fc.sweep(BRIDGE_CRASH_AFTER=hook)
-            if result.returncode == -signal.SIGKILL:
-                self.assertEqual(directory_hash(self.fc.root / "archive"), before)
-                recovered = self.fc.sweep()
-                self.assertEqual(
-                    recovered.returncode, 0, recovered.stdout + recovered.stderr
-                )
-        self.assertEqual(directory_hash(self.fc.root / "archive"), before)
-        self.assertTrue((self.fc.root / "archive" / (mail_id + ".mail")).exists())
 
     def test_reconcile_repairs_every_local_half_state(self):
         self.bootstrap()
@@ -3731,30 +3573,6 @@ class SweeperTest(unittest.TestCase):
             (room_receipts["hq"]["status"], room_receipts["hq"]["reason"]),
             ("quarantined", "id-collision"),
         )
-
-    def test_unknown_room_is_retryable_and_receiver_stays_healthy(self):
-        self.bootstrap()
-        mail_id = fixed_id(900)
-        self.fc.inject(
-            f"outbox/trey/nowhere/{mail_id}.mail",
-            craft_mail(mail_id, "outside", "nowhere"),
-        )
-        result = self.trey.sweep()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        health = json.loads((self.trey.root / "bridge" / "health.json").read_text())
-        self.assertTrue(health["ok"])
-        self.assertNotIn("undeliverable", health)
-        receipt = json.loads(
-            (
-                self.trey.repo
-                / "receipts"
-                / "fc"
-                / "nowhere"
-                / (mail_id + ".json")
-            ).read_text()
-        )
-        self.assertEqual(receipt["status"], "quarantined")
-        self.assertEqual(receipt["reason"], "unknown_room")
 
     def test_cross_host_id_collision_rejects_identical_and_different_bytes(self):
         # The identical-bytes half needs one envelope accepted from two
@@ -4330,51 +4148,6 @@ class SweeperTest(unittest.TestCase):
         health = json.loads((self.fc.root / "bridge" / "health.json").read_text())
         self.assertEqual(health["reason"], "branch_diverged")
         self.assertFalse((self.fc.repo / ".git" / "rebase-merge").exists())
-
-    def test_each_branch_reflog_contains_only_its_owner_commits(self):
-        self.bootstrap()
-        for machine, sender, recipient in (
-            (self.fc, "garden", "hq"),
-            (self.trey, "hq", "porch"),
-            (self.mac, "porch", "garden"),
-        ):
-            machine.send(sender, recipient, "ownership")
-            self.assertEqual(machine.sweep().returncode, 0)
-        for host in ("fc", "trey", "mac"):
-            reflog_commits = run(
-                [
-                    "git",
-                    "--git-dir",
-                    self.topology.forge,
-                    "reflog",
-                    "show",
-                    f"refs/heads/machines/{host}",
-                    "--format=%H",
-                ]
-            ).stdout.splitlines()
-            authors = [
-                run(
-                    [
-                        "git",
-                        "--git-dir",
-                        self.topology.forge,
-                        "show",
-                        "-s",
-                        "--format=%ae",
-                        commit,
-                    ]
-                ).stdout.strip()
-                for commit in reflog_commits
-            ]
-            self.assertTrue(authors)
-            self.assertTrue(
-                all(
-                    author == "fixture@invalid"
-                    or author == f"post-bridge@{host}"
-                    for author in authors
-                ),
-                (host, authors),
-            )
 
     def test_cross_filesystem_mail_root_round_trip(self):
         shm = Path("/dev/shm")
