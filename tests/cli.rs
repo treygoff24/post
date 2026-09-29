@@ -3352,24 +3352,22 @@ fn unknown_room_has_a_did_you_mean_and_exact_discovery_command() {
     assert!(error.error.suggested_fix.contains("`post rooms`"));
 }
 
-/// Identity is a directory, so the error has to name the directory. Naming only
-/// the inferred basename told the caller the one thing they already knew.
+/// A chat read needs a bound participant: a reader with none is refused with
+/// the bind fix, is never given a room guessed from its working directory, and
+/// nothing is created.
 #[test]
 fn unregistered_cwd_read_only_chat_reports_unbound_without_creating_identity() {
     let sandbox = Sandbox::new();
     let before = snapshot_tree(&sandbox.mail_root);
     let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &sandbox.path);
-    assert_eq!(output.status.code(), Some(66));
+    assert_eq!(output.status.code(), Some(65));
     let error: ErrorEnvelope = from_stderr(&output);
-    assert_eq!(error.error.code, "not_found");
-    assert!(error
-        .error
-        .message
-        .contains("channel 'some-channel' does not exist"));
+    assert_eq!(error.error.code, "no_participant");
+    assert!(error.error.message.contains("participant: unbound"));
     assert!(error
         .error
         .suggested_fix
-        .contains("post chat 'some-channel' --join"));
+        .contains("post participant bind --new"));
     assert_eq!(snapshot_tree(&sandbox.mail_root), before);
 }
 
@@ -3384,9 +3382,12 @@ fn hostile_unregistered_cwd_read_only_chat_creates_nothing_and_cannot_inject() {
         fs::create_dir_all(&hostile).expect("create hostile cwd");
         let before = snapshot_tree(&sandbox.mail_root);
         let output = sandbox.run_without_identity(&["chat", "some-channel", "--peek"], &hostile);
-        assert_eq!(output.status.code(), Some(66));
+        assert_eq!(output.status.code(), Some(65));
         let error: ErrorEnvelope = from_stderr(&output);
-        assert_eq!(error.error.code, "not_found");
+        assert_eq!(error.error.code, "no_participant");
+        // The refusal names no directory, so there is nothing to inject into.
+        assert!(!error.error.message.contains(dirname));
+        assert!(!error.error.suggested_fix.contains(dirname));
         assert!(error.error.details.exact_fix.is_none());
         assert_eq!(snapshot_tree(&sandbox.mail_root), before);
         assert!(!hostile.join("INJECTED").exists());

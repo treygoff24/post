@@ -1097,8 +1097,11 @@ fn participant_review_bound_and_unbound_read_only_forms_preserve_complete_tree()
                 }
                 Some("missing_chat") => {
                     let error: ErrorEnvelope = from_stderr(&output);
-                    // Bound or not, a missing channel is not_found (66).
-                    assert_eq!(error.error.code, "not_found", "{args:?} bound={bound}");
+                    // A bound reader is told the channel is missing (66); a reader
+                    // with no participant has no identity to read as, so it is
+                    // refused before the channel is looked up.
+                    let expected = if bound { "not_found" } else { "no_participant" };
+                    assert_eq!(error.error.code, expected, "{args:?} bound={bound}");
                 }
                 Some(code) => {
                     let error: ErrorEnvelope = from_stderr(&output);
@@ -2001,7 +2004,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "--peek".to_owned(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("no_participant"),
         ),
         (
             vec![
@@ -2011,7 +2014,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "1".to_owned(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("no_participant"),
         ),
         (
             vec![
@@ -2021,7 +2024,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 channel_id.clone(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("no_participant"),
         ),
         (
             vec![
@@ -2031,7 +2034,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 channel_id.clone(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("no_participant"),
         ),
         (
             vec![
@@ -2043,7 +2046,7 @@ fn participant_round2_fully_unbound_read_only_forms_work_without_mutation() {
                 "4096".to_owned(),
                 "--json".to_owned(),
             ],
-            Some("not_a_member"),
+            Some("no_participant"),
         ),
     ];
     for (command, expected_error) in commands {

@@ -649,18 +649,6 @@ pub(crate) fn consume_channel(
     consume_channel_waiting(context, room, channel, ids, LockWait::Blocking)
 }
 
-/// Legacy-room `consume_channel` bounded by `budget` on the cursor lock; see
-/// `ParticipantCursors::consume_channel_within`.
-pub(crate) fn consume_channel_within(
-    context: &Context,
-    room: &str,
-    channel: &str,
-    ids: Vec<String>,
-    budget: Duration,
-) -> AppResult<CursorAdvance> {
-    consume_channel_waiting(context, room, channel, ids, LockWait::Within(budget))
-}
-
 fn consume_channel_waiting(
     context: &Context,
     room: &str,

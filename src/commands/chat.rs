@@ -1,5 +1,4 @@
 use crate::channel;
-use crate::channel_state::ChannelState;
 use crate::cli::ChatArgs;
 use crate::command_result::CommandResult;
 use crate::cursor_state::{self, ParticipantCursors};
@@ -196,11 +195,9 @@ fn acknowledge_exact(
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
-    let participant = context.sender().ok().map(|sender| sender.participant);
-    if let Some(participant) = participant.as_ref() {
-        cursor_state::routing::route_for_participant(context, participant)?;
-    }
-    let paths = member_channel_paths(context, channel_name, &room)?;
+    let participant = context.sender()?.participant;
+    cursor_state::routing::route_for_participant(context, &participant)?;
+    let paths = member_channel_paths(context, channel_name)?;
     let id = resolve_message_stem(&paths, channel_name, target_input)?;
     // Parse the exact target before rendering an acknowledgement. A malformed
     // record is not silently markable just because the operator named its id.
@@ -225,18 +222,10 @@ fn acknowledge_exact(
     };
     let context = context.clone();
     let channel_name = channel_name.to_owned();
-    Ok(CommandResult::after_stdout(
-        rendered,
-        move || match participant {
-            Some(participant) => {
-                ParticipantCursors::consume_channel(&context, &participant, &channel_name, &[id])
-                    .map(|_| ())
-            }
-            None => {
-                cursor_state::consume_channel(&context, &room, &channel_name, vec![id]).map(|_| ())
-            }
-        },
-    ))
+    Ok(CommandResult::after_stdout(rendered, move || {
+        ParticipantCursors::consume_channel(&context, &participant, &channel_name, &[id])
+            .map(|_| ())
+    }))
 }
 
 fn read_message_slice(
@@ -254,7 +243,7 @@ fn read_message_slice(
         .expect("clap requires --max-bytes with --message");
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
-    let paths = member_channel_paths(context, &args.name, &room)?;
+    let paths = member_channel_paths(context, &args.name)?;
     let id = resolve_message_stem(&paths, &args.name, message_input)?;
     let path = paths.messages.join(format!("{id}.msg"));
     let parsed = channel::parse_channel_message(&path)?;
@@ -630,12 +619,10 @@ fn read(
     let framing = crate::mailbox::resolve_framing(args.framing);
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
-    let participant = context.sender().ok().map(|sender| sender.participant);
+    let participant = context.sender()?.participant;
     let cursorless = args.history.is_some() || args.since.is_some();
     if !args.peek && !cursorless {
-        if let Some(participant) = participant.as_ref() {
-            cursor_state::routing::route_for_participant(context, participant)?;
-        }
+        cursor_state::routing::route_for_participant(context, &participant)?;
     }
     // --history/--since are cursorless reads: they ignore the unread cursor
     // entirely and NEVER advance it, so they are idempotent and pipe-safe
@@ -644,12 +631,7 @@ fn read(
         mut batch,
         skipped_files,
     } = if cursorless {
-        let scanned = collect_batch_scanned(
-            context,
-            &room,
-            &args.name,
-            UnreadRule::AfterId(args.since.as_deref()),
-        )?;
+        let scanned = collect_batch_scanned(context, &args.name, args.since.as_deref())?;
         let mut all = scanned.batch;
         if let Some(n) = args.history {
             if all.len() > n {
@@ -667,20 +649,14 @@ fn read(
         // A peek consumes nothing, so its domain is every unseen message,
         // history included: that keeps pre-membership messages reachable
         // through --peek. Consuming reads select unread only (join-from-now).
-        match participant.as_ref() {
-            Some(participant) => {
-                read_batch_participant(context, participant, &args.name, args.peek)?
-            }
-            None => read_batch_scanned(context, &room, &args.name)?,
-        }
+        read_batch_participant(context, &participant, &args.name, args.peek)?
     };
     // Peek's @mention rescue is scoped to the member's own span: history
     // mentions predate the membership and are not addressed to this session.
-    let peek_rescue_floor = match participant.as_ref() {
-        Some(participant) if args.peek => {
-            cursor_state::eligibility::channel_history_floor(context, participant, &args.name)?
-        }
-        _ => None,
+    let peek_rescue_floor = if args.peek {
+        cursor_state::eligibility::channel_history_floor(context, &participant, &args.name)?
+    } else {
+        None
     };
     // Keep the full unread selection for --discard: it deliberately consumes
     // everything, independent of the display bound used by ordinary reads.
@@ -980,21 +956,10 @@ fn read(
     // untouched and the batch re-shows on the next read.
     let channel_name = args.name;
     let context = context.clone();
-    Ok(CommandResult::after_stdout(
-        rendered,
-        move || match participant {
-            Some(participant) => ParticipantCursors::consume_channel(
-                &context,
-                &participant,
-                &channel_name,
-                &batch_ids,
-            )
-            .map(|_| ()),
-            None => {
-                cursor_state::consume_channel(&context, &room, &channel_name, batch_ids).map(|_| ())
-            }
-        },
-    ))
+    Ok(CommandResult::after_stdout(rendered, move || {
+        ParticipantCursors::consume_channel(&context, &participant, &channel_name, &batch_ids)
+            .map(|_| ())
+    }))
 }
 
 fn null_stdout_refusal(args: &ChatArgs, count: usize) -> AppError {
@@ -1551,25 +1516,13 @@ fn discard(
     if count == 0 {
         return Ok(CommandResult::success(rendered));
     }
-    let participant = context.sender().ok().map(|sender| sender.participant);
+    let participant = context.sender()?.participant;
     let context = context.clone();
-    let room = room.to_owned();
     let channel_name = channel_name.to_owned();
-    Ok(CommandResult::after_stdout(
-        rendered,
-        move || match participant {
-            Some(participant) => ParticipantCursors::consume_channel(
-                &context,
-                &participant,
-                &channel_name,
-                &batch_ids,
-            )
-            .map(|_| ()),
-            None => {
-                cursor_state::consume_channel(&context, &room, &channel_name, batch_ids).map(|_| ())
-            }
-        },
-    ))
+    Ok(CommandResult::after_stdout(rendered, move || {
+        ParticipantCursors::consume_channel(&context, &participant, &channel_name, &batch_ids)
+            .map(|_| ())
+    }))
 }
 
 /// Consume exactly through `target_input` without printing bodies: the
@@ -1594,25 +1547,16 @@ fn discard_through(
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
-    let participant = context.sender().ok().map(|sender| sender.participant);
-    if let Some(participant) = participant.as_ref() {
-        cursor_state::routing::route_for_participant(context, participant)?;
-    }
-    let paths = member_channel_paths(context, channel_name, &room)?;
+    let participant = context.sender()?.participant;
+    cursor_state::routing::route_for_participant(context, &participant)?;
+    let paths = member_channel_paths(context, channel_name)?;
     let target = resolve_message_stem(&paths, channel_name, target_input)?;
 
     // The span is counted and vetted under the lock inside
     // consume_channel_through: enumeration, parse checks, union, and atomic
     // replace share one hold.
-    let outcome = match participant {
-        Some(participant) => ParticipantCursors::consume_channel_through(
-            context,
-            &participant,
-            channel_name,
-            &target,
-        )?,
-        None => cursor_state::consume_channel_through(context, &room, channel_name, &target)?,
-    };
+    let outcome =
+        ParticipantCursors::consume_channel_through(context, &participant, channel_name, &target)?;
     let discarded = if outcome.advanced { outcome.marked } else { 0 };
     let rendered = if json_output {
         output::json(
@@ -1662,23 +1606,17 @@ fn discard_through_text(
 
 /// Channel paths after the existence and membership checks every cursor-facing
 /// channel command owes its caller.
-fn member_channel_paths(
-    context: &Context,
-    channel_name: &str,
-    _room: &str,
-) -> AppResult<channel::ChannelPaths> {
+fn member_channel_paths(context: &Context, channel_name: &str) -> AppResult<channel::ChannelPaths> {
     let paths = require_channel(context, channel_name, channel::ChannelUse::Read)?;
     let quoted = crate::mailbox::shell_quote(channel_name);
-    let participant = context.sender().ok().map(|sender| sender.participant);
-    let is_member = match participant.as_ref() {
-        Some(participant) => crate::channel_state::ParticipantChannels::load(participant)?
-            .effective(context, participant, channel_name)?,
-        None => paths.load_members()?.contains_key(_room),
-    };
+    let participant = context.sender()?.participant;
+    let is_member = crate::channel_state::ParticipantChannels::load(&participant)?.effective(
+        context,
+        &participant,
+        channel_name,
+    )?;
     if !is_member {
-        let actor = participant
-            .as_ref()
-            .map_or_else(|| _room.to_owned(), |participant| participant.id.clone());
+        let actor = participant.id.clone();
         return Err(AppError::new(
             ErrorCode::NotAMember,
             format!("participant '{actor}' is not a member of channel '{channel_name}'"),
@@ -1762,25 +1700,6 @@ fn require_channel(
     Ok(paths)
 }
 
-/// Collect the unread batch for `room` in `channel`: every message whose id
-/// is not in the room's seen-set, in id order (lexical = chronological for
-/// microsecond-resolution ids). A file that cannot be parsed is skipped and
-/// reported, never fatal: consumption is per emitted id, so it neither advances
-/// nor blocks anything, and it shows up again once repaired.
-fn read_batch_scanned(context: &Context, room: &str, channel_name: &str) -> AppResult<Scanned> {
-    let state = ChannelState::load(context, room)?;
-    collect_batch_scanned(context, room, channel_name, UnreadRule::NotInSeen(&state))
-}
-
-#[cfg(test)]
-fn read_batch(
-    context: &Context,
-    room: &str,
-    channel_name: &str,
-) -> AppResult<Vec<(ChannelMessage, String)>> {
-    Ok(read_batch_scanned(context, room, channel_name)?.batch)
-}
-
 /// A participant's read selection: unread (after the membership start) for a
 /// consuming read, or every unseen message including history for `--peek`.
 fn read_batch_participant(
@@ -1831,39 +1750,25 @@ fn read_batch_participant(
     })
 }
 
-/// Which messages a collection includes. `AfterId` serves the cursorless
-/// `--history`/`--since` reads; `NotInSeen` is the unread selection — the
-/// published predicate "id ∉ seen ∧ from ≠ self" (an unknown event kind is not
-/// conversation and never unread).
-enum UnreadRule<'a> {
-    AfterId(Option<&'a str>),
-    NotInSeen(&'a ChannelState),
-}
-
-/// Every message matching `rule`, in id order, after existence and membership
-/// checks. Pure read: never touches any seen-set. An unreadable `.msg` matching
-/// the rule is skipped and reported in `skipped_files`.
+/// Every message after `after` (all of them when it is `None`), in id order,
+/// after existence and membership checks: the cursorless `--history`/`--since`
+/// selection. Pure read: never touches any seen-set. An unreadable `.msg` in
+/// the range is skipped and reported in `skipped_files`.
 fn collect_batch_scanned(
     context: &Context,
-    _room: &str,
     channel_name: &str,
-    rule: UnreadRule<'_>,
+    after: Option<&str>,
 ) -> AppResult<Scanned> {
     let paths = require_channel(context, channel_name, channel::ChannelUse::Read)?;
     let quoted = crate::mailbox::shell_quote(channel_name);
-    let actor = context.sender().ok().map(|sender| sender.participant);
-    let is_member = match actor.as_ref() {
-        Some(actor) => crate::channel_state::ParticipantChannels::load(actor)?.effective(
-            context,
-            actor,
-            channel_name,
-        )?,
-        None => paths.load_members()?.contains_key(_room),
-    };
+    let actor = context.sender()?.participant;
+    let is_member = crate::channel_state::ParticipantChannels::load(&actor)?.effective(
+        context,
+        &actor,
+        channel_name,
+    )?;
     if !is_member {
-        let actor_id = actor
-            .as_ref()
-            .map_or_else(|| _room.to_owned(), |actor| actor.id.clone());
+        let actor_id = actor.id.clone();
         return Err(AppError::new(
             ErrorCode::NotAMember,
             format!("participant '{actor_id}' is not a member of channel '{channel_name}'"),
@@ -1875,17 +1780,13 @@ fn collect_batch_scanned(
     let mut batch = Vec::new();
     let mut skipped_files = Vec::new();
     for path in channel::message_files(&paths.messages)? {
-        // Filename id is the order key and the membership key (a parsed
-        // envelope must match its filename). Already-seen messages are
-        // ignored even if now unreadable: they were consumed.
+        // The filename id is the order key (a parsed envelope must match its
+        // filename), so the range check needs no parse: a message outside it
+        // is ignored even if now unreadable.
         let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        let included = match &rule {
-            UnreadRule::AfterId(after) => after.is_none_or(|last| id > last),
-            UnreadRule::NotInSeen(state) => !state.has_seen(channel_name, id),
-        };
-        if !included {
+        if !after.is_none_or(|last| id > last) {
             continue;
         }
         let parsed = match channel::parse_channel_message(&path) {
@@ -1898,15 +1799,6 @@ fn collect_batch_scanned(
                 None => return Err(error),
             },
         };
-        // The published unread predicate is "id ∉ seen ∧ from ≠ self". The
-        // seen-set normally records own sends (mark_own_message_seen), but if
-        // that best-effort mark failed, the sender's own message must still
-        // never re-show to its sender.
-        if matches!(&rule, UnreadRule::NotInSeen(_))
-            && (parsed.message.from == _room || channel::is_opaque_event(&parsed.message))
-        {
-            continue;
-        }
         batch.push((parsed.message, parsed.body));
     }
     batch.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
@@ -2585,8 +2477,8 @@ fn seen_by(
     pretty: bool,
 ) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let (room, _) = channel::acting_room(context, &rooms)?;
-    let paths = member_channel_paths(context, channel_name, &room)?;
+    channel::acting_room(context, &rooms)?;
+    let paths = member_channel_paths(context, channel_name)?;
     let message_id = channel::resolve_message_id(&paths, msg_id_or_prefix)?;
     let mut seen = Vec::new();
     for member in crate::channel_state::effective_participants(context, channel_name)? {
@@ -2637,27 +2529,15 @@ fn mark_own_message_seen(
     message: &ChannelMessage,
     lock_budget: std::time::Duration,
 ) -> AppResult<()> {
-    match context.sender() {
-        Ok(sender) => ParticipantCursors::consume_channel_within(
-            context,
-            &sender.participant,
-            &message.channel,
-            std::slice::from_ref(&message.id),
-            lock_budget,
-        )
-        .map(|_| ()),
-        Err(error) if error.code == ErrorCode::NoParticipant => {
-            cursor_state::consume_channel_within(
-                context,
-                &message.from,
-                &message.channel,
-                vec![message.id.clone()],
-                lock_budget,
-            )
-            .map(|_| ())
-        }
-        Err(error) => Err(error),
-    }
+    let sender = context.sender()?;
+    ParticipantCursors::consume_channel_within(
+        context,
+        &sender.participant,
+        &message.channel,
+        std::slice::from_ref(&message.id),
+        lock_budget,
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -2668,16 +2548,46 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    /// A throwaway root whose acting participant is bound to workspace
+    /// `alpha`: chat reads and consumes require a bound participant, and a
+    /// channel whose `members.json` lists `alpha` covers it.
     fn chat_context(label: &str) -> (PathBuf, Context) {
         let root = test_root(&format!("chatread-{label}"));
-        fs::create_dir_all(root.join("alpha")).expect("create reader room dir");
-        (
-            root.clone(),
-            Context {
-                root: root.clone(),
-                home: root,
-            },
-        )
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        crate::participant::bind_test_actor(&context, "alpha");
+        (root, context)
+    }
+
+    fn acting(context: &Context) -> crate::participant::Participant {
+        context.sender().expect("bound test actor").participant
+    }
+
+    /// The acting participant's unread selection, as a consuming read makes it.
+    fn read_scanned(context: &Context, channel_name: &str) -> AppResult<Scanned> {
+        read_batch_participant(context, &acting(context), channel_name, false)
+    }
+
+    fn read_batch(
+        context: &Context,
+        channel_name: &str,
+    ) -> AppResult<Vec<(ChannelMessage, String)>> {
+        Ok(read_scanned(context, channel_name)?.batch)
+    }
+
+    /// What the emit-then-consume callback records for the acting participant.
+    fn consume_seen(
+        context: &Context,
+        channel_name: &str,
+        ids: Vec<String>,
+    ) -> AppResult<crate::cursor_state::CursorAdvance> {
+        ParticipantCursors::consume_channel(context, &acting(context), channel_name, &ids)
+    }
+
+    fn seen_state(context: &Context) -> ParticipantCursors {
+        ParticipantCursors::load(context, &acting(context))
     }
 
     fn seed_channel(root: &Path, members: &[&str]) -> PathBuf {
@@ -2767,25 +2677,19 @@ mod tests {
         seed_message(&dir, ID1, "beta", "first");
         seed_message(&dir, ID2, "beta", "second");
 
-        let batch = read_batch(&context, "alpha", "tax").expect("first read");
+        let batch = read_batch(&context, "tax").expect("first read");
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].0.id, ID1);
         assert_eq!(batch[1].0.id, ID2);
 
         // Emit-then-consume: only after the emit are the ids recorded. The
         // read path unions the FULL selected batch, both ids here.
-        cursor_state::consume_channel(
-            &context,
-            "alpha",
-            "tax",
-            vec![ID1.to_owned(), ID2.to_owned()],
-        )
-        .expect("consume batch");
-        let after = read_batch(&context, "alpha", "tax").expect("second read");
+        consume_seen(&context, "tax", vec![ID1.to_owned(), ID2.to_owned()]).expect("consume batch");
+        let after = read_batch(&context, "tax").expect("second read");
         assert!(after.is_empty(), "advanced cursor must hide the batch");
 
         seed_message(&dir, ID3, "beta", "third");
-        let third = read_batch(&context, "alpha", "tax").expect("third read");
+        let third = read_batch(&context, "tax").expect("third read");
         assert_eq!(third.len(), 1);
         assert_eq!(third[0].0.id, ID3);
         trash_test_root(&root);
@@ -2797,8 +2701,8 @@ mod tests {
         let (root, context) = chat_context("crash");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "only");
-        let first = read_batch(&context, "alpha", "tax").expect("first read");
-        let second = read_batch(&context, "alpha", "tax").expect("re-read");
+        let first = read_batch(&context, "tax").expect("first read");
+        let second = read_batch(&context, "tax").expect("re-read");
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 1, "no advance means the batch re-shows");
         trash_test_root(&root);
@@ -2808,7 +2712,7 @@ mod tests {
     fn non_member_read_is_refused_with_join_fix() {
         let (root, context) = chat_context("nonmember");
         seed_channel(&root, &["beta"]);
-        let error = read_batch(&context, "alpha", "tax").expect_err("non-member must be refused");
+        let error = read_batch(&context, "tax").expect_err("non-member must be refused");
         assert_eq!(error.code.as_str(), "not_a_member");
         trash_test_root(&root);
     }
@@ -2816,7 +2720,7 @@ mod tests {
     #[test]
     fn missing_channel_is_not_found() {
         let (root, context) = chat_context("missing");
-        let error = read_batch(&context, "alpha", "tax").expect_err("missing channel must error");
+        let error = read_batch(&context, "tax").expect_err("missing channel must error");
         assert_eq!(error.code.as_str(), "not_found");
         trash_test_root(&root);
     }
@@ -2826,20 +2730,20 @@ mod tests {
         let (root, context) = chat_context("ownadvance");
         let dir = seed_channel(&root, &["alpha", "beta"]);
         seed_message(&dir, ID1, "beta", "earlier");
-        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
-            .expect("catch up");
+        consume_seen(&context, "tax", vec![ID1.to_owned()]).expect("catch up");
         seed_message(&dir, ID2, "alpha", "my own send");
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID2}.msg")))
             .expect("parse own message")
             .message;
         mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
-        let state = ChannelState::load(&context, "alpha").expect("reload");
-        assert!(state.has_seen("tax", ID2), "own send is in the seen-set");
+        let state = seen_state(&context);
+        assert!(
+            state.channel_has_seen("tax", ID2),
+            "own send is in the seen-set"
+        );
 
         assert!(
-            read_batch(&context, "alpha", "tax")
-                .expect("re-read")
-                .is_empty(),
+            read_batch(&context, "tax").expect("re-read").is_empty(),
             "own message must not re-show as unread"
         );
         trash_test_root(&root);
@@ -2856,13 +2760,13 @@ mod tests {
             .expect("parse own message")
             .message;
         mark_own_message_seen(&context, &own, OWN_SEEN_LOCK_BUDGET).expect("record own id");
-        let state = ChannelState::load(&context, "alpha").expect("reload");
+        let state = seen_state(&context);
         assert!(
-            !state.has_seen("tax", ID1),
+            !state.channel_has_seen("tax", ID1),
             "beta's unseen message must stay unseen"
         );
-        assert!(state.has_seen("tax", ID2));
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        assert!(state.channel_has_seen("tax", ID2));
+        let batch = read_batch(&context, "tax").expect("read");
         assert_eq!(
             batch.len(),
             1,
@@ -2883,10 +2787,9 @@ mod tests {
         let dir = seed_channel(&root, &["alpha", "beta"]);
         // Room reads T1...
         seed_message(&dir, ID1, "beta", "T1");
-        let first = read_batch(&context, "alpha", "tax").expect("read T1");
+        let first = read_batch(&context, "tax").expect("read T1");
         assert_eq!(first.len(), 1);
-        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
-            .expect("consume T1");
+        consume_seen(&context, "tax", vec![ID1.to_owned()]).expect("consume T1");
         // ...sends its own message (id T3)...
         seed_message(&dir, ID3, "alpha", "my own send");
         let own = channel::parse_channel_message(&dir.join("messages").join(format!("{ID3}.msg")))
@@ -2897,31 +2800,23 @@ mod tests {
         seed_message(&dir, ID2, "beta", "bridged late arrival");
 
         // A plain read now returns T2 as unread.
-        let batch = read_batch(&context, "alpha", "tax").expect("late read");
+        let batch = read_batch(&context, "tax").expect("late read");
         assert_eq!(batch.len(), 1, "exactly the bridged late arrival shows");
         assert_eq!(batch[0].0.id, ID2);
 
-        // Watch would have emitted it: it is absent from the seen-set floor.
-        let floors = crate::commands::watch::load_channel_seen(&context, "alpha");
-        let tax_floor = floors.get("tax").expect("floor for tax");
-        assert!(
-            !tax_floor.contains(ID2),
-            "watch must ring for the bridged late arrival"
-        );
-        assert!(tax_floor.contains(ID1) && tax_floor.contains(ID3));
-
         // --seen-by reports correctly: alpha has consumed T1 and T3 but not T2.
-        let state = ChannelState::load(&context, "alpha").expect("reload");
-        assert!(state.has_seen("tax", ID1));
+        let state = seen_state(&context);
+        assert!(state.channel_has_seen("tax", ID1));
         assert!(
-            !state.has_seen("tax", ID2),
+            !state.channel_has_seen("tax", ID2),
             "seen-by must report beta's T2 unread by alpha"
         );
-        assert!(state.has_seen("tax", ID3));
+        assert!(state.channel_has_seen("tax", ID3));
 
         // And a targeted ack through T3 consumes exactly the late arrival.
         let outcome =
-            cursor_state::consume_channel_through(&context, "alpha", "tax", ID3).expect("ack");
+            ParticipantCursors::consume_channel_through(&context, &acting(&context), "tax", ID3)
+                .expect("ack");
         assert!(outcome.advanced);
         assert_eq!(outcome.marked, 1, "only T2 was newly recorded");
         trash_test_root(&root);
@@ -2935,31 +2830,28 @@ mod tests {
         seed_message(&dir, ID2, "beta", "second");
         seed_message(&dir, ID3, "beta", "third");
         // Fully caught up: a normal read sees nothing...
-        cursor_state::consume_channel(
+        consume_seen(
             &context,
-            "alpha",
             "tax",
             vec![ID1.to_owned(), ID2.to_owned(), ID3.to_owned()],
         )
         .expect("consume all");
-        assert!(read_batch(&context, "alpha", "tax")
-            .expect("read")
-            .is_empty());
+        assert!(read_batch(&context, "tax").expect("read").is_empty());
         // ...but --since ignores the seen-set entirely.
-        let since = collect_batch_scanned(&context, "alpha", "tax", UnreadRule::AfterId(Some(ID1)))
+        let since = collect_batch_scanned(&context, "tax", Some(ID1))
             .expect("since read")
             .batch;
         assert_eq!(since.len(), 2);
         assert_eq!(since[0].0.id, ID2);
         assert_eq!(since[1].0.id, ID3);
         // Full history (the --history base) sees all three.
-        let all = collect_batch_scanned(&context, "alpha", "tax", UnreadRule::AfterId(None))
+        let all = collect_batch_scanned(&context, "tax", None)
             .expect("history read")
             .batch;
         assert_eq!(all.len(), 3);
         // And the seen-set is untouched afterwards.
-        let state = ChannelState::load(&context, "alpha").expect("reload");
-        assert!(state.has_seen("tax", ID3));
+        let state = seen_state(&context);
+        assert!(state.channel_has_seen("tax", ID3));
         trash_test_root(&root);
     }
 
@@ -2971,7 +2863,7 @@ mod tests {
         seed_message(&dir, ID2, "beta", "middle");
         seed_message(&dir, ID3, "beta", "newest");
 
-        let mut batch = read_batch(&context, "alpha", "tax").expect("read");
+        let mut batch = read_batch(&context, "tax").expect("read");
         let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha", None).expect("limit");
         assert_eq!(skipped, 1);
         assert_eq!(batch.len(), 2);
@@ -2999,7 +2891,7 @@ mod tests {
         let (root, context) = chat_context("limitzero");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "only");
-        let mut batch = read_batch(&context, "alpha", "tax").expect("read");
+        let mut batch = read_batch(&context, "tax").expect("read");
         let skipped = apply_peek_catch_up(&mut batch, Some(0), "alpha", None).expect("unlimited");
         assert_eq!(skipped, 0);
         assert_eq!(batch.len(), 1, "limit 0 must keep every message");
@@ -3021,7 +2913,7 @@ mod tests {
         fs::write(&path, bytes).expect("rewrite");
         seed_message(&dir, ID2, "beta", "middle");
         seed_message(&dir, ID3, "beta", "newest");
-        let mut batch = read_batch(&context, "alpha", "tax").expect("read");
+        let mut batch = read_batch(&context, "tax").expect("read");
         let skipped = apply_peek_catch_up(&mut batch, Some(2), "alpha", None).expect("catch-up");
         assert_eq!(skipped, 0, "the mention must not count as silently skipped");
         assert_eq!(batch.len(), 3);
@@ -3034,7 +2926,7 @@ mod tests {
         let (root, context) = chat_context("banner");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "hello");
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch = read_batch(&context, "tax").expect("read");
         let first = render_text(
             &context,
             "tax",
@@ -3073,7 +2965,7 @@ mod tests {
         let (root, context) = chat_context("compactbanner");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "hello");
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch = read_batch(&context, "tax").expect("read");
         let compact = render_text(
             &context,
             "tax",
@@ -3121,7 +3013,7 @@ mod tests {
         let (root, context) = chat_context("fullbanner");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "hello");
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch = read_batch(&context, "tax").expect("read");
         for _ in 0..2 {
             let full = render_text(
                 &context,
@@ -3354,7 +3246,7 @@ mod tests {
             .expect("write join event");
         seed_message(&dir, ID2, "beta", "hello");
 
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch = read_batch(&context, "tax").expect("read");
         let text = render_text(
             &context,
             "tax",
@@ -3388,7 +3280,7 @@ mod tests {
             "Lantern",
             "🏮",
         );
-        let batch = read_batch(&context, "alpha", "tax").expect("read batch");
+        let batch = read_batch(&context, "tax").expect("read batch");
         let rendered = render_text(
             &context,
             "tax",
@@ -3410,7 +3302,7 @@ mod tests {
         let (root, context) = chat_context("absent-profile");
         let dir = seed_channel(&root, &["alpha", "beta"]);
         seed_message(&dir, "20260722-013000-000001-aaa111", "beta", "hello");
-        let batch = read_batch(&context, "alpha", "tax").expect("read batch");
+        let batch = read_batch(&context, "tax").expect("read batch");
         let rendered = render_text(
             &context,
             "tax",
@@ -3441,27 +3333,26 @@ mod tests {
         .expect("plant malformed M");
         seed_message(&dir, ID2, "beta", "later readable");
 
-        let scanned = read_batch_scanned(&context, "alpha", "tax").expect("read skips M");
+        let scanned = read_scanned(&context, "tax").expect("read skips M");
         assert_eq!(scanned.batch.len(), 1);
         assert_eq!(scanned.batch[0].0.id, ID2);
         assert_eq!(scanned.skipped_files.len(), 1);
         assert_eq!(scanned.skipped_files[0].id, ID1);
-        let state = ChannelState::load(&context, "alpha").expect("load");
+        let state = seen_state(&context);
         assert!(
-            !state.has_seen("tax", ID1),
+            !state.channel_has_seen("tax", ID1),
             "a skipped file is never marked seen"
         );
 
         // Cursorless history skips and reports it too.
-        let history = collect_batch_scanned(&context, "alpha", "tax", UnreadRule::AfterId(None))
-            .expect("history");
+        let history = collect_batch_scanned(&context, "tax", None).expect("history");
         assert_eq!(history.batch.len(), 1);
         assert_eq!(history.batch[0].0.id, ID2);
         assert_eq!(history.skipped_files.len(), 1);
 
         // Repair M: it is still unseen, so the next read emits it.
         seed_message(&dir, ID1, "beta", "repaired M");
-        let batch = read_batch(&context, "alpha", "tax").expect("after repair");
+        let batch = read_batch(&context, "tax").expect("after repair");
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].0.id, ID1);
         assert_eq!(batch[0].1, "repaired M");
@@ -3474,13 +3365,12 @@ mod tests {
         let (root, context) = chat_context("below-cursor-skip");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "already read");
-        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID1.to_owned()])
-            .expect("consume ID1");
+        consume_seen(&context, "tax", vec![ID1.to_owned()]).expect("consume ID1");
         // Corrupt the already-consumed message; a newer readable one follows.
         fs::write(dir.join("messages").join(format!("{ID1}.msg")), "corrupted")
             .expect("corrupt below-cursor");
         seed_message(&dir, ID2, "beta", "new");
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch = read_batch(&context, "tax").expect("read");
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].0.id, ID2);
         trash_test_root(&root);
@@ -3490,7 +3380,7 @@ mod tests {
         let (root, context) = chat_context("discard-race");
         let dir = seed_channel(&root, &["alpha"]);
         seed_message(&dir, ID1, "beta", "rendered");
-        let batch = read_batch(&context, "alpha", "tax").expect("read");
+        let batch = read_batch(&context, "tax").expect("read");
         let batch_ids: Vec<String> = batch
             .iter()
             .map(|(message, _)| message.id.clone())
@@ -3508,13 +3398,16 @@ mod tests {
             .after_stdout
             .expect("discard returns a post-stdout callback");
         callback().expect("callback records the rendered batch");
-        let state = ChannelState::load(&context, "alpha").expect("reload state");
-        assert!(state.has_seen("tax", ID1), "the rendered batch is consumed");
+        let state = seen_state(&context);
         assert!(
-            !state.has_seen("tax", ID2),
+            state.channel_has_seen("tax", ID1),
+            "the rendered batch is consumed"
+        );
+        assert!(
+            !state.channel_has_seen("tax", ID2),
             "the mid-flight arrival must stay unseen"
         );
-        let next = read_batch(&context, "alpha", "tax").expect("next read");
+        let next = read_batch(&context, "tax").expect("next read");
         assert_eq!(next.len(), 1, "the mid-flight arrival surfaces next read");
         assert_eq!(next[0].0.id, ID2);
         trash_test_root(&root);
@@ -3528,28 +3421,28 @@ mod tests {
         // seen-set — and must still not re-show to its sender.
         let (root, context) = chat_context("own-unmarked");
         let dir = seed_channel(&root, &["alpha", "beta"]);
+        // Ownership needs a loadable registry (a missing rooms.json fails
+        // closed to "not local"); an explicit empty one registers no remote.
+        fs::write(root.join("rooms.json"), "{}").expect("write rooms.json");
         seed_message(&dir, ID1, "alpha", "my own send, unmarked");
+        let path = dir.join("messages").join(format!("{ID1}.msg"));
+        let mut parsed = channel::parse_channel_message(&path).expect("parse");
+        parsed.message.from_participant = Some(acting(&context).id);
+        let bytes = channel::encode_message(&parsed.message, &parsed.body).expect("encode");
+        fs::write(&path, bytes).expect("stamp the sending participant");
 
-        let state = ChannelState::load(&context, "alpha").expect("load");
+        let state = seen_state(&context);
         assert!(
-            !state.has_seen("tax", ID1),
+            !state.channel_has_seen("tax", ID1),
             "fixture: the own id is absent from the seen-set"
         );
         assert!(
-            read_batch(&context, "alpha", "tax")
-                .expect("sender read")
-                .is_empty(),
+            read_batch(&context, "tax").expect("sender read").is_empty(),
             "an own message must not surface to its sender"
         );
         // Other members still see it normally.
-        let beta_batch = collect_batch_scanned(
-            &context,
-            "beta",
-            "tax",
-            UnreadRule::NotInSeen(&ChannelState::load(&context, "beta").expect("beta state")),
-        )
-        .expect("member read")
-        .batch;
+        crate::participant::bind_test_actor(&context, "beta");
+        let beta_batch = read_batch(&context, "tax").expect("member read");
         assert_eq!(beta_batch.len(), 1);
         assert_eq!(beta_batch[0].0.id, ID1);
         trash_test_root(&root);
@@ -3563,12 +3456,12 @@ mod tests {
         // must say what actually happened instead of "advanced from T3 to T3".
         let (root, context) = chat_context("through-replay");
         let dir = seed_channel(&root, &["alpha"]);
-        cursor_state::consume_channel(&context, "alpha", "tax", vec![ID3.to_owned()])
-            .expect("seen T3");
+        consume_seen(&context, "tax", vec![ID3.to_owned()]).expect("seen T3");
         seed_message(&dir, ID2, "beta", "bridged late arrival");
 
-        let outcome = cursor_state::consume_channel_through(&context, "alpha", "tax", ID3)
-            .expect("ack through T3");
+        let outcome =
+            ParticipantCursors::consume_channel_through(&context, &acting(&context), "tax", ID3)
+                .expect("ack through T3");
         assert!(outcome.advanced, "the seen-set changed");
         assert_eq!(outcome.marked, 1);
         assert_eq!(
