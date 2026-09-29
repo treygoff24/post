@@ -3,7 +3,7 @@
 // events and errors the tests fire. Snapshot events are the samples the real
 // post binary emits (`post contract samples`), so the supervisor is tested
 // against production event shapes. POST_BIN selects the producer (default
-// <repo>/target/release/post); a failed sample emit FAILS, it never skips.
+// the cargo release binary); a failed sample emit FAILS, it never skips.
 //
 // Process-level tests (the singleton, the agent commands, an end-to-end ring
 // through real child processes) live in doorbell-supervisor-process.test.mjs.
@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 import { spawnSync } from "node:child_process";
 
 import {
@@ -40,7 +41,7 @@ import {
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
-const POST_BIN = process.env.POST_BIN || path.join(REPO, "target", "release", "post");
+const POST_BIN = process.env.POST_BIN || cargoReleaseBin(REPO);
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "doorbell-supervisor-test-"));
 
 test.after(() => fs.rmSync(ROOT, { recursive: true, force: true }));

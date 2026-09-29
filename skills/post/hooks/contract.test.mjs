@@ -3,7 +3,7 @@
 // (`post contract samples --dir`), plus additive, optional-field, and
 // malformed variants of them. Run: node --test skills/post/hooks/*.test.mjs
 //
-// POST_BIN selects the producer (default <repo>/target/release/post). A failed
+// POST_BIN selects the producer (default: the cargo release binary). A failed
 // sample emit FAILS every test here; it never skips.
 //
 // Surfaces covered: `version --json`, `participant bind --json`,
@@ -25,13 +25,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { parseSnapshot as coreParseSnapshot } from "./mail-hook-core.mjs";
 import { parseSnapshot as supervisorParseSnapshot } from "./doorbell-supervisor.mjs";
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
-const POST_BIN = process.env.POST_BIN || path.join(REPO, "target", "release", "post");
+const POST_BIN = process.env.POST_BIN || cargoReleaseBin(REPO);
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-contract-test-"));
 const CWD = path.join(ROOT, "project");
 fs.mkdirSync(CWD, { recursive: true });

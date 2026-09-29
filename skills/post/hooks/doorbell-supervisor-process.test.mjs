@@ -11,13 +11,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HOOKS, "..", "..", "..");
 const SUPERVISOR = path.join(HOOKS, "doorbell-supervisor.mjs");
-const POST_BIN = process.env.POST_BIN || path.join(REPO, "target", "release", "post");
+const POST_BIN = process.env.POST_BIN || cargoReleaseBin(REPO);
 // Short: macOS caps socket paths, and python's lock path shows up in errors.
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "dbsp-"));
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
