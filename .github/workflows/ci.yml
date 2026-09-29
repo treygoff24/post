@@ -1,10 +1,10 @@
-# The public clean gate on both supported platforms. macOS carries the
-# launchd doorbell installer; Linux exercises the inotify watch backend.
+# The public clean gate on both supported platforms; Linux exercises the inotify
+# watch backend.
 #
 # CI runs scripts/gate.sh rather than restating its steps: a hand-copied list
 # drifts silently, and a gate that asks six of seven questions reads exactly
-# like one that asked all seven. The doorbell suite was missing here for that
-# reason.
+# like one that asked all seven. Python stays installed because the gate's test
+# step runs under scripts/with-timeout.py.
 name: CI
 
 on:
