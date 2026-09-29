@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-PINNED_POST_VERSION = "post 0.9.0"
+PINNED_POST_VERSION = "post 0.9.0 up to, but not including, post 0.10.0"
 HERE = Path(__file__).resolve().parent
 SWEEP = HERE.parent / "sweep.py"
 POST = os.environ.get("POST_BIN", "post")

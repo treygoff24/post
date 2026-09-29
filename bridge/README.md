@@ -32,8 +32,10 @@ Start `--config` from `config.template.json`: fill in `host` and `relay_url`
 only protects a channel on the host that publishes it, so every host carries
 the same list. The installer warns when a config has no `channels` key.
 
-The installer requires Python 3.9 or newer and Post 0.9.0 (`post --version`
-may add a trailing `(build ...)` annotation; the semver stays pinned). It resolves
+The installer requires Python 3.9 or newer and Post 0.9.0 up to, but not
+including, 0.10.0 (`post --version` may add a trailing `(build ...)`
+annotation; the semver is judged, and a pre-release tag such as `0.9.1-rc1` is
+refused). It resolves
 Post at install time, installs `sweep.py` and `bridgelib/` from this
 directory under `~/.local/lib/post-bridge/` together with a `BUILD` file that
 names the post repo commit it was installed from (`commit=<sha>`, and
@@ -191,6 +193,11 @@ Local bridge state is under `$POST_MAIL_ROOT/bridge/`:
 - `bounced/`: the bounce of a terminally refused letter (see Bounce):
   `<id>.json` (intent), `<id>.body` (original text), `<id>.sent`, and
   `undeliverable/` (notices with nobody to read them).
+- `origin/<id>.json`: who sent a letter, written when the bridge first copies
+  it toward the relay: the letter's sha256, the sending participant (only when
+  that participant exists here and is bound to the workspace the letter says
+  it came from) and the sending workspace. A bounce is routed by this record.
+  It is written once and never rewritten or removed.
 - `quarantine/`: rejected bytes or metadata retained for local forensics.
 - `tmp/`: same-filesystem publication temporaries, cleared during recovery.
 - `stray/`: unexpected relay-worktree files moved aside during recovery.
@@ -285,7 +292,12 @@ Receipts have this exact shape:
 Statuses:
 
 - `delivered`: inbox/archive/ledger reconciliation completed. A matching sender
-  may prune.
+  may prune. A delivery is final: when a delivered receipt or a ledger entry
+  already matches the letter's id and bytes, the receiver re-asserts `delivered`
+  before it looks at anything that can change afterwards (the room, the
+  sender's name, the rules), and never writes a `held` or `quarantined`
+  receipt over a matching `delivered` one. A room removed or a name contested
+  after delivery therefore cannot make the sender bounce a letter that arrived.
 - `held`: a local blocking rule refused the write. The sender keeps the item.
 - `quarantined`: hostile input, forged binding, invalid metadata, or an id/byte
   collision. The sender keeps the item.
@@ -304,21 +316,42 @@ One the receiver could still clear itself (`unknown_room`,
 time. On a terminal receipt the sender's bridge:
 
 1. writes a system letter (`from: post-bridge`, subject `Undeliverable:
-   <original subject>`) into the sending participant's inbox while that
-   participant is active. A participant whose session ended or whose lease
-   lapsed reads nothing until its conversation resumes, so the notice goes to
-   the inbox of the room it worked in instead (any session in that workspace
-   sees it), then to the letter's own sending room when that is a room on this
-   host, then to the inactive participant's own inbox, and with no such
-   participant at all to `bridge/bounced/undeliverable/` plus an `attention`
-   item. The body names the
+   <original subject>`) to whoever sent the letter, as the bridge recorded it
+   in `bridge/origin/<id>.json` when it first took the letter (see the state
+   list). The sender is the recorded participant while it is active and still
+   bound to the recorded workspace. A participant whose session ended or whose
+   lease lapsed reads nothing until its conversation resumes, so the notice
+   goes to the inbox of the recorded workspace instead (any session there sees
+   it), provided this host really owns that room. A participant that is bound
+   there but has neither an active lease nor a room to fall back on gets the
+   notice in its own inbox. If the sender cannot be established, the notice is
+   a dead letter: it goes to `bridge/bounced/undeliverable/` plus an
+   `attention` item, and nobody's inbox. Routing never goes by a participant's
+   current workspace alone, so a participant that has since rebound elsewhere
+   does not read someone else's bounce.
+   A letter published before the record existed (including the three that were
+   stuck on the Mac when this landed) has no record. Its own
+   `from_participant` stamp is believed only while that participant's record
+   still names the workspace in the letter's `from`; otherwise it is a dead
+   letter. The body names the
    letter id, recipient, the reason in words, and the exact `post send
    --body-file` command that re-sends the original text (kept in
    `bridge/bounced/<id>.body`). It reads with `post inbox` and `post read`.
-2. records that it did, then retires the outbox entry with `git rm`.
+2. records that it did (`bridge/bounced/<id>.sent`, a JSON record naming the
+   letter, the notice id and the destination), then retires the outbox entry
+   with `git rm`.
 
 Every step is idempotent under a hard kill (see the `bounce-*` crash hooks), so
-a crash never sends two notices or none. The notice never enters `archive/`,
+a crash never sends two notices or none. The destination is fixed in the
+intent (`<id>.json`) before anything is published; a redo whose notice is
+already at that path completes it there and never chooses again, even if the
+room or participant has changed since. A redo that finds nothing published
+yet may choose again. Every file a redo finds (the intent, the saved body, the
+notice, the sent marker) is checked against the letter in hand: ids, sha256,
+the notice's letter id and its destination must match. On a mismatch the
+bridge retires nothing: the outbox entry stays in the relay and a
+`refused_letter` attention item names the file and the `mv ... .conflict`
+that lets the next tick redo that step. The notice never enters `archive/`,
 so it cannot itself travel to a peer.
 
 ### Decided markers
@@ -350,21 +383,21 @@ missing marker means "judge it again".
 ### Participant mail for an archived record
 
 `post participant gc` moves a long-idle participant record whole from
-`<root>/participants/<id>/` to `<root>/participants-archive/<id>/`; the
-session's next `post participant bind` moves it back. While it is archived,
-post cannot find the participant and `post bridge deliver` rejects a letter for
-it for good (`unknown_participant`). So before calling deliver the bridge checks
-for that state and, instead of asking, holds the letter: a `pmail_retry` with
-reason `participant_archived` (counted in `pmail.retry_reasons`), no receipt,
-nothing written into the missing directory, and one `archived_participant`
-attention item per participant naming the letters and the fix, which is the
-same move post's own restore makes:
-`mv <root>/participants-archive/<id> <root>/participants/<id>`. The next full
-tick after the record is back delivers the letters and the item leaves the
-list. No post command restores by id (`bind` restores by the session's
-conversation key, which the bridge does not have), and the bridge does not
-write inside post's participant store, so this is the attention path, not an
-automatic restore.
+`<root>/participants/<id>/` to `<root>/participants-archive/<id>/`. The bridge
+does not write inside post's participant store; it hands the letter to
+`post bridge deliver`, which restores an archived recipient itself, so delivery
+to an archived participant just works.
+
+The hold below is only the fallback for a post whose deliver still answers
+`unknown_participant` for an id whose record is sitting in
+`participants-archive/` (post rejects such a letter for good, so the bridge
+must not treat that answer as the letter's fate; nothing was written). The
+bridge then holds the letter: a `pmail_retry` with reason
+`participant_archived` (counted in `pmail.retry_reasons`), no receipt, nothing
+written into the missing directory, and one `archived_participant` attention
+item per participant naming the letters and the fix,
+`post participant restore <id>`. The next full tick after the record is back
+delivers the letters and the item leaves the list.
 
 ## Logs
 
@@ -442,8 +475,9 @@ Outbound actions:
 is liveness (the bridge is running, fetching and pushing); `attention` is the
 separate list of things that are stuck: items `{kind, id, summary, fix}`,
 where `fix` is an exact command or a one-sentence instruction. Kinds:
-`refused_letter` (a terminal refusal whose sender could not be told, or whose
-bounce failed), `unrelayable_letter`, `quarantined_inbound` (a peer's letter
+`refused_letter` (a terminal refusal whose sender could not be told, whose
+bounce failed, or whose bounce record does not match the letter),
+`unrelayable_letter`, `quarantined_inbound` (a peer's letter
 this host refused; it clears when the sender's bounce retires it),
 `archived_participant` (participant mail waiting for a participant whose record
 `post participant gc` moved to `participants-archive/<id>/`; see below), and
@@ -561,7 +595,8 @@ POST_BIN=/abs/path/to/post bridge/tests/run-all.sh
 suite's log if any fail. One module alone: `POST_BIN=... python3 -m unittest
 bridge.tests.test_sweep`.
 
-The suites refuse to run unless `post --version` is `post 0.9.0`, optionally
-followed by a ` (build ...)` annotation as a release build prints. All mail
+The suites refuse to run unless `post --version` is a version from 0.9.0 up
+to, but not including, 0.10.0, optionally followed by a ` (build ...)`
+annotation as a release build prints. All mail
 roots are temporary and initialized by `post doctor --fix`; the suite never
 touches the user's real Post root or relay repo.

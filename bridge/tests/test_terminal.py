@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from .test_sweep import (
+    PINNED_POST_VERSION,
     POST,
     SWEEPER,
     CanonicalTemporaryDirectory,
@@ -46,8 +47,8 @@ class TerminalFixture(unittest.TestCase):
         version = subprocess.run(
             [POST, "--version"], capture_output=True, text=True, check=False
         )
-        if version.returncode != 0 or not version.stdout.startswith("post 0.9.0"):
-            raise RuntimeError(f"tests require post 0.9.0; got {version.stdout!r}")
+        if version.returncode != 0 or not SWEEPER.post_version_accepted(version.stdout):
+            raise RuntimeError(f"tests require {PINNED_POST_VERSION}; got {version.stdout!r}")
 
     def setUp(self):
         self.temporary = CanonicalTemporaryDirectory(prefix="post-bridge-terminal-")
@@ -66,13 +67,15 @@ class TerminalFixture(unittest.TestCase):
                 result = machine.sweep()
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def full_sweep(self, machine, **env):
-        """One full tick: the quiet fingerprint is dropped first."""
+    def full_sweep(self, machine, returncodes=(0,), **env):
+        """One full tick: the quiet fingerprint is dropped first. A standing
+        unhealthy condition (a room-name collision) is exit 1, and a test that
+        sets one up says so with `returncodes`."""
         fingerprint = machine.root / "bridge" / "trigger-fingerprint.json"
         if fingerprint.exists():
             fingerprint.unlink()
         result = machine.sweep(**env)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(result.returncode, returncodes, result.stdout + result.stderr)
         self.assertFalse(self.health(machine)["quiet"])
         return result
 
@@ -111,8 +114,36 @@ class TerminalFixture(unittest.TestCase):
         path = machine.repo / "receipts" / sender_host / room / (mail_id + ".json")
         return json.loads(path.read_text()) if path.exists() else None
 
+    def remove_room(self, machine, room):
+        """Take a room out of the machine's table (`post rooms` cannot; the
+        table is a flat name -> path map and the bridge reads it as it is)."""
+        path = machine.root / "rooms.json"
+        table = json.loads(path.read_text())
+        del table[room]
+        path.write_text(json.dumps(table, indent=2) + "\n")
+
+    def publish_letter(self, mail_id, sender, recipient, subject, participant=None):
+        """A letter the bridge itself takes from fc's archive and relays, so
+        the bridge records who sent it (what a bounce is later routed by).
+        Returns the relay path of the outbox entry."""
+        archive = self.fc.root / "archive"
+        archive.mkdir(exist_ok=True)
+        fields = {"subject": subject}
+        if participant is not None:
+            fields["from_participant"] = participant
+            fields["sender_provenance"] = "participant-binding"
+        (archive / (mail_id + ".mail")).write_bytes(
+            craft_mail(mail_id, sender, recipient, body=FORGED_BODY, **fields)
+        )
+        self.full_sweep(self.fc)
+        relative = f"outbox/trey/{recipient}/{mail_id}.mail"
+        self.assertIn(relative, self.remote_tree("fc"))
+        return relative
+
     def stick(self, mail_id, sender, recipient, subject, participant=None, host="trey"):
-        """A letter fc's outbox holds for `host`, as a peer's bridge left it."""
+        """A letter fc's outbox holds for `host`, as an older bridge left it:
+        it never passed through this bridge's publish step, so no origin was
+        recorded for it (the shape of the three letters stuck on the Mac)."""
         fields = {"subject": subject}
         if participant is not None:
             fields["from_participant"] = participant
@@ -157,19 +188,23 @@ class TerminalFixture(unittest.TestCase):
 
 
 class BounceTest(TerminalFixture):
-    def test_a_refusal_tells_the_sending_participant_and_retires_the_entry(self):
-        # The three live stuck Mac->devbox letters are this shape: a workspace
-        # letter whose `from` names a room the receiver already owns
-        # (forged_self), stamped with the sending participant.
+    def refuse_atlasos(self):
+        """trey stops having `atlasos`; fc's pin still routes letters there,
+        which trey refuses as unknown_room."""
         self.bootstrap()
+        self.remove_room(self.trey, "atlasos")
+        self.full_sweep(self.trey)
+
+    def test_a_refusal_tells_the_sending_participant_and_retires_the_entry(self):
+        self.refuse_atlasos()
         participant = self.fc.participant("garden")
         mail_id = fixed_id(0x7A01)
-        relative = self.stick(
-            mail_id, "hq", "atlasos", "forged hello", participant=participant
+        relative = self.publish_letter(
+            mail_id, "garden", "atlasos", "hello atlasos", participant=participant
         )
         self.full_sweep(self.trey)
         refusal = self.receipt(self.trey, "fc", "atlasos", mail_id)
-        self.assertEqual((refusal["status"], refusal["reason"]), ("quarantined", FORGED_SELF))
+        self.assertEqual((refusal["status"], refusal["reason"]), ("quarantined", "unknown_room"))
         self.assertIn(relative, self.remote_tree("fc"))
 
         # The receiver lists it, with a fix, and stays alive (ok is liveness).
@@ -181,8 +216,11 @@ class BounceTest(TerminalFixture):
         self.assertEqual(standing[0]["kind"], "quarantined_inbound")
         self.assertIn("bridge", standing[0]["fix"])
 
-        # The first tick on the sender after it learns of the refusal.
+        # The sender waits while the receiver may still clear the refusal...
         self.full_sweep(self.fc)
+        self.assertIn(relative, self.remote_tree("fc"))
+        # ...and on the first tick after the wait it tells the sender.
+        self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
         self.assertNotIn(relative, self.remote_tree("fc"))
         self.assertEqual(self.actions(self.fc, "letter_bounced", mail_id)[0]["where"],
                          "participant:" + participant)
@@ -190,13 +228,13 @@ class BounceTest(TerminalFixture):
         self.assertEqual(self.health(self.fc)["attention"], [])
 
         # The notice reads with the ordinary commands.
-        notices = self.undeliverable(self.fc, "garden", "forged hello")
+        notices = self.undeliverable(self.fc, "garden", "hello atlasos")
         self.assertEqual(len(notices), 1, self.unread(self.fc, "garden"))
         notice = self.shown(self.fc, "garden", notices[0]["id"])
-        self.assertEqual(notice["envelope"]["subject"], "Undeliverable: forged hello")
+        self.assertEqual(notice["envelope"]["subject"], "Undeliverable: hello atlasos")
         self.assertEqual(notice["envelope"]["from"], "post-bridge")
         text = notice["body"]
-        for expected in (mail_id, "atlasos", "trey", FORGED_SELF):
+        for expected in (mail_id, "atlasos", "trey", "unknown_room"):
             self.assertIn(expected, text)
         commands = [
             line.strip() for line in text.splitlines() if line.strip().startswith("post send ")
@@ -206,7 +244,7 @@ class BounceTest(TerminalFixture):
         # Every later tick, and a crash-free rerun, changes nothing.
         inbox = self.fc.root / "participants" / participant / "inbox"
         for _ in range(3):
-            self.full_sweep(self.fc)
+            self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
         self.assertEqual(len(self.notice_files(inbox)), 1)
         self.assertEqual(len(self.actions(self.fc, "letter_bounced", mail_id)), 1)
         self.assertEqual(len(self.actions(self.fc, "outbox_bounced", mail_id)), 1)
@@ -216,24 +254,26 @@ class BounceTest(TerminalFixture):
         self.assertEqual(self.health(self.trey)["attention"], [])
 
         # The command in the notice is exact: pasted as written from the
-        # workspace it re-sends the original text, and it is delivered.
+        # workspace it re-sends the original text; once the room is back on
+        # the receiver, it is delivered.
+        self.trey.post("rooms", "add", "atlasos", self.trey.workspaces["atlasos"])
         tokens = shlex.split(commands[0])
         self.assertEqual(tokens[:2], ["post", "send"])
         resent = self.fc.post(*tokens[1:], "--json", cwd=self.fc.workspaces["garden"])
         new_id = json.loads(resent.stdout)["envelope"]["id"]
         self.assertNotEqual(new_id, mail_id)
-        self.bootstrap(rounds=2, machines=[self.fc, self.trey])
+        self.bootstrap(rounds=2, machines=[self.trey, self.fc, self.trey])
         self.assertIn(new_id, self.trey.inbox_ids("atlasos"))
         self.assertEqual(self.trey.read("atlasos", new_id)["body"], FORGED_BODY.decode())
         self.assertNotIn(mail_id, self.trey.inbox_ids("atlasos"))
 
     def test_the_notice_falls_back_to_the_sending_room_inbox(self):
         # No participant stamp: the sending room's own inbox is next.
-        self.bootstrap()
+        self.refuse_atlasos()
         mail_id = fixed_id(0x7A02)
-        self.stick(mail_id, "garden", "nowhere", "no such room")
+        self.publish_letter(mail_id, "garden", "atlasos", "no such room")
         self.full_sweep(self.trey)
-        refusal = self.receipt(self.trey, "fc", "nowhere", mail_id)
+        refusal = self.receipt(self.trey, "fc", "atlasos", mail_id)
         self.assertEqual((refusal["status"], refusal["reason"]), ("quarantined", "unknown_room"))
         self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
         self.assertEqual(
@@ -246,22 +286,23 @@ class BounceTest(TerminalFixture):
         self.assertEqual(self.health(self.fc)["attention"], [])
 
     def test_an_inactive_participants_notice_goes_to_its_workspace_inbox(self):
-        # The three live stuck letters were sent by sessions that ended days
-        # ago, and their `from` names a peer's room, which is a placeholder
-        # here. Nobody reads an inactive participant's inbox, so the notice
-        # goes where the next session in that workspace looks.
-        self.bootstrap()
+        # A session that ended (or whose lease ran out) reads nothing until
+        # its conversation resumes, so the notice goes where the next session
+        # in the workspace it sent from looks.
+        self.refuse_atlasos()
         participant = self.fc.participant("garden")
         own_inbox = self.fc.root / "participants" / participant / "inbox"
         workspace_inbox = self.fc.root / "garden" / "inbox"
         record_path = self.fc.root / "participants" / participant / "participant.json"
 
         ended, lapsed = fixed_id(0x7A05), fixed_id(0x7A06)
-        self.stick(ended, "hq", "atlasos", "sent by an ended session", participant=participant)
+        self.publish_letter(
+            ended, "garden", "atlasos", "sent by an ended session", participant=participant
+        )
         self.full_sweep(self.trey)
         self.fc.post("participant", "end", as_room="garden")
         self.assertIn("ended_at", json.loads(record_path.read_text()))
-        self.full_sweep(self.fc)
+        self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
 
         self.assertEqual(
             self.actions(self.fc, "letter_bounced", ended)[0]["where"], "room:garden"
@@ -280,13 +321,15 @@ class BounceTest(TerminalFixture):
 
         # A lease that ran out without an explicit end is inactive too: turn
         # the ended record into one that was simply last seen weeks ago.
-        self.stick(lapsed, "hq", "atlasos", "sent by a lapsed session", participant=participant)
+        self.publish_letter(
+            lapsed, "garden", "atlasos", "sent by a lapsed session", participant=participant
+        )
         self.full_sweep(self.trey)
         record = json.loads(record_path.read_text())
         record.pop("ended_at", None)
         record["last_seen"] = "2026-09-01T00:00:00Z"
         record_path.write_text(json.dumps(record))
-        self.full_sweep(self.fc)
+        self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
         self.assertEqual(
             self.actions(self.fc, "letter_bounced", lapsed)[0]["where"], "room:garden"
         )
@@ -335,7 +378,7 @@ class BounceTest(TerminalFixture):
         self.assertEqual(len(self.actions(self.fc, "letter_bounced", mail_id)), 1)
 
     def test_a_crash_at_any_bounce_step_never_skips_or_doubles_the_notice(self):
-        self.bootstrap()
+        self.refuse_atlasos()
         participant = self.fc.participant("garden")
         hooks = (
             "bounce-b1-intent",
@@ -348,16 +391,18 @@ class BounceTest(TerminalFixture):
             with self.subTest(hook=hook):
                 mail_id = fixed_id(0x7B00 + index)
                 subject = f"crash at {hook}"
-                relative = self.stick(
-                    mail_id, "hq", "atlasos", subject, participant=participant
+                relative = self.publish_letter(
+                    mail_id, "garden", "atlasos", subject, participant=participant
                 )
                 self.full_sweep(self.trey)
-                crashed = self.fc.sweep(BRIDGE_CRASH_AFTER=hook)
+                crashed = self.fc.sweep(
+                    BRIDGE_CRASH_AFTER=hook, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0
+                )
                 self.assertEqual(
                     crashed.returncode, -signal.SIGKILL, crashed.stdout + crashed.stderr
                 )
                 self.assertIn(relative, self.remote_tree("fc"))  # nothing pushed yet
-                recovered = self.fc.sweep()
+                recovered = self.fc.sweep(BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
                 self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
                 self.assertNotIn(relative, self.remote_tree("fc"))
                 inbox = self.fc.root / "participants" / participant / "inbox"
@@ -370,7 +415,7 @@ class BounceTest(TerminalFixture):
                     / (intent["letter_id"] + ".mail")
                 )
                 self.assertTrue(notice_path.is_file(), hook)
-                self.full_sweep(self.fc)
+                self.full_sweep(self.fc, BRIDGE_BOUNCE_TRANSIENT_SECONDS=0)
                 self.assertEqual(len(self.notice_files(inbox, subject)), 1, hook)
                 self.assertEqual(self.health(self.fc)["attention"], [], hook)
                 # ...and it reads with the ordinary command.

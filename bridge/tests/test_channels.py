@@ -29,7 +29,7 @@ from .harness_channels import (  # noqa: E402
     channel_record,
     snapshot_for,
 )
-from .test_sweep import CanonicalTemporaryDirectory
+from .test_sweep import PINNED_POST_VERSION, SWEEPER, CanonicalTemporaryDirectory
 
 ALL = channels.ChannelsConfig("all", frozenset(), frozenset())
 
@@ -134,8 +134,10 @@ class ChannelIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = subprocess_run([POST, "--version"])
-        if version.stdout.strip() != "post 0.9.0":
-            raise RuntimeError(f"tests require post 0.9.0, got {version.stdout!r}")
+        if not SWEEPER.post_version_accepted(version.stdout):
+            raise RuntimeError(
+                f"tests require {PINNED_POST_VERSION}, got {version.stdout!r}"
+            )
 
     def setUp(self):
         self.temporary = CanonicalTemporaryDirectory(prefix="post-channels-")

@@ -685,7 +685,10 @@ post was canonicalized to `/usr/local/bin` (fixed by drop-in
 2026-09-02). `install.sh` resolves `post` from PATH at install time and
 writes the resolved absolute path; `sweep.py --check-config` fails
 unless `POST_BIN` exists, is executable, and `POST_BIN --version`
-prints exactly the pinned string (`post 0.9.0`) — Sol MINOR 2.
+prints a version from 0.9.0 up to, but not including, 0.10.0
+(`post 0.9.N`, N a plain integer; optionally followed by ` (build ...)`;
+no pre-release tag) — Sol MINOR 2, widened from the exact string
+`post 0.9.0` by r6.4.
 
 ## Coexistence with `cell_bridge.py`, and its retirement
 
@@ -1314,15 +1317,18 @@ rejection final, so no rollback step does that.
      `participants/<id>/imports/<mail-id>.json` exists under the mail
      root. The bridge checks existence only and never reads the file; this
      couples the bridge to post's layout (post `src/imports.rs`);
-   - when `participants/<id>/` is absent and `participants-archive/<id>/`
-     is a directory, `post participant gc` archived the record, and post
-     would reject the letter `unknown_participant` for good. The bridge
-     makes no post call: it records a `participant_archived` retry, writes
-     no receipt, and lists one `archived_participant` item per participant
-     in health `attention` with the restore move
-     (`mv participants-archive/<id> participants/<id>`, the move post's own
-     restore makes). The bridge never writes inside the participant store;
-     no post command restores by id. Once the record is back the next full
+   - `post participant gc` moves a long-idle record to
+     `participants-archive/<id>/`, and `post bridge deliver` restores an
+     archived recipient itself, so the bridge calls it as for any other
+     participant (r6.4; this replaces the earlier rule that held such a
+     letter without asking post). Fallback: when post answers
+     `unknown_participant` and `participants/<id>/` is absent while
+     `participants-archive/<id>/` is a directory, that answer is not the
+     letter's fate (post wrote nothing). The bridge records a
+     `participant_archived` retry instead, writes no receipt, and lists one
+     `archived_participant` item per participant in health `attention` with
+     the fix `post participant restore <id>`. The bridge never writes
+     inside the participant store. Once the record is back the next full
      tick delivers and the item leaves;
    - otherwise `post bridge deliver --participant=<id> --source-host=<H>
      --mail-id=<id> --sha256=<hex> --file=<private tmp> --json`, 30 s cap.
@@ -1898,6 +1904,25 @@ unchanged.
 
 ## History
 
+- r6.4 (2026-09-28): bounce safety, review round 1 of the bridge move (see
+  README "Bounce"). (1) A delivery is final: a delivered receipt or ledger
+  entry that matches the letter is re-asserted before the receiver looks at
+  the room, the sender's name or the rules, and no `held` or `quarantined`
+  receipt is ever written over a matching `delivered` one, so a room removed
+  or a name contested after delivery cannot make the sender bounce, and
+  remove, a letter that arrived. (2) A bounce is routed by the sender the
+  bridge recorded when it first took the letter (`bridge/origin/<id>.json`),
+  never by the letter's `from_participant` stamp or the participant's current
+  workspace alone; a letter with no record is believed only while its stamp
+  still checks out; anything else is a dead letter in
+  `bridge/bounced/undeliverable/` plus an attention item. (3) A bounce whose
+  notice is already published at the intent's path is completed there and
+  never re-routed. (4) Every intent, saved body, notice and sent marker a redo
+  finds is checked against the letter; a mismatch keeps the outbox entry and
+  raises a `refused_letter` attention item. (5) The post version pin is the
+  range 0.9.0 up to, but not including, 0.10.0. (6) An archived participant's
+  letters go to `post bridge deliver`; the hold-and-attention path is only the
+  fallback, and its fix is `post participant restore <id>`.
 - r6.3 (2026-09-25): roomless participants' channel posts cross hosts
   (Trey ruling 2026-09-25). The relay branch authenticates `from_host`;
   imported bytes retain it for Post's host-qualified rendering and direct

@@ -86,8 +86,9 @@ INVALID_INVOCATION = "invalid_invocation"
 # Retryable: the relay entry could not be read this tick (Grok G2).
 OBJECT_UNREADABLE = "object_unreadable"
 # Retryable: `post participant gc` moved the addressee's record aside to
-# <root>/participants-archive/<id>/. post finds no such participant and would
-# reject the letter for good (unknown_participant), so the bridge does not ask.
+# <root>/participants-archive/<id>/. `post bridge deliver` restores an archived
+# recipient itself; when it still answers unknown_participant for one, that
+# answer is not the letter's fate, so the bridge holds the letter instead.
 PARTICIPANT_ARCHIVED = "participant_archived"
 PARTICIPANTS_DIR = "participants"
 PARTICIPANTS_ARCHIVE_DIR = "participants-archive"
@@ -392,11 +393,11 @@ def archived_participant_dir(settings, participant):
     """The archive directory holding ``participant``'s record, or None.
 
     ``post participant gc`` (tier 2) moves a long-idle record whole from
-    ``participants/<id>/`` to ``participants-archive/<id>/``; a session's next
-    ``post participant bind`` moves it back. Until then post cannot find the
-    participant. No post command restores by id, and the bridge never writes
-    inside post's participant store, so a letter for an archived id waits and
-    health.json's attention list carries the restore command.
+    ``participants/<id>/`` to ``participants-archive/<id>/``. ``post bridge
+    deliver`` restores such a recipient itself. This is the fallback for a
+    post that still refuses one (``unknown_participant``): the bridge never
+    writes inside post's participant store, so the letter waits and
+    health.json's attention list carries ``post participant restore <id>``.
     """
     live = destination(settings.root, PARTICIPANTS_DIR, participant)
     if os.path.lexists(str(live)):
@@ -903,18 +904,6 @@ def import_pmail(settings, git, snapshot, logger, deadline, fence):
                 continue
             if fence():
                 raise TickError("fenced")
-            archived = archived_participant_dir(settings, participant)
-            if archived is not None:
-                ledger.note(
-                    host, participant, mail_id, PARTICIPANT_ARCHIVED,
-                    f"participant record is archived at {archived}", logger,
-                )
-                waiting.add((participant, mail_id))
-                stats.retried += 1
-                stats.reasons[PARTICIPANT_ARCHIVED] = (
-                    stats.reasons.get(PARTICIPANT_ARCHIVED, 0) + 1
-                )
-                continue
             if supported is None:
                 supported = post_supports_deliver(settings)
                 if not supported:
@@ -928,6 +917,16 @@ def import_pmail(settings, git, snapshot, logger, deadline, fence):
                 )
             else:
                 decision = _retry(POST_UNAVAILABLE, "post has no `bridge deliver`")
+            if decision.outcome == "rejected" and decision.reason == "unknown_participant":
+                # post answers that for an id with no live record, and for an
+                # archived one only while it does not restore by itself.
+                # Nothing was written; an archived record is not a dead one.
+                archived = archived_participant_dir(settings, participant)
+                if archived is not None:
+                    decision = _retry(
+                        PARTICIPANT_ARCHIVED,
+                        f"participant record is archived at {archived}",
+                    )
             if decision.outcome == "retry":
                 ledger.note(
                     host, participant, mail_id, decision.reason, decision.detail, logger

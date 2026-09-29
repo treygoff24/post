@@ -15,7 +15,6 @@ calling the real post binary named by POST_BIN.
 import hashlib
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -986,11 +985,14 @@ class PmailTest(unittest.TestCase):
     @needs_deliver
     def test_letter_for_an_archived_participant_waits_and_is_flagged(self):
         # `post participant gc` (tier 2) moves a long-idle record whole to
-        # <root>/participants-archive/<id>/. post cannot find such a
-        # participant and rejects a letter for it for good, so the bridge holds
-        # the letter, says so in health.json's attention list with the restore
-        # command, writes nothing into the missing directory, and delivers
-        # once the record is back.
+        # <root>/participants-archive/<id>/. `post bridge deliver` restores
+        # such a recipient itself; this is the fallback for a post that still
+        # answers unknown_participant (faked here, so the test does not depend
+        # on which post is installed). The bridge then asks first, holds the
+        # letter instead of taking that answer as its fate, says so in
+        # health.json's attention list with post's restore command, writes
+        # nothing into the missing directory, and delivers once the record is
+        # back.
         self.bootstrap()
         trey_pid = self.trey.participant("hq")
         live = self.trey.root / "participants" / trey_pid
@@ -999,9 +1001,18 @@ class PmailTest(unittest.TestCase):
         live.rename(archived)
 
         mail_id, data = self.letter(self.fc, "garden", self.trey, trey_pid)
+        directory, wrapper = self.wrap_post(self.trey)
+        (directory / "fake.out").write_text(json.dumps({
+            "ok": True, "schema": pmail.DELIVER_SCHEMA, "outcome": "rejected",
+            "reason": "unknown_participant", "participant": trey_pid,
+            "mail_id": mail_id, "source_host": "fc", "sha256": sha(data),
+            "admitted_at": None, "replay": False, "detail": None,
+        }))
+        (directory / "fake.rc").write_text("0")
         self.sweep(self.fc)
-        self.sweep(self.trey)
-        self.sweep(self.trey)
+        self.sweep(self.trey, POST_BIN=wrapper)
+        self.sweep(self.trey, POST_BIN=wrapper)
+        self.assertGreaterEqual(len(self.deliver_calls(directory)), 1, "post was not asked")
 
         self.assertIsNone(self.receipt_bytes(self.trey, self.fc, trey_pid, mail_id))
         self.assertFalse(os.path.lexists(live), "the bridge wrote into a missing record")
@@ -1027,12 +1038,18 @@ class PmailTest(unittest.TestCase):
             [self.pmail_path(self.trey, trey_pid, mail_id)],
         )
 
-        # The fix the item names is exact: run it as written.
-        command = re.search(r"mv '[^']+' '[^']+'", items[0]["fix"])
-        self.assertIsNotNone(command, items[0]["fix"])
-        run(["sh", "-c", command.group(0)])
+        # The fix the item names is post's own restore command.
+        self.assertIn(f"post participant restore {trey_pid}", items[0]["fix"])
+        restore = self.trey.post("participant", "restore", trey_pid, check=False)
+        if "unrecognized subcommand" in restore.stdout + restore.stderr:
+            # This post predates `participant restore`: put the record back
+            # the way that command does (the archive directory moves whole).
+            archived.rename(live)
+        else:
+            self.assertEqual(restore.returncode, 0, restore.stdout + restore.stderr)
         self.assertTrue(live.is_dir())
-        self.sweep(self.trey)
+        (directory / "fake.out").unlink()
+        self.sweep(self.trey, POST_BIN=wrapper)
         self.assert_delivered(self.trey, self.fc, trey_pid, mail_id, data)
         self.assertEqual(
             [
@@ -1044,6 +1061,43 @@ class PmailTest(unittest.TestCase):
         )
         self.sweep(self.fc)
         self.assert_acked(self.fc, self.trey, trey_pid, mail_id)
+
+    @needs_deliver
+    def test_an_archived_recipient_is_handed_to_post_not_held(self):
+        # `post bridge deliver` restores an archived recipient itself, so the
+        # bridge must ask post about it. Holding on sight would keep the
+        # letter waiting for a command an agent has no reason to run. Post's
+        # answer is faked, so the test does not depend on the installed post.
+        self.bootstrap()
+        trey_pid = self.trey.participant("hq")
+        live = self.trey.root / "participants" / trey_pid
+        archived = self.trey.root / "participants-archive" / trey_pid
+        archived.parent.mkdir()
+        live.rename(archived)
+        mail_id, data = self.letter(self.fc, "garden", self.trey, trey_pid)
+        directory, wrapper = self.wrap_post(self.trey)
+        (directory / "fake.out").write_text(json.dumps({
+            "ok": True, "schema": pmail.DELIVER_SCHEMA, "outcome": "delivered",
+            "reason": None, "participant": trey_pid, "mail_id": mail_id,
+            "source_host": "fc", "sha256": sha(data),
+            "admitted_at": "2026-09-28T12:00:00Z", "replay": False, "detail": None,
+        }))
+        (directory / "fake.rc").write_text("0")
+        self.sweep(self.fc)
+        self.sweep(self.trey, POST_BIN=wrapper)
+        self.assertEqual(len(self.deliver_calls(directory)), 1, "post was not asked")
+        receipt = self.receipt_bytes(self.trey, self.fc, trey_pid, mail_id)
+        self.assertIsNotNone(receipt, "the delivered answer was not honoured")
+        self.assertEqual(json.loads(receipt)["status"], "delivered")
+        self.assertEqual(self.actions(self.trey, "pmail_retry"), [])
+        self.assertEqual(
+            [
+                entry
+                for entry in self.health(self.trey)["attention"]
+                if entry["kind"] == "archived_participant"
+            ],
+            [],
+        )
 
     # -- visible queued states and outbound exclusion ------------------------
 

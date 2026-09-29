@@ -92,15 +92,20 @@ from bridgelib.snapshot import (  # noqa: E402
     binding_verdict,
 )
 
-PINNED_POST_VERSION = "post 0.9.0"
+# The post versions this bridge is written for: 0.9.0 up to, but not
+# including, 0.10.0. Every 0.9.x is the same mail model (a patch release does
+# not change a store or command contract), so a patch bump must not stop the
+# bridge on the hosts it reaches; 0.10.0 is where a check is needed again.
+POST_VERSION_RANGE = "post 0.9.0 up to, but not including, post 0.10.0"
 # `post --version` may carry build metadata after the semver
-# (`post 0.9.0 (build abc1234, ...)`); the semver itself stays pinned.
-_POST_VERSION_RE = re.compile(re.escape(PINNED_POST_VERSION) + r"(?: \(build [^()\n]*\))?")
+# (`post 0.9.4 (build abc1234, ...)`); only the semver is judged. A patch
+# number is a plain integer: no leading zeros, and no pre-release tag.
+_POST_VERSION_RE = re.compile(r"post 0\.9\.(?:0|[1-9][0-9]*)(?: \(build [^()\n]*\))?")
 
 
 def post_version_accepted(text):
-    """True when ``post --version`` printed the pinned semver, with or
-    without a trailing ``(build ...)`` annotation."""
+    """True when ``post --version`` printed a version from 0.9.0 up to, but
+    not including, 0.10.0, with or without a trailing ``(build ...)``."""
     return _POST_VERSION_RE.fullmatch(text.strip()) is not None
 
 
@@ -489,8 +494,8 @@ def validate_post_version(settings):
         raise ConfigError(f"POST_BIN --version failed: {error}")
     if result.returncode != 0 or not post_version_accepted(result.stdout):
         raise ConfigError(
-            f"POST_BIN --version must print exactly {PINNED_POST_VERSION!r}"
-            " (optionally followed by ' (build ...)')"
+            f"POST_BIN --version must print {POST_VERSION_RANGE}, optionally "
+            "followed by ' (build ...)'"
         )
 
 
@@ -808,9 +813,49 @@ def receipt_bytes(status, host, room, mail_id, sha256, reason):
     )
 
 
+def delivered_receipt(settings, host, room, mail_id, sha256):
+    """This node's ``delivered`` receipt for exactly this letter, else ``None``.
+
+    A delivered receipt is final: the sender retires the letter on seeing it,
+    so nothing that changes later (a room removed, a name contested) may take
+    it back. "Exactly this letter" is the (host, room, id, sha256) it names.
+    """
+    path = destination(settings.repo, "receipts", host, room, mail_id + ".json")
+    try:
+        value = load_json_bytes(open_regular(path, 4096), str(path))
+    except (FileNotFoundError, ConfigError, OSError):
+        return None
+    if isinstance(value, dict) and all(
+        (
+            value.get("v") == 1,
+            value.get("status") == "delivered",
+            value.get("host") == host,
+            value.get("room") == room,
+            value.get("id") == mail_id,
+            value.get("sha256") == sha256,
+        )
+    ):
+        return value
+    return None
+
+
 def write_receipt(settings, host, room, mail_id, status, sha256, reason, logger):
     if fence_present(settings):
         raise TickError("fenced")
+    if status != "delivered" and delivered_receipt(
+        settings, host, room, mail_id, sha256
+    ):
+        # Never downgrade: process_inbound checks for a delivered letter
+        # before any current routing condition, so this is the backstop.
+        logger.emit(
+            "receipt_downgrade_refused",
+            status=status,
+            host=host,
+            room=room,
+            id=mail_id,
+            reason=reason,
+        )
+        return
     path = destination(settings.repo, "receipts", host, room, mail_id + ".json")
     payload = receipt_bytes(status, host, room, mail_id, sha256, reason)
     existing = None
@@ -1171,6 +1216,33 @@ def process_inbound(
                 quarantined += 1
                 continue
             sha256 = hashlib.sha256(data).hexdigest()
+            ledger = destination(
+                settings.root, "bridge", "delivered", host, room, mail_id
+            )
+            try:
+                stored_sha = open_regular(ledger, 65).decode("ascii").strip()
+            except (FileNotFoundError, ConfigError, UnicodeDecodeError):
+                stored_sha = None
+            # SPEC r3.5 I3½: a ledger hit with the matching sha replays — it
+            # skips ONLY the route evaluation below; fence rechecks and state
+            # repair still run (receipts move held→delivered, never back).
+            replay = stored_sha == sha256
+            # A letter this node already delivered is final, whether the
+            # ledger or the receipt says so. The sender retires (or, for a
+            # refusal, bounces) a letter on the strength of the receipt, so
+            # the receipt is decided before anything that can change later:
+            # the room still being registered, the sender's name still being
+            # uncontested. Such a change never takes a delivery back.
+            settled = replay or delivered_receipt(
+                settings, host, room, mail_id, sha256
+            ) is not None
+            if settled and room not in real_rooms:
+                # Nothing left to route to. A crash between the ledger and the
+                # receipt leaves the receipt missing; this writes it.
+                write_receipt(
+                    settings, host, room, mail_id, "delivered", sha256, "", logger
+                )
+                continue
             if room not in real_rooms:
                 quarantine(
                     settings,
@@ -1187,6 +1259,12 @@ def process_inbound(
             try:
                 envelope = parse_envelope(data, mail_id, room, logger)
             except ConfigError as error:
+                if settled:
+                    write_receipt(
+                        settings, host, room, mail_id, "delivered", sha256, "", logger
+                    )
+                    checkpoint("inbound-i1")
+                    continue
                 quarantine(
                     settings, host, room, mail_id, sha256, str(error), data, logger
                 )
@@ -1208,6 +1286,14 @@ def process_inbound(
                 )
             )
             if verdict in (FORGED_SELF, NAME_COLLISION, UNPUBLISHED_SENDER):
+                if settled:
+                    # Delivered before the sender's name became contested (or
+                    # a room took it): the delivery stands, nothing repairs.
+                    write_receipt(
+                        settings, host, room, mail_id, "delivered", sha256, "", logger
+                    )
+                    checkpoint("inbound-i2")
+                    continue
                 # SPEC-v2 §What this changes in v1 mail: the reason is the
                 # verdict. It never depends on whether a registry branch is
                 # fetchable this tick (review D3).
@@ -1217,20 +1303,9 @@ def process_inbound(
                 quarantined += 1
                 checkpoint("inbound-i2")
                 continue
-            ledger = destination(
-                settings.root, "bridge", "delivered", host, room, mail_id
-            )
-            try:
-                stored_sha = open_regular(ledger, 65).decode("ascii").strip()
-            except (FileNotFoundError, ConfigError, UnicodeDecodeError):
-                stored_sha = None
-            # SPEC r3.5 I3½: a ledger hit with the matching sha replays — it
-            # skips ONLY the route evaluation below; fence rechecks and state
-            # repair still run (receipts move held→delivered, never back).
-            replay = stored_sha == sha256
             # r5.5 (M2): deliver on the evidence post consumes. These checks
-            # run only for a first delivery; a replay keeps its outcome.
-            if not replay and verdict == VERIFIED and not post_sees_remote(
+            # run only for a first delivery; a settled letter keeps its outcome.
+            if not settled and verdict == VERIFIED and not post_sees_remote(
                 settings.root, host, sender, post_rooms
             ):
                 # post would not read this sender as remote: hold without a
@@ -1248,7 +1323,7 @@ def process_inbound(
                 checkpoint("inbound-i2")
                 continue
             if (
-                not replay
+                not settled
                 and verdict == UNHOMED
                 and envelope.get("from_participant") is not None
             ):
@@ -1291,7 +1366,7 @@ def process_inbound(
             if fence_present(settings):
                 raise TickError("fenced")
             checkpoint("inbound-i4")
-            if not replay:
+            if not settled:
                 rules = load_rules(settings)
                 reason = blocked_reason(rules, sender, room)
                 if reason is not None:
@@ -1641,6 +1716,8 @@ def copy_outbound(settings, selected, logger):
                     f"outbox differs from immutable archive for {mail_id}"
                 )
             continue
+        # Who sent this letter, as of now: what a later bounce is routed by.
+        bounce.record_origin(settings, mail_id, data)
         try:
             exclusive_publish(target, data, target.parent, settings.repo)
         except FileExistsError:
@@ -1763,11 +1840,20 @@ def prune_outbox(settings, config, git, logger, snapshot=None, refusals=None):
                     "bounce_failed", host=host, room=room, id=mail_id, reason=str(error)
                 )
                 if refusals is not None:
-                    refusals.append(
-                        attention.refused_bounce_failed(
-                            mail_id, host, room, receipt["reason"], error
+                    if isinstance(error, bounce.BounceConflict):
+                        # A record on disk does not describe this letter:
+                        # keep the entry, never retire on a guess.
+                        refusals.append(
+                            attention.refused_bounce_conflict(
+                                mail_id, host, room, receipt["reason"], error
+                            )
                         )
-                    )
+                    else:
+                        refusals.append(
+                            attention.refused_bounce_failed(
+                                mail_id, host, room, receipt["reason"], error
+                            )
+                        )
                 continue
             git.run(["rm", "--quiet", "--", relative])
             pruned += 1
@@ -2235,7 +2321,6 @@ def build_attention(settings, logger, snapshot, refusals, prior, read_failures):
                 participant,
                 waiting[participant],
                 destination(root, pmail.PARTICIPANTS_ARCHIVE_DIR, participant),
-                destination(root, pmail.PARTICIPANTS_DIR, participant),
             )
         )
     return attention.assemble(

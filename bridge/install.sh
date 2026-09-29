@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PINNED_POST_VERSION='post 0.9.0'
+POST_VERSION_RANGE='post 0.9.0 up to, but not including, post 0.10.0'
 
-# `post --version` prints the pinned semver, optionally followed by build
-# metadata: `post 0.9.0 (build abc1234, ...)`. Same rule as sweep.py's
-# post_version_accepted, which --check-config applies again below.
+# `post --version` prints a version from 0.9.0 up to, but not including,
+# 0.10.0, optionally followed by build metadata: `post 0.9.4 (build abc1234,
+# ...)`. A patch number is a plain integer (no leading zeros, no pre-release
+# tag). Same rule as sweep.py's post_version_accepted, which --check-config
+# applies again below.
 post_version_accepted() {
-  local text=$1 build_re='^ \(build [^()]*\)$'
+  local text=$1 version_re='^post 0\.9\.(0|[1-9][0-9]*)( \(build [^()]*\))?$'
   case $text in
     *$'\n'*) return 1 ;;
   esac
-  [ "$text" = "$PINNED_POST_VERSION" ] && return 0
-  [ "${text:0:${#PINNED_POST_VERSION}}" = "$PINNED_POST_VERSION" ] || return 1
-  [[ ${text:${#PINNED_POST_VERSION}} =~ $build_re ]]
+  [[ $text =~ $version_re ]]
 }
 
 usage() {
@@ -245,7 +245,7 @@ fi
 [ -f "$POST_BIN" ] && [ -x "$POST_BIN" ] || die "post binary is not an executable file: $POST_BIN"
 POST_BIN=$(CDPATH='' cd -- "$(dirname -- "$POST_BIN")" && printf '%s/%s\n' "$PWD" "$(basename -- "$POST_BIN")")
 POST_VERSION=$("$POST_BIN" --version 2>&1) || die "cannot run $POST_BIN --version"
-post_version_accepted "$POST_VERSION" || die "post version must be $PINNED_POST_VERSION, optionally followed by ' (build ...)'; got $POST_VERSION"
+post_version_accepted "$POST_VERSION" || die "post version must be $POST_VERSION_RANGE, optionally followed by ' (build ...)'; got $POST_VERSION"
 
 [ -n "$REPO_URL" ] || die '--repo-url is required for installation'
 [ -n "$SSH_KEY" ] || die '--ssh-key is required for installation'

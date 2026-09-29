@@ -123,7 +123,7 @@ class TickV2Test(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("post 0.9.0", result.stdout)
+        self.assertIn("post 0.9.0 up to, but not including, post 0.10.0", result.stdout)
 
     def check_config_with_version_line(self, line):
         fake = Path(self.temporary.name) / "annotated-post"
@@ -137,27 +137,43 @@ class TickV2Test(unittest.TestCase):
 
     def test_check_config_accepts_a_build_annotated_post_version(self):
         # `post --version` gains build metadata after the semver; the bridge
-        # pins the semver, not the annotation, or a rebuilt post would stop
-        # every tick on the host it was installed to.
+        # judges the semver, not the annotation, or a rebuilt post would stop
+        # every tick on the host it was installed to. The same goes for a
+        # patch release: anything from 0.9.0 up to, but not including, 0.10.0.
         for line in (
             "post 0.9.0 (build abc1234, 2026-09-28)",
             "post 0.9.0 (build abc1234-dirty)",
+            "post 0.9.0",
+            "post 0.9.1",
+            "post 0.9.12 (build abc1234)",
+            "post 0.9.999",
         ):
             result = self.check_config_with_version_line(line)
             self.assertEqual(result.returncode, 0, line + result.stdout + result.stderr)
 
     def test_check_config_refuses_other_semvers_and_malformed_annotations(self):
         for line in (
-            "post 0.9.1",
+            "post 0.8.9",
+            "post 0.10.0",
             "post 0.10.0 (build abc1234)",
+            "post 0.100.0",
+            "post 1.0.0",
+            "post 0.9",
+            "post 0.9.",
+            "post 0.9.01",
+            "post 0.90.0",
             "post 0.9.0 build abc1234",
             "post 0.9.0 (build abc) trailing",
             "post 0.9.0-rc1",
+            "post 0.9.1-rc1",
             "post 0.9.0 (build (nested))",
+            "xpost 0.9.0",
+            "post  0.9.0",
+            "post 0.9.0 (build abc1234)x",
         ):
             result = self.check_config_with_version_line(line)
             self.assertEqual(result.returncode, 2, line + result.stdout + result.stderr)
-            self.assertIn("post 0.9.0", result.stdout)
+            self.assertIn("post 0.9.0 up to, but not including, post 0.10.0", result.stdout)
 
     def test_check_config_refuses_a_missing_or_non_executable_post_bin(self):
         """SPEC-v2 §Onboarding: POST_BIN must exist and be executable.

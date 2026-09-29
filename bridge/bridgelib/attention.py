@@ -9,8 +9,10 @@ Kinds:
 
 ``refused_letter``
     A letter this host sent was refused for good and its sender could not be
-    told, or the bounce failed this tick. (When the bounce works the sender
-    gets a system letter and the entry is retired, so nothing stays here.)
+    told (the notice is a dead letter), the bounce failed this tick, or a
+    record of an earlier bounce attempt does not match the letter and the
+    entry is kept. (When the bounce works the sender gets a system letter and
+    the entry is retired, so nothing stays here.)
 ``unrelayable_letter``
     A workspace letter in ``archive/`` that cannot be relayed at all.
 ``quarantined_inbound``
@@ -67,8 +69,9 @@ def refused_dead_letter(notice_id, path):
     return item(
         "refused_letter",
         notice_id,
-        "A letter this host sent was refused for good, and its sender is no longer "
-        "here to tell. The notice is saved at " + str(path) + ".",
+        "A letter this host sent was refused for good, and the bridge could not "
+        "tell its sender: no participant or room here can be shown to have sent it. "
+        "The notice is saved at " + str(path) + ".",
         f"Read it with: cat '{path}'. Re-send the letter if it still matters "
         f"(the notice has the command), then delete the notice with: rm '{path}'",
     )
@@ -82,6 +85,25 @@ def refused_bounce_failed(mail_id, host, room, reason, error):
         f"bridge could not write the notice to its sender: {error}",
         "The bridge retries every tick. If this stays, check that the sending "
         "participant's inbox under the mail root is writable and the disk is not full.",
+    )
+
+
+def refused_bounce_conflict(mail_id, host, room, reason, error):
+    """A bounce record does not describe the letter; the entry stays in the relay."""
+    path = getattr(error, "path", None)
+    fix = (
+        f"Move the mismatched file aside and the next tick redoes that step: "
+        f"mv '{path}' '{path}.conflict'"
+        if path is not None
+        else "Look under bridge/bounced/ in the mail root for the file named above."
+    )
+    return item(
+        "refused_letter",
+        mail_id,
+        f"Letter {mail_id} to {room} on {host} was refused ({reason}) but a record "
+        f"of its bounce does not match the letter, so the bridge kept the letter "
+        f"in the relay and retired nothing: {error}",
+        fix,
     )
 
 
@@ -123,12 +145,12 @@ def quarantined_inbound(host, room, mail_id, reason, forensic_path):
     )
 
 
-def archived_participant(participant, letters, archive_dir, live_dir):
+def archived_participant(participant, letters, archive_dir):
     """Letters waiting for a participant whose record ``post participant gc`` archived.
 
-    ``letters`` is ``[(host, mail_id), ...]``. The fix is the move post's own
-    restore makes (``bind`` renames the archive directory back, whole); no
-    post command restores by id, so this is the exact command until one does.
+    ``letters`` is ``[(host, mail_id), ...]``. ``post bridge deliver`` restores
+    an archived recipient itself; this item only stands while it still refuses,
+    and the fix is post's own ``participant restore``.
     """
     ids = ", ".join(mail_id for _, mail_id in letters[:3])
     more = f" and {len(letters) - 3} more" if len(letters) > 3 else ""
@@ -138,10 +160,10 @@ def archived_participant(participant, letters, archive_dir, live_dir):
         participant,
         f"{len(letters)} letter(s) from {hosts} for participant {participant} "
         f"are waiting ({ids}{more}): `post participant gc` moved that record to "
-        f"{archive_dir}, post cannot find the participant, and would reject the "
-        f"letters for good. The bridge holds them instead.",
-        f"Restore the record and the next tick delivers them: mv '{archive_dir}' "
-        f"'{live_dir}'. (That session's next `post participant bind` does the same.)",
+        f"{archive_dir} and post's delivery would not restore it, so it would "
+        f"reject the letters for good. The bridge holds them instead.",
+        f"Restore the record and the next tick delivers them: "
+        f"post participant restore {participant}",
     )
 
 
