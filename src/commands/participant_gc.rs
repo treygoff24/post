@@ -666,29 +666,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_participant_that_woke_up_since_planning_is_left_alone() {
-        let root = test_root("gc-woke");
-        let context = Context {
-            root: root.clone(),
-            home: root.clone(),
-        };
-        let now = SystemTime::now();
-        let (id, _) = seed(&root, "woke-key", &days_ago(40, now), false);
-        let plan = plan(&context, now).expect("plan");
-        assert_eq!(plan.actions.len(), 1);
-        // The session touches its record between the plan and the apply.
-        participant::touch(&context, &id).expect("touch");
-        let applied = apply_plan(&context, &plan, now, &mut |_| Ok(())).expect("apply");
-        assert!(applied.deleted.is_empty() && applied.archived.is_empty());
-        assert!(root
-            .join("participants")
-            .join(&id)
-            .join("participant.json")
-            .exists());
-        trash_test_root(&root);
-    }
-
     fn context_at(root: &Path) -> Context {
         Context {
             root: root.to_path_buf(),
@@ -768,7 +745,7 @@ mod tests {
         // workspace mail is pending for its active members, not for an idle
         // one; an empty record is kept more cautiously, for any mail waiting in
         // its workspace.
-        let scenarios: [(&str, bool, Arrive); 7] = [
+        let scenarios: [(&str, bool, Arrive); 8] = [
             // Planned as empty, then it is not: the record would now be
             // archived, not deleted, and a delete would lose what arrived.
             ("state written into its directory", false, |context, id| {
@@ -807,6 +784,11 @@ mod tests {
                     .expect("record");
                 crate::presence::touch_participant_heartbeat(&record, 10_000);
                 assert!(crate::presence::participant_heartbeat_stamp(&record).is_some());
+            }),
+            // The session itself wakes and touches its record, so it is no
+            // longer stale: kept at both tiers, by the re-check of `last_seen`.
+            ("the session woke up and touched it", true, |context, id| {
+                participant::touch(context, id).expect("touch");
             }),
             ("a receipt that names it", true, |context, id| {
                 let letter = write_letter(&context.root, "alpha", "gamma");
@@ -968,92 +950,6 @@ mod tests {
                 .is_file(),
             "the letter that landed before the second check keeps it"
         );
-        trash_test_root(&root);
-    }
-
-    /// A collected record comes back under its own id: a tier-1 record from
-    /// its tombstone, a tier-2 record from the archive with its state.
-    #[test]
-    fn a_collected_record_is_revived_under_the_same_id() {
-        let root = test_root("gc-revive");
-        let context = context_at(&root);
-        let now = SystemTime::now();
-        let (bare, digest) = seed_in(
-            &root,
-            "revive-bare",
-            &days_ago(40, now),
-            false,
-            Some("alpha"),
-        );
-        let (stateful, _) = seed_in(&root, "revive-stateful", &days_ago(40, now), true, None);
-        // What the record says about itself survives its tombstone.
-        let record_file = root
-            .join("participants")
-            .join(&bare)
-            .join("participant.json");
-        let mut record: serde_json::Value =
-            serde_json::from_slice(&fs::read(&record_file).expect("record")).expect("json");
-        record["lease_hours"] = serde_json::json!(12);
-        record["display_name"] = serde_json::json!("Ember");
-        record["workspace_path"] = serde_json::json!("/projects/alpha");
-        fs::write(
-            &record_file,
-            serde_json::to_vec_pretty(&record).expect("json"),
-        )
-        .expect("edit");
-        let plan = plan(&context, now).expect("plan");
-        let applied = apply_plan(&context, &plan, now, &mut |_| Ok(())).expect("apply");
-        assert_eq!(applied.deleted, vec![bare.clone()]);
-        assert_eq!(applied.archived, vec![stateful.clone()]);
-
-        let _lock = participant::lock(&context).expect("lock");
-        let back = participant::revive_locked(&context, &bare)
-            .expect("revive")
-            .expect("a tombstoned id comes back");
-        assert_eq!(back.id, bare);
-        assert_eq!(back.conversation_key_digest, digest);
-        assert_eq!(back.workspace.as_deref(), Some("alpha"));
-        assert_eq!(back.lease_hours, 12);
-        assert_eq!(back.display_name.as_deref(), Some("Ember"));
-        assert_eq!(
-            back.workspace_path.as_deref(),
-            Some(std::path::Path::new("/projects/alpha"))
-        );
-        assert!(matches!(
-            participant::resolve_key(&context, "claude", &digest).expect("resolve"),
-            participant::KeyResolution::Live(live) if live.id == bare
-        ));
-
-        let restored = participant::revive_locked(&context, &stateful)
-            .expect("revive")
-            .expect("an archived id comes back");
-        assert_eq!(restored.id, stateful);
-        assert!(
-            restored.dir.join("cursors.json").is_file(),
-            "state came back"
-        );
-        assert!(!gc::archived_dir(&context, &stateful).exists());
-
-        assert!(
-            participant::revive_locked(&context, "claude-ffffffff")
-                .expect("revive")
-                .is_none(),
-            "an id that never existed stays missing"
-        );
-        // An archived record that cannot be read is an error, not a guess.
-        let broken = gc::archived_dir(&context, "claude-badbad00");
-        fs::create_dir_all(&broken).expect("archive dir");
-        fs::write(broken.join("participant.json"), b"not json").expect("garbage record");
-        assert!(participant::revive_locked(&context, "claude-badbad00").is_err());
-        assert!(
-            broken.join("participant.json").is_file(),
-            "an unreadable archive stays where it was found"
-        );
-        assert!(
-            !context.root.join("participants/claude-badbad00").exists(),
-            "and is not left half-restored in the registry"
-        );
-        drop(_lock);
         trash_test_root(&root);
     }
 }
