@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { contextFor, parseSnapshot, participantMissing } from "./mail-hook-core.mjs";
+import { ACTIVATION_NOTICE, contextFor, parseSnapshot, participantMissing } from "./mail-hook-core.mjs";
 
 const HOOKS = process.env.POST_HOOK_TEST_DIR || path.dirname(fileURLToPath(import.meta.url));
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-hook-core-test-"));
@@ -44,6 +44,7 @@ if (Array.isArray(list) && list.length > 0) {
   fs.writeFileSync(counter, String(n + 1));
   step = list[Math.min(n, list.length - 1)];
 }
+if (step.sleepMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, step.sleepMs);
 const json = (value) => JSON.stringify(value) + "\n";
 let stdout = step.stdout;
 if (stdout !== undefined && typeof stdout !== "string") stdout = json(stdout);
@@ -149,11 +150,13 @@ function makeWorld(name, adapter) {
         ...extra,
       };
       for (const key of unsetEnv) delete env[key];
+      const startedAt = Date.now();
       const result = spawnSync(process.execPath, [path.join(HOOKS, adapter.script)], {
         input: JSON.stringify(adapter.input(phase, session, cwd)),
         encoding: "utf8",
         env,
       });
+      world.lastMs = Date.now() - startedAt;
       assert.equal(result.status, 0, `hook must always exit 0: ${result.stderr}`);
       return JSON.parse(result.stdout);
     },
@@ -509,11 +512,79 @@ for (const [name, adapter] of Object.entries(ADAPTERS).filter(([, a]) => a.lazy)
       assert.ok(garbled.keys().includes("participant bind"));
     });
 
-    test("a show that cannot answer (an older post) falls back to minting", () => {
-      const world = makeWorld("lazy-show-old", adapter);
-      world.control({ rooms: [{ stdout: roomsListing("/elsewhere") }], "participant show": [{ exit: 2, stderr: "error: unexpected argument '--harness'\n" }] });
-      world.run("start", "sess-o");
-      assert.ok(world.keys().includes("participant bind"));
+    // A lookup that gives no answer is neither "unbound" nor "bound": the session
+    // stays unbound, the failure is reported once, and nothing is minted.
+    const NO_ANSWER = {
+      "an older post that does not take --harness": { exit: 2, stderr: "error: unexpected argument '--harness'\n" },
+      "a post that crashes": { exit: 101, stderr: "thread 'main' panicked\n" },
+      "output that is not JSON": { stdout: "not json\n" },
+      "an ok:false envelope": { stdout: { ok: false, error: { code: "config_invalid" } } },
+      "a status this hook does not know": { stdout: { ok: true, status: "quarantined" } },
+    };
+
+    for (const [label, step] of Object.entries(NO_ANSWER)) {
+      test(`no answer from show (${label}) does not mint an unregistered cwd`, () => {
+        const world = makeWorld("lazy-show-none", adapter);
+        world.control({ rooms: [{ stdout: roomsListing("/elsewhere") }], "participant show": [step] });
+        const out = world.run("start", "sess-o");
+        assert.match(contextOf(out), /could not check whether this session already has a participant/);
+        assert.match(contextOf(out), /UNKNOWN \(not empty\)/, "the lookup failure is reported, not read as an empty inbox");
+        assert.ok(!world.keys().includes("participant bind"), "an inconclusive lookup never mints");
+        assert.deepEqual(
+          { participantId: world.state("sess-o").participantId, deferred: world.state("sess-o").deferred, setupWarned: world.state("sess-o").setupWarned },
+          { participantId: null, deferred: true, setupWarned: true }
+        );
+
+        // Reported once: later turns keep asking, stay quiet, and still never mint.
+        world.reset();
+        assert.deepEqual(world.run("prompt", "sess-o"), {});
+        assert.deepEqual(world.run("tool", "sess-o"), {});
+        assert.ok(!world.keys().includes("participant bind"));
+        assert.equal(world.state("sess-o").participantId, null);
+      });
+    }
+
+    test("no answer from show does not mint a delegate child either", () => {
+      const world = makeWorld("lazy-show-none-delegate", adapter);
+      world.control({ rooms: [{ stdout: roomsListing(world.cwd) }], "participant show": [{ exit: 2 }] });
+      const out = world.run("start", "sess-q", { env: { DELEGATE_RUN_ID: "run-5" } });
+      assert.match(contextOf(out), /could not check whether this session already has a participant/);
+      assert.ok(!world.keys().includes("participant bind"));
+      assert.equal(world.state("sess-q").participantId, null);
+    });
+
+    test("the lookup failure record clears on an answer, so a later failure is reported again", () => {
+      const world = makeWorld("lazy-show-recovers", adapter);
+      const broken = { "participant show": [{ exit: 2 }] };
+      world.control({ rooms: [{ stdout: roomsListing("/elsewhere") }], ...broken });
+      assert.match(contextOf(world.run("start", "sess-w")), /could not check/);
+      assert.deepEqual(world.run("prompt", "sess-w"), {}, "still failing: not repeated");
+
+      world.control({ "participant show": [{ stdout: { ok: true, status: "unbound", bound: false } }] });
+      assert.deepEqual(world.run("prompt", "sess-w"), {}, "an answer (unbound) is quiet");
+      assert.equal(world.state("sess-w").setupWarned, false, "the record clears on recovery");
+      assert.equal(world.state("sess-w").deferred, true);
+
+      world.control(broken);
+      assert.match(contextOf(world.run("prompt", "sess-w")), /could not check/, "a new failure streak is reported again");
+      assert.deepEqual(world.run("prompt", "sess-w"), {});
+
+      // And when the CLI has minted it by then, the session carries on normally.
+      world.control({ "participant show": [{ stdout: BOUND(ID) }], watch: [{ stdout: "" }] });
+      assert.deepEqual(world.run("prompt", "sess-w"), {});
+      assert.ok(!world.keys().includes("participant bind"));
+      assert.equal(world.state("sess-w").participantId, ID);
+      assert.equal(world.state("sess-w").setupWarned, false);
+    });
+
+    test("a lookup that recovers into a failing scan leaves no lookup failure recorded", () => {
+      const world = makeWorld("lazy-show-recovers-scan-down", adapter);
+      world.control({ rooms: [{ stdout: roomsListing("/elsewhere") }], "participant show": [{ exit: 2 }] });
+      assert.match(contextOf(world.run("start", "sess-y")), /could not check/);
+      world.control({ "participant show": [{ stdout: BOUND(ID) }], watch: [{ exit: 1 }] });
+      assert.match(contextOf(world.run("prompt", "sess-y")), /automatic mail check failed/);
+      assert.equal(world.state("sess-y").setupWarned, false);
+      assert.equal(world.state("sess-y").participantId, ID);
     });
 
     test("an explicit participant is never deferred", () => {
@@ -555,6 +626,134 @@ for (const [name, adapter] of Object.entries(ADAPTERS).filter(([, a]) => !a.lazy
       assert.ok(world.keys().includes("participant bind"));
       assert.ok(!world.keys().includes("rooms"), "the workspace check is skipped");
       assert.match(contextOf(out), /prefix Post commands with POST_PARTICIPANT=/);
+    });
+  });
+}
+
+// ------------------------------------------------- post missing or broken
+
+for (const [name, adapter] of Object.entries(ADAPTERS)) {
+  describe(`${name}: post missing or broken`, () => {
+    const first = adapter.hasStart ? "start" : "prompt";
+    const laterPhases = adapter.hasStart ? ["prompt", "tool", "prompt"] : ["prompt", "prompt", "prompt"];
+
+    test("a missing post binary is reported once per session, not on every prompt and tool call", () => {
+      const world = makeWorld("post-missing", adapter);
+      const gone = { [`${adapter.prefix}_BIN`]: path.join(world.dir, "no-such-post") };
+      assert.match(contextOf(world.run(first, "sess-n", { env: gone })), /could not verify installed post capabilities/);
+      for (const phase of laterPhases) {
+        assert.deepEqual(world.run(phase, "sess-n", { env: gone }), {}, `${phase} must not repeat the setup warning`);
+      }
+      assert.equal(world.state("sess-n").setupWarned, true);
+      assert.equal(world.state("sess-n").participantId, null);
+    });
+
+    test("a post whose every command fails is reported once", () => {
+      const world = makeWorld("post-version-broken", adapter);
+      world.control({ version: [{ exit: 1 }], "participant bind": [{ exit: 1 }] });
+      assert.match(contextOf(world.run(first, "sess-v")), /could not verify installed post capabilities/);
+      for (const phase of laterPhases) assert.deepEqual(world.run(phase, "sess-v"), {}, `${phase} must not repeat the setup warning`);
+    });
+
+    test("a bind that keeps failing is reported once, retried every turn, and clears when it works", () => {
+      const world = makeWorld("bind-broken", adapter);
+      world.control({ "participant bind": [{ exit: 1 }] });
+      assert.match(contextOf(world.run(first, "sess-b")), /participant setup failed; inbox state is UNKNOWN/);
+      world.reset();
+      assert.deepEqual(world.run("prompt", "sess-b"), {}, "the second failure is quiet");
+      assert.ok(world.keys().includes("participant bind"), "but setup is still retried");
+      assert.equal(world.state("sess-b").setupWarned, true);
+
+      // Post recovers for the bind while the scan is still down: the record is
+      // gone (the setup answered), and the scan failure reports as itself.
+      world.control({ watch: [{ exit: 1 }] });
+      const out = world.run("prompt", "sess-b");
+      assert.match(contextOf(out), /automatic mail check failed/);
+      assert.doesNotMatch(contextOf(out), /participant setup failed/);
+      assert.equal(world.state("sess-b").setupWarned, false, "recovery clears the record");
+      assert.ok(world.state("sess-b").participantId);
+    });
+
+    test("a working setup after a failed one leaves nothing recorded", () => {
+      const world = makeWorld("bind-recovers", adapter);
+      world.control({ "participant bind": [{ exit: 1 }] });
+      world.run(first, "sess-r");
+      world.control({ watch: [{ stdout: jsonl(MAIL) }] });
+      assert.match(contextOf(world.run("prompt", "sess-r")), /Direct mail id\(s\): 20260730-010101-aaa111/);
+      assert.equal(world.state("sess-r").setupWarned, false);
+    });
+
+    if (adapter.hasStart) {
+      test("a resumed session whose start hit a broken post clears the record on its next good turn", () => {
+        const world = makeWorld("resume-broken-start", adapter);
+        world.control({ watch: [{ stdout: "" }] });
+        world.run("start", "sess-x");
+        const id = world.state("sess-x").participantId;
+        assert.ok(id, "setup: the session was bound");
+        world.control({ version: [{ exit: 1 }] });
+        assert.match(contextOf(world.run("start", "sess-x")), /could not verify installed post capabilities/);
+        assert.equal(world.state("sess-x").setupWarned, true);
+        assert.equal(world.state("sess-x").participantId, id, "the known participant is kept");
+        world.control({ watch: [{ stdout: "" }] });
+        assert.deepEqual(world.run("prompt", "sess-x"), {});
+        assert.equal(world.state("sess-x").setupWarned, false);
+      });
+
+      test("a fresh session start reports a broken setup again", () => {
+        const world = makeWorld("bind-broken-resume", adapter);
+        world.control({ "participant bind": [{ exit: 1 }] });
+        assert.match(contextOf(world.run("start", "sess-s")), /participant setup failed/);
+        assert.deepEqual(world.run("prompt", "sess-s"), {});
+        assert.match(contextOf(world.run("start", "sess-s")), /participant setup failed/);
+      });
+    }
+  });
+}
+
+// -------------------------------------- one deadline for the whole invocation
+
+for (const [name, adapter] of Object.entries(ADAPTERS).filter(([, a]) => a.lazy)) {
+  describe(`${name}: the notice release stays inside the hook's time budget`, () => {
+    const DEADLINE_MS = 2000;
+    const noticeFlags = (world) => world.calls().filter((call) => call.key === "participant notice").map((call) => call.args[2]);
+
+    test("a release that hangs is cut off by the shared deadline, after delivery is recorded", () => {
+      const world = makeWorld("slow-release", adapter);
+      world.control({
+        rooms: [{ stdout: roomsListing(world.cwd) }],
+        // claim, ack, release: the release never returns.
+        "participant notice": [{ stdout: { ok: true, notice: ACTIVATION_NOTICE, busy: false } }, { stdout: { ok: true } }, { sleepMs: 30_000 }],
+      });
+      const out = world.run("start", "sess-slow", { env: { [`${adapter.prefix}_DEADLINE_MS`]: String(DEADLINE_MS) } });
+      assert.match(contextOf(out), new RegExp(ACTIVATION_NOTICE.slice(0, 30)), "the notice was delivered");
+      assert.equal(world.state("sess-slow").activationSeen, true, "and recorded before the release ran");
+      assert.deepEqual(noticeFlags(world), ["--claim", "--ack", "--release"]);
+      // The release is bounded by the one deadline, not by a fresh 4 s of its own
+      // (which would run past the 5 s Codex timeout on top of the work before it).
+      assert.ok(world.lastMs < DEADLINE_MS + 1400, `whole invocation took ${world.lastMs} ms against a ${DEADLINE_MS} ms budget`);
+    });
+
+    test("a step that finds the shared budget already spent is not started", () => {
+      const world = makeWorld("spent-budget", adapter);
+      world.control({ rooms: [{ stdout: roomsListing(world.cwd) }], watch: [{ stdout: "" }] });
+      world.run("start", "sess-spent");
+      assert.ok(world.state("sess-spent").participantId, "setup: the session was bound");
+      world.reset();
+      world.control({ "participant touch": [{ sleepMs: 30_000 }], watch: [{ stdout: jsonl(MAIL) }] });
+      const out = world.run("prompt", "sess-spent", { env: { [`${adapter.prefix}_DEADLINE_MS`]: "800" } });
+      assert.deepEqual(world.keys(), ["participant touch"], "the touch used the whole budget; the scan was not started");
+      assert.match(contextOf(out), /UNKNOWN \(not empty\)/, "and the missed scan is reported, never read as an empty inbox");
+      assert.ok(world.lastMs < 2400, `whole invocation took ${world.lastMs} ms against an 800 ms budget`);
+    });
+
+    test("a prompt release still happens, after the ack", () => {
+      const world = makeWorld("fast-release", adapter);
+      world.control({
+        rooms: [{ stdout: roomsListing(world.cwd) }],
+        "participant notice": [{ stdout: { ok: true, notice: ACTIVATION_NOTICE, busy: false } }, { stdout: { ok: true } }, { stdout: { ok: true } }],
+      });
+      world.run("start", "sess-fast");
+      assert.deepEqual(noticeFlags(world), ["--claim", "--ack", "--release"]);
     });
   });
 }

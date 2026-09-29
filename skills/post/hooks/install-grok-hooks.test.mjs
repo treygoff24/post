@@ -269,6 +269,37 @@ test("malformed target JSON fails before copying the adapter", () => {
   assert.equal(fs.readFileSync(target, "utf8"), "{not-json");
 });
 
+// Everything is staged as temp files and renamed into place only when every
+// write has succeeded. The config directory here allows reading but not
+// creating a file, so the config write is the step that fails, after the
+// watch-notice, core and adapter have been staged.
+test("a failure writing the config leaves the installed files exactly as they were", { skip: process.getuid?.() === 0 && "root ignores directory permissions" }, () => {
+  const dir = path.join(ROOT, "hooks-staged");
+  fs.mkdirSync(dir, { recursive: true });
+  const old = { "mail-hook-core.mjs": ["// old core\n", 0o644], "post-grok-mail.mjs": ["// old adapter\n", 0o755], "post-watch-notice.mjs": ["// old notice\n", 0o755] };
+  for (const [name, [content, mode]] of Object.entries(old)) fs.writeFileSync(path.join(dir, name), content, { mode });
+  const before = fs.readdirSync(dir).sort();
+  const configDir = path.join(ROOT, "config-readonly");
+  fs.mkdirSync(configDir);
+  const target = path.join(configDir, "post-mail.json");
+  fs.writeFileSync(target, JSON.stringify({ hooks: {} }));
+  const env = { ...process.env, POST_GROK_HOOK_INSTALL_DIR: dir, POST_GROK_HOOK_BIN: GOOD_POST };
+  fs.chmodSync(configDir, 0o500);
+  try {
+    const failed = spawnSync(process.execPath, [INSTALLER, target], { encoding: "utf8", env });
+    assert.notEqual(failed.status, 0, "the install must fail");
+    for (const [name, [content]] of Object.entries(old)) assert.equal(fs.readFileSync(path.join(dir, name), "utf8"), content, name);
+    assert.deepEqual(fs.readdirSync(dir).sort(), before, "no staged temp files are left behind");
+    assert.equal(fs.readFileSync(target, "utf8"), JSON.stringify({ hooks: {} }));
+  } finally {
+    fs.chmodSync(configDir, 0o700);
+  }
+  const rerun = spawnSync(process.execPath, [INSTALLER, target], { encoding: "utf8", env });
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.deepEqual(fs.readFileSync(path.join(dir, "mail-hook-core.mjs")), fs.readFileSync(CORE_SOURCE));
+  assert.ok(JSON.parse(fs.readFileSync(target, "utf8")).hooks.UserPromptSubmit);
+});
+
 test("root array or null config normalizes to an object hooks map", () => {
   for (const [label, content] of [
     ["array", "[]"],

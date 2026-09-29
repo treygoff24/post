@@ -772,10 +772,19 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
   setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
   const failed = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
   assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
-  assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
+  // The failure is recorded (so it prints once per session), but the session
+  // holds no participant: the next turn tries setup again.
+  const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
+  assert.equal(recorded.participantId, null);
+  assert.equal(recorded.setupWarned, true);
+  const repeat = run({ ...BASE, hook_event_name: "UserPromptSubmit", session_id: "bind-failure" }, { stateDir });
+  assert.deepEqual(repeat, {}, "the same failure is not reported again");
   setStub({ events: [] });
   const recovered = run({ ...BASE, hook_event_name: "SessionStart", session_id: "bind-failure" }, { stateDir });
   assert.deepEqual(recovered, {});
+  const cleared = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
+  assert.ok(cleared.participantId);
+  assert.equal(cleared.setupWarned, false);
 });
 
 test("lineage names are shell-quoted in the voice command", () => {

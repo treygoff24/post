@@ -114,9 +114,26 @@ if (typeof config.hooks !== "object" || config.hooks === null) config.hooks = {}
 
 fs.mkdirSync(path.dirname(ADAPTER), { recursive: true });
 
+// Every file the install writes is STAGED first and renamed into place only
+// after every write has succeeded, so a failure while staging (disk full, an
+// unwritable settings directory) leaves what is installed exactly as it was; the
+// temps are removed on exit. Renames run in staging order (core, adapter, then
+// settings), so an adapter never lands without the core it imports.
+const staged = [];
+process.on("exit", () => {
+  for (const { tmp } of staged) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Never created, or already renamed into place.
+    }
+  }
+});
+
 // Random-named exclusive temp, O_EXCL|O_NOFOLLOW: a planted predictable
 // symlink can neither be followed nor clobber a victim file.
-function writeFileAtomic(file, bytes, mode) {
+function stageFile(file, bytes, mode) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = path.join(
     path.dirname(file),
     `.${path.basename(file)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
@@ -138,9 +155,10 @@ function writeFileAtomic(file, bytes, mode) {
       if (n <= 0) throw new Error("short write");
       offset += n;
     }
+    // The umask must not trim the mode the file is meant to have.
+    fs.fchmodSync(fd, mode);
     fs.closeSync(fd);
     fd = undefined;
-    fs.renameSync(tmp, file);
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -156,22 +174,29 @@ function writeFileAtomic(file, bytes, mode) {
     }
     throw error;
   }
+  staged.push({ tmp, file });
 }
 
-// Copy a reviewed file into place if its bytes or mode differ. Returns whether
-// anything changed.
+function commitStaged() {
+  while (staged.length > 0) {
+    fs.renameSync(staged[0].tmp, staged[0].file);
+    staged.shift();
+  }
+}
+
+// Stage a reviewed file for installation if its bytes or mode differ. Returns
+// whether anything will change.
 function installFile(from, to, mode) {
   const bytes = fs.readFileSync(from);
-  let changed = true;
+  let current = null;
   try {
-    changed = !bytes.equals(fs.readFileSync(to));
+    current = { bytes: fs.readFileSync(to), mode: fs.statSync(to).mode & 0o777 };
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  if (changed) writeFileAtomic(to, bytes, mode);
-  const modeChanged = (fs.statSync(to).mode & 0o777) !== mode;
-  if (modeChanged) fs.chmodSync(to, mode);
-  return changed || modeChanged;
+  const changed = current === null || !current.bytes.equals(bytes) || current.mode !== mode;
+  if (changed) stageFile(to, bytes, mode);
+  return changed;
 }
 
 // The adapter imports ./mail-hook-core.mjs, so the core goes in first and the
@@ -223,10 +248,16 @@ for (const event of EVENTS) {
 
 const configChanged = JSON.stringify(config) !== original;
 if (configChanged) {
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
-  fs.renameSync(tmp, target);
+  // Keep an existing settings file's mode; a new one is created 0644.
+  let configMode = 0o644;
+  try {
+    configMode = fs.statSync(target).mode & 0o777;
+  } catch {
+    // New file.
+  }
+  stageFile(target, `${JSON.stringify(config, null, 2)}\n`, configMode);
 }
+commitStaged();
 console.log(
   configChanged || adapterChanged || coreChanged
     ? [

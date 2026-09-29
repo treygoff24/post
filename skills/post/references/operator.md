@@ -20,8 +20,11 @@ node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
 ```
 
 - Each installs a small adapter beside a shared `mail-hook-core.mjs` (mode
-  0644). Both files are copied together, so an adapter is never installed
-  without its core; a failed install leaves no half-copy. Rerunning prints
+  0644). Every file, the settings or hooks file included, is first written to a
+  temp file beside its destination and renamed into place only once all the
+  writes have succeeded, so a failed write (full disk, unwritable directory)
+  leaves what was installed untouched and removes its temps. The core is
+  renamed before the adapter that imports it. Rerunning prints
   `adapter updated` when either changed.
 - **Claude Code:** SessionStart, UserPromptSubmit, root PostToolUse, and
   SessionEnd (the only adapter that ends the participant). **Codex:** the first
@@ -34,12 +37,19 @@ node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
   asks `post participant show --harness <h> --key <k> --json` each turn and adopts
   the id once the agent's first write has bound it. Cursor and Grok always bind
   and print the id, because their agents cannot see an ambient session key.
+  If the lookup itself gets no answer (a timeout, a crash, a `post` too old to
+  take `--harness`), the hook leaves the session unbound, says so once, and does
+  not mint; a session that finds `post` missing or broken is likewise told once
+  per session, not on every prompt and tool call. Update `post` to fix either.
 - If a hook reports `participant_missing`, it rebinds once with `post participant
   bind --harness <h> --key <k>` and retries; a failure after that is reported as
   an UNKNOWN inbox, never as an empty one.
 - Test overrides: `POST_<HARNESS>_HOOK_BIN`, `POST_<HARNESS>_HOOK_STATE_DIR`,
-  `POST_<HARNESS>_HOOK_THROTTLE_MS` (`CLAUDE`, `CODEX`, `CURSOR`, `GROK`). The
-  full adapter contract is `docs/ADAPTERS.md` in the post repo.
+  `POST_<HARNESS>_HOOK_THROTTLE_MS`, `POST_<HARNESS>_HOOK_DEADLINE_MS` (`CLAUDE`,
+  `CODEX`, `CURSOR`, `GROK`). A hook runs every `post` call, the notice release
+  included, inside one 4.5 s deadline (the default of `..._DEADLINE_MS`), under
+  the 5 s timeout Codex installs. The full adapter contract is `docs/ADAPTERS.md`
+  in the post repo.
 
 ## Doorbell supervisor: install, migrate, uninstall
 

@@ -798,10 +798,15 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
     setStub({ events: [MAIL_A], bind_stdout });
     const failed = run({ hook_event_name: "SessionStart", session_id: sessionId }, { stateDir });
     assert.match(failed.hookSpecificOutput.additionalContext, /participant setup failed/);
-    assert.equal(fs.existsSync(path.join(stateDir, `session-${sessionId}.json`)), false);
+    // Recorded so the failure prints once per session; no participant is held.
+    const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, `session-${sessionId}.json`), "utf8"));
+    assert.equal(recorded.participantId, null);
+    assert.equal(recorded.setupWarned, true);
     assert.equal(allStubCalls().at(-1).args[0], "participant");
+    assert.deepEqual(run({ hook_event_name: "UserPromptSubmit", session_id: sessionId }, { stateDir }), {}, "the same failure is not reported again");
     setStub({ events: [] });
     assert.deepEqual(run({ hook_event_name: "SessionStart", session_id: sessionId }, { stateDir }), {});
+    assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, `session-${sessionId}.json`), "utf8")).setupWarned, false);
   }
 });
 
@@ -872,6 +877,9 @@ test("release binary binds from payload keys and reuses the participant later", 
       POST_CODEX_HOOK_STATE_DIR: stateDir,
       POST_MAIL_ROOT: mailRoot,
     };
+    // A session inside a registered room is minted at SessionStart; one outside
+    // every room is deferred (lazy minting), which would leave nothing to count.
+    execFileSync(releaseBin, ["rooms", "add", "session", cwd], { env: { PATH: process.env.PATH, HOME: process.env.HOME, POST_MAIL_ROOT: mailRoot }, encoding: "utf8" });
     const invoke = (payload, extraEnv = {}) => {
       const result = spawnSync(process.execPath, [ADAPTER], {
         input: JSON.stringify(payload),

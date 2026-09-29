@@ -10,7 +10,8 @@
 //
 // Adapter contract (all fields required unless marked optional):
 //   harness          "claude" | "codex" | "cursor" | "grok": the `--harness` value
-//   envPrefix        POST_CLAUDE_HOOK etc.; <prefix>_BIN, _STATE_DIR, _THROTTLE_MS
+//   envPrefix        POST_CLAUDE_HOOK etc.; <prefix>_BIN, _STATE_DIR, _THROTTLE_MS,
+//                    _DEADLINE_MS (test override of the whole-invocation budget)
 //   stateDirName     default state directory name under the OS temp dir
 //   text             { waiting, manualCheck }: the two wordings that differ by harness
 //   parse(input, env)  -> { event, phase, sessionRaw, cwd } | null
@@ -44,7 +45,17 @@
 // - a session that has no workspace to talk to (its cwd is not a registered
 //   room) or that nobody is reading (a delegate child) is not minted at session
 //   start. The CLI mints it on its first write; each turn the hook asks
-//   `participant show` whether that has happened yet.
+//   `participant show` whether that has happened yet. A lookup that gives no
+//   answer (spawn failure, timeout, an older post without --harness) leaves the
+//   session unbound and is reported once; it never falls through to minting.
+// - if post is missing or broken, the failure is reported once per session (the
+//   state file's `setupWarned`), not on every prompt and tool call, and the
+//   record clears when a later turn gets an answer.
+//
+// Time: the harness kills a hook at its own timeout (Codex installs 5 s), so the
+// whole invocation, the notice release included, runs inside ONE deadline
+// (4.5 s by default). A step that finds none left is not started; a claim left
+// unreleased belongs to a dead pid and the CLI reclaims it.
 //
 // Watch events are read tolerantly (contract section 3): an event whose `event`
 // value this hook does not know is skipped without dropping the rest of the batch.
@@ -79,6 +90,8 @@ const PARTICIPANTS_MISSING =
   "[post] installed post lacks the participants capability; repair: cd ~/Code/post && cargo build --release && install -m 0755 target/release/post ~/.local/bin/post";
 const PARTICIPANT_SETUP_FAILED =
   "[post] participant setup failed; inbox state is UNKNOWN (not empty). Retry setup or run: post participant bind";
+const PARTICIPANT_LOOKUP_FAILED =
+  "[post] could not check whether this session already has a participant (participant show failed, timed out, or is not supported by the installed post); leaving it unbound rather than minting one. Inbox state is UNKNOWN (not empty). Update post, or run: post participant bind";
 const LIFECYCLE_WARNING =
   "[post] participant lifecycle update unavailable; continuing without presence refresh";
 const CONFLICT_WARNING =
@@ -125,11 +138,12 @@ function readState(file) {
       participantId: typeof parsed.participantId === "string" ? parsed.participantId : null,
       lifecycleWarned: parsed.lifecycleWarned === true,
       conflictWarned: parsed.conflictWarned === true,
+      setupWarned: parsed.setupWarned === true,
       deferred: parsed.deferred === true,
       activationSeen: parsed.activationSeen === true,
     };
   } catch {
-    return { seen: [], failStreak: 0, initialized: false, participantId: null, lifecycleWarned: false, conflictWarned: false, deferred: false, activationSeen: false };
+    return { seen: [], failStreak: 0, initialized: false, participantId: null, lifecycleWarned: false, conflictWarned: false, setupWarned: false, deferred: false, activationSeen: false };
   }
 }
 
@@ -453,7 +467,8 @@ function boundParticipantId(result) {
 // What `participant show --harness <h> --key <key> --json` says about a session
 // that may not have been minted yet. It never mints. "unknown" is any answer
 // that is not a clear yes or no (a spawn failure, a timeout, an older binary
-// that does not take --harness), and the caller falls back to legacy behaviour.
+// that does not take --harness). The caller must not read it as "unbound" or
+// "bound": it leaves the session as it is and says so once.
 function mintedStatus(result) {
   const value = jsonOf(result);
   if (value?.ok !== true) return { status: "unknown" };
@@ -534,6 +549,8 @@ function pathContains(root, candidate) {
 export function runMailHook(adapter) {
   const { harness } = adapter;
   const THROTTLE_MS = Number(process.env[`${adapter.envPrefix}_THROTTLE_MS`] ?? 30_000);
+  const configuredDeadline = Number(process.env[`${adapter.envPrefix}_DEADLINE_MS`]);
+  const DEADLINE_MS = Number.isFinite(configuredDeadline) && configuredDeadline > 0 ? configuredDeadline : SESSION_DEADLINE_MS;
   const failText =
     "[post] The automatic mail check failed; inbox state is UNKNOWN (not empty). " + adapter.text.manualCheck;
   let activationDelivery = null;
@@ -573,10 +590,18 @@ export function runMailHook(adapter) {
       delete env.POST_SENDER_ADDRESS;
     }
     env.POST_NOTICE_MANAGED = "1";
+    let timeout = 4000;
+    if (deadline !== null) {
+      const remaining = deadline - Date.now();
+      // Nothing left of the shared budget: report a timeout without starting a
+      // process the harness would kill mid-run.
+      if (remaining <= 0) return { status: null, error: new Error("hook deadline exhausted"), stdout: "", stderr: "" };
+      timeout = Math.min(4000, remaining);
+    }
     return spawnSync(postBinary(), args, {
       cwd,
       encoding: "utf8",
-      timeout: deadline === null ? 4000 : Math.max(1, Math.min(4000, deadline - Date.now())),
+      timeout,
       env,
       // stderr is piped only so the typed `participant_missing` code can be read.
       stdio: ["ignore", "pipe", "pipe"],
@@ -706,9 +731,23 @@ export function runMailHook(adapter) {
 
     let state = readState(stateFile);
     if (phase === "start") {
-      state = { ...state, seen: [], failStreak: 0, lifecycleWarned: false, conflictWarned: false, deferred: false };
+      state = { ...state, seen: [], failStreak: 0, lifecycleWarned: false, conflictWarned: false, setupWarned: false, deferred: false };
     }
-    const session = { cwd, sessionRaw, participantId: state.participantId, deadline: Date.now() + SESSION_DEADLINE_MS, reboundOnce: false };
+    const session = { cwd, sessionRaw, participantId: state.participantId, deadline: Date.now() + DEADLINE_MS, reboundOnce: false };
+
+    // Setup cannot finish this turn (post missing or broken). Say so once per
+    // session: with nothing recorded, every prompt and tool hook repeated it.
+    const setupTrouble = (text) =>
+      deliverThenCommit(stateFile, eventName, state.setupWarned ? {} : payloadOf(text), { ...state, setupWarned: true });
+    // The session stays unminted and deferred. `inconclusive` is a lookup that
+    // gave no answer: reported once, and the record clears on the next answer.
+    const stayUnbound = (inconclusive) =>
+      deliverThenCommit(stateFile, eventName, inconclusive && !state.setupWarned ? payloadOf(PARTICIPANT_LOOKUP_FAILED) : {}, {
+        ...state,
+        participantId: null,
+        deferred: true,
+        setupWarned: inconclusive,
+      });
     const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
 
     if (participantConflict(harness, sessionRaw, explicit)) {
@@ -737,33 +776,25 @@ export function runMailHook(adapter) {
       // has minted it since (its first write command does).
       if (phase === "tool" && throttled(stateFile)) return tryEmit({});
       const minted = probeMinted(session);
-      if (minted.status !== "bound") {
-        deliverThenCommit(stateFile, eventName, {}, { ...state });
-        return;
-      }
+      if (minted.status !== "bound") return stayUnbound(minted.status === "unknown");
       session.participantId = minted.id;
-      state = { ...state, deferred: false };
+      state = { ...state, deferred: false, setupWarned: false };
       announceIdentity = true;
     } else if (isStart || !session.participantId || (explicit && explicit !== session.participantId)) {
       if (adapter.startsOnFirstPrompt || phase === "start") {
         const versionError = versionFailure(runPost(["version", "--json"], cwd, { clearConversationKeys: true, deadline: session.deadline }));
-        if (versionError) {
-          tryEmit(payloadOf(versionError));
-          return;
-        }
+        if (versionError) return setupTrouble(versionError);
       }
       if (isStart && !explicit && deferReason(input, session)) {
-        if (probeMinted(session).status === "unbound") {
-          deliverThenCommit(stateFile, eventName, {}, { ...state, participantId: null, deferred: true });
-          return;
-        }
-        // Already minted (a resumed session), or the answer is unclear: bind as usual.
+        const minted = probeMinted(session);
+        // Only a confirmed "unbound" defers, and only a confirmed existing record
+        // (a resumed session) is bound here. No answer at all is neither: minting
+        // on a guess creates the identity this path exists to withhold.
+        if (minted.status !== "bound") return stayUnbound(minted.status === "unknown");
       }
       session.participantId = setupParticipant(session, explicit);
-      if (!session.participantId) {
-        tryEmit(payloadOf(PARTICIPANT_SETUP_FAILED));
-        return;
-      }
+      if (!session.participantId) return setupTrouble(PARTICIPANT_SETUP_FAILED);
+      state = { ...state, setupWarned: false };
       setupPerformed = true;
     }
 
@@ -813,6 +844,7 @@ export function runMailHook(adapter) {
       participantId: session.participantId,
       lifecycleWarned: state.lifecycleWarned || touchFailed,
       conflictWarned: state.conflictWarned,
+      setupWarned: false,
       deferred: false,
     };
     if (adapter.startsOnFirstPrompt) nextState.initialized = true;
@@ -828,7 +860,10 @@ export function runMailHook(adapter) {
     tryEmit({});
   }
   if (activationDelivery?.notice) {
-    runPost(["participant", "notice", "--release", String(process.pid), "--json"], activationDelivery.cwd, { ...activationDelivery.options, deadline: null });
+    // On the same deadline as everything before it: this runs after the payload
+    // is out and the state is written, so an overrun here is the only way the
+    // harness's own timeout could still fire on a delivered notice.
+    runPost(["participant", "notice", "--release", String(process.pid), "--json"], activationDelivery.cwd, activationDelivery.options);
   }
   process.exit(0);
 }

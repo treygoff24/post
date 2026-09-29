@@ -833,9 +833,14 @@ test("bind failure emits one setup diagnostic and leaves state retryable", () =>
   setStub({ events: [MAIL_A], bind_stdout: JSON.stringify({ ok: false, status: "unbound" }) });
   const failed = run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-failure" }, { stateDir });
   assert.match(failed.additional_context, /participant setup failed/);
-  assert.equal(fs.existsSync(path.join(stateDir, "session-bind-failure.json")), false);
+  // Recorded so the failure prints once per session; no participant is held.
+  const recorded = JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8"));
+  assert.equal(recorded.participantId, null);
+  assert.equal(recorded.setupWarned, true);
+  assert.deepEqual(run({ ...BASE, hook_event_name: "beforeSubmitPrompt", session_id: "bind-failure" }, { stateDir }), {}, "the same failure is not reported again");
   setStub({ events: [] });
   assert.match(run({ ...BASE, hook_event_name: "sessionStart", session_id: "bind-failure" }, { stateDir }).additional_context, /prefix Post commands with POST_PARTICIPANT=test-participant/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, "session-bind-failure.json"), "utf8")).setupWarned, false);
 });
 
 test("lineage names are shell-quoted in the voice command", () => {

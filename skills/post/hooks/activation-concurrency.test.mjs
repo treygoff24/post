@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cargoReleaseBin } from "../../../scripts/cargo-release-bin.mjs";
 
@@ -24,6 +24,9 @@ for (const [harness, event] of [["codex", "SessionStart"], ["claude", "SessionSt
         [`POST_${harness.toUpperCase()}_HOOK_BIN`]: wrapper,
         [`POST_${harness.toUpperCase()}_HOOK_STATE_DIR`]: path.join(root, "state"),
       };
+      // Claude and Codex mint at SessionStart only inside a registered room; a
+      // session elsewhere is deferred and would have no notice to deliver.
+      execFileSync(binary, ["rooms", "add", "overlap-room", root], { env, encoding: "utf8" });
       const run = () => new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [path.join(repo, "skills/post/hooks", `${harness}-mail.mjs`)], { env });
         let stdout="", stderr="";
