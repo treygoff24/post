@@ -13,6 +13,10 @@ import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 
 import { stableNodePath } from "./stable-node-path.mjs";
+import { withoutSessionIdentity } from "./test-session-env.mjs";
+
+// The child env never inherits the identity of the session running the tests.
+const TEST_ENV = withoutSessionIdentity();
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 // The installers pin a package-manager-stable alias for the running Node
@@ -66,7 +70,7 @@ function run(target, { bin = GOOD_POST, extra = [] } = {}) {
   return spawnSync(process.execPath, args, {
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...TEST_ENV,
       POST_CODEX_HOOK_INSTALL_DIR: INSTALL_DIR,
       POST_CODEX_HOOK_BIN: bin,
     },
@@ -256,7 +260,7 @@ test("malformed target JSON fails before copying the adapter", () => {
   const result = spawnSync(process.execPath, [INSTALLER, target], {
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...TEST_ENV,
       POST_CODEX_HOOK_INSTALL_DIR: installDir,
       POST_CODEX_HOOK_BIN: GOOD_POST,
     },
@@ -282,7 +286,7 @@ test("a failure writing the config leaves the installed files exactly as they we
   fs.mkdirSync(configDir);
   const target = path.join(configDir, "hooks.json");
   fs.writeFileSync(target, JSON.stringify({ hooks: {} }));
-  const env = { ...process.env, POST_CODEX_HOOK_INSTALL_DIR: dir, POST_CODEX_HOOK_BIN: GOOD_POST };
+  const env = { ...TEST_ENV, POST_CODEX_HOOK_INSTALL_DIR: dir, POST_CODEX_HOOK_BIN: GOOD_POST };
   fs.chmodSync(configDir, 0o500);
   try {
     const failed = spawnSync(process.execPath, [INSTALLER, target], { encoding: "utf8", env });
@@ -349,7 +353,7 @@ test("installed adapter copy runs end-to-end with the release CLI", () => {
     const installed = spawnSync(process.execPath, [INSTALLER, target], {
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...TEST_ENV,
         POST_CODEX_HOOK_INSTALL_DIR: runtimeInstallDir,
         POST_CODEX_HOOK_BIN: releaseBin,
       },

@@ -79,6 +79,35 @@ pub(crate) const POST_SENDER_ADDRESS_ENV: &str = "POST_SENDER_ADDRESS";
 /// always wins. Set-but-invalid warns and falls back to auto (see
 /// `resolve_framing`): presentation must never break a read.
 pub(crate) const POST_FRAMING_ENV: &str = "POST_FRAMING";
+
+/// The environment variables through which a running agent session tells post
+/// who it is: the explicit claim, the launcher declarations, and the harness
+/// conversation keys.
+const SESSION_IDENTITY_ENV: [&str; 9] = [
+    "POST_PARTICIPANT",
+    "POST_HARNESS",
+    POST_FROM_ENV,
+    POST_SENDER_ADDRESS_ENV,
+    POST_FRAMING_ENV,
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+];
+
+/// Read an environment variable, with the session-identity ones unset in unit
+/// tests. Unit tests run in-process inside whatever agent session started the
+/// gate, and every bound session carries these variables, so a test that read
+/// them would exercise the runner's identity instead of its own. A unit test
+/// that needs an identity binds one explicitly (`participant::bind_test_actor`).
+/// The production read is covered by the integration tests, which run the real
+/// binary with an environment they construct.
+pub(crate) fn env_var_os(name: &str) -> Option<std::ffi::OsString> {
+    if cfg!(test) && SESSION_IDENTITY_ENV.contains(&name) {
+        return None;
+    }
+    std::env::var_os(name)
+}
 /// Bound on a declared sender address. `harness.repo.uuid` is well under
 /// this; the cap keeps a hostile environment from bloating every envelope.
 const SENDER_ADDRESS_MAX_BYTES: usize = 256;
@@ -558,7 +587,7 @@ pub(crate) fn ensure_room_not_mid_rename(context: &Context, room: &str) -> AppRe
 /// silent fallback to inference — a launcher that exports a broken pin is a
 /// bug someone must see, and falling back would quietly re-open specimen 21.
 pub(crate) fn declared_env_pin() -> AppResult<Option<String>> {
-    let Some(raw) = std::env::var_os(POST_FROM_ENV) else {
+    let Some(raw) = env_var_os(POST_FROM_ENV) else {
         return Ok(None);
     };
     let value = raw.to_str().ok_or_else(|| {
@@ -591,7 +620,7 @@ pub(crate) fn resolve_framing(flag: Option<crate::cli::FramingMode>) -> crate::c
     if let Some(mode) = flag {
         return mode;
     }
-    let Some(raw) = std::env::var_os(POST_FRAMING_ENV) else {
+    let Some(raw) = env_var_os(POST_FRAMING_ENV) else {
         return crate::cli::FramingMode::Auto;
     };
     match raw.to_str() {
@@ -614,7 +643,7 @@ pub(crate) fn resolve_framing(flag: Option<crate::cli::FramingMode>) -> crate::c
 /// Post records it verbatim and never synthesizes one; set-but-invalid is a
 /// loud error for the same reason as the pin.
 pub(crate) fn declared_sender_address() -> AppResult<Option<String>> {
-    let Some(raw) = std::env::var_os(POST_SENDER_ADDRESS_ENV) else {
+    let Some(raw) = env_var_os(POST_SENDER_ADDRESS_ENV) else {
         return Ok(None);
     };
     let refuse = |reason: &str, shown: &str| {

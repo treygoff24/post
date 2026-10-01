@@ -1329,8 +1329,8 @@ fn nonempty_native_key(variable: &str, key: String) -> AppResult<String> {
 }
 
 fn nearest_native_harness() -> Option<NativeHarness> {
-    let claude_pid = std::env::var("CLAUDE_PID")
-        .ok()
+    let claude_pid = crate::mailbox::env_var_os("CLAUDE_PID")
+        .and_then(|value| value.into_string().ok())
         .and_then(|value| value.parse::<u32>().ok());
     nearest_native_harness_from(std::process::id(), claude_pid, process_info)
 }
@@ -1656,7 +1656,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 fn env_utf8(name: &str) -> AppResult<Option<String>> {
-    let Some(raw) = std::env::var_os(name) else {
+    let Some(raw) = crate::mailbox::env_var_os(name) else {
         return Ok(None);
     };
     raw.into_string().map(Some).map_err(|_| {

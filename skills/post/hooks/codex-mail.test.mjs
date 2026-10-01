@@ -9,6 +9,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
+import { withoutSessionIdentity } from "./test-session-env.mjs";
+
+// The child env never inherits the identity of the session running the tests.
+const TEST_ENV = withoutSessionIdentity();
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-codex-hook-test-"));
@@ -88,7 +92,7 @@ function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv
     input: typeof payload === "string" ? payload : JSON.stringify(payload),
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...TEST_ENV,
       POST_CODEX_HOOK_BIN: STUB,
       POST_CODEX_HOOK_STATE_DIR: stateDir,
       POST_CODEX_HOOK_THROTTLE_MS: String(throttleMs),

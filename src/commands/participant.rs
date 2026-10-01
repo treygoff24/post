@@ -142,7 +142,7 @@ pub(super) fn run(
                 match args.harness.clone() {
                     Some(harness) => Some(harness),
                     None => Some(
-                        std::env::var_os("POST_HARNESS")
+                        crate::mailbox::env_var_os("POST_HARNESS")
                             .map(|value| {
                                 value.into_string().map_err(|_| {
                                     AppError::invalid_argument(

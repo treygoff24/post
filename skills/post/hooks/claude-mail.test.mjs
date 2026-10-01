@@ -10,6 +10,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { withoutSessionIdentity } from "./test-session-env.mjs";
+
+// The child env never inherits the identity of the session running the tests.
+const TEST_ENV = withoutSessionIdentity();
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "claude-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-claude-hook-test-"));
@@ -85,7 +89,7 @@ function run(input, { stateDir, throttleMs = 0, env: extraEnv = {} } = {}) {
     input: typeof input === "string" ? input : JSON.stringify(input),
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...TEST_ENV,
       POST_CLAUDE_HOOK_BIN: STUB,
       POST_CLAUDE_HOOK_STATE_DIR: stateDir,
       POST_CLAUDE_HOOK_THROTTLE_MS: String(throttleMs),
@@ -643,7 +647,7 @@ test("a closed stdout leaves fresh events and failure eligibility intact", async
     await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [ADAPTER], {
         env: {
-          ...process.env,
+          ...TEST_ENV,
           POST_CLAUDE_HOOK_BIN: STUB,
           POST_CLAUDE_HOOK_STATE_DIR: stateDir,
           POST_CLAUDE_HOOK_THROTTLE_MS: "0",

@@ -4682,11 +4682,13 @@ mod follow_tests {
         let mut targets = bound_targets(&context, &participant, &[], false).expect("targets");
         let mut follow = Follow::new(&participant, Vec::new());
         fs::remove_dir_all(&participant.dir).expect("remove the record");
-        // The branch under test needs a clean ambient identity; fail loudly
-        // rather than silently exercising a different one.
+        // The branch under test is "nothing claims this session any more".
+        // Unit builds never read the runner's session identity
+        // (`mailbox::env_var_os`), so with the fixture record gone nothing
+        // else may bind; fail loudly rather than exercise a different branch.
         assert!(
             matches!(crate::participant::resolve(&context), Ok(Resolved::Unbound)),
-            "precondition: no ambient POST_PARTICIPANT or harness key"
+            "precondition: with its record removed, nothing binds this session"
         );
         let error = follow_identity(&context, &mut follow, &mut targets)
             .expect_err("a vanished participant stops the watch");

@@ -9,6 +9,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { withoutSessionIdentity } from "./test-session-env.mjs";
+
+// The child env never inherits the identity of the session running the tests.
+const TEST_ENV = withoutSessionIdentity();
 
 const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "grok-mail.mjs");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "post-grok-hook-test-"));
@@ -83,7 +87,7 @@ function run(input, { stateDir, env: extraEnv = {} } = {}) {
     input: typeof input === "string" ? input : JSON.stringify(input),
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...TEST_ENV,
       POST_GROK_HOOK_BIN: STUB,
       POST_GROK_HOOK_STATE_DIR: stateDir,
       STUB_CONTROL: CONTROL,
@@ -192,7 +196,7 @@ test("GROK_HOOK_EVENT is consulted when stdin omits the event name", () => {
     input: JSON.stringify({ sessionId: "s-env", cwd: CWD }),
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...TEST_ENV,
       POST_GROK_HOOK_BIN: STUB,
       POST_GROK_HOOK_STATE_DIR: freshStateDir(),
       GROK_HOOK_EVENT: "user_prompt_submit",
