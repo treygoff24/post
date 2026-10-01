@@ -600,6 +600,7 @@ fn participant_required(command: &Command) -> bool {
         Command::Participant(crate::cli::ParticipantArgs {
             command:
                 crate::cli::ParticipantCommand::Touch
+                | crate::cli::ParticipantCommand::Describe(_)
                 | crate::cli::ParticipantCommand::End
                 | crate::cli::ParticipantCommand::Notice { .. },
         }) => true,

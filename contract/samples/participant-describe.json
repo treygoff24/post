@@ -1,5 +1,4 @@
 {
-  "bound": true,
   "id": "claude-dd611847",
   "ok": true,
   "participant": {
@@ -20,7 +19,5 @@
     "version": 1,
     "workspace": "alpha",
     "workspace_path": "/SANDBOX/alpha"
-  },
-  "provenance": "explicit-env",
-  "status": "bound"
+  }
 }

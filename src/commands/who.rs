@@ -105,6 +105,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 provenance: Some(provenance.as_str().to_owned()),
                 workspace: participant.workspace.clone(),
                 lineage: participant.lineage.clone(),
+                runtime: participant.runtime.clone(),
                 unread,
                 pending,
                 fix: None,
@@ -124,6 +125,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             provenance: None,
             workspace: None,
             lineage: None,
+            runtime: None,
             unread: BTreeMap::new(),
             pending: BTreeMap::new(),
             fix: Some(match &missing {
@@ -168,6 +170,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             last_seen: participant.last_seen,
             lineage: participant.lineage,
             workspace: participant.workspace,
+            runtime: participant.runtime,
             unread,
             pending,
             live_watch: presence.live_watch || doorbell_armed,

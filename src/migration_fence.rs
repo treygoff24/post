@@ -591,6 +591,7 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
                     release: Some(_), ..
                 }
                 | crate::cli::ParticipantCommand::Touch
+                | crate::cli::ParticipantCommand::Describe(_)
                 | crate::cli::ParticipantCommand::End,
         })
         | Command::Identity(crate::cli::IdentityArgs {

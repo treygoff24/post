@@ -1,4 +1,6 @@
-use crate::cli::{ParticipantArgs, ParticipantCommand, ParticipantShowArgs};
+use crate::cli::{
+    ParticipantArgs, ParticipantCommand, ParticipantDescribeArgs, ParticipantShowArgs,
+};
 use crate::command_result::CommandResult;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::Context;
@@ -233,6 +235,7 @@ pub(super) fn run(
         }
         ParticipantCommand::Touch => lifecycle(context, false, pretty),
         ParticipantCommand::End => lifecycle(context, true, pretty),
+        ParticipantCommand::Describe(args) => describe(context, args, json, pretty),
         ParticipantCommand::Gc(args) => super::participant_gc::run(context, args.apply, pretty),
         ParticipantCommand::Restore(args) => restore(context, &args.id, pretty),
         ParticipantCommand::List => {
@@ -278,6 +281,53 @@ fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandRes
         },
         pretty,
     )
+}
+
+#[derive(Serialize)]
+struct DescribeOutput {
+    ok: bool,
+    id: String,
+    participant: Participant,
+}
+
+/// `participant describe`: the acting participant records its own model,
+/// effort, and directory. Refuses when unbound (the dispatcher requires a
+/// participant, as for `touch`); silent otherwise.
+fn describe(
+    context: &Context,
+    args: ParticipantDescribeArgs,
+    json: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    let update = participant::RuntimeUpdate {
+        model: args.model,
+        effort: args.effort,
+        cwd: args.cwd,
+        clear: args.clear,
+    };
+    let (current, _) = participant::require(context)?;
+    let participant = participant::describe(context, &current.id, &update)?;
+    if json {
+        return CommandResult::json(
+            &DescribeOutput {
+                ok: true,
+                id: participant.id.clone(),
+                participant,
+            },
+            pretty,
+        );
+    }
+    let line = match &participant.runtime {
+        None => format!("participant {}: runtime cleared\n", participant.id),
+        Some(runtime) => format!(
+            "participant {}: runtime model={} effort={} cwd={}\n",
+            participant.id,
+            crate::output::sanitize_text_header(runtime.model.as_deref().unwrap_or("-")),
+            crate::output::sanitize_text_header(runtime.effort.as_deref().unwrap_or("-")),
+            crate::output::sanitize_text_header(runtime.cwd.as_deref().unwrap_or("-")),
+        ),
+    };
+    Ok(CommandResult::success(line))
 }
 
 #[derive(Serialize)]

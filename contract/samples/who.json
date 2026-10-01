@@ -38,6 +38,12 @@
       "workspace:alpha": 1
     },
     "provenance": "explicit-env",
+    "runtime": {
+      "cwd": "/SANDBOX/alpha",
+      "effort": "high",
+      "model": "claude-opus-5-5",
+      "updated": "2026-01-01T00:00:00Z"
+    },
     "state": "active",
     "status": "bound",
     "unread": {
@@ -74,6 +80,12 @@
         "lineage:ember": 0,
         "participant:claude-dd611847": 0,
         "workspace:alpha": 1
+      },
+      "runtime": {
+        "cwd": "/SANDBOX/alpha",
+        "effort": "high",
+        "model": "claude-opus-5-5",
+        "updated": "2026-01-01T00:00:00Z"
       },
       "state": "active",
       "unread": {

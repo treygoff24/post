@@ -127,8 +127,91 @@ pub(crate) struct Participant {
     /// `participant gc` collects after a day instead of a week.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
+    /// What the session says about itself (`participant describe`): model,
+    /// reasoning effort, working directory. Self-declared display text, never
+    /// identity. Absent until a session describes itself; older records and
+    /// older post binaries (no `deny_unknown_fields` on this struct) are
+    /// unaffected either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Runtime>,
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+/// The `runtime` member of a participant record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Runtime {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// RFC3339 UTC time of the last `participant describe`.
+    #[serde(default)]
+    pub updated: String,
+}
+
+/// One `participant describe` call: each field given replaces that field;
+/// `clear` drops the whole object and stands alone.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RuntimeUpdate {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub cwd: Option<String>,
+    pub clear: bool,
+}
+
+const MAX_RUNTIME_TEXT_CHARS: usize = 64;
+const MAX_RUNTIME_CWD_BYTES: usize = 4096;
+
+impl RuntimeUpdate {
+    /// Refuses, as `invalid_argument`, anything that must not be stored. Pure:
+    /// runs before the store is touched.
+    pub(crate) fn validate(&self) -> AppResult<()> {
+        let given = self.model.is_some() || self.effort.is_some() || self.cwd.is_some();
+        if self.clear && given {
+            return Err(AppError::invalid_argument(
+                "--clear cannot be combined with --model, --effort, or --cwd",
+            ));
+        }
+        if !self.clear && !given {
+            return Err(AppError::invalid_argument(
+                "participant describe needs at least one of --model, --effort, --cwd, or --clear",
+            ));
+        }
+        for (flag, value) in [("--model", &self.model), ("--effort", &self.effort)] {
+            if let Some(value) = value {
+                let chars = value.chars().count();
+                if chars == 0 || chars > MAX_RUNTIME_TEXT_CHARS {
+                    return Err(AppError::invalid_argument(format!(
+                        "{flag} must be 1 to {MAX_RUNTIME_TEXT_CHARS} characters"
+                    )));
+                }
+                if value.chars().any(char::is_control) {
+                    return Err(AppError::invalid_argument(format!(
+                        "{flag} must not contain control characters"
+                    )));
+                }
+            }
+        }
+        if let Some(cwd) = &self.cwd {
+            if cwd.len() > MAX_RUNTIME_CWD_BYTES {
+                return Err(AppError::invalid_argument(format!(
+                    "--cwd must be at most {MAX_RUNTIME_CWD_BYTES} bytes"
+                )));
+            }
+            if cwd.chars().any(char::is_control) {
+                return Err(AppError::invalid_argument(
+                    "--cwd must not contain control characters",
+                ));
+            }
+            if !Path::new(cwd).is_absolute() {
+                return Err(AppError::invalid_argument("--cwd must be an absolute path"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +634,44 @@ pub(crate) fn touch(context: &Context, id: &str) -> AppResult<Participant> {
     Ok(participant)
 }
 
+/// `participant describe`: replace the given runtime fields (or clear the
+/// object) and refresh `last_seen` like `touch`. Silent: no mail, no channel
+/// event. Invalid input writes nothing.
+pub(crate) fn describe(
+    context: &Context,
+    id: &str,
+    update: &RuntimeUpdate,
+) -> AppResult<Participant> {
+    update.validate()?;
+    let activity = activity_from_env()?;
+    let _lock = lock(context)?;
+    let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
+    apply_activity(&mut participant, &activity);
+    if update.clear {
+        participant.runtime = None;
+    } else {
+        let mut runtime = participant.runtime.take().unwrap_or(Runtime {
+            model: None,
+            effort: None,
+            cwd: None,
+            updated: String::new(),
+        });
+        if let Some(model) = &update.model {
+            runtime.model = Some(model.clone());
+        }
+        if let Some(effort) = &update.effort {
+            runtime.effort = Some(effort.clone());
+        }
+        if let Some(cwd) = &update.cwd {
+            runtime.cwd = Some(cwd.clone());
+        }
+        runtime.updated = activity.last_seen.clone();
+        participant.runtime = Some(runtime);
+    }
+    write_record(&participant)?;
+    Ok(participant)
+}
+
 pub(crate) fn end(context: &Context, id: &str) -> AppResult<Participant> {
     let _lock = lock(context)?;
     let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
@@ -670,6 +791,7 @@ fn from_tombstone(id: &str, tombstone: gc::Tombstone, dir: PathBuf) -> Participa
         lineage_since: None,
         display_name: tombstone.display_name,
         ephemeral: tombstone.ephemeral,
+        runtime: None,
         dir,
     }
 }
@@ -887,6 +1009,7 @@ pub(crate) fn bind(
             lineage_since: None,
             display_name: None,
             ephemeral,
+            runtime: None,
             dir,
         };
         write_record(&created_participant)?;
@@ -1747,6 +1870,7 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
             lineage: None,
             lineage_since: None,
             display_name: None,
+            runtime: None,
             dir: dir.clone(),
         };
         write_record(&participant).expect("write test participant record");
@@ -1762,6 +1886,7 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
 #[cfg(test)]
 mod tests {
     use super::{list_active, nearest_native_harness_from, NativeHarness, Participant};
+    use crate::error::ErrorCode;
     use crate::mailbox::Context;
     use crate::test_support::{test_root, trash_test_root};
     use std::fs;
@@ -1807,6 +1932,7 @@ mod tests {
             lease_hours,
             ephemeral: false,
             ended_at: ended_at.map(str::to_owned),
+            runtime: None,
             dir: PathBuf::new(),
         }
     }
@@ -1959,6 +2085,179 @@ mod tests {
             .map(|participant| participant.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["test-active"]);
+        trash_test_root(&root);
+    }
+
+    fn update(
+        model: Option<&str>,
+        effort: Option<&str>,
+        cwd: Option<&str>,
+    ) -> super::RuntimeUpdate {
+        super::RuntimeUpdate {
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            cwd: cwd.map(str::to_owned),
+            clear: false,
+        }
+    }
+
+    #[test]
+    fn runtime_update_validation_accepts_the_limits_and_refuses_the_rest() {
+        let long_cwd = format!("/{}", "a".repeat(4095));
+        let sixty_four = "é".repeat(64);
+        for good in [
+            update(Some("opus"), None, None),
+            update(None, Some(&sixty_four), None),
+            update(None, None, Some("/does/not/exist")),
+            update(None, None, Some(&long_cwd)),
+            super::RuntimeUpdate {
+                clear: true,
+                ..Default::default()
+            },
+        ] {
+            good.validate().expect("valid update");
+        }
+        let sixty_five = "x".repeat(65);
+        let too_long_cwd = format!("/{}", "a".repeat(4096));
+        let clear_with = |model: Option<&str>, effort: Option<&str>, cwd: Option<&str>| {
+            let mut combined = update(model, effort, cwd);
+            combined.clear = true;
+            combined
+        };
+        for (label, bad) in [
+            ("no flags", update(None, None, None)),
+            ("clear + model", clear_with(Some("m"), None, None)),
+            ("clear + effort", clear_with(None, Some("e"), None)),
+            ("clear + cwd", clear_with(None, None, Some("/x"))),
+            ("empty model", update(Some(""), None, None)),
+            ("empty effort", update(None, Some(""), None)),
+            ("model over 64", update(Some(&sixty_five), None, None)),
+            ("effort over 64", update(None, Some(&sixty_five), None)),
+            ("model control", update(Some("a\u{1b}[31m"), None, None)),
+            ("effort newline", update(None, Some("a\nb"), None)),
+            ("relative cwd", update(None, None, Some("a/b"))),
+            ("empty cwd", update(None, None, Some(""))),
+            ("cwd NUL", update(None, None, Some("/a\0b"))),
+            ("cwd tab", update(None, None, Some("/a\tb"))),
+            ("cwd over 4096", update(None, None, Some(&too_long_cwd))),
+        ] {
+            let error = bad.validate().expect_err(label);
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+        }
+    }
+
+    fn write_plain_record(root: &std::path::Path, id: &str, extra: serde_json::Value) {
+        let dir = root.join("participants").join(id);
+        fs::create_dir_all(&dir).expect("participant dir");
+        let mut record = serde_json::json!({
+            "version": 1,
+            "id": id,
+            "harness": "test",
+            "conversation_key_digest": "0".repeat(64),
+            "created": "2026-09-16 00:00:00 +0000",
+            "last_seen": "2020-01-01T00:00:00Z",
+            "lease_hours": 24
+        });
+        record
+            .as_object_mut()
+            .expect("record object")
+            .extend(extra.as_object().expect("extra object").clone());
+        fs::write(
+            dir.join("participant.json"),
+            serde_json::to_vec_pretty(&record).expect("participant JSON"),
+        )
+        .expect("participant record");
+    }
+
+    #[test]
+    fn describe_merges_clears_and_refreshes_activity_in_the_store() {
+        let root = test_root("participant-describe");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        write_plain_record(&root, "test-describe", serde_json::json!({}));
+
+        let set = super::describe(
+            &context,
+            "test-describe",
+            &update(Some("opus"), Some("high"), Some("/work")),
+        )
+        .expect("set");
+        let runtime = set.runtime.expect("runtime set");
+        assert_eq!(runtime.model.as_deref(), Some("opus"));
+        assert_ne!(set.last_seen.as_deref(), Some("2020-01-01T00:00:00Z"));
+        assert_eq!(runtime.updated, set.last_seen.expect("last_seen"));
+
+        let merged = super::describe(&context, "test-describe", &update(None, Some("low"), None))
+            .expect("merge");
+        let runtime = merged.runtime.expect("runtime kept");
+        assert_eq!(
+            (
+                runtime.model.as_deref(),
+                runtime.effort.as_deref(),
+                runtime.cwd.as_deref()
+            ),
+            (Some("opus"), Some("low"), Some("/work"))
+        );
+
+        // A refused update leaves the stored record untouched.
+        let path = root.join("participants/test-describe/participant.json");
+        let before = fs::read(&path).expect("record");
+        super::describe(
+            &context,
+            "test-describe",
+            &update(Some("new"), None, Some("relative")),
+        )
+        .expect_err("bad cwd refuses the whole update");
+        assert_eq!(fs::read(&path).expect("record"), before);
+
+        let cleared = super::describe(
+            &context,
+            "test-describe",
+            &super::RuntimeUpdate {
+                clear: true,
+                ..Default::default()
+            },
+        )
+        .expect("clear");
+        assert!(cleared.runtime.is_none());
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("record")).expect("record JSON");
+        assert!(on_disk.get("runtime").is_none(), "{on_disk}");
+        trash_test_root(&root);
+    }
+
+    /// Old posts read a new record through this same `load`: the `Participant`
+    /// struct has no `deny_unknown_fields`, so a member it does not know (what
+    /// an old binary sees when it meets `runtime`) is ignored, and a record
+    /// with no `runtime` loads with `None`.
+    #[test]
+    fn load_ignores_unknown_members_and_defaults_a_missing_runtime() {
+        let root = test_root("participant-runtime-compat");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        write_plain_record(&root, "test-plain", serde_json::json!({}));
+        write_plain_record(
+            &root,
+            "test-future",
+            serde_json::json!({
+                "runtime": {"model": "m", "unmodelled": [1, 2]},
+                "member_from_a_future_post": {"anything": true}
+            }),
+        );
+        let plain = super::load(&context, "test-plain")
+            .expect("loads")
+            .expect("present");
+        assert!(plain.runtime.is_none());
+        let future = super::load(&context, "test-future")
+            .expect("unknown members do not fail the load")
+            .expect("present");
+        let runtime = future.runtime.expect("runtime parsed");
+        assert_eq!(runtime.model.as_deref(), Some("m"));
+        assert_eq!(runtime.updated, "", "a missing `updated` defaults");
         trash_test_root(&root);
     }
 }

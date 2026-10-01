@@ -206,12 +206,33 @@ pub(crate) enum ParticipantCommand {
     Touch,
     /// Explicitly end the acting participant session.
     End,
+    /// Record the acting participant's model, effort, and directory (self-declared display facts; silent; counts as activity).
+    Describe(ParticipantDescribeArgs),
     /// List every participant record in this local store.
     List,
     /// Collect participant records that hold nothing (dry run unless --apply).
     Gc(ParticipantGcArgs),
     /// Bring back a participant that `participant gc` collected, under the same id. Already present is ok with restored: false.
     Restore(ParticipantRestoreArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ParticipantDescribeArgs {
+    /// Model the session runs (1 to 64 printable characters). Replaces the stored model.
+    #[arg(long, value_name = "TEXT")]
+    pub model: Option<String>,
+
+    /// Reasoning effort level (1 to 64 printable characters). Replaces the stored effort.
+    #[arg(long, value_name = "TEXT")]
+    pub effort: Option<String>,
+
+    /// Working directory (absolute path, at most 4096 bytes; need not exist). Replaces the stored directory.
+    #[arg(long, value_name = "ABS_PATH")]
+    pub cwd: Option<String>,
+
+    /// Remove the whole runtime object; cannot be combined with the other flags.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Debug, Args)]

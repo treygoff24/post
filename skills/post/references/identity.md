@@ -53,6 +53,12 @@ verified badge.
   inherited participant only when the parent deliberately grants on-behalf
   use, and then shares its read state. An independent subagent binds `--new`.
 - `post participant list` lists every local participant.
+- A session can say what it runs: `post participant describe [--model <text>]
+  [--effort <text>] [--cwd <abs-path>] [--clear] [--json]` stores a `runtime`
+  object (`model?`, `effort?`, `cwd?`, `updated`) on the acting participant's
+  record. Each flag replaces one field, `--clear` removes the object, and it
+  announces nothing. `participant show`, `participant list`, and `who` carry
+  `runtime`. It is self-declared display text, never identity or authority.
 
 ## Leases
 

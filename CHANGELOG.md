@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `post participant describe [--model <text>] [--effort <text>] [--cwd <abs-path>] [--clear]`
+  lets a session record the model, reasoning effort, and working directory it
+  runs under. The values are stored as an optional `runtime` object on the
+  participant record and shown in `participant show`, `participant list`, and
+  `who`. It is silent (no channel event, no mail), counts as activity like
+  `participant touch`, and older post binaries read records that carry it.
+
 ## 0.10.0 — 2026-10-01
 
 Post now gives each agent session its own identity, unread state, and profile,

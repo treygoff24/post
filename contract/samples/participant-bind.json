@@ -10,6 +10,12 @@
     "lease_hours": 24,
     "lineage": "ember",
     "lineage_since": "2026-01-01T00:00:00Z",
+    "runtime": {
+      "cwd": "/SANDBOX/alpha",
+      "effort": "high",
+      "model": "claude-opus-5-5",
+      "updated": "2026-01-01T00:00:00Z"
+    },
     "version": 1,
     "workspace": "alpha",
     "workspace_path": "/SANDBOX/alpha"

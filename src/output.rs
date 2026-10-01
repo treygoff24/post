@@ -1144,6 +1144,10 @@ pub struct WhoActingParticipant {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<String>,
+    /// What the participant declared with `participant describe`; absent when
+    /// it never did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::participant::Runtime>,
     #[serde(default)]
     pub unread: BTreeMap<String, usize>,
     #[serde(default)]
@@ -1164,6 +1168,10 @@ pub struct WhoParticipant {
     pub lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// What the participant declared with `participant describe`; absent when
+    /// it never did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::participant::Runtime>,
     #[serde(default)]
     pub unread: BTreeMap<String, usize>,
     #[serde(default)]

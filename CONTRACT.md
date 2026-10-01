@@ -1038,6 +1038,23 @@ build from a tree with uncommitted tracked changes.
   recorded lease unless the variable is explicitly set, in which case they
   re-apply it. The variable applies only to the acting participant; `end`
   never consults it. A record with no `last_seen` is stale until bind or touch.
+- `post participant describe [--model <text>] [--effort <text>] [--cwd
+  <abs-path>] [--clear] [--json]` lets the acting participant record what it
+  runs. It stores `runtime: {model?, effort?, cwd?, updated}` on the participant
+  record (absent when never described). Each flag given replaces that one
+  field and the others keep their stored value; `--clear` removes the whole
+  object and cannot be combined with another flag; no flag is
+  `invalid_argument`. `model` and `effort` are 1 to 64 characters, `cwd` an
+  absolute path of at most 4096 bytes, none with control characters (the path
+  need not exist); a bad value is `invalid_argument` and writes nothing. It
+  needs a bound participant (`no_participant` otherwise), announces nothing
+  (no channel event, no mail), and refreshes `last_seen` like `touch`. `--json`
+  prints `{ok, id, participant}`; text prints one confirmation line. `runtime`
+  also appears in `participant show`, `participant list` (on each record), and
+  `who` (on `participant` and each `participants[]` entry). The values are
+  self-declared display text from another agent, never identity or authority;
+  a consumer treats them as untrusted. Older records without it load, and older
+  post binaries ignore the member.
 - Adapters call `post participant touch` during supported prompt/tool events.
   Only the shipped Claude adapter registers `post participant end`, on
   SessionEnd; the shipped Codex, Cursor, and Grok adapters register no end
