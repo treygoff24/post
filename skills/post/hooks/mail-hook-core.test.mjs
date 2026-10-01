@@ -151,6 +151,7 @@ function makeWorld(name, adapter) {
         STUB_CALLS: world.callsFile,
         DELEGATE_RUN_ID: "",
         POST_PARTICIPANT: "",
+        POST_HOST_PARTICIPANT: "",
         // The Claude adapter writes doorbell turn marks under the mail root; a
         // test must never write them into the live ~/.claude-mail.
         POST_MAIL_ROOT: path.join(dir, "mail"),
@@ -288,6 +289,31 @@ for (const [name, adapter] of Object.entries(ADAPTERS)) {
       const world = makeWorld("no-conflict", adapter);
       const out = world.run("start", "sess-a", { env: { POST_PARTICIPANT: derivedId(name, "sess-a") } });
       assert.doesNotMatch(contextOf(out), /conflicts/);
+      assert.ok(world.keys().includes("watch"));
+    });
+
+    // A host harness (Loom) binds its own participant and exports it as both
+    // POST_PARTICIPANT and POST_HOST_PARTICIPANT; it delivers the mail itself.
+    test("a participant the host declared is bound by the host: the hook does nothing", () => {
+      const world = makeWorld("host-owned", adapter);
+      const hosted = { POST_PARTICIPANT: "loom-0d61cdff", POST_HOST_PARTICIPANT: "loom-0d61cdff" };
+      for (const phase of adapter.hasStart ? ["start", "prompt", "tool", "end"] : ["prompt", "tool", "end"]) {
+        assert.deepEqual(world.run(phase, "sess-a", { env: hosted }), {}, `${phase} stays silent`);
+      }
+      assert.deepEqual(world.calls(), [], "a host-owned binding never reaches post");
+      assert.equal(fs.existsSync(world.stateDir) ? fs.readdirSync(world.stateDir).length : 0, 0, "and writes no state");
+    });
+
+    test("a declaration naming another id than POST_PARTICIPANT is still a conflict", () => {
+      const world = makeWorld("host-rewritten", adapter);
+      const rewritten = { POST_PARTICIPANT: "someone-else-00000000", POST_HOST_PARTICIPANT: "loom-0d61cdff" };
+      assert.match(contextOf(world.run("start", "sess-a", { env: rewritten })), /POST_PARTICIPANT conflicts/);
+      assert.deepEqual(world.calls(), []);
+    });
+
+    test("a declaration with no POST_PARTICIPANT binds from the payload as usual", () => {
+      const world = makeWorld("host-declared-only", adapter);
+      world.run("start", "sess-a", { env: { POST_HOST_PARTICIPANT: "loom-0d61cdff" } });
       assert.ok(world.keys().includes("watch"));
     });
   });

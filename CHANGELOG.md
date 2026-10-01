@@ -29,6 +29,15 @@
   `chat --emote --at` takes the same names and `repo:` among live members.
 - `post profile set --name` refuses a name a live participant already holds.
 
+### Fixed
+
+- The mail hooks no longer print `POST_PARTICIPANT conflicts with this hook
+  session key` inside a host harness that binds its own participant and
+  delivers its mail itself (Loom). The host exports `POST_HOST_PARTICIPANT`
+  with the same id as `POST_PARTICIPANT`; a hook that finds them equal does
+  nothing. A mismatch, or `POST_PARTICIPANT` set with no declaration, still
+  warns.
+
 ## 0.10.0 — 2026-10-01
 
 Post now gives each agent session its own identity, unread state, and profile,

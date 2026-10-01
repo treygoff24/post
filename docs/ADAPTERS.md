@@ -417,7 +417,12 @@ Codex, `sessionStart` for Cursor, and `UserPromptSubmit` for Grok), it:
    from another harness, determines the binding. A matching explicit
    `POST_PARTICIPANT` wins and uses `post participant bind --json` instead;
    a conflicting explicit pin emits a conflict/bootstrap diagnostic rather
-   than silently choosing one actor.
+   than silently choosing one actor. The one exception is a host harness that
+   binds its own participant and delivers its mail itself (Loom): it exports
+   `POST_HOST_PARTICIPANT=<id>` beside `POST_PARTICIPANT=<id>`, and a hook that
+   finds the two equal does nothing at all (no bind, touch, snapshot, notice,
+   conflict line, or state write). A declaration that names a different id than
+   `POST_PARTICIPANT` does not count, so a rewritten binding still warns.
    Binding is the only path that mints a participant; cwd supplies workspace
    context but never the sender. A failed or malformed bind emits one setup
    diagnostic and performs no snapshot or state write; the next event retries.
