@@ -53,7 +53,18 @@
 //   session unbound and is reported once; it never falls through to minting.
 // - if post is missing or broken, the failure is reported once per session (the
 //   state file's `setupWarned`), not on every prompt and tool call, and the
-//   record clears when a later turn gets an answer.
+//   record clears when a later turn gets an answer;
+// - a host harness that binds its own participant and delivers its mail itself
+//   (Loom) says so by exporting `POST_HOST_PARTICIPANT=<id>` next to
+//   `POST_PARTICIPANT=<id>`. When the two are the same id the hook has nothing
+//   to do and stands down: no bind, no touch, no snapshot, no notice, no
+//   conflict line, and no mail state written. The adapter's `observe` has
+//   already run by then, so its own bookkeeping (Claude's doorbell marks) goes on. Without that declaration an explicit
+//   POST_PARTICIPANT that is not this payload's own participant stays a
+//   conflict, because a stale id inherited from another agent's shell looks
+//   identical to a deliberate one from inside the hook. A declaration naming a
+//   different id than POST_PARTICIPANT is no declaration for it, so the
+//   conflict line still fires when something rewrote the binding.
 //
 // Time: the harness kills a hook at its own timeout (Codex installs 5 s), so the
 // whole invocation, the notice release included, runs inside ONE deadline
@@ -537,6 +548,15 @@ function appendLine(context, line) {
   return Buffer.byteLength(merged, "utf8") <= MERGED_CONTEXT_MAX ? merged : context;
 }
 
+// True when the host harness running this hook declared that it bound
+// `explicit` itself (`POST_HOST_PARTICIPANT` names the same id), so the mail
+// for that participant is the host's to deliver and not this hook's.
+function hostOwnsBinding(explicit, env = process.env) {
+  if (!explicit) return false;
+  const declared = typeof env.POST_HOST_PARTICIPANT === "string" ? env.POST_HOST_PARTICIPANT.trim() : "";
+  return declared !== "" && declared === explicit;
+}
+
 function participantConflict(harness, sessionRaw, explicit) {
   if (!explicit) return false;
   const digest = createHash("sha256").update(sessionRaw).digest("hex");
@@ -765,6 +785,8 @@ export function runMailHook(adapter) {
         setupWarned: inconclusive,
       });
     const explicit = typeof process.env.POST_PARTICIPANT === "string" && process.env.POST_PARTICIPANT.trim();
+
+    if (hostOwnsBinding(explicit)) return tryEmit({});
 
     if (participantConflict(harness, sessionRaw, explicit)) {
       // Warn once per session: the same line on every prompt and tool call was
