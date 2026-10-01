@@ -206,8 +206,8 @@ pub(crate) enum ParticipantCommand {
     Touch,
     /// Explicitly end the acting participant session.
     End,
-    /// Record the acting participant's model, effort, and directory (self-declared display facts; silent; counts as activity).
-    Describe(ParticipantDescribeArgs),
+    /// Record what the acting participant runs under (model, effort, directory, repo, branch, title, role, parent, state, pane; self-declared; silent; counts as activity).
+    Describe(Box<ParticipantDescribeArgs>),
     /// List every participant record in this local store.
     List,
     /// Collect participant records that hold nothing (dry run unless --apply).
@@ -230,9 +230,49 @@ pub(crate) struct ParticipantDescribeArgs {
     #[arg(long, value_name = "ABS_PATH")]
     pub cwd: Option<String>,
 
+    /// Git toplevel of the session's repository (absolute path, at most 4096 bytes; need not exist).
+    #[arg(long, value_name = "ABS_PATH")]
+    pub repo: Option<String>,
+
+    /// Git branch (1 to 255 characters).
+    #[arg(long, value_name = "TEXT")]
+    pub branch: Option<String>,
+
+    /// Session headline (1 to 80 characters).
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+
+    /// What kind of session this is: interactive, child, or headless.
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+
+    /// Participant id of the session that started this one (must be an existing participant).
+    #[arg(long, value_name = "ID")]
+    pub parent: Option<String>,
+
+    /// What the session is doing now: working or idle.
+    #[arg(long, value_name = "STATE")]
+    pub state: Option<String>,
+
+    /// The herdr pane id the session runs in (1 to 64 characters).
+    #[arg(long, value_name = "TEXT")]
+    pub pane: Option<String>,
+
+    /// The harness's own session id (1 to 128 characters).
+    #[arg(long = "harness-session", value_name = "TEXT")]
+    pub harness_session: Option<String>,
+
+    /// Remove one stored field by its JSON name (model, effort, cwd, repo, branch, title, role, parent, state, pane, harness_session); repeatable.
+    #[arg(long, value_name = "FIELD")]
+    pub unset: Vec<String>,
+
     /// Remove the whole runtime object; cannot be combined with the other flags.
     #[arg(long)]
     pub clear: bool,
+
+    /// End this participant session and drop its runtime (what `participant end` does); cannot be combined with the other flags.
+    #[arg(long)]
+    pub ended: bool,
 }
 
 #[derive(Debug, Args)]
@@ -781,6 +821,18 @@ pub(crate) struct WhoArgs {
     /// Emit human-readable text instead of the default JSON.
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
+
+    /// List only live participants (a live watch and activity within the last 10 minutes), one text line each; --json gives the full records.
+    #[arg(long)]
+    pub live: bool,
+
+    /// With --live: only participants whose declared role is this (interactive, child, or headless).
+    #[arg(long, requires = "live", value_name = "ROLE", value_parser = NonEmptyStringValueParser::new())]
+    pub role: Option<String>,
+
+    /// With --live: only participants in this repository (basename or absolute path).
+    #[arg(long, requires = "live", value_name = "PATH|NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Args)]

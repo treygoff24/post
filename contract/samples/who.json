@@ -39,9 +39,16 @@
     },
     "provenance": "explicit-env",
     "runtime": {
+      "branch": "main",
       "cwd": "/SANDBOX/alpha",
       "effort": "high",
+      "harness_session": "session-0001",
       "model": "claude-opus-5-5",
+      "pane": "w1-1",
+      "repo": "/SANDBOX/alpha",
+      "role": "interactive",
+      "state": "working",
+      "title": "Reviewing the tax thread",
       "updated": "2026-01-01T00:00:00Z"
     },
     "state": "active",
@@ -76,15 +83,24 @@
       "last_seen": "2026-01-01T00:00:00Z",
       "lineage": "ember",
       "live_watch": false,
+      "name": "Reader",
       "pending": {
         "lineage:ember": 0,
         "participant:claude-dd611847": 0,
         "workspace:alpha": 1
       },
+      "pfp": "📮",
       "runtime": {
+        "branch": "main",
         "cwd": "/SANDBOX/alpha",
         "effort": "high",
+        "harness_session": "session-0001",
         "model": "claude-opus-5-5",
+        "pane": "w1-1",
+        "repo": "/SANDBOX/alpha",
+        "role": "interactive",
+        "state": "working",
+        "title": "Reviewing the tax thread",
         "updated": "2026-01-01T00:00:00Z"
       },
       "state": "active",

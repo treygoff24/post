@@ -302,8 +302,16 @@ build from a tree with uncommitted tracked changes.
   the shell parses argv before post sees it. A body-file path that does not
   exist is `invalid_argument` (a usage error)
   rather than a retryable `io_error`. Bare targets resolve deterministically in
-  workspace → lineage → participant priority; typed `kind:name` addresses bypass
-  that priority. Refuses: unknown recipient, a blocked direct target (quotes
+  workspace → lineage → participant priority, and a bare string that matches
+  none of those is tried last as the profile name of one live participant (see
+  `post who --live`); typed `kind:name` addresses bypass that priority, and
+  `repo:<basename-or-abs-path>` names the one live participant whose declared
+  repo matches. A name or repo that matches no live participant is
+  `unknown_recipient`, several are `ambiguous_recipient` (exit 65,
+  `details.candidates`), and nothing is sent. When the send went to one
+  participant the `--json` receipt carries `resolved: {id, name?, via}`, `via`
+  being `id` (an exact id or `participant:<id>`), `name`, or `repo`, and the text
+  receipt adds a `post:` note when `via` is not `id`. Refuses: unknown recipient, a blocked direct target (quotes
   reason), reserved-name impersonation, subjects over 1 KiB, empty body, and
   bodies over 32 KiB unless `--oversize` records explicit intent. A complete
   Post watch-event NDJSON line does not block legitimate forensic traffic; the
@@ -782,6 +790,17 @@ build from a tree with uncommitted tracked changes.
   member. `messages` remains the raw message-file count. Listing is read-only
   and never creates cursor state.
 - `post who [--room <name>]... [--text]`: read-only participant directory.
+  `post who --live [--role <role>] [--repo <basename-or-abs-path>] [--json]`
+  narrows it to live peers: a participant that is not ended, has a live watch
+  (fresh heartbeat or armed doorbell), and whose activity (the later of
+  `last_seen` and `runtime.updated`) is within the last 10 minutes, inclusive.
+  Text is one line per peer, `<pfp> <name|id> · repo@branch · title · state ·
+  age`, and nothing when no one is live. `--json` prints the same document as
+  plain `who` filtered the same way, with `legacy_rooms` empty. `--role`
+  (`interactive|child|headless`) and `--repo` (an absolute path matches exactly,
+  anything else matches a runtime repo's basename case-insensitively) require
+  `--live`. Each `participants[]` entry also carries `name?` and `pfp?` from the
+  participant's profile.
   JSON is `{ok, participant, participants, legacy_rooms, activity_note?, count,
   skipped?, bridge_attention?, bridge_health?, doorbell?}`. `skipped` (`[{id,
   reason}]`, present only when nonempty) names the participant records too
@@ -1039,14 +1058,27 @@ build from a tree with uncommitted tracked changes.
   re-apply it. The variable applies only to the acting participant; `end`
   never consults it. A record with no `last_seen` is stale until bind or touch.
 - `post participant describe [--model <text>] [--effort <text>] [--cwd
-  <abs-path>] [--clear] [--json]` lets the acting participant record what it
-  runs. It stores `runtime: {model?, effort?, cwd?, updated}` on the participant
-  record (absent when never described). Each flag given replaces that one
-  field and the others keep their stored value; `--clear` removes the whole
-  object and cannot be combined with another flag; no flag is
-  `invalid_argument`. `model` and `effort` are 1 to 64 characters, `cwd` an
-  absolute path of at most 4096 bytes, none with control characters (the path
-  need not exist); a bad value is `invalid_argument` and writes nothing. It
+  <abs-path>] [--repo <abs-path>] [--branch <text>] [--title <text>] [--role
+  interactive|child|headless] [--parent <id>] [--state working|idle] [--pane
+  <text>] [--harness-session <text>] [--unset <field>]... [--clear | --ended]
+  [--json]` lets the acting participant record what it runs. It stores
+  `runtime: {model?, effort?, cwd?, repo?, branch?, title?, role?, parent?,
+  state?, pane?, harness_session?, updated}` on the participant record (absent
+  when never described). Each flag given replaces that one field and the others
+  keep their stored value; `--unset <field>` (repeatable, JSON field name,
+  kebab-case accepted) removes one field and combines with set flags, though a
+  field both set and unset is `invalid_argument`; unsetting the last field drops
+  the object; `--clear` removes the whole object and `--ended` ends the
+  participant like `participant end` and drops it, and neither can be combined
+  with another flag; no flag is `invalid_argument`. `model` and `effort` are 1
+  to 64 characters, `branch` 1 to 255, `title` 1 to 80, `pane` 1 to 64,
+  `harness_session` 1 to 128, `cwd` and `repo` absolute paths of at most 4096
+  bytes, none with control or bidirectional-override characters and none blank
+  (the paths need not exist); `role` is `interactive`, `child`, or `headless`,
+  `state` is `working` or `idle`, and `parent` must name an existing
+  participant; a bad value is `invalid_argument` and writes nothing. `post
+  participant end` drops the runtime too, since an ended session is not a live
+  peer. It
   needs a bound participant (`no_participant` otherwise), announces nothing
   (no channel event, no mail), and refreshes `last_seen` like `touch`. `--json`
   prints `{ok, id, participant}`; text prints one confirmation line. `runtime`
@@ -1377,9 +1409,13 @@ suggested_fix}}`. Codes (stable): `unknown_room`, `blocked_route`,
 `invalid_argument`, `config_invalid`, `duplicate_workspace`, `io_error`,
 `delivered_output_failure`, `delivered_unarchived`, `not_a_member`,
 `crossed_send` (reserved: no command produces it now that a crossed channel send
-always delivers).
+always delivers), `unknown_recipient`, `ambiguous_recipient`.
 Pre-commit `io_error` is retryable with exit 75. `duplicate_workspace` and
-`not_a_member` are non-retryable with exit 65. Both delivered variants are
+`not_a_member` are non-retryable with exit 65, as are `unknown_recipient`
+(a `--to` or `--at` that names no live participant by profile name or
+`repo:`) and `ambiguous_recipient` (several do; `details.candidates` is
+`[{id, name?, repo?, title?, state?}]`). A bare string that is no profile name
+at all stays `unknown_room`. Both delivered variants are
 non-retryable with exit 70: `delivered_output_failure` means a channel
 mutation committed but stdout receipt failed (a direct `post send` that landed
 exits 0 instead, with a stderr note); `delivered_unarchived`
@@ -1387,7 +1423,8 @@ means inbox delivery committed but archive publication failed. Room
 registration stdout failure after commit is reported as success with best-effort
 diagnostics, not `delivered_output_failure`. Exit codes per the agent-CLI
 standard: 2 usage, 65 validation (unknown_room, reserved_sender, empty_body,
-ambiguous_id, duplicate_workspace, not_a_member), 66 not_found, 77
+ambiguous_id, unknown_recipient, ambiguous_recipient, duplicate_workspace,
+not_a_member), 66 not_found, 77
 blocked_route (permission class), 78 config_invalid, 70 post-commit/internal
 failure, 75 retryable pre-commit I/O.
 

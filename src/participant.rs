@@ -138,8 +138,9 @@ pub(crate) struct Participant {
     pub dir: PathBuf,
 }
 
-/// The `runtime` member of a participant record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The `runtime` member of a participant record: what the session says about
+/// itself (`participant describe`). Every field is optional and self-declared.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -147,67 +148,247 @@ pub struct Runtime {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Git toplevel of the session's repository (absolute path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The session's headline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `interactive`, `child`, or `headless`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The participant id of the session that started this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// `working` or `idle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The herdr pane id the session runs in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// The harness's own session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session: Option<String>,
     /// RFC3339 UTC time of the last `participant describe`.
     #[serde(default)]
     pub updated: String,
 }
 
+impl Runtime {
+    /// Whether no declared field remains (`updated` is only a stamp).
+    fn is_empty(&self) -> bool {
+        RUNTIME_FIELDS
+            .iter()
+            .all(|field| self.field(field).is_none())
+    }
+
+    fn slot(&mut self, field: &str) -> Option<&mut Option<String>> {
+        Some(match field {
+            "model" => &mut self.model,
+            "effort" => &mut self.effort,
+            "cwd" => &mut self.cwd,
+            "repo" => &mut self.repo,
+            "branch" => &mut self.branch,
+            "title" => &mut self.title,
+            "role" => &mut self.role,
+            "parent" => &mut self.parent,
+            "state" => &mut self.state,
+            "pane" => &mut self.pane,
+            "harness_session" => &mut self.harness_session,
+            _ => return None,
+        })
+    }
+
+    fn field(&self, field: &str) -> Option<&str> {
+        match field {
+            "model" => &self.model,
+            "effort" => &self.effort,
+            "cwd" => &self.cwd,
+            "repo" => &self.repo,
+            "branch" => &self.branch,
+            "title" => &self.title,
+            "role" => &self.role,
+            "parent" => &self.parent,
+            "state" => &self.state,
+            "pane" => &self.pane,
+            "harness_session" => &self.harness_session,
+            _ => &None,
+        }
+        .as_deref()
+    }
+}
+
+/// The `runtime` fields `participant describe` can set and `--unset` can remove.
+pub(crate) const RUNTIME_FIELDS: &[&str] = &[
+    "model",
+    "effort",
+    "cwd",
+    "repo",
+    "branch",
+    "title",
+    "role",
+    "parent",
+    "state",
+    "pane",
+    "harness_session",
+];
+
+/// The allowed values of `runtime.role` and `runtime.state`.
+pub(crate) const RUNTIME_ROLES: &[&str] = &["interactive", "child", "headless"];
+pub(crate) const RUNTIME_STATES: &[&str] = &["working", "idle"];
+
 /// One `participant describe` call: each field given replaces that field;
-/// `clear` drops the whole object and stands alone.
+/// `unset` removes the named fields; `clear` drops the whole object and stands
+/// alone.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RuntimeUpdate {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub cwd: Option<String>,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub title: Option<String>,
+    pub role: Option<String>,
+    pub parent: Option<String>,
+    pub state: Option<String>,
+    pub pane: Option<String>,
+    pub harness_session: Option<String>,
+    pub unset: Vec<String>,
     pub clear: bool,
 }
 
 const MAX_RUNTIME_TEXT_CHARS: usize = 64;
-const MAX_RUNTIME_CWD_BYTES: usize = 4096;
+const MAX_RUNTIME_PATH_BYTES: usize = 4096;
+const MAX_RUNTIME_BRANCH_CHARS: usize = 255;
+const MAX_RUNTIME_TITLE_CHARS: usize = 80;
+const MAX_RUNTIME_PANE_CHARS: usize = 64;
+const MAX_RUNTIME_HARNESS_SESSION_CHARS: usize = 128;
+
+/// The field name `--unset` was given, normalised (`harness-session` is
+/// accepted for `harness_session`).
+fn unset_field(raw: &str) -> Option<&'static str> {
+    let normalised = raw.replace('-', "_");
+    RUNTIME_FIELDS
+        .iter()
+        .find(|field| **field == normalised)
+        .copied()
+}
 
 impl RuntimeUpdate {
+    /// The values to set, as (flag, field, value, max characters).
+    fn settings(&self) -> Vec<(&'static str, &'static str, &String)> {
+        [
+            ("--model", "model", &self.model),
+            ("--effort", "effort", &self.effort),
+            ("--cwd", "cwd", &self.cwd),
+            ("--repo", "repo", &self.repo),
+            ("--branch", "branch", &self.branch),
+            ("--title", "title", &self.title),
+            ("--role", "role", &self.role),
+            ("--parent", "parent", &self.parent),
+            ("--state", "state", &self.state),
+            ("--pane", "pane", &self.pane),
+            (
+                "--harness-session",
+                "harness_session",
+                &self.harness_session,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(flag, field, value)| value.as_ref().map(|value| (flag, field, value)))
+        .collect()
+    }
+
     /// Refuses, as `invalid_argument`, anything that must not be stored. Pure:
-    /// runs before the store is touched.
+    /// runs before the store is touched. (That `parent` names an existing
+    /// participant needs the store and is checked by [`describe`].)
     pub(crate) fn validate(&self) -> AppResult<()> {
-        let given = self.model.is_some() || self.effort.is_some() || self.cwd.is_some();
+        let settings = self.settings();
+        let given = !settings.is_empty() || !self.unset.is_empty();
         if self.clear && given {
             return Err(AppError::invalid_argument(
-                "--clear cannot be combined with --model, --effort, or --cwd",
+                "--clear cannot be combined with any other describe flag",
             ));
         }
         if !self.clear && !given {
             return Err(AppError::invalid_argument(
-                "participant describe needs at least one of --model, --effort, --cwd, or --clear",
+                "participant describe needs at least one field flag (--model, --effort, --cwd, --repo, --branch, --title, --role, --parent, --state, --pane, --harness-session), --unset <field>, --clear, or --ended",
             ));
         }
-        for (flag, value) in [("--model", &self.model), ("--effort", &self.effort)] {
-            if let Some(value) = value {
-                let chars = value.chars().count();
-                if chars == 0 || chars > MAX_RUNTIME_TEXT_CHARS {
-                    return Err(AppError::invalid_argument(format!(
-                        "{flag} must be 1 to {MAX_RUNTIME_TEXT_CHARS} characters"
-                    )));
-                }
-                if value.chars().any(char::is_control) {
-                    return Err(AppError::invalid_argument(format!(
-                        "{flag} must not contain control characters"
-                    )));
-                }
-            }
+        let mut unset = Vec::new();
+        for raw in &self.unset {
+            let field = unset_field(raw).ok_or_else(|| {
+                AppError::invalid_argument(format!(
+                    "--unset '{}' is not a runtime field; expected one of {}",
+                    raw.escape_debug(),
+                    RUNTIME_FIELDS.join(", ")
+                ))
+            })?;
+            unset.push(field);
         }
-        if let Some(cwd) = &self.cwd {
-            if cwd.len() > MAX_RUNTIME_CWD_BYTES {
+        for (flag, field, _) in &settings {
+            if unset.contains(field) {
                 return Err(AppError::invalid_argument(format!(
-                    "--cwd must be at most {MAX_RUNTIME_CWD_BYTES} bytes"
+                    "{flag} and --unset {field} name the same field"
                 )));
             }
-            if cwd.chars().any(char::is_control) {
-                return Err(AppError::invalid_argument(
-                    "--cwd must not contain control characters",
-                ));
+        }
+        for (flag, field, value) in settings {
+            let limit = match field {
+                "model" | "effort" => Some(MAX_RUNTIME_TEXT_CHARS),
+                "branch" => Some(MAX_RUNTIME_BRANCH_CHARS),
+                "title" => Some(MAX_RUNTIME_TITLE_CHARS),
+                "pane" => Some(MAX_RUNTIME_PANE_CHARS),
+                "harness_session" => Some(MAX_RUNTIME_HARNESS_SESSION_CHARS),
+                _ => None,
+            };
+            if value.trim().is_empty() {
+                return Err(AppError::invalid_argument(format!(
+                    "{flag} must not be empty"
+                )));
             }
-            if !Path::new(cwd).is_absolute() {
-                return Err(AppError::invalid_argument("--cwd must be an absolute path"));
+            if value.chars().any(crate::mailbox::refused_profile_char) {
+                return Err(AppError::invalid_argument(format!(
+                    "{flag} must not contain control or bidirectional-control characters"
+                )));
+            }
+            if let Some(limit) = limit {
+                if value.chars().count() > limit {
+                    return Err(AppError::invalid_argument(format!(
+                        "{flag} must be at most {limit} characters"
+                    )));
+                }
+            }
+            match field {
+                "cwd" | "repo" => {
+                    if value.len() > MAX_RUNTIME_PATH_BYTES {
+                        return Err(AppError::invalid_argument(format!(
+                            "{flag} must be at most {MAX_RUNTIME_PATH_BYTES} bytes"
+                        )));
+                    }
+                    if !Path::new(value).is_absolute() {
+                        return Err(AppError::invalid_argument(format!(
+                            "{flag} must be an absolute path"
+                        )));
+                    }
+                }
+                "role" if !RUNTIME_ROLES.contains(&value.as_str()) => {
+                    return Err(AppError::invalid_argument(format!(
+                        "--role must be one of {}",
+                        RUNTIME_ROLES.join(", ")
+                    )));
+                }
+                "state" if !RUNTIME_STATES.contains(&value.as_str()) => {
+                    return Err(AppError::invalid_argument(format!(
+                        "--state must be one of {}",
+                        RUNTIME_STATES.join(", ")
+                    )));
+                }
+                "parent" => validate_participant_id(value)
+                    .map_err(|_| AppError::invalid_argument("--parent must be a participant id"))?,
+                _ => {}
             }
         }
         Ok(())
@@ -411,9 +592,14 @@ pub(crate) fn resolve_target(context: &Context, raw: &str) -> AppResult<Address>
             "workspace" | "lineage" | "participant" => {
                 return Err(unknown_typed_target(prefix, name));
             }
+            "repo" => return resolve_live_repo(context, raw, name),
             _ => {
+                // A profile name may itself contain ':'.
+                if let Some(address) = resolve_live_name(context, raw) {
+                    return address;
+                }
                 return Err(AppError::invalid_argument(format!(
-                    "typed target prefix '{prefix}' is unknown; expected workspace, lineage, or participant"
+                    "typed target prefix '{prefix}' is unknown; expected workspace, lineage, participant, or repo"
                 ))
                 .input(raw)
                 .reason("unknown typed target prefix"));
@@ -437,6 +623,11 @@ pub(crate) fn resolve_target(context: &Context, raw: &str) -> AppResult<Address>
             name: raw.to_owned(),
         });
     }
+    // Last resort, so every form above keeps its meaning: a live
+    // participant's profile name.
+    if let Some(address) = resolve_live_name(context, raw) {
+        return address;
+    }
     Err(AppError::new(
         ErrorCode::UnknownRoom,
         format!("recipient room '{raw}' is unknown"),
@@ -444,6 +635,49 @@ pub(crate) fn resolve_target(context: &Context, raw: &str) -> AppResult<Address>
     )
     .input(raw)
     .reason("target is absent"))
+}
+
+/// A live participant's profile name (case-insensitive). `None` means the
+/// string is not a name: no live participant has it, no known participant ever
+/// declared it, or the peer directory cannot be read, so the caller's own
+/// error stands (a name lookup is a last resort and must not turn an unknown
+/// target into a store error). Several matches are `ambiguous_recipient`; a
+/// name only a participant that is not live holds is `unknown_recipient`.
+fn resolve_live_name(context: &Context, raw: &str) -> Option<AppResult<Address>> {
+    let peers = crate::peers::live_peers(context).ok()?;
+    let found = crate::peers::by_name(&peers, raw);
+    match found.as_slice() {
+        [peer] => Some(Ok(participant_address(&peer.participant.id))),
+        [] => crate::peers::known_name(context, raw).then(|| {
+            Err(crate::peers::unknown(
+                raw,
+                &format!("is named '{}'", crate::peers::clean(raw)),
+            ))
+        }),
+        _ => Some(Err(crate::peers::ambiguous(raw, &found))),
+    }
+}
+
+/// `repo:<basename-or-absolute-path>`: the one live participant in that
+/// repository.
+fn resolve_live_repo(context: &Context, raw: &str, selector: &str) -> AppResult<Address> {
+    let peers = crate::peers::live_peers(context)?;
+    let found = crate::peers::by_repo(&peers, selector);
+    match found.as_slice() {
+        [peer] => Ok(participant_address(&peer.participant.id)),
+        [] => Err(crate::peers::unknown(
+            raw,
+            &format!("is in repo '{}'", crate::peers::clean(selector)),
+        )),
+        _ => Err(crate::peers::ambiguous(raw, &found)),
+    }
+}
+
+fn participant_address(id: &str) -> Address {
+    Address {
+        kind: AddressKind::Participant,
+        name: id.to_owned(),
+    }
 }
 
 fn unknown_typed_target(kind: &str, name: &str) -> AppError {
@@ -646,27 +880,35 @@ pub(crate) fn describe(
     let activity = activity_from_env()?;
     let _lock = lock(context)?;
     let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
+    // A parent must name a record that exists now; nothing is written if it
+    // does not.
+    if let Some(parent) = &update.parent {
+        if load(context, parent)?.is_none() {
+            return Err(AppError::invalid_argument(format!(
+                "--parent '{parent}' does not name an existing participant"
+            ))
+            .input(parent.clone())
+            .reason("parent participant is absent"));
+        }
+    }
     apply_activity(&mut participant, &activity);
     if update.clear {
         participant.runtime = None;
     } else {
-        let mut runtime = participant.runtime.take().unwrap_or(Runtime {
-            model: None,
-            effort: None,
-            cwd: None,
-            updated: String::new(),
-        });
-        if let Some(model) = &update.model {
-            runtime.model = Some(model.clone());
+        let mut runtime = participant.runtime.take().unwrap_or_default();
+        for raw in &update.unset {
+            if let Some(slot) = unset_field(raw).and_then(|field| runtime.slot(field)) {
+                *slot = None;
+            }
         }
-        if let Some(effort) = &update.effort {
-            runtime.effort = Some(effort.clone());
-        }
-        if let Some(cwd) = &update.cwd {
-            runtime.cwd = Some(cwd.clone());
+        for (_, field, value) in update.settings() {
+            if let Some(slot) = runtime.slot(field) {
+                *slot = Some(value.clone());
+            }
         }
         runtime.updated = activity.last_seen.clone();
-        participant.runtime = Some(runtime);
+        // Unsetting the last declared field leaves no runtime at all.
+        participant.runtime = (!runtime.is_empty()).then_some(runtime);
     }
     write_record(&participant)?;
     Ok(participant)
@@ -676,11 +918,18 @@ pub(crate) fn end(context: &Context, id: &str) -> AppResult<Participant> {
     let _lock = lock(context)?;
     let mut participant = load(context, id)?.ok_or_else(|| AppError::no_participant(false))?;
     if participant.ended_at.is_some() {
+        // Already ended: nothing changes, except that a runtime an older post
+        // left behind is dropped now.
+        if participant.runtime.take().is_some() {
+            write_record(&participant)?;
+        }
         return Ok(participant);
     }
     let ended_at = format_rfc3339(SystemTime::now())?;
     participant.last_seen = Some(ended_at.clone());
     participant.ended_at = Some(ended_at);
+    // A session that has ended is no longer what it declared.
+    participant.runtime = None;
     write_record(&participant)?;
     Ok(participant)
 }
@@ -2097,8 +2346,235 @@ mod tests {
             model: model.map(str::to_owned),
             effort: effort.map(str::to_owned),
             cwd: cwd.map(str::to_owned),
-            clear: false,
+            ..Default::default()
         }
+    }
+
+    /// One new field set from its JSON name.
+    fn set_field(field: &str, value: &str) -> super::RuntimeUpdate {
+        let mut update = super::RuntimeUpdate::default();
+        let value = Some(value.to_owned());
+        match field {
+            "repo" => update.repo = value,
+            "branch" => update.branch = value,
+            "title" => update.title = value,
+            "role" => update.role = value,
+            "parent" => update.parent = value,
+            "state" => update.state = value,
+            "pane" => update.pane = value,
+            "harness_session" => update.harness_session = value,
+            other => panic!("not a peer field: {other}"),
+        }
+        update
+    }
+
+    #[test]
+    fn peer_field_validation_accepts_the_limits_and_refuses_the_rest() {
+        let long_repo = format!("/{}", "a".repeat(4095));
+        for (field, value) in [
+            ("repo", "/work/porch"),
+            ("repo", long_repo.as_str()),
+            ("branch", &"b".repeat(255)),
+            ("title", &"t".repeat(80)),
+            ("title", "Fix the 🦊 sigil 👩\u{200d}🚀"),
+            ("role", "interactive"),
+            ("role", "child"),
+            ("role", "headless"),
+            ("parent", "test-parent"),
+            ("state", "working"),
+            ("state", "idle"),
+            ("pane", &"p".repeat(64)),
+            ("harness_session", &"h".repeat(128)),
+        ] {
+            set_field(field, value)
+                .validate()
+                .unwrap_or_else(|error| panic!("{field}={value:?}: {error}"));
+        }
+        let too_long_repo = format!("/{}", "a".repeat(4096));
+        for (label, field, value) in [
+            ("relative repo", "repo", "work/porch"),
+            ("repo over 4096", "repo", too_long_repo.as_str()),
+            ("repo NUL", "repo", "/a\0b"),
+            ("empty repo", "repo", ""),
+            ("empty branch", "branch", ""),
+            ("blank branch", "branch", "   "),
+            ("branch over 255", "branch", &"b".repeat(256)),
+            ("title over 80", "title", &"t".repeat(81)),
+            ("title newline", "title", "a\nb"),
+            ("title bidi override", "title", "a\u{202e}b"),
+            ("title bidi isolate", "title", "a\u{2066}b"),
+            ("title line separator", "title", "a\u{2028}b"),
+            ("empty role", "role", ""),
+            ("unknown role", "role", "daemon"),
+            ("role case", "role", "Child"),
+            ("unknown state", "state", "busy"),
+            ("empty state", "state", ""),
+            ("pane over 64", "pane", &"p".repeat(65)),
+            ("pane control", "pane", "%1\u{7}"),
+            (
+                "harness_session over 128",
+                "harness_session",
+                &"h".repeat(129),
+            ),
+            ("parent with slash", "parent", "../x"),
+            ("empty parent", "parent", ""),
+        ] {
+            let error = set_field(field, value).validate().expect_err(label);
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+        }
+        // The old fields now refuse bidi controls too.
+        for bad in [
+            update(Some("a\u{202e}b"), None, None),
+            update(None, Some("a\u{200f}"), None),
+            update(None, None, Some("/a\u{2069}")),
+            update(Some("  "), None, None),
+        ] {
+            assert_eq!(
+                bad.validate().expect_err("refused").code,
+                ErrorCode::InvalidArgument
+            );
+        }
+    }
+
+    #[test]
+    fn unset_validation_names_real_fields_and_refuses_conflicts() {
+        let unset = |fields: &[&str]| super::RuntimeUpdate {
+            unset: fields.iter().map(|field| (*field).to_owned()).collect(),
+            ..Default::default()
+        };
+        unset(&["model", "harness_session", "harness-session", "title"])
+            .validate()
+            .expect("every field name, with the kebab alias");
+        for (label, bad) in [
+            ("unknown field", unset(&["colour"])),
+            ("updated is a stamp, not a field", unset(&["updated"])),
+            ("empty name", unset(&[""])),
+            (
+                "set and unset the same field",
+                super::RuntimeUpdate {
+                    model: Some("m".to_owned()),
+                    unset: vec!["model".to_owned()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "clear with unset",
+                super::RuntimeUpdate {
+                    clear: true,
+                    unset: vec!["model".to_owned()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "clear with a peer field",
+                super::RuntimeUpdate {
+                    clear: true,
+                    title: Some("t".to_owned()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                bad.validate().expect_err(label).code,
+                ErrorCode::InvalidArgument,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_unsets_fields_checks_the_parent_and_drops_an_emptied_runtime() {
+        let root = test_root("participant-describe-peer");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        write_plain_record(&root, "test-child", serde_json::json!({}));
+        write_plain_record(&root, "test-parent", serde_json::json!({}));
+        let path = root.join("participants/test-child/participant.json");
+
+        let mut full = set_field("repo", "/work/porch");
+        full.branch = Some("main".to_owned());
+        full.title = Some("Peer work".to_owned());
+        full.parent = Some("test-parent".to_owned());
+        full.state = Some("working".to_owned());
+        let described = super::describe(&context, "test-child", &full).expect("set");
+        let runtime = described.runtime.expect("runtime");
+        assert_eq!(runtime.repo.as_deref(), Some("/work/porch"));
+        assert_eq!(runtime.parent.as_deref(), Some("test-parent"));
+
+        // A parent that names no participant refuses and writes nothing.
+        let before = fs::read(&path).expect("record");
+        let mut orphan = set_field("parent", "test-nobody");
+        orphan.title = Some("never stored".to_owned());
+        let error = super::describe(&context, "test-child", &orphan).expect_err("no such parent");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(fs::read(&path).expect("record"), before);
+
+        // Unset removes exactly the named fields; the rest keep their value.
+        let unset = super::RuntimeUpdate {
+            unset: vec!["title".to_owned(), "parent".to_owned()],
+            ..Default::default()
+        };
+        let kept = super::describe(&context, "test-child", &unset)
+            .expect("unset")
+            .runtime
+            .expect("runtime remains");
+        assert_eq!(
+            (
+                kept.repo.as_deref(),
+                kept.branch.as_deref(),
+                kept.state.as_deref()
+            ),
+            (Some("/work/porch"), Some("main"), Some("working"))
+        );
+        assert!(kept.title.is_none() && kept.parent.is_none());
+
+        // Unsetting the last field leaves no runtime at all.
+        let rest = super::RuntimeUpdate {
+            unset: vec!["repo".to_owned(), "branch".to_owned(), "state".to_owned()],
+            ..Default::default()
+        };
+        let emptied = super::describe(&context, "test-child", &rest).expect("unset rest");
+        assert!(emptied.runtime.is_none());
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+        assert!(on_disk.get("runtime").is_none(), "{on_disk}");
+        trash_test_root(&root);
+    }
+
+    #[test]
+    fn end_drops_runtime_even_on_an_already_ended_record() {
+        let root = test_root("participant-end-runtime");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        write_plain_record(&root, "test-ending", serde_json::json!({}));
+        super::describe(&context, "test-ending", &update(Some("opus"), None, None))
+            .expect("describe");
+        let ended = super::end(&context, "test-ending").expect("end");
+        assert!(ended.ended_at.is_some() && ended.runtime.is_none());
+
+        // An ended record an older post left a runtime on is cleaned by a
+        // second end, without moving ended_at.
+        write_plain_record(
+            &root,
+            "test-left-over",
+            serde_json::json!({
+                "ended_at": "2026-01-01T00:00:00Z",
+                "runtime": {"model": "stale", "updated": "2026-01-01T00:00:00Z"}
+            }),
+        );
+        let cleaned = super::end(&context, "test-left-over").expect("second end");
+        assert_eq!(cleaned.ended_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert!(cleaned.runtime.is_none());
+        let on_disk: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("participants/test-left-over/participant.json")).expect("record"),
+        )
+        .expect("JSON");
+        assert!(on_disk.get("runtime").is_none(), "{on_disk}");
+        trash_test_root(&root);
     }
 
     #[test]

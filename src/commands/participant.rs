@@ -235,7 +235,7 @@ pub(super) fn run(
         }
         ParticipantCommand::Touch => lifecycle(context, false, pretty),
         ParticipantCommand::End => lifecycle(context, true, pretty),
-        ParticipantCommand::Describe(args) => describe(context, args, json, pretty),
+        ParticipantCommand::Describe(args) => describe(context, *args, json, pretty),
         ParticipantCommand::Gc(args) => super::participant_gc::run(context, args.apply, pretty),
         ParticipantCommand::Restore(args) => restore(context, &args.id, pretty),
         ParticipantCommand::List => {
@@ -299,14 +299,55 @@ fn describe(
     json: bool,
     pretty: bool,
 ) -> AppResult<CommandResult> {
+    if args.ended {
+        let conflicting = args.clear
+            || !args.unset.is_empty()
+            || [
+                &args.model,
+                &args.effort,
+                &args.cwd,
+                &args.repo,
+                &args.branch,
+                &args.title,
+                &args.role,
+                &args.parent,
+                &args.state,
+                &args.pane,
+                &args.harness_session,
+            ]
+            .iter()
+            .any(|value| value.is_some());
+        if conflicting {
+            return Err(AppError::invalid_argument(
+                "--ended cannot be combined with any other describe flag",
+            ));
+        }
+        let (current, _) = participant::require(context)?;
+        // `end` drops the runtime along with ending the session.
+        let participant = participant::end(context, &current.id)?;
+        return describe_answer(participant, json, pretty);
+    }
     let update = participant::RuntimeUpdate {
         model: args.model,
         effort: args.effort,
         cwd: args.cwd,
+        repo: args.repo,
+        branch: args.branch,
+        title: args.title,
+        role: args.role,
+        parent: args.parent,
+        state: args.state,
+        pane: args.pane,
+        harness_session: args.harness_session,
+        unset: args.unset,
         clear: args.clear,
     };
     let (current, _) = participant::require(context)?;
     let participant = participant::describe(context, &current.id, &update)?;
+    describe_answer(participant, json, pretty)
+}
+
+fn describe_answer(participant: Participant, json: bool, pretty: bool) -> AppResult<CommandResult> {
     if json {
         return CommandResult::json(
             &DescribeOutput {
@@ -317,15 +358,35 @@ fn describe(
             pretty,
         );
     }
-    let line = match &participant.runtime {
-        None => format!("participant {}: runtime cleared\n", participant.id),
-        Some(runtime) => format!(
-            "participant {}: runtime model={} effort={} cwd={}\n",
-            participant.id,
-            crate::output::sanitize_text_header(runtime.model.as_deref().unwrap_or("-")),
-            crate::output::sanitize_text_header(runtime.effort.as_deref().unwrap_or("-")),
-            crate::output::sanitize_text_header(runtime.cwd.as_deref().unwrap_or("-")),
-        ),
+    let clean = crate::peers::clean;
+    let line = match (&participant.runtime, &participant.ended_at) {
+        (None, Some(_)) => format!("participant {}: ended, runtime cleared\n", participant.id),
+        (None, None) => format!("participant {}: runtime cleared\n", participant.id),
+        (Some(runtime), _) => {
+            let mut line = format!(
+                "participant {}: runtime model={} effort={} cwd={}",
+                participant.id,
+                clean(runtime.model.as_deref().unwrap_or("-")),
+                clean(runtime.effort.as_deref().unwrap_or("-")),
+                clean(runtime.cwd.as_deref().unwrap_or("-")),
+            );
+            for (key, value) in [
+                ("repo", &runtime.repo),
+                ("branch", &runtime.branch),
+                ("title", &runtime.title),
+                ("role", &runtime.role),
+                ("parent", &runtime.parent),
+                ("state", &runtime.state),
+                ("pane", &runtime.pane),
+                ("harness_session", &runtime.harness_session),
+            ] {
+                if let Some(value) = value {
+                    line.push_str(&format!(" {key}={}", clean(value)));
+                }
+            }
+            line.push('\n');
+            line
+        }
     };
     Ok(CommandResult::success(line))
 }

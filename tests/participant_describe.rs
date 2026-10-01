@@ -405,9 +405,8 @@ fn records_without_runtime_load_and_a_runtime_record_survives_other_commands() {
     assert_eq!(touched["participant"]["runtime"]["effort"], "high");
     let end = sandbox.run_as_participant(&["participant", "end", "--json"], &id, &alpha);
     assert_success(&end);
-    assert_eq!(
-        sandbox.read_participant(&id)["runtime"]["effort"],
-        "high",
-        "end keeps runtime"
+    assert!(
+        sandbox.read_participant(&id).get("runtime").is_none(),
+        "end drops runtime: a closed session is not a live peer"
     );
 }

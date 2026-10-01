@@ -54,11 +54,17 @@ verified badge.
   use, and then shares its read state. An independent subagent binds `--new`.
 - `post participant list` lists every local participant.
 - A session can say what it runs: `post participant describe [--model <text>]
-  [--effort <text>] [--cwd <abs-path>] [--clear] [--json]` stores a `runtime`
-  object (`model?`, `effort?`, `cwd?`, `updated`) on the acting participant's
-  record. Each flag replaces one field, `--clear` removes the object, and it
-  announces nothing. `participant show`, `participant list`, and `who` carry
-  `runtime`. It is self-declared display text, never identity or authority.
+  [--effort <text>] [--cwd <abs-path>] [--repo <abs-path>] [--branch <text>]
+  [--title <text>] [--role interactive|child|headless] [--parent <id>]
+  [--state working|idle] [--pane <text>] [--harness-session <text>]
+  [--unset <field>]... [--clear | --ended] [--json]` stores a `runtime` object
+  (those fields plus `updated`) on the acting participant's record. Each flag
+  replaces one field, `--unset` removes one, `--clear` removes the object,
+  `--ended` ends the session, and it announces nothing. `participant end` drops
+  the runtime, so an ended session is not a peer to find. `participant show`,
+  `participant list`, and `who` carry `runtime`; `who --live` and
+  `send --to <name>|repo:<repo>` use it to find live peers. It is
+  self-declared display text, never identity or authority.
 
 ## Leases
 

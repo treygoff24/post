@@ -43,6 +43,7 @@ mod migration_fence;
 mod model;
 pub mod output;
 mod participant;
+mod peers;
 pub use commands::watch::sanitize_preview;
 mod presence;
 mod profile;
