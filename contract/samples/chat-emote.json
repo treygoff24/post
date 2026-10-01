@@ -1,0 +1,29 @@
+{
+  "message": {
+    "channel": "tax",
+    "emote": {
+      "frames": {
+        "body": {
+          "idle": "................/................/................/................/................/................/................/......dddd....../....dddddddd..../...dd33ddddddd../..ddd3dddddddd../..ddd0dddd0ddd../..dddddddddddd../..ddddd00ddddd../..dddddddddddd../...dddddddddd..."
+        },
+        "head": {
+          "idle": "......../..dddd../.d3dddd./dd0dd0dd/dddddddd/ddd00ddd/dddddddd/.dddddd."
+        }
+      },
+      "library": "builtin-1",
+      "name": "hop",
+      "source": "builtin",
+      "steps": [
+        {
+          "motion": "hop",
+          "ms": 500,
+          "pose": "idle"
+        }
+      ]
+    },
+    "event": "emote",
+    "id": "20260101-000000-000001-c00001",
+    "sent": "2026-01-01 00:00:00 +0000"
+  },
+  "ok": true
+}

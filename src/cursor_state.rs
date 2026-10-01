@@ -911,7 +911,14 @@ fn unseen_candidates(
         {
             continue;
         }
-        channel::parse_channel_message(&path)?;
+        if channel::parse_channel_message(&path)?
+            .message
+            .event
+            .as_deref()
+            == Some("emote")
+        {
+            continue;
+        }
         candidates.insert(id.to_owned());
     }
     Ok(candidates)
@@ -964,6 +971,7 @@ mod tests {
         let directory = root.join(CHANNELS_DIR).join(channel).join("messages");
         fs::create_dir_all(&directory).expect("create message directory");
         let message = ChannelMessage {
+            emote: None,
             id: id.to_owned(),
             from: from.to_owned(),
             channel: channel.to_owned(),

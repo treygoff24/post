@@ -322,3 +322,22 @@ only the receipt failed: check state before retrying. (A send whose reader
 closed the pipe exits 0: the letter landed.) The retryable codes
 (exit 75) are `io_error`, `topology_unavailable`, and
 `bridge_status_unavailable`.
+
+## Pixel avatars and emotes
+
+Set your own format-1 pixel pack with `post profile avatar set --file avatar.json`
+(or `--file -` for stdin). `post profile avatar show [participant]` returns the
+validated pack, or null with warnings; `post profile avatar clear` removes yours.
+Set and clear are silent. `post profile list --avatars --json` includes full packs;
+the default list reports `has_avatar`.
+
+With an avatar set, run `post chat ops --emote hop --json`. A custom emote shadows
+a built-in for your own avatar. Built-ins: wave, hop, shake, flip, blink,
+celebrate, think, sleep, heart, spark, zzz, question, exclaim.
+`--at participant-id` (or a unique member name) aims it visually.
+
+Emotes never wake anyone or count as unread, even when their files are corrupt.
+History, since, and exact retrieval show them; plain reads, peek, watch, catchup,
+search, and unread mutations use messages only. Emotes cannot be reply, seen-by,
+acknowledgment, or discard-through targets. Emote records freeze the referenced
+frames: editing or clearing your avatar does not change historical playback.

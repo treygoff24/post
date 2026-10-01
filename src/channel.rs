@@ -1412,6 +1412,9 @@ pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResul
         let Ok(parsed) = parse_channel_message(&path) else {
             continue;
         };
+        if parsed.message.event.as_deref() == Some("emote") {
+            continue;
+        }
         let id = parsed.message.id;
         if id == prefix || id.starts_with(prefix) {
             matches.push(id);
@@ -1421,7 +1424,7 @@ pub(crate) fn resolve_message_id(paths: &ChannelPaths, prefix: &str) -> AppResul
         0 => Err(AppError::new(
             ErrorCode::NotFound,
             format!("no message in channel matching id/prefix '{prefix}'"),
-            "Pass a full message id or a unique prefix. `post chat <channel> --history 25` lists recent ids, and `post chat <channel> --message <id> --max-bytes 8000` reads one message.",
+            "emote records are never reply, seen-by or unread targets. Pass a full .msg id or a unique prefix from channel history.",
         )
         .input(prefix)
         .reason("no matching message id")),
@@ -1608,6 +1611,9 @@ impl MentionTargets {
     /// `@<name>` for one of them. A name that is both a workspace and a lineage
     /// is one entry here, so it addresses the reader once.
     pub(crate) fn addressed_by(&self, message: &ChannelMessage, body: &str) -> bool {
+        if message.event.as_deref() == Some("emote") {
+            return false;
+        }
         message
             .mentions
             .iter()
@@ -1693,6 +1699,7 @@ fn write_message(
         let (id_timestamp, sent) = local_timestamp_micros()?;
         let id = new_mail_id(&id_timestamp, attempt)?;
         let message = ChannelMessage {
+            emote: None,
             id: id.clone(),
             from: opts.room.to_owned(),
             channel: opts.channel.to_owned(),
@@ -1716,6 +1723,9 @@ fn write_message(
         validate_channel_message(Path::new("<generated message>"), &message)?;
         let payload = encode_message(&message, opts.body)?;
         let path = paths.messages.join(format!("{id}.msg"));
+        if paths.messages.join(format!("{id}.emote")).exists() {
+            continue;
+        }
         match exclusive_atomic_write(&path, &payload) {
             Ok(()) => return Ok(id),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2085,6 +2095,7 @@ mod tests {
         let second = new_mail_id(&second_ts, 0).expect("id");
         assert!(first < second, "{first} must sort before {second}");
         let message = ChannelMessage {
+            emote: None,
             id: first.clone(),
             from: "alpha".to_owned(),
             channel: "tax".to_owned(),
@@ -2112,6 +2123,7 @@ mod tests {
         // watch text lines print "#<channel>" unquoted; a newline smuggled
         // into a hand-written .msg envelope must die in the validator.
         let message = ChannelMessage {
+            emote: None,
             id: "20260722-013000-000001-abc123".to_owned(),
             from: "alpha".to_owned(),
             channel: "tax\nFORGED".to_owned(),
@@ -2138,6 +2150,7 @@ mod tests {
     #[test]
     fn second_resolution_mail_id_is_refused_for_channel_messages() {
         let message = ChannelMessage {
+            emote: None,
             id: "20260722-012000-abcdef".to_owned(),
             from: "alpha".to_owned(),
             channel: "tax".to_owned(),
@@ -2425,6 +2438,7 @@ mod tests {
     #[test]
     fn malformed_re_is_refused_at_parse() {
         let message = ChannelMessage {
+            emote: None,
             id: "20260722-013000-000001-abc123".to_owned(),
             from: "alpha".to_owned(),
             channel: "tax".to_owned(),

@@ -558,7 +558,7 @@ inotify/FSEvents on `messages/` (`src/commands/watch.rs:594`), and the
 bridge's exclusive link fires it, so doorbells ring.
 
 For agents that are *not* running, the bridge writes **one immutable
-file per imported channel message** (Sol M5 — exactly-once by
+file per imported attention channel message** (Sol M5 — exactly-once by
 construction, step C5(b)):
 
     bridge/events/<name>/<id>.json
@@ -2022,3 +2022,18 @@ unchanged.
   Rulings against Sol: B3 resolved as bounded model 2 with ownership
   memory, not a central room registry; events built now as per-file
   records rather than deferred.
+
+
+## Silent Porch records (2026-09-30)
+
+`channels/<name>/messages/<id>.emote` relays through channel export, paging,
+reservation, import, and conflict handling with its suffix intact. The envelope
+must carry `event: "emote"`; its frozen payload is opaque to the bridge. Import
+publishes no `bridge/events/` record for an emote (including a compatibility emote
+in `.msg`). Existing `.msg` reservation names remain readable; emote reservations
+are keyed as `<id>.emote`, so the two suffixes cannot collide. Conflict copies use
+`<id>-<host>-conflict.emote`. Join replay only reads `.msg` files.
+
+Roomless host stamping retains the 4096-byte header cap. Post writers leave
+room for that stamp by limiting emote headers to 3072 bytes. Avatar packs remain
+host-local and are not relayed. Older bridges skip `.emote` paths.

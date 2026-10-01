@@ -696,3 +696,32 @@ describe("the real unbound snapshot, parsed", () => {
     }
   });
 });
+
+// Same real store and ordinary records, before and after silent/corrupt emotes.
+// Stub only transport to the adapter; snapshot bytes come from this binary.
+import { porchSnapshots } from '../../../tests/porch-store.mjs';
+describe('Porch emotes never create hook or native-monitor notices', () => {
+  for (const cursor of ['healthy', 'missing', 'corrupt']) {
+    for (const ordinary of [false, true]) {
+      test(`${cursor} cursors, ordinary=${ordinary}: all four hooks and watch-notice`, async () => {
+        const pair = porchSnapshots(POST_BIN, { ordinary, cursor });
+        assert.equal(pair.after.bound, pair.before.bound);
+        for (const adapter of MAIL_ADAPTERS) {
+          const before = await runMail(adapter, { watch: pair.before.bound });
+          const after = await runMail(adapter, { watch: pair.after.bound });
+          assert.equal(before.watchCalls.length, 1);
+          assert.equal(after.watchCalls.length, 1);
+          assert.equal(after.context, before.context, adapter.name);
+          if (!ordinary && cursor === 'healthy') assert.doesNotMatch(after.context, /#ops|UNKNOWN|Unreadable/);
+          if (ordinary) assert.match(after.context, /#ops/);
+        }
+        const before = await runNotice(pair.before.bound);
+        const after = await runNotice(pair.after.bound);
+        assert.equal(after.stdout, before.stdout);
+        assert.equal(after.status, 0);
+        if (!ordinary && cursor === 'healthy') assert.equal(after.stdout, '');
+        if (ordinary) assert.match(after.stdout, /#ops/);
+      });
+    }
+  }
+});

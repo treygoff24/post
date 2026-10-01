@@ -577,6 +577,15 @@ pub(crate) struct ChatArgs {
     #[arg(long, conflicts_with_all = ["peek", "discard", "seen_by"])]
     pub send: bool,
 
+    /// Play a frozen avatar emote. Never wakes anyone or counts as unread.
+    #[arg(long, value_name = "NAME", value_parser = nonempty_without_controls,
+        conflicts_with_all = ["send","body","body_file","join","leave","archive","unarchive","re","signature_ref","subject","oversize","peek","history","since","grep","limit","discard","discard_through","seen_by","message","ack","max_bytes","framing","anyway"])]
+    pub emote: Option<String>,
+
+    /// Aim an emote visually at a channel member; never a mention.
+    #[arg(long, requires = "emote", value_name = "PARTICIPANT", value_parser = nonempty_without_controls)]
+    pub at: Option<String>,
+
     /// Accepted and ignored: a send always delivers. Habitual commands that
     /// still pass it keep working; the receipt reports what crossed instead.
     #[arg(long, hide = true)]
@@ -852,7 +861,33 @@ pub(crate) enum ProfileCommand {
     /// Remove the acting participant's profile; bylines fall back to its lineage, else the bare id.
     Clear,
     /// List every profile with its holder, sigil, and lease (read-only; text, or JSON with --json).
-    List,
+    List(ProfileListArgs),
+    /// Set, show, or clear the acting participant's pixel avatar (silent).
+    Avatar(ProfileAvatarArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileListArgs {
+    /// Include full validated avatar packs, rather than has_avatar alone.
+    #[arg(long)]
+    pub avatars: bool,
+}
+#[derive(Debug, Args)]
+pub(crate) struct ProfileAvatarArgs {
+    #[command(subcommand)]
+    pub command: ProfileAvatarCommand,
+}
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProfileAvatarCommand {
+    /// Validate and store a format-1 pack without announcing a channel event.
+    Set {
+        #[arg(long, value_name = "PATH", required = true)]
+        file: PathBuf,
+    },
+    /// Show a validated avatar, or null with warnings for an invalid pack.
+    Show(ProfileShowArgs),
+    /// Remove your own avatar without announcing a channel event.
+    Clear,
 }
 
 #[derive(Debug, Args)]

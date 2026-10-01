@@ -2123,7 +2123,9 @@ fn scan_batch_measured(
             // watcher that declared --own for several rooms is one session
             // wearing several identities, so any of them counts as its own.
             Ok(parsed)
-                if parsed.message.from == room || owned_rooms.contains(&parsed.message.from) => {}
+                if parsed.message.from == room
+                    || owned_rooms.contains(&parsed.message.from)
+                    || crate::channel::is_opaque_event(&parsed.message) => {}
             Ok(parsed) => {
                 emitted_channel_ids.insert(dedupe_id);
                 batch.push(WatchDelivery::channel(
@@ -2425,6 +2427,7 @@ mod tests {
 
     fn channel_message(id: &str, channel: &str, from: &str) -> ChannelMessage {
         ChannelMessage {
+            emote: None,
             id: id.to_owned(),
             from: from.to_owned(),
             channel: channel.to_owned(),
@@ -3053,6 +3056,7 @@ mod tests {
         fs::create_dir_all(&messages).expect("create messages");
         for (sibling_id, subject) in [(before_id, "before"), (after_id, "after")] {
             let sibling = ChannelMessage {
+                emote: None,
                 id: sibling_id.to_owned(),
                 from: "beta".to_owned(),
                 channel: channel.to_owned(),
@@ -3123,6 +3127,7 @@ mod tests {
         assert!(batch.is_empty(), "unchanged corruption rings only once");
 
         let repaired = ChannelMessage {
+            emote: None,
             id: id.to_owned(),
             from: "beta".to_owned(),
             channel: channel.to_owned(),
@@ -3203,6 +3208,7 @@ mod tests {
             (local_id, "alpha", "participant-binding"),
         ] {
             let message = ChannelMessage {
+                emote: None,
                 id: id.to_owned(),
                 from: from.to_owned(),
                 channel: channel.to_owned(),
@@ -3538,6 +3544,7 @@ mod tests {
             ("20260722-013000-000003-ccc333", "gamma"),
         ] {
             let message = ChannelMessage {
+                emote: None,
                 id: id.to_owned(),
                 from: from.to_owned(),
                 channel: "tax".to_owned(),
@@ -4450,6 +4457,114 @@ body
                 median_ms(fast),
                 median_ms(scan_complete),
                 median_ms(scan_wake),
+            );
+            trash_test_root(&root);
+        }
+    }
+    #[test]
+    fn porch_emotes_do_not_complete_once_in_live_poll_or_reconciliation() {
+        struct Arrivals {
+            root: PathBuf,
+            dirs: BTreeSet<PathBuf>,
+            waits: usize,
+            events: bool,
+        }
+        impl WakeSource for Arrivals {
+            fn wait(&mut self, _: Duration) -> Option<Wake> {
+                self.waits += 1;
+                let dir = self.root.join("channels/ops/messages");
+                match self.waits {
+                    1 => {
+                        let id = "20990930-100000-000001-aaaaaa";
+                        let mut m = channel_message(id, "ops", "beta");
+                        m.event = Some("emote".into());
+                        m.mentions = vec!["alpha".into()];
+                        fs::write(
+                            dir.join(format!("{id}.emote")),
+                            encode_message(&m, "@alpha").unwrap(),
+                        )
+                        .unwrap();
+                        fs::write(
+                            dir.join("20990930-100000-000002-aaaaaa.emote"),
+                            "broken @alpha",
+                        )
+                        .unwrap();
+                    }
+                    2 => seed_channel_message(
+                        &self.root,
+                        "ops",
+                        "20990930-100000-000003-aaaaaa",
+                        "beta",
+                    ),
+                    _ => panic!("ordinary delivery failed to complete --once"),
+                }
+                Some(if self.events {
+                    Wake::Events(self.dirs.clone())
+                } else {
+                    Wake::TimedOut
+                })
+            }
+        }
+        for (events, slow) in [
+            (true, Duration::from_secs(60)),
+            (false, Duration::ZERO),
+            (true, Duration::ZERO),
+        ] {
+            let root = test_root("porch-watch-loop");
+            let context = Context {
+                root: root.clone(),
+                home: root.clone(),
+            };
+            fs::write(
+                root.join("rooms.json"),
+                serde_json::to_vec(&serde_json::json!({"alpha":root.join("alpha")})).unwrap(),
+            )
+            .unwrap();
+            fs::write(root.join("rules.json"), r#"{"blocked":[]}"#).unwrap();
+            let p = crate::participant::bind_test_actor(&context, "alpha");
+            let dir = root.join("channels/ops/messages");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                root.join("channels/ops/channel.json"),
+                r#"{"name":"ops","created":"2026-09-30 10:00:00 +0000","created_by":"alpha"}"#,
+            )
+            .unwrap();
+            ParticipantChannels::join(&context, &p, "ops").unwrap();
+            let mut target = watch_target_for(&context, &p, "alpha");
+            target.dirs = participant_target_dirs(&context, &p, &target.inbox);
+            let mut wake: Box<dyn WakeSource> = Box::new(Arrivals {
+                root: root.clone(),
+                dirs: target.dirs.clone(),
+                waits: 0,
+                events,
+            });
+            let mut emitted = HashSet::new();
+            let mut corrupt = HashSet::new();
+            run_watch_loop(
+                &context,
+                &mut vec![target],
+                &BTreeSet::new(),
+                &mut emitted,
+                100,
+                true,
+                false,
+                false,
+                &[],
+                &mut wake,
+                slow,
+                AdmissionWarnings::default(),
+                HashSet::new(),
+                &mut corrupt,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                emitted,
+                HashSet::from([("ops".to_owned(), "20990930-100000-000003-aaaaaa".to_owned())])
+            );
+            assert!(
+                corrupt.is_empty(),
+                "corrupt emotes cannot become unreadable notifications"
             );
             trash_test_root(&root);
         }

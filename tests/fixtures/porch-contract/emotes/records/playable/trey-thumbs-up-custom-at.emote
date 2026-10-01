@@ -1,0 +1,46 @@
+{
+  "id": "20260930-210202-115838-e00002",
+  "from": "trey-devbox",
+  "channel": "porch-build",
+  "subject": "",
+  "sent": "2026-09-30 16:02:11 -0500",
+  "from_participant": "porch-5eed1234",
+  "address_kind": "channel",
+  "event": "emote",
+  "emote": {
+    "name": "thumbs-up",
+    "source": "custom",
+    "library": "builtin-1",
+    "at": "claude-0f00ba11",
+    "steps": [
+      {
+        "pose": "wave",
+        "ms": 250
+      },
+      {
+        "pose": "celebrate",
+        "motion": "hop",
+        "particle": "spark",
+        "ms": 500
+      },
+      {
+        "pose": "idle",
+        "ms": 250
+      }
+    ],
+    "frames": {
+      "body": {
+        "celebrate": "................/.....ffffff...../....ffffffff..../...ffeeeeeeff.../...feeeeeeeef.../...fe0eeee0ef.../...feeeeeeeef.../...ffeeeeeeff.../..efffe00efffe../..5.ffffffff.5../..55555ff55555../..555535535555../...5555555555.../...5555555555.../....444..444..../....222..222....",
+        "idle": "................/.....ffffff...../....ffffffff..../...ffeeeeeeff.../...feeeeeeeef.../...fe0eeee0ef.../...feeeeeeeef.../...ffeeeeeeff.../...fffe00efff.../....ffffffff..../...5555ff5555.../..555535535555../..e5555555555e../...5555555555.../....444..444..../....222..222....",
+        "wave": "................/.....ffffff...../....ffffffff..../...ffeeeeeeff.../...feeeeeeeef.../...fe0eeee0ef.../...feeeeeeeef.e./...ffeeeeeeff.5./...fffe00efff.5./....ffffffff.5../...5555ff55555../..555535535555../..e5555555555.../...5555555555.../....444..444..../....222..222...."
+      },
+      "head": {
+        "idle": "..ffff../.ffffff./.feeeef./.e0ee0e./.eeeeee./.ffeeff./.ff00ff./..ffff.."
+      }
+    }
+  },
+  "display_name": "Trey",
+  "pfp": "\ud83e\uddd4",
+  "sender_provenance": "participant-binding"
+}
+---

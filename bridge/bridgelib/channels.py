@@ -37,6 +37,7 @@ CHANNEL_ENVELOPE_REQUIRED = frozenset({"id", "from", "channel", "subject", "sent
 CHANNEL_ENVELOPE_OPTIONAL = frozenset(
     {
         "event",
+        "emote",
         "display_name",
         "pfp",
         "re",
@@ -611,12 +612,13 @@ def _record_divergence(
     data: bytes,
     other_host: str,
     fence_present,
+    suffix=".msg",
 ) -> None:
     _forensic(
         settings,
         host,
         name,
-        f"{message_id}-{host}-conflict.msg",
+        f"{message_id}-{host}-conflict{suffix}",
         data,
         fence_present,
     )
@@ -967,9 +969,15 @@ def _adopt_description_locked(
     logger.emit("chan_description_adopted", host=host, channel=name, oid=record_oid)
 
 
-def _read_reservation(settings, name: str, message_id: str) -> Optional[str]:
+def _reservation_key(message_id: str, suffix: str = ".msg") -> str:
+    # Retain existing .msg markers across upgrades; silent records have a
+    # suffix-qualified key and can never share the legacy reservation.
+    return message_id if suffix == ".msg" else message_id + suffix
+
+
+def _read_reservation(settings, name: str, message_id: str, suffix: str = ".msg") -> Optional[str]:
     path = common.destination(
-        settings.root, "bridge", "chan-received", name, message_id
+        settings.root, "bridge", "chan-received", name, _reservation_key(message_id, suffix)
     )
     data = _read_optional(path, 512)
     if data is None:
@@ -1011,18 +1019,19 @@ def _publish_message_batch(
     sha256: str,
     envelope: dict,
     fence_present,
+    suffix=".msg",
 ) -> bool:
     """C5(a-c), one fence-delimited mutation batch."""
     _fence(fence_present)
     temp = common.destination(settings.root, "bridge", "tmp")
     reservation = common.destination(
-        settings.root, "bridge", "chan-received", name, message_id
+        settings.root, "bridge", "chan-received", name, _reservation_key(message_id, suffix)
     )
     expected = f"{host} {sha256}"
-    reserved = _read_reservation(settings, name, message_id)
+    reserved = _read_reservation(settings, name, message_id, suffix)
     if reserved is None:
         _publish_once(reservation, _marker_bytes(expected), temp, settings.root)
-        reserved = _read_reservation(settings, name, message_id)
+        reserved = _read_reservation(settings, name, message_id, suffix)
     if reserved != expected:
         return False
     common.checkpoint("channels-c5a")
@@ -1030,13 +1039,14 @@ def _publish_message_batch(
     event = common.destination(
         settings.root, "bridge", "events", name, message_id + ".json"
     )
-    _publish_once(
-        event, _event_bytes(host, name, message_id, envelope), temp, settings.root
-    )
+    if suffix == ".msg" and envelope.get("event") != "emote":
+        _publish_once(
+            event, _event_bytes(host, name, message_id, envelope), temp, settings.root
+        )
     common.checkpoint("channels-c5b")
     _fence(fence_present)
     message = common.destination(
-        settings.root, "channels", name, "messages", message_id + ".msg"
+        settings.root, "channels", name, "messages", message_id + suffix
     )
     created = _publish_once(message, data, temp, settings.root)
     common.checkpoint("channels-c5c")
@@ -1152,15 +1162,15 @@ def _message_reservation_exists(settings, raw_path) -> bool:
         len(parts) == 4
         and parts[0] == "channels"
         and parts[2] == "messages"
-        and parts[3].endswith(".msg")
+        and parts[3].endswith((".msg", ".emote"))
     ):
         return False
-    name, message_id = parts[1], parts[3][:-4]
+    name, message_id = parts[1], PurePosixPath(parts[3]).stem
     try:
         common.validate_room(name, topology=True, label="channel name")
         _validate_channel_id(message_id)
         marker = common.destination(
-            settings.root, "bridge", "chan-received", name, message_id
+            settings.root, "bridge", "chan-received", name, _reservation_key(message_id, PurePosixPath(parts[3]).suffix)
         )
     except common.ConfigError:
         return False
@@ -1227,7 +1237,10 @@ def _peer_records_and_messages(
             if behind and not (new_since_cursor or _is_record_path(raw_path)):
                 continue
             if _message_reservation_exists(settings, raw_path):
-                advanced = _advanced_cursor(advanced, resume, key)
+                # A later reservation must not move the cursor past an
+                # unprocessed entry deferred by this page's cap.
+                if remaining == 0:
+                    advanced = _advanced_cursor(advanced, resume, key)
                 continue
             if processed >= CHANNEL_TREE_MAX:
                 if new_since_cursor:
@@ -1267,10 +1280,10 @@ def _peer_records_and_messages(
             len(parts) == 4
             and parts[0] == "channels"
             and parts[2] == "messages"
-            and parts[3].endswith(".msg")
+            and parts[3].endswith((".msg", ".emote"))
         ):
             name = parts[1]
-            message_id = parts[3][:-4]
+            message_id = PurePosixPath(parts[3]).stem
             try:
                 common.validate_room(name, topology=True, label="channel name")
                 _validate_channel_id(message_id)
@@ -1591,7 +1604,9 @@ def import_channels(
                     )
                     skipped = True
                 continue
-            for message_id, entry in sorted(messages[name], key=lambda row: row[0]):
+            for message_id, entry in sorted(messages[name], key=lambda row: (row[0], row[1]["path"])):
+                suffix = PurePosixPath(entry["path"]).suffix
+                reservation_key = _reservation_key(message_id, suffix)
                 deadline.check()
                 data = git.show(oid, entry["path"])
                 if (
@@ -1609,12 +1624,14 @@ def import_channels(
                     envelope = _parse_envelope(
                         data, name, message_id, logger, unknown_seen
                     )
+                    if suffix == ".emote" and envelope.get("event") != "emote":
+                        raise common.ConfigError("envelope-event")
                 except common.ConfigError as error:
                     _forensic(
                         settings,
                         host,
                         name,
-                        message_id + ".msg",
+                        message_id + suffix,
                         data,
                         fence_present,
                     )
@@ -1648,7 +1665,7 @@ def import_channels(
                             raise common.ConfigError("participant_id_collision")
                     except common.ConfigError as error:
                         _forensic(
-                            settings, host, name, message_id + ".msg", data, fence_present
+                            settings, host, name, message_id + suffix, data, fence_present
                         )
                         _log_quarantine(
                             settings, stats, logger, host, name, message_id,
@@ -1658,7 +1675,7 @@ def import_channels(
                         continue
                 elif "from_host" in envelope:
                     _forensic(
-                        settings, host, name, message_id + ".msg", data, fence_present
+                        settings, host, name, message_id + suffix, data, fence_present
                     )
                     _log_quarantine(
                         settings, stats, logger, host, name, message_id,
@@ -1672,7 +1689,7 @@ def import_channels(
                         settings,
                         host,
                         name,
-                        message_id + ".msg",
+                        message_id + suffix,
                         data,
                         fence_present,
                     )
@@ -1691,7 +1708,7 @@ def import_channels(
                                 "channels",
                                 name,
                                 "messages",
-                                message_id + ".msg",
+                                message_id + suffix,
                             ),
                             settings.max_mail_bytes,
                         )
@@ -1729,7 +1746,7 @@ def import_channels(
                         settings,
                         host,
                         name,
-                        message_id + ".msg",
+                        message_id + suffix,
                         data,
                         fence_present,
                     )
@@ -1754,9 +1771,9 @@ def import_channels(
                         "channels",
                         name,
                         "messages",
-                        message_id + ".msg",
+                        message_id + suffix,
                     )
-                    reservation = _read_reservation(settings, name, message_id)
+                    reservation = _read_reservation(settings, name, message_id, suffix=suffix)
                     existing = _read_optional(message_path, settings.max_mail_bytes)
                 except (common.ConfigError, OSError) as error:
                     key = (name, message_id)
@@ -1796,6 +1813,7 @@ def import_channels(
                         data,
                         other_host,
                         fence_present,
+                        suffix=suffix,
                     )
                     skipped = True
                     continue
@@ -1821,6 +1839,7 @@ def import_channels(
                         data,
                         other_host,
                         fence_present,
+                        suffix=suffix,
                     )
                     skipped = True
                     continue
@@ -1839,7 +1858,7 @@ def import_channels(
                             skipped = True
                             continue
                         existing = _read_optional(message_path, settings.max_mail_bytes)
-                        current_reservation = _read_reservation(settings, name, message_id)
+                        current_reservation = _read_reservation(settings, name, message_id, suffix=suffix)
                         same_shim_copy = (
                             existing is not None
                             and _same_unstamped_roomless_copy(
@@ -1858,13 +1877,14 @@ def import_channels(
                                 data,
                                 reservation.split(" ", 1)[0] if reservation else LOCAL,
                                 fence_present,
+                                suffix=suffix,
                             )
                             skipped = True
                             continue
                         if same_shim_copy and current_reservation is None:
                             _fence(fence_present)
                             reservation_path = common.destination(
-                                settings.root, "bridge", "chan-received", name, message_id
+                                settings.root, "bridge", "chan-received", name, reservation_key
                             )
                             _publish_once(
                                 reservation_path,
@@ -1872,10 +1892,11 @@ def import_channels(
                                 common.destination(settings.root, "bridge", "tmp"),
                                 settings.root,
                             )
-                            if _read_reservation(settings, name, message_id) != expected_reservation:
+                            if _read_reservation(settings, name, message_id, suffix=suffix) != expected_reservation:
                                 _record_divergence(
                                     settings, stats, logger, host, name, message_id,
                                     data, LOCAL, fence_present,
+                                    suffix=suffix,
                                 )
                                 skipped = True
                                 continue
@@ -1889,13 +1910,14 @@ def import_channels(
                                 sha256,
                                 envelope,
                                 fence_present,
+                                suffix=suffix,
                             )
                             if (
                                 not created
-                                and _read_reservation(settings, name, message_id)
+                                and _read_reservation(settings, name, message_id, suffix=suffix)
                                 != expected_reservation
                             ):
-                                current = _read_reservation(settings, name, message_id)
+                                current = _read_reservation(settings, name, message_id, suffix=suffix)
                                 other_host = (
                                     current.split(" ", 1)[0] if current else LOCAL
                                 )
@@ -1909,6 +1931,7 @@ def import_channels(
                                     data,
                                     other_host,
                                     fence_present,
+                                    suffix=suffix,
                                 )
                                 skipped = True
                                 continue
@@ -1918,7 +1941,7 @@ def import_channels(
                                 )
                                 if appeared != data:
                                     reserved_host, _ = _reservation_parts(
-                                        _read_reservation(settings, name, message_id)
+                                        _read_reservation(settings, name, message_id, suffix=suffix)
                                     )
                                     _record_divergence(
                                         settings,
@@ -1930,6 +1953,7 @@ def import_channels(
                                         data,
                                         reserved_host or LOCAL,
                                         fence_present,
+                                        suffix=suffix,
                                     )
                                     skipped = True
                                     continue
@@ -2112,36 +2136,40 @@ def publish_channels(
             continue
         for entry in candidates:
             deadline.check()
-            if not entry.name.endswith(".msg"):
+            if not entry.name.endswith((".msg", ".emote")):
                 continue
-            message_id = entry.name[:-4]
+            message_id = Path(entry.name).stem
+            suffix = Path(entry.name).suffix
+            reservation_key = _reservation_key(message_id, suffix)
             if tracked is not None and (
                 f"channels/{name}/messages/{entry.name}" in tracked
             ):
                 continue
-            stamp = settled.get(message_id)
+            stamp = settled.get(reservation_key)
             if stamp is not None and recheck > 0 and 0 <= now - stamp < recheck:
                 continue
             try:
                 _validate_channel_id(message_id)
                 data = common.open_regular(Path(entry.path), settings.max_mail_bytes)
                 envelope = _parse_envelope(data, name, message_id, logger, unknown_seen)
+                if suffix == ".emote" and envelope.get("event") != "emote":
+                    raise common.ConfigError("envelope-event")
             except (common.ConfigError, OSError) as error:
                 _unpublishable(
                     stats, logger, name, message_id, _local_failure_reason(error)
                 )
                 continue
             received = common.destination(
-                settings.root, "bridge", "chan-received", name, message_id
+                settings.root, "bridge", "chan-received", name, reservation_key
             )
             if received.exists() or received.is_symlink():
                 if envelope["from"] in snapshot.real_rooms:
                     logger.emit("chan_self_conflict", channel=name, id=message_id)
-                decided.mark_channel(settings, name, message_id)
+                decided.mark_channel(settings, name, reservation_key)
                 continue
             if envelope["from"] not in snapshot.real_rooms:
                 if not _roomless_sender(envelope):
-                    decided.mark_channel(settings, name, message_id)
+                    decided.mark_channel(settings, name, reservation_key)
                     continue
                 try:
                     pmail.validate_participant(envelope["from"], "roomless sender")

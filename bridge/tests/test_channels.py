@@ -2935,6 +2935,70 @@ def _capture(errors, function):
         errors.append(error)
 
 
+
+class PorchEmoteIntegrationTest(unittest.TestCase):
+    setUpClass = ChannelIntegrationTest.setUpClass
+    setUp = ChannelIntegrationTest.setUp
+    tearDown = ChannelIntegrationTest.tearDown
+    publish = ChannelIntegrationTest.publish
+    alpha_snapshot = ChannelIntegrationTest.alpha_snapshot
+    import_alpha = ChannelIntegrationTest.import_alpha
+    tick_channels = ChannelIntegrationTest.tick_channels
+    page_until_walk_ends = ChannelIntegrationTest.page_until_walk_ends
+    # Inherit the existing bridge harness, not its test methods.
+    def test_emotes_export_page_import_replay_and_reservations_are_silent(self):
+        name = "porch-wire"
+        self.alpha.join(name, "alice")
+        local = self.alpha.root / "channels" / name / "messages"
+        ordinary = channel_id(910)
+        original = channel_message(ordinary, "alice", name, body="@bob ordinary")
+        (local / (ordinary + ".msg")).write_bytes(original)
+        self.publish(self.alpha)
+        baseline = self.import_alpha()
+        self.assertGreater(baseline.imported, 0)
+        event_dir = self.beta.root / "bridge" / "events" / name
+        before_events = {p.name: p.read_bytes() for p in event_dir.iterdir()}
+        emotes = {}
+        # Same-id .msg/.emote imports must have distinct reservations.
+        for index in range(6):
+            message_id = ordinary if index == 0 else channel_id(910 + index)
+            data = channel_message(message_id, "alice", name, event="emote", mentions=["bob"], body="@bob")
+            emotes[message_id] = data
+            (local / (message_id + ".emote")).write_bytes(data)
+        self.publish(self.alpha)
+        with mock.patch.object(channels, "CHANNEL_TREE_MAX", 2):
+            walk = self.page_until_walk_ends(self.alpha_snapshot())
+        self.assertGreater(len(walk), 1, "precondition: emotes exercised paging")
+        self.assertEqual(sum(t.imported for t in walk), len(emotes))
+        for message_id, data in emotes.items():
+            landed = self.beta.root / "channels" / name / "messages" / (message_id + ".emote")
+            self.assertEqual(landed.read_bytes(), data)
+            self.assertTrue(channels._message_reservation_exists(self.beta.settings, f"channels/{name}/messages/{message_id}.emote"))
+            self.assertIsNotNone(channels._read_reservation(self.beta.settings, name, message_id, ".emote"))
+        self.assertEqual({p.name:p.read_bytes() for p in event_dir.iterdir()}, before_events)
+        self.assertEqual(self.import_alpha().imported, 0)
+        self.assertEqual({p.name:p.read_bytes() for p in event_dir.iterdir()}, before_events)
+        # Even a malicious pending marker cannot replay .emote as a join.
+        marker=self.beta.root / "bridge" / "chan-joins-pending" / name / list(emotes)[1]
+        marker.parent.mkdir(parents=True,exist_ok=True); marker.write_text("pending")
+        members = (self.beta.root / "channels" / name / "members.json").read_bytes()
+        self.import_alpha()
+        self.assertEqual((self.beta.root / "channels" / name / "members.json").read_bytes(), members)
+
+    def test_corrupt_emotes_are_quarantined_without_bridge_events(self):
+        name="porch-corrupt"
+        root=self.alpha.repo / "channels" / name
+        (root / "messages").mkdir(parents=True)
+        (root / "channel.json").write_text(json.dumps(channel_record(name,"alice"))+"\n")
+        (root / "messages" / (channel_id(950)+".emote")).write_bytes(b"broken @bob")
+        (root / "messages" / (channel_id(951)+".emote")).write_bytes(channel_message(channel_id(951),"alice",name,event="join"))
+        self.alpha.commit("publish corrupt silent records")
+        stats=self.import_alpha()
+        self.assertEqual(stats.imported,0)
+        self.assertEqual(stats.quarantined,2)
+        self.assertFalse((self.beta.root / "bridge" / "events" / name).exists())
+
+
 def subprocess_run(args):
     import subprocess
 

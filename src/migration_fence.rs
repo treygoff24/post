@@ -623,7 +623,16 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
             command: Some(crate::cli::OwnerCommand::Init(_)),
         })
         | Command::Profile(crate::cli::ProfileArgs {
-            command: Some(crate::cli::ProfileCommand::Set(_) | crate::cli::ProfileCommand::Clear),
+            command:
+                Some(
+                    crate::cli::ProfileCommand::Set(_)
+                    | crate::cli::ProfileCommand::Clear
+                    | crate::cli::ProfileCommand::Avatar(crate::cli::ProfileAvatarArgs {
+                        command:
+                            crate::cli::ProfileAvatarCommand::Set { .. }
+                            | crate::cli::ProfileAvatarCommand::Clear,
+                    }),
+                ),
         })
         | Command::Catchup(_)
         | Command::Bridge(_) => true,
@@ -635,6 +644,7 @@ pub(crate) fn classify_write(command: &crate::cli::Command) -> bool {
             args.join
                 || args.leave
                 || args.send
+                || args.emote.is_some()
                 || args.body.is_some()
                 || args.body_file.is_some()
                 || args.discard
@@ -717,6 +727,9 @@ mod tests {
             &["post", "rooms", "rename", "alpha", "beta"],
             &["post", "profile", "set", "--name", "x"],
             &["post", "profile", "clear"],
+            &["post", "profile", "avatar", "set", "--file", "-"],
+            &["post", "profile", "avatar", "clear"],
+            &["post", "chat", "tax", "--emote", "wave"],
             &["post", "owner", "init", "--room", "alpha"],
             &["post", "watch"],
         ] {
@@ -750,6 +763,8 @@ mod tests {
             &["post", "rooms"],
             &["post", "rooms", "rename", "alpha", "beta", "--dry-run"],
             &["post", "profile", "show"],
+            &["post", "profile", "avatar", "show"],
+            &["post", "profile", "list", "--avatars"],
             &["post", "owner", "show"],
             &["post", "watch", "--snapshot"],
             &["post", "search", "needle"],

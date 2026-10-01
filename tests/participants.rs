@@ -1566,7 +1566,14 @@ fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
         .is_some_and(|sha| !sha.is_empty()));
     assert_eq!(
         value["capabilities"],
-        serde_json::json!(["participants", "lineages", "routing-receipts", "cursors-v2"])
+        serde_json::json!([
+            "participants",
+            "lineages",
+            "routing-receipts",
+            "cursors-v2",
+            "avatars-v1",
+            "emotes-v1"
+        ])
     );
     assert_eq!(tree(&ambiguous.mail_root), before);
 }

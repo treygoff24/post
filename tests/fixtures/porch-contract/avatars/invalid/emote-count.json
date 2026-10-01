@@ -1,0 +1,140 @@
+{
+  "format": 1,
+  "accent": "d",
+  "body": {
+    "idle": [
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "......dddd......",
+      "....dddddddd....",
+      "...dd33ddddddd..",
+      "..ddd3dddddddd..",
+      "..ddd0dddd0ddd..",
+      "..dddddddddddd..",
+      "..ddddd00ddddd..",
+      "..dddddddddddd..",
+      "...dddddddddd..."
+    ]
+  },
+  "head": {
+    "idle": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ]
+  },
+  "emotes": {
+    "wobble": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-1": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-2": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-3": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-4": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-5": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-6": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-7": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-8": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-9": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-10": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-11": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-12": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-13": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-14": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-15": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    },
+    "wobble-16": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    }
+  }
+}

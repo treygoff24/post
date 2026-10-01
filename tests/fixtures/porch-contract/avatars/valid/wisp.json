@@ -1,0 +1,156 @@
+{
+  "format": 1,
+  "accent": "c",
+  "body": {
+    "idle": [
+      "................",
+      "......cccc......",
+      "....cccccccc....",
+      "...cccccccccc...",
+      "...cc33cc33cc...",
+      "...cc30cc30cc...",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccccc00ccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccc.cccc.ccc..",
+      "..cc...cc...cc..",
+      "................"
+    ],
+    "float": [
+      "................",
+      "......cccc......",
+      "....cccccccc....",
+      "...cccccccccc...",
+      "...cc33cc33cc...",
+      "...cc30cc30cc...",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccccc00ccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccc.cc.cccc..",
+      "...cc..cc..cc...",
+      "................"
+    ],
+    "blink": [
+      "................",
+      "......cccc......",
+      "....cccccccc....",
+      "...cccccccccc...",
+      "...cccccccccc...",
+      "...cc00cc00cc...",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccccc00ccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccc.cccc.ccc..",
+      "..cc...cc...cc..",
+      "................"
+    ],
+    "talk": [
+      "................",
+      "......cccc......",
+      "....cccccccc....",
+      "...cccccccccc...",
+      "...cc33cc33cc...",
+      "...cc30cc30cc...",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccccc00ccccc..",
+      "..ccccc00ccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccc.cccc.ccc..",
+      "..cc...cc...cc..",
+      "................"
+    ],
+    "boo": [
+      "................",
+      "......cccc......",
+      "....cccccccc....",
+      "...cccccccccc...",
+      "...c333cc333c...",
+      "...c303cc303c...",
+      "..c333cccc333c..",
+      "..cccccccccccc..",
+      "..cccc0000cccc..",
+      "c.cccc0000cccc.c",
+      "cccccccccccccccc",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccc.cccc.ccc..",
+      "..cc...cc...cc..",
+      "................"
+    ],
+    "sleep": [
+      "................",
+      "................",
+      "......cccc......",
+      "....cccccccc....",
+      "...cccccccccc...",
+      "...cc00cc00cc...",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..cccccccccccc..",
+      "..ccc.cccc.ccc..",
+      "..cc...cc...cc..",
+      "................"
+    ]
+  },
+  "head": {
+    "idle": [
+      "..cccc..",
+      ".cccccc.",
+      "cc3cc3cc",
+      "cc0cc0cc",
+      "cccccccc",
+      "ccc00ccc",
+      "cccccccc",
+      "c.cc.cc."
+    ],
+    "blink": [
+      "..cccc..",
+      ".cccccc.",
+      "cccccccc",
+      "cc0cc0cc",
+      "cccccccc",
+      "ccc00ccc",
+      "cccccccc",
+      "c.cc.cc."
+    ],
+    "boo": [
+      "..cccc..",
+      ".cccccc.",
+      "cc3cc3cc",
+      "cc0cc0cc",
+      "cccccccc",
+      "cc0000cc",
+      "cccccccc",
+      "c.cc.cc."
+    ]
+  },
+  "emotes": {
+    "boo": {
+      "steps": [
+        { "pose": "float", "ms": 250 },
+        { "pose": "idle", "ms": 250 },
+        { "pose": "boo", "motion": "shake", "particle": "exclaim", "ms": 500 },
+        { "pose": "idle", "motion": "blink", "ms": 500 }
+      ]
+    }
+  }
+}

@@ -971,7 +971,15 @@ pub fn names(text: &str, word: &str) -> bool {
 /// whatever the store holds, so those keys are not required in the shape.
 /// Every other nested object is traversed. An entry here is a promise that
 /// the shape documents the map's value, not its keys.
-pub const DATA_KEYED_MAPS: &[&str] = &["unread", "pending", "pending_by_address", "rewritten"];
+pub const DATA_KEYED_MAPS: &[&str] = &[
+    "unread",
+    "pending",
+    "pending_by_address",
+    "rewritten",
+    "body",
+    "head",
+    "emotes",
+];
 
 /// The fields a real output carries that the shape must name: every key of
 /// every object at any depth (nested objects and objects inside arrays

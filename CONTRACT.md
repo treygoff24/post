@@ -1400,3 +1400,41 @@ Rust 2021+, clap 4 derive, serde/serde_json, thiserror or anyhow at the
 edge; keep dependencies minimal (no tokio — everything is local sync I/O).
 Layout per the rust-agent-cli skill: src/main.rs, src/cli.rs, src/commands/,
 src/output.rs, src/error.rs, src/lib.rs, tests/cli.rs.
+
+## Porch avatar and emote contract (2026-09-30)
+
+Capabilities `avatars-v1` and `emotes-v1` are additive to store v2.
+`profile avatar set --file <path|->` stores a validated format-1 pack as sorted,
+compact canonical JSON plus newline at `avatars/<participant>.json`; set and
+clear are silent. Show revalidates and reports null plus warnings for invalid
+stored packs. Profile show includes `avatar`; list includes `has_avatar`, with
+full packs under `--avatars`. The frozen rule corpus is
+`tests/fixtures/porch-contract/`; its README files and checksums pin rule IDs,
+canonical limits, frozen bytes, and record-reader verdicts.
+
+`chat <channel> --emote <name> [--at <participant-or-name>]` requires membership
+and a valid stored avatar. Its receipt is `{ok,message:{id,channel,sent,event,
+emote}}`, without crossed attention. Custom names shadow that sender's built-ins.
+The record freezes referenced body/head frames and authored steps (1280-byte
+canonical payload cap), with a 3072-byte ASCII-escaped encoded header cap.
+There is no body, subject, mention, reply, or signature. The target is visual.
+
+Emotes live at `channels/<channel>/messages/<id>.emote`. Attention enumerates
+`.msg` only: emotes, including corrupt files, cause no unread contribution,
+watch notification, hook notice, sink dispatch, or bridge wake-event record.
+Filesystem hints may schedule a reconciliation scan. Compatibility `.msg`
+records whose event is emote are also excluded from attention and unread targets.
+
+History and since merge both suffixes in bytewise ID order; newest-N and byte
+budgets count both. Grep and search remain message-only; search channel hits
+include optional `event`. Exact retrieval resolves both suffixes and returns an
+empty emote body. Reply, seen-by, acknowledgment and discard-through resolve
+messages only. A duplicate ID returns the `.msg` and diagnoses the `.emote`.
+Unreadable emotes are omitted with `unreadable_emote: <rule>` in `skipped_files`;
+invalid payloads remain visible with `emote_bubble: <rule>` there. Text renders
+`✦ <sender> <name>` (or `emoted` for invalid names), retaining immutable attribution.
+Frozen frames determine replay even for an unknown built-in library version.
+
+The bridge relays the suffix and excludes emotes from `bridge/events/`.
+Older post binaries ignore the sibling files; older bridges do not relay them.
+Avatars are local to each host; avatar relay is deferred.

@@ -21,6 +21,8 @@ struct ProfileOutput<'a> {
     /// Registry key the entry lives under.
     key: &'a str,
     profile: &'a Profile,
+    avatar: Option<serde_json::Value>,
+    warnings: Vec<String>,
     /// True for a legacy workspace-keyed entry (shown only; never stamped).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     legacy: bool,
@@ -60,6 +62,11 @@ struct ProfileListEntry {
     /// True when this entry's pfp blocks another participant from setting it
     /// now: the exact predicate `profile set` refuses on.
     holds_sigil: bool,
+    has_avatar: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<Option<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 const OCCUPANCY_NOTE: &str = "sigil occupancy is lease-dependent: a sigil is held only while its participant's lease is active (or its legacy room is registered), so it can change between this listing and `post profile set`";
@@ -74,7 +81,8 @@ pub(super) fn run(
         Some(ProfileCommand::Set(args)) => set(context, args, pretty),
         Some(ProfileCommand::Show(args)) => show(context, args, pretty),
         Some(ProfileCommand::Clear) => clear(context, pretty),
-        Some(ProfileCommand::List) => list(context, json, pretty),
+        Some(ProfileCommand::List(args)) => list(context, args.avatars, json, pretty),
+        Some(ProfileCommand::Avatar(args)) => avatar(context, args, pretty),
         None => show(context, ProfileShowArgs { participant: None }, pretty),
     }
 }
@@ -182,6 +190,8 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
         room: &room,
         participant: Some(&participant_id),
         key: &key,
+        avatar: crate::avatar::load(context, &participant_id).0,
+        warnings: crate::avatar::load(context, &participant_id).1,
         profile: &profile,
         legacy: false,
         announced,
@@ -228,7 +238,9 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
                     .and_then(|record| record.workspace)
                     .unwrap_or_else(|| id.clone());
                 (room, target.clone(), Some(id), false)
-            } else if profiles.contains_key(&participant_key(&target)) {
+            } else if profiles.contains_key(&participant_key(&target))
+                || crate::participant::load(context, &target)?.is_some()
+            {
                 let room = crate::participant::load(context, &target)?
                     .and_then(|record| record.workspace)
                     .unwrap_or_else(|| target.clone());
@@ -239,7 +251,12 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
         }
     };
     let profile = profiles.get(&key).cloned().unwrap_or_default();
+    let (avatar, warnings) = participant
+        .as_deref()
+        .map_or_else(|| (None, Vec::new()), |id| crate::avatar::load(context, id));
     let output = ProfileOutput {
+        avatar,
+        warnings,
         ok: true,
         room: &room,
         participant: participant.as_deref(),
@@ -254,9 +271,24 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
 
 /// Read-only: every profile entry, its holder, and whether its sigil is held
 /// right now, computed with `profile set`'s own uniqueness predicate.
-fn list(context: &Context, json: bool, pretty: bool) -> AppResult<CommandResult> {
+fn list(context: &Context, avatars: bool, json: bool, pretty: bool) -> AppResult<CommandResult> {
     let rooms = context.load_rooms()?;
-    let profiles = load_profiles(context)?;
+    let mut profiles = load_profiles(context)?;
+    // Avatar-only participants are profiles too; old binaries never rewrite these files.
+    if let Ok(entries) = std::fs::read_dir(context.root.join("avatars")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Some(id) = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|id| crate::participant::validate_participant_id(id).is_ok())
+                {
+                    profiles.entry(participant_key(id)).or_default();
+                }
+            }
+        }
+    }
     let now = std::time::SystemTime::now();
     let records: std::collections::BTreeMap<String, crate::participant::Participant> =
         crate::participant::list(context)?
@@ -287,7 +319,13 @@ fn list(context: &Context, json: bool, pretty: bool) -> AppResult<CommandResult>
                 }
                 None => (None, Some(key.clone()), None, true),
             };
+            let (avatar, warnings) = participant
+                .as_deref()
+                .map_or_else(|| (None, Vec::new()), |id| crate::avatar::load(context, id));
             ProfileListEntry {
+                has_avatar: avatar.is_some(),
+                avatar: if avatars { Some(avatar) } else { None },
+                warnings,
                 participant,
                 workspace,
                 name: profile.name,
@@ -362,6 +400,8 @@ fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         room: &room,
         participant: Some(&participant_id),
         key: &key,
+        avatar: crate::avatar::load(context, &participant_id).0,
+        warnings: crate::avatar::load(context, &participant_id).1,
         profile: &profile,
         legacy: false,
         announced,
@@ -394,4 +434,69 @@ fn announce(
         }
     }
     announced
+}
+
+fn avatar(
+    context: &Context,
+    args: crate::cli::ProfileAvatarArgs,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    use crate::cli::ProfileAvatarCommand;
+    use std::io;
+    let (id, committed) = match args.command {
+        ProfileAvatarCommand::Show(args) => {
+            let id = match args.participant {
+                Some(target) => target
+                    .strip_prefix("participant:")
+                    .unwrap_or(&target)
+                    .to_owned(),
+                None => context.sender()?.participant.id,
+            };
+            crate::participant::validate_participant_id(&id)?;
+            (id, false)
+        }
+        ProfileAvatarCommand::Set { file } => {
+            let id = context.sender()?.participant.id;
+            let bytes = if file.as_os_str() == "-" {
+                crate::avatar::read_bounded(io::stdin().lock())
+                    .map_err(|e| AppError::io("read avatar stdin", &file, e))?
+            } else {
+                let input = std::fs::File::open(&file)
+                    .map_err(|e| AppError::io("open avatar", &file, e))?;
+                crate::avatar::read_bounded(input)
+                    .map_err(|e| AppError::io("read avatar", &file, e))?
+            };
+            let pack = crate::avatar::parse(&bytes).map_err(crate::avatar::invalid)?;
+            let _lock = context.lock_rooms()?;
+            let path = context.root.join("avatars").join(format!("{id}.json"));
+            std::fs::create_dir_all(path.parent().unwrap())
+                .map_err(|e| AppError::io("create avatars directory", &path, e))?;
+            let mut bytes = crate::avatar::canonical(&pack);
+            bytes.push(b'\n');
+            crate::mailbox::atomic_replace(&path, &bytes)
+                .map_err(|e| AppError::io("store avatar", &path, e))?;
+            (id, true)
+        }
+        ProfileAvatarCommand::Clear => {
+            let id = context.sender()?.participant.id;
+            let _lock = context.lock_rooms()?;
+            let path = context.root.join("avatars").join(format!("{id}.json"));
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(AppError::io("clear avatar", &path, e)),
+            }
+            (id, true)
+        }
+    };
+    let (avatar, warnings) = crate::avatar::load(context, &id);
+    let result = CommandResult::json(
+        &serde_json::json!({"ok":true,"participant":id,"avatar":avatar,"warnings":warnings}),
+        pretty,
+    )?;
+    Ok(if committed {
+        result.registration_committed()
+    } else {
+        result
+    })
 }

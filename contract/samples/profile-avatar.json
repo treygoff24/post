@@ -1,0 +1,41 @@
+{
+  "avatar": {
+    "accent": "d",
+    "body": {
+      "idle": [
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "......dddd......",
+        "....dddddddd....",
+        "...dd33ddddddd..",
+        "..ddd3dddddddd..",
+        "..ddd0dddd0ddd..",
+        "..dddddddddddd..",
+        "..ddddd00ddddd..",
+        "..dddddddddddd..",
+        "...dddddddddd..."
+      ]
+    },
+    "format": 1,
+    "head": {
+      "idle": [
+        "........",
+        "..dddd..",
+        ".d3dddd.",
+        "dd0dd0dd",
+        "dddddddd",
+        "ddd00ddd",
+        "dddddddd",
+        ".dddddd."
+      ]
+    }
+  },
+  "ok": true,
+  "participant": "claude-dd611847",
+  "warnings": []
+}

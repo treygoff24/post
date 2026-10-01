@@ -4,7 +4,9 @@
     "participants",
     "lineages",
     "routing-receipts",
-    "cursors-v2"
+    "cursors-v2",
+    "avatars-v1",
+    "emotes-v1"
   ],
   "ok": true,
   "store_version": 2,

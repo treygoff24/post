@@ -1000,6 +1000,8 @@ pub struct CatchupOutput {
 /// One bounded, preview-only result from `post search`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
     /// `mail` or `channel`.
     pub source: String,
     /// Null for direct mail; the channel name for channel results.

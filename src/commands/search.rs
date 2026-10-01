@@ -314,6 +314,7 @@ fn collect_mail(
             own,
             pending,
             already_read,
+            event: None,
             kind: Some(envelope.kind),
         };
         matches.push(SearchHit {
@@ -368,6 +369,7 @@ fn collect_channel(
             pending: false,
             already_read,
             kind: None,
+            event: message.event.clone(),
         };
         matches.push(SearchHit {
             key: SortKey::new(&id, "channel", Some(channel_name)),

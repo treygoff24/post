@@ -37,6 +37,14 @@ pub(super) fn run(
             }
         }
     }
+    if let Some(name) = args.emote.as_deref() {
+        refuse_unintended_stdin(&args, json_output, pretty)?;
+        let message = crate::emote::send(context, &args.name, name, args.at.as_deref())?;
+        return Ok(CommandResult::committed(output::json(
+            &serde_json::json!({"ok":true,"message": {"id":message.id,"channel":message.channel,"sent":message.sent,"event":"emote","emote":message.emote}}),
+            pretty,
+        )?));
+    }
     if args.join {
         return join(context, &args, json_output, pretty);
     }
@@ -244,9 +252,12 @@ fn read_message_slice(
     let rooms = context.load_rooms()?;
     let (room, _) = channel::acting_room(context, &rooms)?;
     let paths = member_channel_paths(context, &args.name)?;
-    let id = resolve_message_stem(&paths, &args.name, message_input)?;
-    let path = paths.messages.join(format!("{id}.msg"));
-    let parsed = channel::parse_channel_message(&path)?;
+    let path = resolve_record_path(&paths, &args.name, message_input)?;
+    let parsed = if path.extension().and_then(|s| s.to_str()) == Some("emote") {
+        crate::emote::parse(&path)?.0
+    } else {
+        channel::parse_channel_message(&path)?
+    };
     let owner = crate::mailbox::resolve_owner(context)?;
     // Verification always covers the complete stored message, never the
     // returned slice in isolation.
@@ -1063,10 +1074,11 @@ fn filter_grep(
     Ok(batch
         .into_iter()
         .filter(|(message, body)| {
-            re.is_match(body)
-                || re.is_match(&message.subject)
-                || re.is_match(&message.from)
-                || re.is_match(&message.id)
+            message.event.as_deref() != Some("emote")
+                && (re.is_match(body)
+                    || re.is_match(&message.subject)
+                    || re.is_match(&message.from)
+                    || re.is_match(&message.id))
         })
         .collect())
 }
@@ -1657,6 +1669,10 @@ fn resolve_message_stem(
     let prefix = output::unmark_reference(prefix);
     let mut matches: Vec<String> = channel::message_files(&paths.messages)?
         .iter()
+        .filter(|path| {
+            !channel::parse_channel_message(path)
+                .is_ok_and(|p| p.message.event.as_deref() == Some("emote"))
+        })
         .filter_map(|path| path.file_stem().and_then(|value| value.to_str()))
         .filter(|stem| stem.starts_with(prefix))
         .map(str::to_owned)
@@ -1666,7 +1682,7 @@ fn resolve_message_stem(
             ErrorCode::NotFound,
             format!("no message in channel '{channel_name}' matching id/prefix '{prefix}'"),
             format!(
-                "Pass a full message id or a unique prefix. `post chat {0} --history 25` lists recent ids, and `post chat {0} --message <id> --max-bytes 8000` reads one message; ids from other channels do not resolve here.",
+                "emote records are never reply, seen-by or unread targets. `post chat {0} --history 25` lists recent ids; pass a .msg id from this channel.",
                 crate::mailbox::shell_quote(channel_name)
             ),
         )
@@ -1687,6 +1703,36 @@ fn resolve_message_stem(
             .matches(matches)
             .reason("ambiguous message id prefix"))
         }
+    }
+}
+
+fn resolve_record_path(
+    paths: &channel::ChannelPaths,
+    channel_name: &str,
+    prefix: &str,
+) -> AppResult<std::path::PathBuf> {
+    let prefix = output::unmark_reference(prefix);
+    let matches: Vec<_> = crate::emote::history_files(&paths.messages)?
+        .into_iter()
+        .filter(|path| {
+            let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            id.starts_with(prefix)
+                && !(path.extension().and_then(|s| s.to_str()) == Some("emote")
+                    && paths.messages.join(format!("{id}.msg")).exists())
+        })
+        .collect();
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("no record in channel '{channel_name}' matching '{prefix}'"),
+            "Pass a record id from channel history.",
+        )),
+        _ => Err(AppError::new(
+            ErrorCode::AmbiguousId,
+            "record prefix matches multiple messages or emotes",
+            "Pass a longer unique prefix.",
+        )),
     }
 }
 
@@ -1791,7 +1837,7 @@ fn collect_batch_scanned(
     }
     let mut batch = Vec::new();
     let mut skipped_files = Vec::new();
-    for path in channel::message_files(&paths.messages)? {
+    for path in crate::emote::history_files(&paths.messages)? {
         // The filename id is the order key (a parsed envelope must match its
         // filename), so the range check needs no parse: a message outside it
         // is ignored even if now unreadable.
@@ -1801,11 +1847,38 @@ fn collect_batch_scanned(
         if !after.is_none_or(|last| id > last) {
             continue;
         }
-        let parsed = match channel::parse_channel_message(&path) {
+        let is_emote = path.extension().and_then(|s| s.to_str()) == Some("emote");
+        if is_emote && paths.messages.join(format!("{id}.msg")).exists() {
+            skipped_files.push(crate::emote::diagnostic(
+                &path,
+                "duplicate_id",
+                "message takes precedence",
+            ));
+            continue;
+        }
+        let result = if is_emote {
+            crate::emote::parse(&path).map(|(parsed, rule)| {
+                if let Some(rule) = rule {
+                    skipped_files.push(crate::emote::diagnostic(&path, "emote_bubble", rule));
+                }
+                parsed
+            })
+        } else {
+            channel::parse_channel_message(&path)
+        };
+        let parsed = match result {
             Ok(parsed) => parsed,
             Err(error) => match channel::SkippedFile::from_error(&path, &error) {
                 Some(file) => {
-                    skipped_files.push(file);
+                    skipped_files.push(if is_emote {
+                        crate::emote::diagnostic(
+                            &path,
+                            "unreadable_emote",
+                            error.details.reason.as_deref().unwrap_or("read-error"),
+                        )
+                    } else {
+                        file
+                    });
                     continue;
                 }
                 None => return Err(error),
@@ -1944,6 +2017,21 @@ fn render_chat_text_item(
     message_ids: &std::collections::HashSet<String>,
     owner: Option<&crate::mailbox::ResolvedOwner>,
 ) -> String {
+    if message.event.as_deref() == Some("emote") {
+        let name = message
+            .emote
+            .as_ref()
+            .and_then(|e| e.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|n| crate::avatar::name_valid(n))
+            .unwrap_or("emoted");
+        return format!(
+            "\n✦ {} {} · id={}\n",
+            output::sender_label(output::SenderAttribution::from(message)),
+            name,
+            labelled_reference(&message.id, message_ids)
+        );
+    }
     let reply = output::channel_reply_metadata(context, message);
     let id = labelled_reference(&message.id, message_ids);
     let re = message
@@ -2648,6 +2736,7 @@ mod tests {
         pfp: &str,
     ) {
         let message = ChannelMessage {
+            emote: None,
             id: id.to_owned(),
             from: from.to_owned(),
             channel: "tax".to_owned(),
@@ -2672,6 +2761,7 @@ mod tests {
 
     fn seed_message(dir: &Path, id: &str, from: &str, body: &str) {
         let message = ChannelMessage {
+            emote: None,
             id: id.to_owned(),
             from: from.to_owned(),
             channel: "tax".to_owned(),
@@ -3045,6 +3135,7 @@ mod tests {
     fn signed_status_detects_and_fails_safely() {
         let (root, context) = chat_context("signed");
         let msg = |from: &str| ChannelMessage {
+            emote: None,
             id: ID1.to_owned(),
             from: from.to_owned(),
             channel: "tax".to_owned(),
@@ -3139,6 +3230,7 @@ mod tests {
         // inherit VERIFIED.
         let (root, context) = chat_context("signed-lines");
         let msg = |from: &str| ChannelMessage {
+            emote: None,
             id: ID1.to_owned(),
             from: from.to_owned(),
             channel: "tax".to_owned(),
@@ -3227,6 +3319,7 @@ mod tests {
         let (root, context) = chat_context("render");
         let dir = seed_channel(&root, &["alpha"]);
         let join_event = ChannelMessage {
+            emote: None,
             id: ID1.to_owned(),
             from: "gamma".to_owned(),
             channel: "tax".to_owned(),

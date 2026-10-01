@@ -2,6 +2,7 @@
   "ok": true,
   "profiles": [
     {
+      "has_avatar": false,
       "holds_sigil": true,
       "key": "participant:claude-dd611847",
       "lease": "active",

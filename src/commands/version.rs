@@ -2,8 +2,14 @@ use crate::command_result::CommandResult;
 use crate::error::AppResult;
 use serde::Serialize;
 
-pub(crate) const CAPABILITIES: [&str; 4] =
-    ["participants", "lineages", "routing-receipts", "cursors-v2"];
+pub(crate) const CAPABILITIES: [&str; 6] = [
+    "participants",
+    "lineages",
+    "routing-receipts",
+    "cursors-v2",
+    "avatars-v1",
+    "emotes-v1",
+];
 
 const STORE_VERSION: u64 = 2;
 

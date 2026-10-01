@@ -99,6 +99,12 @@ impl BlockingRule {
 /// by 013434 (microsecond ids).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub emote: Option<serde_json::Value>,
     pub id: String,
     pub from: String,
     pub channel: String,

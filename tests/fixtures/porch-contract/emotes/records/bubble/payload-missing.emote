@@ -1,0 +1,12 @@
+{
+  "id": "20260930-210219-250461-e00013",
+  "from": "bolt",
+  "channel": "porch-build",
+  "subject": "",
+  "sent": "2026-09-30 16:02:11 -0500",
+  "from_participant": "claude-0f00ba11",
+  "address_kind": "channel",
+  "event": "emote",
+  "sender_provenance": "participant-binding"
+}
+---

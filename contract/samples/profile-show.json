@@ -1,4 +1,5 @@
 {
+  "avatar": null,
   "key": "participant:claude-dd611847",
   "ok": true,
   "participant": "claude-dd611847",
@@ -6,5 +7,6 @@
     "name": "Reader",
     "pfp": "📮"
   },
-  "room": "alpha"
+  "room": "alpha",
+  "warnings": []
 }

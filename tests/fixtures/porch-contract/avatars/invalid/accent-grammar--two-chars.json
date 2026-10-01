@@ -1,0 +1,44 @@
+{
+  "format": 1,
+  "accent": "dd",
+  "body": {
+    "idle": [
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "......dddd......",
+      "....dddddddd....",
+      "...dd33ddddddd..",
+      "..ddd3dddddddd..",
+      "..ddd0dddd0ddd..",
+      "..dddddddddddd..",
+      "..ddddd00ddddd..",
+      "..dddddddddddd..",
+      "...dddddddddd..."
+    ]
+  },
+  "head": {
+    "idle": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ]
+  },
+  "emotes": {
+    "wobble": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    }
+  }
+}

@@ -359,9 +359,14 @@ fn tolerates_resolution_error(
         }
         Command::Profile(args) => matches!(
             &args.command,
-            Some(ProfileCommand::List)
+            Some(ProfileCommand::List(_))
                 | Some(ProfileCommand::Show(crate::cli::ProfileShowArgs {
                     participant: Some(_)
+                }))
+                | Some(ProfileCommand::Avatar(crate::cli::ProfileAvatarArgs {
+                    command: crate::cli::ProfileAvatarCommand::Show(crate::cli::ProfileShowArgs {
+                        participant: Some(_)
+                    })
                 }))
         ),
         _ => false,
@@ -611,7 +616,14 @@ fn participant_required(command: &Command) -> bool {
         ),
         Command::Profile(args) => matches!(
             &args.command,
-            Some(ProfileCommand::Set(_) | ProfileCommand::Clear)
+            Some(
+                ProfileCommand::Set(_)
+                    | ProfileCommand::Clear
+                    | ProfileCommand::Avatar(crate::cli::ProfileAvatarArgs {
+                        command: crate::cli::ProfileAvatarCommand::Set { .. }
+                            | crate::cli::ProfileAvatarCommand::Clear
+                    })
+            )
         ),
         _ => false,
     }

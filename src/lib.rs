@@ -24,6 +24,7 @@ macro_rules! eprint {
 }
 
 mod app;
+mod avatar;
 mod bridge_topology;
 mod channel;
 mod channel_archive;
@@ -32,6 +33,7 @@ mod cli;
 mod command_result;
 mod commands;
 mod cursor_state;
+mod emote;
 mod error;
 mod imports;
 mod lineage;

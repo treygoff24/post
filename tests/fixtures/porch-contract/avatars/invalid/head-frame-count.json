@@ -1,0 +1,124 @@
+{
+  "format": 1,
+  "accent": "d",
+  "body": {
+    "idle": [
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "................",
+      "......dddd......",
+      "....dddddddd....",
+      "...dd33ddddddd..",
+      "..ddd3dddddddd..",
+      "..ddd0dddd0ddd..",
+      "..dddddddddddd..",
+      "..ddddd00ddddd..",
+      "..dddddddddddd..",
+      "...dddddddddd..."
+    ]
+  },
+  "head": {
+    "idle": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f1": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f2": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f3": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f4": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f5": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f6": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f7": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ],
+    "f8": [
+      "........",
+      "..dddd..",
+      ".d3dddd.",
+      "dd0dd0dd",
+      "dddddddd",
+      "ddd00ddd",
+      "dddddddd",
+      ".dddddd."
+    ]
+  },
+  "emotes": {
+    "wobble": {
+      "steps": [
+        { "pose": "idle", "motion": "shake", "ms": 250 },
+        { "pose": "idle", "particle": "heart", "ms": 250 }
+      ]
+    }
+  }
+}

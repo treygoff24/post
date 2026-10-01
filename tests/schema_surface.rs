@@ -117,7 +117,14 @@ fn participant_identity_adopt_and_version_schema_surface_is_complete() {
     assert_eq!(schema.store_version, 2);
     assert_eq!(
         schema.capabilities,
-        vec!["participants", "lineages", "routing-receipts", "cursors-v2"]
+        vec![
+            "participants",
+            "lineages",
+            "routing-receipts",
+            "cursors-v2",
+            "avatars-v1",
+            "emotes-v1"
+        ]
     );
     let watch = schema
         .commands
@@ -553,7 +560,15 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
     assert_shape!(
         "profile",
         &schema.output_shapes.profile,
-        ["ok", "room", "profile", "announced", "list:"]
+        [
+            "ok",
+            "room",
+            "profile",
+            "avatar",
+            "warnings",
+            "announced",
+            "list:"
+        ]
     );
     assert_shape!(
         "watch",

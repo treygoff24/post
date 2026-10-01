@@ -1220,6 +1220,7 @@ mod tests {
         let late_id = "20260831-171234-000002-b2c3d4";
         let write_message = |id: &str| {
             let message = ChannelMessage {
+                emote: None,
                 id: id.to_owned(),
                 from: "beta".to_owned(),
                 channel: "tax".to_owned(),

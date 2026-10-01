@@ -411,6 +411,21 @@ fn produce() -> BTreeMap<&'static str, String> {
         );
         samples.insert(name, normalizer.document(&output));
     }
+    let avatar_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/porch-contract/avatars/valid/blob.json");
+    let avatar = as_reader(&[
+        "profile",
+        "avatar",
+        "set",
+        "--file",
+        avatar_file.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_success(&avatar);
+    samples.insert("profile-avatar.json", normalizer.document(&avatar));
+    let emote = as_reader(&["chat", "tax", "--emote", "hop", "--json"]);
+    assert_success(&emote);
+    samples.insert("chat-emote.json", normalizer.document(&emote));
 
     // Cursor re-report: a participant whose cursor state is unusable sees its
     // history as unread, and each event says so.

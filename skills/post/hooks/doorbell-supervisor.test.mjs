@@ -1743,3 +1743,55 @@ describe("per-channel mute", () => {
     assert.equal(w.residentCalls[0].args.at(-1), "mention");
   });
 });
+
+import { porchSnapshots } from '../../../tests/porch-store.mjs';
+describe('Porch emotes cannot dispatch attention sinks', () => {
+  for (const cursor of ['healthy', 'missing', 'corrupt']) {
+    for (const ordinary of [false, true]) {
+      test(`${cursor} cursors, ordinary=${ordinary}: subscriptions, mute, herdr, resident, desktop`, async () => {
+        const pair = porchSnapshots(POST_BIN, { ordinary, cursor });
+        for (const prefs of [{ channels: ['ops'] }, { channels: [] }, { channels: ['ops'], muted: ['ops'] }]) {
+          for (const sink of ['herdr', 'resident', 'desktop']) {
+            async function exercise(raw) {
+              const w = makeWorld();
+              if (sink === 'resident') {
+                saveResident(w.paths, 'beta', ['/usr/bin/porch-test-wake']);
+                w.enable('beta', prefs);
+                w.snapshots.set('beta', { result: ok(raw.room) });
+              } else {
+                w.addParticipant(pair.id, 'porch-session', { workspace: 'beta' });
+                w.addPane('wC:p1', 'porch-session');
+                w.enable(pair.id, { ...prefs, desktop: sink === 'desktop' });
+                w.snapshots.set(pair.id, { result: ok(raw.bound) });
+                if (sink === 'desktop') {
+                  w.panes[0].status = 'working';
+                  w.getOverride.set('wC:p1', () => ok(JSON.stringify({ result: { agent: { pane_id: 'wC:p1', terminal_id: w.panes[0].terminal_id, agent_status: 'working', focused: false, agent_session: { kind: 'id', value: 'porch-session' } } } })));
+                }
+              }
+              await w.run();
+              if (sink === 'desktop') {
+                const sub = w.sub(pair.id); assert.ok(sub);
+                sub.scannable = true; w.sup.markDirty(sub, 'hint'); w.sup.pump(); await w.sup.idle();
+              }
+              const result = {
+                prompts: w.prompts.length, residents: w.residentCalls.length, desktop: w.desktop.length,
+                // Only the sandbox root varies between identical worlds.
+                deliveries: JSON.parse(JSON.stringify({ prompts: w.prompts, residents: w.residentCalls, desktop: w.desktop }).replaceAll(w.dir, '<world>')),
+              };
+              assert.ok(w.snapshotCalls().length > 0, 'producer snapshot was consumed');
+              return result;
+            }
+            const before = await exercise(pair.before);
+            const after = await exercise(pair.after);
+            assert.deepEqual(after, before, `${sink} ${JSON.stringify(prefs)}`);
+            if (!ordinary || prefs.muted) assert.deepEqual(after, {
+              prompts: 0, residents: 0, desktop: 0,
+              deliveries: { prompts: [], residents: [], desktop: [] },
+            });
+            else assert.ok(after.prompts + after.residents + after.desktop > 0, `${sink} ${JSON.stringify(prefs)}: ordinary control rings the selected sink`);
+          }
+        }
+      });
+    }
+  }
+});
