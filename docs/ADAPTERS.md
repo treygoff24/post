@@ -420,8 +420,10 @@ Codex, `sessionStart` for Cursor, and `UserPromptSubmit` for Grok), it:
    than silently choosing one actor. The one exception is a host harness that
    binds its own participant and delivers its mail itself (Loom): it exports
    `POST_HOST_PARTICIPANT=<id>` beside `POST_PARTICIPANT=<id>`, and a hook that
-   finds the two equal does nothing at all (no bind, touch, snapshot, notice,
-   conflict line, or state write). A declaration that names a different id than
+   finds the two equal handles no mail (no bind, touch, snapshot, notice,
+   conflict line, or mail-state write). The adapter's observer still runs
+   first, so Claude's doorbell bookkeeping (busy/idle marks and lifecycle
+   cleanup in an existing doorbell directory) continues. A declaration that names a different id than
    `POST_PARTICIPANT` does not count, so a rewritten binding still warns.
    Binding is the only path that mints a participant; cwd supplies workspace
    context but never the sender. A failed or malformed bind emits one setup

@@ -58,7 +58,8 @@
 //   (Loom) says so by exporting `POST_HOST_PARTICIPANT=<id>` next to
 //   `POST_PARTICIPANT=<id>`. When the two are the same id the hook has nothing
 //   to do and stands down: no bind, no touch, no snapshot, no notice, no
-//   conflict line, and no state written. Without that declaration an explicit
+//   conflict line, and no mail state written. The adapter's `observe` has
+//   already run by then, so its own bookkeeping (Claude's doorbell marks) goes on. Without that declaration an explicit
 //   POST_PARTICIPANT that is not this payload's own participant stays a
 //   conflict, because a stale id inherited from another agent's shell looks
 //   identical to a deliberate one from inside the hook. A declaration naming a
