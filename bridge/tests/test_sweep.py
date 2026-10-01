@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-PINNED_POST_VERSION = "post 0.9.0 up to, but not including, post 0.10.0"
+PINNED_POST_VERSION = "post 0.10.0 up to, but not including, post 0.11.0"
 HERE = Path(__file__).resolve().parent
 SWEEP = HERE.parent / "sweep.py"
 POST = os.environ.get("POST_BIN", "post")
@@ -4301,7 +4301,7 @@ class LogDedupeStateTest(unittest.TestCase):
         ld = self.logdedupe
         fields = [
             {"host": "mac", "room": "hq", "id": f"20260923-12{i:04d}-{i:06x}",
-             "path": "/Users/trey/.claude-mail/bridge/quarantine/" + "d" * 400}
+             "path": str(self.root / "bridge" / "quarantine" / ("d" * 400))}
             for i in range(ld.MAX_ENTRIES)
         ]
         log = ld.ConditionLog(self.path, self.root)

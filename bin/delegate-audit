@@ -1,4 +1,9 @@
 #!/usr/bin/env sh
 # Exec shim: the writing-plans audit tool lives outside this repo; the final
 # close verify row resolves bin/delegate-audit against the target repo.
-exec /home/trey-agent/.local/bin/delegate-audit "$@"
+tool=/home/trey-agent/.local/bin/delegate-audit
+if [ ! -x "$tool" ]; then
+  printf 'delegate-audit: optional external audit tool is missing or not executable: %s\n' "$tool" >&2
+  exit 127
+fi
+exec "$tool" "$@"

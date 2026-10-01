@@ -21,7 +21,7 @@ mkdir -p "$HOME_DIR" "$MAIL_ROOT" "$BIN"
 cat >"$BIN/post" <<'SH'
 #!/bin/sh
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'post 0.9.0'
+  printf '%s\n' 'post 0.10.0'
   exit 0
 fi
 printf '%s\n' 'fake post: unsupported command' >&2
@@ -83,11 +83,25 @@ COMMON_ENV=(
   "HOME=$HOME_DIR"
   "XDG_CONFIG_HOME=$XDG_CONFIG"
   "POST_MAIL_ROOT=$MAIL_ROOT"
+  "POST_BRIDGE_RELAY_URL=$REMOTE"
   "PATH=$BIN:$PATH"
   "POST_BRIDGE_SYSTEMCTL_LOG=$TMP/systemctl.log"
 )
 
 SCOPE_ERROR='{"message":"token does not have at least one of required scope(s): [read:user]"}'
+if env "${COMMON_ENV[@]}" POST_BRIDGE_RELAY_URL= \
+  "$ROOT/bridge/enroll.sh" --dry-run --host x \
+  >"$TMP/enroll-no-relay.out" 2>"$TMP/enroll-no-relay.err"; then
+  printf '%s\n' 'enrollment without a relay URL was accepted' >&2
+  exit 1
+fi
+grep -Fq 'set POST_BRIDGE_RELAY_URL to the relay repository URL' "$TMP/enroll-no-relay.err"
+if env -u POST_BRIDGE_RELAY_URL "$ROOT/bridge/enroll.sh" --dry-run --host x \
+  >"$TMP/enroll-unset-relay.out" 2>"$TMP/enroll-unset-relay.err"; then
+  printf '%s\n' 'enrollment with an unset relay URL was accepted' >&2
+  exit 1
+fi
+grep -Fq 'set POST_BRIDGE_RELAY_URL to the relay repository URL' "$TMP/enroll-unset-relay.err"
 env "${COMMON_ENV[@]}" FAKE_FJ_USER_BODY="$SCOPE_ERROR" \
   "$ROOT/bridge/enroll.sh" --dry-run --host x \
   >"$TMP/enroll-scope.out" 2>"$TMP/enroll-scope.err"
@@ -116,12 +130,12 @@ if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" "${INSTALL_ARGS[@]}" --post-
   printf '%s\n' 'old Post version was accepted' >&2
   exit 1
 fi
-grep -Fq "post version must be post 0.9.0 up to, but not including, post 0.10.0, optionally followed by ' (build ...)'; got post 0.6.0" "$TMP/old.err"
+grep -Fq "post version must be post 0.10.0 up to, but not including, post 0.11.0, optionally followed by ' (build ...)'; got post 0.6.0" "$TMP/old.err"
 [ ! -e "$CLONE" ] || { printf '%s\n' 'version refusal cloned the relay' >&2; exit 1; }
-# Any version from 0.9.0 up to, but not including, 0.10.0 is accepted, with or
-# without a build annotation; 0.10.0, another major, a malformed version or a
+# Any version from 0.10.0 up to, but not including, 0.11.0 is accepted, with or
+# without a build annotation; 0.11.0, another major, a malformed version or a
 # malformed annotation is not. Each variant gets its own fake post.
-for variant in 'post 0.9.0 (build abc1234, 2026-09-28)' 'post 0.9.0 (build abc1234-dirty)' 'post 0.9.1' 'post 0.9.12 (build abc1234)'; do
+for variant in 'post 0.10.0 (build abc1234, 2026-09-28)' 'post 0.10.0 (build abc1234-dirty)' 'post 0.10.1' 'post 0.10.12 (build abc1234)'; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$variant" >"$BIN/post-annotated"
   chmod 0755 "$BIN/post-annotated"
   env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-annotated" --host cell-a \
@@ -130,7 +144,7 @@ for variant in 'post 0.9.0 (build abc1234, 2026-09-28)' 'post 0.9.0 (build abc12
   env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --uninstall --clone-dir "$TMP/clone-annotated" >/dev/null
   rm -rf "$TMP/clone-annotated" "$MAIL_ROOT/bridge/config.json"
 done
-for variant in 'post 0.8.9' 'post 0.10.0' 'post 0.10.0 (build abc1234)' 'post 1.0.0' 'post 0.9' 'post 0.9.' 'post 0.9.01' 'post 0.90.0' 'post 0.9.0 build abc1234' 'post 0.9.0 (build abc) trailing' 'post 0.9.0-rc1' 'post 0.9.1-rc1' 'post 0.9.0 (build (nested))' 'xpost 0.9.0' 'post  0.9.0' 'post 0.9.0 (build abc1234)x'; do
+for variant in 'post 0.8.9' 'post 0.11.0' 'post 0.11.0 (build abc1234)' 'post 1.0.0' 'post 0.10' 'post 0.10.' 'post 0.10.01' 'post 0.90.0' 'post 0.10.0 build abc1234' 'post 0.10.0 (build abc) trailing' 'post 0.10.0-rc1' 'post 0.10.1-rc1' 'post 0.10.0 (build (nested))' 'xpost 0.10.0' 'post  0.10.0' 'post 0.10.0 (build abc1234)x'; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$variant" >"$BIN/post-annotated"
   chmod 0755 "$BIN/post-annotated"
   if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-annotated" --host cell-a \

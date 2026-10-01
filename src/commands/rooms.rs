@@ -1989,7 +1989,7 @@ mod tests {
         // teach "crons"; with no vote the bridge host id supplies the suffix.
         let rooms = room_map_at(&[
             ("cos", "/root/remote/devbox/cos"),
-            ("cos-crons", "/Users/trey/Code/cos-crons"),
+            ("cos-crons", "/fixtures/projects/cos-crons"),
         ]);
         let placeholders = placeholder_map(&["cos"]);
         assert_eq!(learned_host_suffixes(&rooms, &placeholders).first(), None);
