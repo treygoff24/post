@@ -28,6 +28,8 @@ from .harness_channels import (  # noqa: E402
     channel_message,
     channel_record,
     snapshot_for,
+    post_env,
+    run,
 )
 from .test_sweep import PINNED_POST_VERSION, SWEEPER, CanonicalTemporaryDirectory
 
@@ -2950,7 +2952,17 @@ class PorchEmoteIntegrationTest(unittest.TestCase):
         name = "porch-wire"
         self.alpha.join(name, "alice")
         local = self.alpha.root / "channels" / name / "messages"
-        ordinary = channel_id(910)
+        pack = HERE.parent.parent / "tests/fixtures/porch-contract/avatars/valid/bolt.json"
+        self.alpha.post("profile", "avatar", "set", "--file", pack, cwd=self.alpha.workspaces["alice"])
+        emotes = {}
+        for _ in range(6):
+            receipt = json.loads(self.alpha.post("chat", name, "--emote", "hop", "--json", cwd=self.alpha.workspaces["alice"]).stdout)
+            message_id = receipt["message"]["id"]
+            record = local / (message_id + ".emote")
+            emotes[message_id] = record.read_bytes()
+            self.assertEqual(json.loads(emotes[message_id].split(b"\n---\n", 1)[0])["emote"], receipt["message"]["emote"])
+            record.unlink()
+        ordinary = next(iter(emotes))
         original = channel_message(ordinary, "alice", name, body="@bob ordinary")
         (local / (ordinary + ".msg")).write_bytes(original)
         self.publish(self.alpha)
@@ -2958,12 +2970,8 @@ class PorchEmoteIntegrationTest(unittest.TestCase):
         self.assertGreater(baseline.imported, 0)
         event_dir = self.beta.root / "bridge" / "events" / name
         before_events = {p.name: p.read_bytes() for p in event_dir.iterdir()}
-        emotes = {}
         # Same-id .msg/.emote imports must have distinct reservations.
-        for index in range(6):
-            message_id = ordinary if index == 0 else channel_id(910 + index)
-            data = channel_message(message_id, "alice", name, event="emote", mentions=["bob"], body="@bob")
-            emotes[message_id] = data
+        for message_id, data in emotes.items():
             (local / (message_id + ".emote")).write_bytes(data)
         self.publish(self.alpha)
         with mock.patch.object(channels, "CHANNEL_TREE_MAX", 2):
@@ -2984,6 +2992,52 @@ class PorchEmoteIntegrationTest(unittest.TestCase):
         members = (self.beta.root / "channels" / name / "members.json").read_bytes()
         self.import_alpha()
         self.assertEqual((self.beta.root / "channels" / name / "members.json").read_bytes(), members)
+
+    def test_real_roomless_emote_near_write_cap_survives_host_stamping(self):
+        name = "porch-roomless"
+        cwd = self.alpha.base / "unregistered"
+        cwd.mkdir()
+        env = post_env(self.alpha.root)
+        participant = json.loads(run([POST, "participant", "bind", "--new", "--json"], cwd=cwd, env=env).stdout)["id"]
+        env["POST_PARTICIPANT"] = participant
+        def post(*args):
+            return run([POST, *args], cwd=cwd, env=env)
+        post("chat", name, "--join")
+        pack = HERE.parent.parent / "tests/fixtures/porch-contract/avatars/valid/limit-freeze-1280.json"
+        post("profile", "avatar", "set", "--file", pack)
+        post("identity", "new", "z" * 200)
+        first = json.loads(post("chat", name, "--emote", "chatter", "--json").stdout)["message"]["id"]
+        directory = self.alpha.root / "channels" / name / "messages"
+        base = len((directory / (first + ".emote")).read_bytes().split(b"\n---\n", 1)[0])
+        # Each accepted non-BMP letter adds 12 escaped ASCII bytes to the header.
+        letters = max(1, (2820 - base - 23 + 11) // 12)
+        self.assertLessEqual(letters, 32)
+        post("profile", "set", "--name", "\U00010400" * letters)
+        second = json.loads(post("chat", name, "--emote", "chatter", "--json").stdout)["message"]["id"]
+        base = len((directory / (second + ".emote")).read_bytes().split(b"\n---\n", 1)[0])
+        address_length = 3070 - base - len(',\n  "sender_address": ""')
+        self.assertTrue(1 <= address_length <= 256, (base, address_length))
+        env["POST_SENDER_ADDRESS"] = "a" * address_length
+        message_id = json.loads(post("chat", name, "--emote", "chatter", "--json").stdout)["message"]["id"]
+        original = (directory / (message_id + ".emote")).read_bytes()
+        header = original.split(b"\n---\n", 1)[0]
+        self.assertTrue(3000 <= len(header) <= 3072, len(header))
+        self.assertEqual(json.loads(header)["from"], participant)
+        self.publish(self.alpha)
+        stats = self.import_alpha()
+        self.assertGreaterEqual(stats.imported, 3)
+        landed = self.beta.root / "channels" / name / "messages" / (message_id + ".emote")
+        expected = channels._stamp_roomless_host(original, json.loads(header), "alpha")
+        self.assertEqual(landed.read_bytes(), expected)
+        stamped = landed.read_bytes().split(b"\n---\n", 1)[0]
+        self.assertGreater(len(stamped), len(header))
+        self.assertLessEqual(len(stamped), 4096)
+        self.assertEqual(json.loads(stamped)["from_host"], "alpha")
+        event_dir = self.beta.root / "bridge/events" / name
+        self.assertTrue(all(not (event_dir / (record.stem + ".json")).exists() for record in directory.glob("*.emote")))
+        self.beta.join(name, "bob")
+        output = self.beta.post("chat", name, "--message", message_id, "--max-bytes", "8000", "--json", cwd=self.beta.workspaces["bob"])
+        self.assertEqual(json.loads(output.stdout)["message"]["emote"], json.loads(header)["emote"])
 
     def test_corrupt_emotes_are_quarantined_without_bridge_events(self):
         name="porch-corrupt"

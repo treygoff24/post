@@ -5,6 +5,208 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn review_doctor_accepts_valid_emotes_and_warns_on_unreadable_records() {
+    let (s, a, _) = setup();
+    set(&s, &a, "bolt");
+    let receipt = ok(&s, &["chat", "ops", "--emote", "hop", "--json"], &a);
+    let dir = s.mail_root.join("channels/ops/messages");
+    let valid = dir.join(format!(
+        "{}.emote",
+        receipt["message"]["id"].as_str().unwrap()
+    ));
+    let corrupt = dir.join("20990930-100000-000001-aaaaaa.emote");
+    fs::write(&corrupt, b"broken").unwrap();
+    let output = run(&s, &["doctor", "--json"], &a);
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = value["checks"].as_array().unwrap();
+    assert!(
+        !checks
+            .iter()
+            .any(|c| c.to_string().contains(valid.to_str().unwrap())),
+        "{value}"
+    );
+    let warning = checks
+        .iter()
+        .find(|c| c.to_string().contains(corrupt.to_str().unwrap()))
+        .expect("corrupt emote warning");
+    assert_eq!(warning["severity"], "warning");
+    assert!(warning.to_string().contains("envelope-separator"));
+    assert!(!warning.to_string().contains("stray_file"));
+    assert!(valid.is_file() && corrupt.is_file());
+}
+
+#[test]
+fn review_bubble_is_returned_with_a_rule_and_never_reported_as_skipped() {
+    let (s, a, _) = setup();
+    let id = "20990930-100000-000002-aaaaaa";
+    let text =
+        fs::read_to_string(corpus().join("emotes/records/bubble/payload-missing.emote")).unwrap();
+    let (header, _) = text.split_once("\n---\n").unwrap();
+    let mut value: Value = serde_json::from_str(header).unwrap();
+    value["id"] = id.into();
+    value["channel"] = "ops".into();
+    fs::write(
+        s.mail_root
+            .join(format!("channels/ops/messages/{id}.emote")),
+        format!("{value}\n---\n"),
+    )
+    .unwrap();
+    let history = ok(&s, &["chat", "ops", "--history", "10", "--json"], &a);
+    assert_eq!(history["messages"][0]["id"], id);
+    assert_eq!(history["messages"][0]["emote_rule"], "payload-missing");
+    assert!(history
+        .get("skipped_files")
+        .is_none_or(|v| v.as_array().unwrap().is_empty()));
+    let exact = ok(
+        &s,
+        &[
+            "chat",
+            "ops",
+            "--message",
+            id,
+            "--max-bytes",
+            "8000",
+            "--json",
+        ],
+        &a,
+    );
+    assert_eq!(exact["emote_rule"], "payload-missing");
+}
+
+#[test]
+fn review_emote_send_respects_output_mode_and_names_stdin_refusal() {
+    let (s, a, _) = setup();
+    set(&s, &a, "bolt");
+    let output = run(&s, &["chat", "ops", "--emote", "hop"], &a);
+    assert_success(&output);
+    assert!(serde_json::from_slice::<Value>(&output.stdout).is_err());
+    assert!(stdout(&output).contains("hop"));
+}
+
+#[test]
+fn review_emote_stdin_refusal_names_the_emote_command() {
+    let (s, a, _) = setup();
+    set(&s, &a, "bolt");
+    let before = common::tree_snapshot(&s.mail_root);
+    let participant = s.test_participant("alpha");
+    let output = s.run_in_env(
+        &["chat", "ops", "--emote", "hop", "--json"],
+        Some("unintended body"),
+        &a,
+        &[("POST_PARTICIPANT", &participant)],
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("emote"));
+    assert!(!error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("is a read"));
+    assert_eq!(common::tree_snapshot(&s.mail_root), before);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn review_ack_prefix_does_not_open_unrelated_files() {
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let (s, a, _) = setup();
+    plant(&s, false, true);
+    let dir = s.mail_root.join("channels/ops/messages");
+    let target = dir.join("20990930-100000-000001-aaaaaa.msg");
+    let unrelated = dir.join("20990930-100000-999999-aaaaaa.msg");
+    fs::write(&unrelated, b"unrelated unreadable message").unwrap();
+    let raw = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    assert!(raw >= 0);
+    let mut watcher = unsafe { fs::File::from_raw_fd(raw) };
+    let watch = |path: &Path| {
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let id = unsafe { libc::inotify_add_watch(raw, name.as_ptr(), libc::IN_OPEN) };
+        assert!(id >= 0);
+        id
+    };
+    let target_watch = watch(&target);
+    let unrelated_watch = watch(&unrelated);
+    let value = ok(
+        &s,
+        &["chat", "ops", "--ack", "20990930-100000-000001", "--json"],
+        &a,
+    );
+    assert_eq!(value["id"], "20990930-100000-000001-aaaaaa");
+    // The child has exited, so its filesystem opens are already queued.
+    // Observe real opens, including a positive target control; no timing or
+    // memory threshold and no test-only production seam is involved.
+    let mut buffer = [0u8; 4096];
+    let n = watcher
+        .read(&mut buffer)
+        .expect("target open must produce an event");
+    let mut offset = 0;
+    let mut saw_target = false;
+    while offset < n {
+        assert!(offset + 16 <= n);
+        let id = i32::from_ne_bytes(buffer[offset..offset + 4].try_into().unwrap());
+        let length =
+            u32::from_ne_bytes(buffer[offset + 12..offset + 16].try_into().unwrap()) as usize;
+        assert_ne!(
+            id, unrelated_watch,
+            "acknowledgment opened an unrelated message"
+        );
+        saw_target |= id == target_watch;
+        offset += 16 + length;
+    }
+    assert_eq!(offset, n);
+    assert!(
+        saw_target,
+        "positive control: acknowledgment opened its target"
+    );
+}
+
+#[test]
+fn review_emote_write_cap_refuses_large_real_headers_without_publication() {
+    let (s, a, _) = setup();
+    set(&s, &a, "limit-freeze-1280");
+    let display_name = "\u{10400}".repeat(32);
+    ok(
+        &s,
+        &["profile", "set", "--name", &display_name, "--json"],
+        &a,
+    );
+    let lineage = "z".repeat(240);
+    ok(&s, &["identity", "new", &lineage, "--json"], &a);
+    let participant = s.test_participant("alpha");
+    let address = "a".repeat(256);
+    let before = common::tree_snapshot(&s.mail_root.join("channels/ops/messages"));
+    let output = s.run_in_env(
+        &["chat", "ops", "--emote", "chatter", "--json"],
+        None,
+        &a,
+        &[
+            ("POST_PARTICIPANT", &participant),
+            ("POST_SENDER_ADDRESS", &address),
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "oversized real header was published"
+    );
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "invalid_argument");
+    assert!(
+        error["error"]["message"].as_str().unwrap().contains("3072"),
+        "{error}"
+    );
+    assert_eq!(
+        common::tree_snapshot(&s.mail_root.join("channels/ops/messages")),
+        before
+    );
+}
+
 fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/porch-contract")
 }
@@ -549,9 +751,11 @@ fn corrupt_emotes_are_history_diagnostics_never_attention() {
     assert!(h["skipped_files"]
         .to_string()
         .contains("unreadable_emote: envelope-separator"));
-    assert!(h["skipped_files"]
-        .to_string()
-        .contains("emote_bubble: payload-unknown-field"));
+    assert!(h["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["emote_rule"] == "payload-unknown-field"));
     assert!(h["messages"]
         .as_array()
         .unwrap()

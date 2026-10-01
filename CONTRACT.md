@@ -1431,7 +1431,8 @@ include optional `event`. Exact retrieval resolves both suffixes and returns an
 empty emote body. Reply, seen-by, acknowledgment and discard-through resolve
 messages only. A duplicate ID returns the `.msg` and diagnoses the `.emote`.
 Unreadable emotes are omitted with `unreadable_emote: <rule>` in `skipped_files`;
-invalid payloads remain visible with `emote_bubble: <rule>` there. Text renders
+invalid payloads remain visible with an `emote_rule` field on each returned
+message (also at the top level of an exact message slice), never in `skipped_files`. Text renders
 `✦ <sender> <name>` (or `emoted` for invalid names), retaining immutable attribution.
 Frozen frames determine replay even for an unknown built-in library version.
 

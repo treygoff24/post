@@ -2036,4 +2036,6 @@ are keyed as `<id>.emote`, so the two suffixes cannot collide. Conflict copies u
 
 Roomless host stamping retains the 4096-byte header cap. Post writers leave
 room for that stamp by limiting emote headers to 3072 bytes. Avatar packs remain
-host-local and are not relayed. Older bridges skip `.emote` paths.
+host-local and are not relayed. Older bridges skip `.emote` paths. Emotes sent
+while a peer runs an older bridge are not backfilled after that peer upgrades:
+its persisted position has already advanced past those channel changes.

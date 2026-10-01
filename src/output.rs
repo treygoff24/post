@@ -833,6 +833,8 @@ impl PartialEq<Envelope> for MessageEnvelope {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emote_rule: Option<String>,
     #[serde(flatten)]
     pub message: crate::model::ChannelMessage,
     #[serde(default)]
@@ -849,6 +851,13 @@ pub struct ChatMessageItem {
     pub signed_verified: Option<bool>,
 }
 
+pub(crate) fn emote_rule(message: &crate::model::ChannelMessage) -> Option<String> {
+    (message.event.as_deref() == Some("emote"))
+        .then(|| crate::avatar::payload_rule(message.emote.as_ref()))
+        .flatten()
+        .map(str::to_owned)
+}
+
 impl ChatMessageItem {
     pub(crate) fn new(
         context: &crate::mailbox::Context,
@@ -858,6 +867,7 @@ impl ChatMessageItem {
     ) -> Self {
         let reply = channel_reply_metadata(context, &message);
         Self {
+            emote_rule: emote_rule(&message),
             message,
             origin: reply.origin,
             reply_to_participant: reply.participant,
@@ -896,6 +906,8 @@ pub struct BodyByteRange {
 /// distinct from the complete-message `body` field.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessageSliceOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emote_rule: Option<String>,
     pub ok: bool,
     pub framing: ChannelFraming,
     pub channel: String,

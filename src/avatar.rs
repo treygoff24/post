@@ -15,7 +15,7 @@ const PARTICLES: &[&str] = &["heart", "spark", "zzz", "question", "exclaim", "no
 type Rules = BTreeSet<&'static str>;
 
 // Deserialize objects ourselves: serde_json's Value silently replaces duplicate keys.
-struct Unique(Value);
+pub(crate) struct Unique(pub(crate) Value);
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
@@ -401,7 +401,7 @@ pub(crate) fn invalid(rules: Vec<&str>) -> AppError {
 
 /// Payload checks are independent of the current avatar or installed library.
 pub(crate) fn payload_rule(v: Option<&Value>) -> Option<&'static str> {
-    let Some(v) = v else {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
         return Some("payload-missing");
     };
     let Some(m) = v.as_object() else {
@@ -432,10 +432,9 @@ pub(crate) fn payload_rule(v: Option<&Value>) -> Option<&'static str> {
         return Some("payload-source");
     }
     let library = m["library"].as_str().unwrap();
-    if !library
-        .strip_prefix("builtin-")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-    {
+    if !library.strip_prefix("builtin-").is_some_and(|n| {
+        !n.is_empty() && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit())
+    }) {
         return Some("payload-library-grammar");
     }
     let mut r = Rules::new();

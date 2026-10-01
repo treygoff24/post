@@ -77,6 +77,27 @@ fn the_field_check_reaches_nested_objects_and_exempts_only_data_keyed_maps() {
     );
 }
 
+#[test]
+fn review_avatar_maps_are_exempt_only_at_documented_paths() {
+    let value = json!({
+        "avatar": {"body": {"idle": []}, "head": {"idle": []}, "emotes": {"wave": {}}},
+        "messages": [{"emote": {"frames": {"body": {"idle": ""}, "head": {"idle": ""}}}}],
+        "unrelated": {"body": {"undocumented_body": 1}, "head": {"undocumented_head": 1}, "emotes": {"undocumented_emotes": 1}}
+    });
+    let keys = documented_keys(&value);
+    assert!(!keys.contains("idle") && !keys.contains("wave"));
+    for key in [
+        "undocumented_body",
+        "undocumented_head",
+        "undocumented_emotes",
+    ] {
+        assert!(
+            keys.contains(key),
+            "an unrelated {key} must still be checked"
+        );
+    }
+}
+
 /// Which schema shape describes each sample the contract ships. A new sample
 /// with no entry here fails the test: say what documents it.
 fn shape_for_sample(name: &str) -> &'static str {

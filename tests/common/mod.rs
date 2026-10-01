@@ -971,39 +971,52 @@ pub fn names(text: &str, word: &str) -> bool {
 /// whatever the store holds, so those keys are not required in the shape.
 /// Every other nested object is traversed. An entry here is a promise that
 /// the shape documents the map's value, not its keys.
-pub const DATA_KEYED_MAPS: &[&str] = &[
-    "unread",
-    "pending",
-    "pending_by_address",
-    "rewritten",
-    "body",
-    "head",
-    "emotes",
-];
+pub const DATA_KEYED_MAPS: &[&str] = &["unread", "pending", "pending_by_address", "rewritten"];
 
 /// The fields a real output carries that the shape must name: every key of
 /// every object at any depth (nested objects and objects inside arrays
 /// included), except the keys of the data-keyed maps above.
 pub fn documented_keys(value: &Value) -> BTreeSet<String> {
-    fn collect(value: &Value, keys: &mut BTreeSet<String>) {
+    fn collect(value: &Value, path: &str, keys: &mut BTreeSet<String>) {
         match value {
             Value::Object(object) => {
                 for (key, child) in object {
                     keys.insert(key.clone());
                     // Only a map is exempt: `unread` in an inbox is an array
                     // of envelopes whose fields must be named.
-                    let data_keyed = child.is_object() && DATA_KEYED_MAPS.contains(&key.as_str());
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    let avatar_map = matches!(
+                        child_path.as_str(),
+                        "avatar.body"
+                            | "avatar.head"
+                            | "avatar.emotes"
+                            | "profiles[].avatar.body"
+                            | "profiles[].avatar.head"
+                            | "profiles[].avatar.emotes"
+                            | "message.emote.frames.body"
+                            | "message.emote.frames.head"
+                            | "messages[].emote.frames.body"
+                            | "messages[].emote.frames.head"
+                    );
+                    let data_keyed = child.is_object()
+                        && (DATA_KEYED_MAPS.contains(&key.as_str()) || avatar_map);
                     if !data_keyed {
-                        collect(child, keys);
+                        collect(child, &child_path, keys);
                     }
                 }
             }
-            Value::Array(items) => items.iter().for_each(|item| collect(item, keys)),
+            Value::Array(items) => items
+                .iter()
+                .for_each(|item| collect(item, &format!("{path}[]"), keys)),
             _ => {}
         }
     }
     let mut keys = BTreeSet::new();
-    collect(value, &mut keys);
+    collect(value, "", &mut keys);
     keys
 }
 

@@ -40,10 +40,18 @@ pub(super) fn run(
     if let Some(name) = args.emote.as_deref() {
         refuse_unintended_stdin(&args, json_output, pretty)?;
         let message = crate::emote::send(context, &args.name, name, args.at.as_deref())?;
-        return Ok(CommandResult::committed(output::json(
-            &serde_json::json!({"ok":true,"message": {"id":message.id,"channel":message.channel,"sent":message.sent,"event":"emote","emote":message.emote}}),
-            pretty,
-        )?));
+        let rendered = if json_output {
+            output::json(
+                &serde_json::json!({"ok":true,"message": {"id":message.id,"channel":message.channel,"sent":message.sent,"event":"emote","emote":message.emote}}),
+                pretty,
+            )?
+        } else {
+            format!(
+                "sent emote {name} to #{} ({})\n",
+                message.channel, message.id
+            )
+        };
+        return Ok(CommandResult::committed(rendered));
     }
     if args.join {
         return join(context, &args, json_output, pretty);
@@ -124,6 +132,28 @@ fn refuse_unintended_stdin(args: &ChatArgs, json_output: bool, pretty: bool) -> 
     let verdict = probe(libc::STDIN_FILENO, READINESS_BOUND);
     if verdict == StdinVerdict::Clear {
         return Ok(());
+    }
+    if let Some(emote) = args.emote.as_deref() {
+        let mut fix = format!(
+            "post chat {} --emote {}",
+            crate::mailbox::shell_quote(&args.name),
+            crate::mailbox::shell_quote(emote)
+        );
+        if let Some(at) = args.at.as_deref() {
+            fix.push_str(&format!(" --at {}", crate::mailbox::shell_quote(at)));
+        }
+        if json_output {
+            fix.push_str(" --json");
+        }
+        if pretty {
+            fix.push_str(" --pretty");
+        }
+        fix.push_str(" < /dev/null");
+        return Err(AppError::new(
+            if verdict == StdinVerdict::Queued { ErrorCode::InvalidArgument } else { ErrorCode::InputAmbiguous },
+            "stdin is attached to an emote command, which cannot accept a body",
+            "To send the emote, re-run with stdin redirected from /dev/null; over ssh use ssh -n. To send the input as a message, use --send instead. Nothing was sent or marked seen.",
+        ).exact_fix(fix).input("stdin").reason("emote invocation cannot accept stdin"));
     }
     // Runs as written: the send correction reads the body from stdin, so it
     // works re-attached to the producer and refuses an empty body on its own.
@@ -432,6 +462,7 @@ fn render_chat_slice_json(
             channel: options.channel.to_owned(),
             room: room.to_owned(),
             message: message.clone(),
+            emote_rule: output::emote_rule(message),
             origin: reply.origin,
             reply_to_participant: reply.participant,
             reply_to_shared: reply.shared,
@@ -1670,11 +1701,15 @@ fn resolve_message_stem(
     let mut matches: Vec<String> = channel::message_files(&paths.messages)?
         .iter()
         .filter(|path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|stem| stem.starts_with(prefix))
+        })
+        .filter(|path| {
             !channel::parse_channel_message(path)
                 .is_ok_and(|p| p.message.event.as_deref() == Some("emote"))
         })
         .filter_map(|path| path.file_stem().and_then(|value| value.to_str()))
-        .filter(|stem| stem.starts_with(prefix))
         .map(str::to_owned)
         .collect();
     match matches.len() {
@@ -1857,12 +1892,7 @@ fn collect_batch_scanned(
             continue;
         }
         let result = if is_emote {
-            crate::emote::parse(&path).map(|(parsed, rule)| {
-                if let Some(rule) = rule {
-                    skipped_files.push(crate::emote::diagnostic(&path, "emote_bubble", rule));
-                }
-                parsed
-            })
+            crate::emote::parse(&path).map(|(parsed, _)| parsed)
         } else {
             channel::parse_channel_message(&path)
         };

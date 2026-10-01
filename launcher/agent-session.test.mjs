@@ -23,6 +23,7 @@ const PARTICIPANT_BINDING_KEYS = [
   "CLAUDE_CODE_SESSION_ID",
   "CODEX_THREAD_ID",
   "CODEX_SESSION_ID",
+  "DELEGATE_RUN_ID",
 ];
 
 function sandbox() {

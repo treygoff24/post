@@ -773,7 +773,27 @@ fn detect_channels(context: &Context, checks: &mut Vec<DoctorCheck>) {
                 if !message_path.is_file() {
                     continue;
                 }
-                if message_path.extension().and_then(|value| value.to_str()) != Some("msg") {
+                if message_path.extension().and_then(|value| value.to_str()) == Some("emote") {
+                    let result =
+                        fs::read(&message_path)
+                            .map_err(|_| "read-error")
+                            .and_then(|bytes| {
+                                crate::emote::decode(
+                                    &bytes,
+                                    message_path.file_stem().and_then(|s| s.to_str()),
+                                )
+                            });
+                    if let Err(rule) = result {
+                        checks.push(check(
+                            "channels.unreadable_emote",
+                            DoctorSeverity::Warning,
+                            &message_path,
+                            &format!("unreadable emote: {rule}"),
+                            false,
+                            "Inspect the emote envelope; nothing is moved or deleted.",
+                        ));
+                    }
+                } else if message_path.extension().and_then(|value| value.to_str()) != Some("msg") {
                     checks.push(check(
                         "channels.stray_file",
                         DoctorSeverity::Warning,

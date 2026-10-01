@@ -42,13 +42,14 @@ pub(crate) fn decode(
     if split > 4096 {
         return Err("envelope-header-too-large");
     }
-    let v: Value = serde_json::from_slice(&bytes[..split]).map_err(|_| "envelope-json")?;
+    let avatar::Unique(v) = serde_json::from_slice(&bytes[..split]).map_err(|_| "envelope-json")?;
+    let fields = v.as_object().ok_or("envelope-fields")?;
+    if fields.get("event").and_then(Value::as_str) != Some("emote") {
+        return Err("envelope-event");
+    }
     let message: ChannelMessage = serde_json::from_value(v).map_err(|_| "envelope-fields")?;
     channel::validate_channel_message(Path::new("<emote>"), &message)
         .map_err(|_| "envelope-fields")?;
-    if message.event.as_deref() != Some("emote") {
-        return Err("envelope-event");
-    }
     if stem.is_some_and(|s| s != message.id) {
         return Err("envelope-id-mismatch");
     }
@@ -226,6 +227,72 @@ pub(crate) fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture() -> String {
+        fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "tests/fixtures/porch-contract/emotes/records/playable/bolt-hop-builtin.emote",
+            ),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn review_duplicate_record_members_are_envelope_json() {
+        let text = fixture();
+        let duplicate = text.replace(
+            "\"source\": \"builtin\",",
+            "\"source\": \"builtin\", \"source\": \"builtin\",",
+        );
+        assert_ne!(duplicate, text);
+        assert_eq!(
+            decode(duplicate.as_bytes(), None).unwrap_err(),
+            "envelope-json"
+        );
+    }
+    #[test]
+    fn review_null_payload_is_missing() {
+        let text = fixture();
+        let (header, _) = text.split_once("\n---\n").unwrap();
+        let mut value: Value = serde_json::from_str(header).unwrap();
+        value["emote"] = Value::Null;
+        assert_eq!(
+            decode(format!("{value}\n---\n").as_bytes(), None)
+                .unwrap()
+                .1,
+            Some("payload-missing")
+        );
+    }
+    #[test]
+    fn review_event_type_has_its_own_envelope_rule() {
+        let text = fixture();
+        let (header, _) = text.split_once("\n---\n").unwrap();
+        for event in [Value::Null, json!(7), json!([]), json!({}), json!("join")] {
+            let mut value: Value = serde_json::from_str(header).unwrap();
+            value["event"] = event;
+            assert_eq!(
+                decode(format!("{value}\n---\n").as_bytes(), None).unwrap_err(),
+                "envelope-event"
+            );
+        }
+    }
+    #[test]
+    fn review_builtin_versions_are_positive_without_leading_zeros() {
+        let text = fixture();
+        let (header, _) = text.split_once("\n---\n").unwrap();
+        for (library, rule) in [
+            ("builtin-0", Some("payload-library-grammar")),
+            ("builtin-01", Some("payload-library-grammar")),
+            ("builtin-99", None),
+        ] {
+            let mut value: Value = serde_json::from_str(header).unwrap();
+            value["emote"]["library"] = library.into();
+            assert_eq!(
+                decode(format!("{value}\n---\n").as_bytes(), None)
+                    .unwrap()
+                    .1,
+                rule
+            );
+        }
+    }
     #[test]
     fn record_corpus() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
