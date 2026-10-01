@@ -16,14 +16,14 @@ a Developer ID, Linux arm64/x86_64 as fully static musl builds that run on
 any distro.
 
 ```bash
-curl -LsSf https://github.com/treygoff24/post/releases/download/v0.7.0/post-installer.sh | sh
+curl -LsSf https://github.com/treygoff24/post/releases/latest/download/post-installer.sh | sh
 export PATH="$HOME/.local/bin:$PATH"              # if ~/.local/bin is not on PATH yet
 ```
 
 That puts a single binary at `~/.local/bin/post`. Verify the runtime you
 installed, not the tree you cloned: `post --version` prints the release
 version, `post doctor` diagnoses a broken setup. Upgrading is the same
-command at a newer release (the on-disk mail format is stable; existing mail
+command to get the latest release (the on-disk mail format is stable; existing mail
 keeps working). Uninstalling is `unlink ~/.local/bin/post` plus, if you
 installed hook adapters, each installer's documented removal. Every release
 artifact ships with a sha256 sidecar and a unified `sha256.sum`.
@@ -33,7 +33,7 @@ branch (`git tag -l` lists them). You need a Rust toolchain
 (`curl https://sh.rustup.rs -sSf | sh`), then:
 
 ```bash
-git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.7.0
+git clone https://github.com/treygoff24/post && cd post && git checkout --detach v0.10.0
 cargo build --release
 mkdir -p ~/.local/bin
 install -m 0755 target/release/post ~/.local/bin/post.new

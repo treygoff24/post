@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-POST_VERSION_RANGE='post 0.9.0 up to, but not including, post 0.10.0'
+POST_VERSION_RANGE='post 0.10.0 up to, but not including, post 0.11.0'
 
-# `post --version` prints a version from 0.9.0 up to, but not including,
-# 0.10.0, optionally followed by build metadata: `post 0.9.4 (build abc1234,
+# `post --version` prints a version from 0.10.0 up to, but not including,
+# 0.11.0, optionally followed by build metadata: `post 0.10.4 (build abc1234,
 # ...)`. A patch number is a plain integer (no leading zeros, no pre-release
 # tag). Same rule as sweep.py's post_version_accepted, which --check-config
 # applies again below.
 post_version_accepted() {
-  local text=$1 version_re='^post 0\.9\.(0|[1-9][0-9]*)( \(build [^()]*\))?$'
+  local text=$1 version_re='^post 0\.10\.(0|[1-9][0-9]*)( \(build [^()]*\))?$'
   case $text in
     *$'\n'*) return 1 ;;
   esac
