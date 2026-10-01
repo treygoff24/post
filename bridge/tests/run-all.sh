@@ -6,8 +6,8 @@
 #
 #   POST_BIN=/path/to/post bridge/tests/run-all.sh
 #
-# POST_BIN (default: `post` on PATH) must be a post the bridge accepts (0.9.0
-# up to, but not including, 0.10.0).
+# POST_BIN (default: `post` on PATH) must be a post the bridge accepts (0.10.0
+# up to, but not including, 0.11.0).
 # BRIDGE_TEST_JOBS (default 4) caps how many suites run at once. All mail
 # roots the suites use are temporary; nothing here touches ~/.claude-mail or
 # ~/post-relay.

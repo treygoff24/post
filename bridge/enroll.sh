@@ -2,7 +2,7 @@
 set -euo pipefail
 
 API_REPO='/repos/estate/post-relay'
-RELAY_URL=${POST_BRIDGE_RELAY_URL:-ssh://git@10.17.198.1:2222/estate/post-relay.git}
+RELAY_URL=${POST_BRIDGE_RELAY_URL:-}
 DRY_RUN=false
 INIT_REGISTRY=false
 MODE=enroll
@@ -62,6 +62,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$HOST" ] || die '--host or --verify is required'
+[ -n "$RELAY_URL" ] || die 'set POST_BRIDGE_RELAY_URL to the relay repository URL'
 case $HOST in
   *[!a-z0-9-]*) die 'host must match ^[a-z0-9-]{1,32}$' ;;
 esac

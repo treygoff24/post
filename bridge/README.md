@@ -32,9 +32,9 @@ Start `--config` from `config.template.json`: fill in `host` and `relay_url`
 only protects a channel on the host that publishes it, so every host carries
 the same list. The installer warns when a config has no `channels` key.
 
-The installer requires Python 3.9 or newer and Post 0.9.0 up to, but not
-including, 0.10.0 (`post --version` may add a trailing `(build ...)`
-annotation; the semver is judged, and a pre-release tag such as `0.9.1-rc1` is
+The installer requires Python 3.9 or newer and Post 0.10.0 up to, but not
+including, 0.11.0 (`post --version` may add a trailing `(build ...)`
+annotation; the semver is judged, and a pre-release tag such as `0.10.1-rc1` is
 refused). It resolves
 Post at install time, installs `sweep.py` and `bridgelib/` from this
 directory under `~/.local/lib/post-bridge/` together with a `BUILD` file that
@@ -73,7 +73,8 @@ health record reach stdout only.
 
 ## Enroll
 
-Run `bridge/enroll.sh --host <host> [--dry-run] [--init-registry]` as a
+Set `POST_BRIDGE_RELAY_URL` to your relay repository URL, then run
+`bridge/enroll.sh --host <host> [--dry-run] [--init-registry]` as a
 Forgejo operator, or `bridge/enroll.sh --verify <host>` to check an existing
 enrollment. The script checks the Forgejo user when its token has `read:user`;
 otherwise it relies on the exact branch-protection API to validate the username.
@@ -610,8 +611,8 @@ POST_BIN=/abs/path/to/post bridge/tests/run-all.sh
 suite's log if any fail. One module alone: `POST_BIN=... python3 -m unittest
 bridge.tests.test_sweep`.
 
-The suites refuse to run unless `post --version` is a version from 0.9.0 up
-to, but not including, 0.10.0, optionally followed by a ` (build ...)`
+The suites refuse to run unless `post --version` is a version from 0.10.0 up
+to, but not including, 0.11.0, optionally followed by a ` (build ...)`
 annotation as a release build prints. All mail
 roots are temporary and initialized by `post doctor --fix`; the suite never
 touches the user's real Post root or relay repo.

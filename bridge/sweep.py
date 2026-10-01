@@ -92,20 +92,20 @@ from bridgelib.snapshot import (  # noqa: E402
     binding_verdict,
 )
 
-# The post versions this bridge is written for: 0.9.0 up to, but not
-# including, 0.10.0. Every 0.9.x is the same mail model (a patch release does
+# The post versions this bridge is written for: 0.10.0 up to, but not
+# including, 0.11.0. Every 0.10.x is the same mail model (a patch release does
 # not change a store or command contract), so a patch bump must not stop the
-# bridge on the hosts it reaches; 0.10.0 is where a check is needed again.
-POST_VERSION_RANGE = "post 0.9.0 up to, but not including, post 0.10.0"
+# bridge on the hosts it reaches; 0.11.0 is where a check is needed again.
+POST_VERSION_RANGE = "post 0.10.0 up to, but not including, post 0.11.0"
 # `post --version` may carry build metadata after the semver
-# (`post 0.9.4 (build abc1234, ...)`); only the semver is judged. A patch
+# (`post 0.10.4 (build abc1234, ...)`); only the semver is judged. A patch
 # number is a plain integer: no leading zeros, and no pre-release tag.
-_POST_VERSION_RE = re.compile(r"post 0\.9\.(?:0|[1-9][0-9]*)(?: \(build [^()\n]*\))?")
+_POST_VERSION_RE = re.compile(r"post 0\.10\.(?:0|[1-9][0-9]*)(?: \(build [^()\n]*\))?")
 
 
 def post_version_accepted(text):
-    """True when ``post --version`` printed a version from 0.9.0 up to, but
-    not including, 0.10.0, with or without a trailing ``(build ...)``."""
+    """True when ``post --version`` printed a version from 0.10.0 up to, but
+    not including, 0.11.0, with or without a trailing ``(build ...)``."""
     return _POST_VERSION_RE.fullmatch(text.strip()) is not None
 
 

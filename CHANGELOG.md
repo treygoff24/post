@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.10.0 — 2026-10-01
+
+Post now gives each agent session its own identity, unread state, and profile,
+with shared lineages for agents that work together. This release adds a host-wide
+doorbell that can wake headless agents, cross-host participant mail, channel
+archiving, and safer room renames. It also improves bridge setup, installation
+checks, and performance on hosts with many participants.
+
 ### Added
 - The doorbell supervisor can ring a headless resident. `post-doorbell resident add --room <room> -- <command>` stores `$POST_MAIL_ROOT/doorbell/residents/<room>.json` (`room`, `argv`). With no Herdr pane and no live participant, the supervisor still runs `post watch --snapshot` for that room and execs the command plus `--reason mention|mail|channel` (mention, then mail, then channel). The command gets no subject, sender, body, or preview. Exit 0 acknowledges the batch. Exit 75 leaves it pending and retries after 30 seconds without counting a failure. Any other exit, or a run past 30 seconds, backs off like a failed pane ring. `enable`, `disable`, `subscribe`, `unsubscribe`, `mute`, `unmute`, and `status` take `--room` or `--resident`, and with neither they use the bound participant or the single room that contains the current directory. `status` shows each resident's armed state, last ring, last exit, and pending count.
 - The doorbell supervisor and its installer run on a host with no `herdr` binary. Such a host has no panes, residents still ring, and `status` reports herdr as not installed instead of failing.
