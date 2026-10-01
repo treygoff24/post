@@ -162,11 +162,37 @@ pub(crate) fn send(
         match found.as_slice() {
             [p] => payload["at"] = p.id.clone().into(),
             [] => {
-                return Err(AppError::new(
-                    ErrorCode::InvalidArgument,
-                    "emote target is not a channel member",
-                    "Pass a member participant id or unique display name.",
-                ))
+                // The send resolver's two forms, among the members that are
+                // live: a profile name (any case) or `repo:<name-or-path>`.
+                let repo_selector = at.strip_prefix("repo:");
+                let live_members: Vec<_> = crate::peers::live_peers(context)?
+                    .into_iter()
+                    .filter(|peer| members.iter().any(|m| m.id == peer.participant.id))
+                    .collect();
+                let found = match repo_selector {
+                    Some(selector) => crate::peers::by_repo(&live_members, selector),
+                    None => crate::peers::by_name(&live_members, at),
+                };
+                match found.as_slice() {
+                    [peer] => payload["at"] = peer.participant.id.clone().into(),
+                    [] if repo_selector.is_some() => {
+                        return Err(crate::peers::unknown(
+                            at,
+                            &format!(
+                                "that is a member of this channel is in repo '{}'",
+                                crate::peers::clean(repo_selector.unwrap_or_default())
+                            ),
+                        ))
+                    }
+                    [] => {
+                        return Err(AppError::new(
+                            ErrorCode::InvalidArgument,
+                            "emote target is not a channel member",
+                            "Pass a member participant id or unique display name.",
+                        ))
+                    }
+                    _ => return Err(crate::peers::ambiguous(at, &found)),
+                }
             }
             _ => {
                 return Err(AppError::new(

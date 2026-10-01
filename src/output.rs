@@ -563,12 +563,61 @@ pub struct SendOutput {
     /// it went, and why (the same note `--text` prints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retargeted: Option<SendRetarget>,
+    /// Present when the send went to one participant: its id, its profile
+    /// name when it has one, and how `--to` named it (`id` for an exact
+    /// participant id or `participant:<id>`, `name` for a profile name,
+    /// `repo` for `repo:<basename-or-path>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<SendResolved>,
     /// Sent, but something about it deserves a second look (a routing
     /// receipt that could not be written, a body that looks like pasted
     /// watch output). Absent when there is nothing to say. Never an error:
     /// the letter landed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendResolved {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub via: String,
+}
+
+impl SendResolved {
+    /// How `--to` (`raw`) named the participant `target` resolved to; `None`
+    /// when the target is not a participant (a room or a lineage).
+    pub(crate) fn of(
+        context: &crate::mailbox::Context,
+        raw: &str,
+        target: &crate::participant::Address,
+    ) -> Option<Self> {
+        if target.kind != crate::participant::AddressKind::Participant {
+            return None;
+        }
+        let via = if raw == target.name || raw.strip_prefix("participant:") == Some(&target.name) {
+            "id"
+        } else if raw.starts_with("repo:") {
+            "repo"
+        } else {
+            "name"
+        };
+        let name = crate::profile::load_profiles(context)
+            .ok()
+            .and_then(|profiles| {
+                profiles
+                    .get(&crate::profile::participant_key(&target.name))
+                    .and_then(|entry| entry.name.clone())
+            })
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        Some(Self {
+            id: target.name.clone(),
+            name,
+            via: via.to_owned(),
+        })
+    }
 }
 
 /// An `--allow-self` retarget: `from` is the address the send named, `to` the
@@ -1144,6 +1193,10 @@ pub struct WhoActingParticipant {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<String>,
+    /// What the participant declared with `participant describe`; absent when
+    /// it never did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::participant::Runtime>,
     #[serde(default)]
     pub unread: BTreeMap<String, usize>,
     #[serde(default)]
@@ -1164,6 +1217,16 @@ pub struct WhoParticipant {
     pub lineage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// The participant's own profile name and sigil (`post profile set`);
+    /// absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pfp: Option<String>,
+    /// What the participant declared with `participant describe`; absent when
+    /// it never did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::participant::Runtime>,
     #[serde(default)]
     pub unread: BTreeMap<String, usize>,
     #[serde(default)]

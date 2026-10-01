@@ -275,6 +275,16 @@ binding is alive, not that anyone read anything: ask `post chat <channel>
 the wrong check for "am I bound and alive": use `post participant show --json`.
 It prints `bridge_attention: <count>` when the bridge has something stuck.
 
+`post who --live [--role interactive|child|headless] [--repo <basename-or-path>]`
+lists only the peers you can message now (a live watch or doorbell, and
+activity in the last 10 minutes), one line each: `<pfp> <name|id> · repo@branch
+· title · state · age`. `--json` gives the full records. Participants carry
+`name` and `pfp` from their profile. Send to a live peer by profile name or
+`post send --to repo:<basename-or-path>`; a miss is `unknown_recipient`,
+several matches are `ambiguous_recipient` with `details.candidates`, and nothing
+is sent either way. Exact ids, `participant:<id>`, rooms, and lineages win over
+names. The receipt's `resolved {id, name?, via}` names who got it.
+
 ## Participant mail across hosts
 
 - `post send --to participant:<id>@<host>` queues a letter for a participant

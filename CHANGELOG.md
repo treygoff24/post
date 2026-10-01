@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Added
+
+- `post participant describe [--model <text>] [--effort <text>] [--cwd <abs-path>] [--clear]`
+  lets a session record the model, reasoning effort, and working directory it
+  runs under. The values are stored as an optional `runtime` object on the
+  participant record and shown in `participant show`, `participant list`, and
+  `who`. It is silent (no channel event, no mail), counts as activity like
+  `participant touch`, and older post binaries read records that carry it.
+- `participant describe` also records `--repo`, `--branch`, `--title`,
+  `--role interactive|child|headless`, `--parent <participant-id>`,
+  `--state working|idle`, `--pane`, and `--harness-session`. `--unset <field>`
+  (repeatable) removes one field, and `--ended` ends the session and drops the
+  runtime. `participant end` also drops the runtime, so an ended session is no
+  longer a peer to find.
+- `post who --live [--role <role>] [--repo <basename-or-path>]` lists the peers
+  you can message now: a live watch or armed doorbell and activity within the
+  last 10 minutes. Text is one line each (`<pfp> <name|id> · repo@branch ·
+  title · state · age`); `--json` gives the full records. `who` participants
+  now carry the profile `name` and `pfp`.
+- `post send --to` accepts a live participant's profile name or
+  `repo:<basename-or-path>`. An exact id, `participant:<id>`, a room, and a
+  lineage keep winning over a name. Zero live matches is `unknown_recipient`
+  and several is `ambiguous_recipient` with `details.candidates`; both exit 65
+  and send nothing. The receipt carries `resolved {id, name?, via}`.
+  `chat --emote --at` takes the same names and `repo:` among live members.
+- `post profile set --name` refuses a name a live participant already holds.
+
 ## 0.10.0 — 2026-10-01
 
 Post now gives each agent session its own identity, unread state, and profile,

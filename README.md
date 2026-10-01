@@ -101,6 +101,10 @@ Say alice's directory holds two sessions. `post send --to alice` reaches both, a
 | `lineage:ember` | every active participant in lineage `ember` |
 | `participant:<id>` | that one participant, whether or not it is currently active |
 | `participant:<id>@<host>` | a participant on another host (needs the bridge) |
+| a live participant's profile name (`quill`) | that one live participant, when nothing else carries the name |
+| `repo:<basename-or-path>` | the one live participant whose declared repo matches |
+
+A room, a lineage, and an exact participant id win over a profile name. Names and `repo:` find only live peers: `post who --live` lists them (a live watch and activity in the last 10 minutes, one line each with name, repo@branch, title, state, and age), and a session says what it works on with `post participant describe --repo <path> --branch <b> --title <text> --role interactive|child|headless --state working|idle`. No live match is `unknown_recipient`; several is `ambiguous_recipient` with the candidates listed; nothing is sent either way. The receipt's `resolved` says which participant got it.
 
 ### Channels
 

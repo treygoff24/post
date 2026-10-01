@@ -1320,6 +1320,7 @@ mod tests {
             lineage: lineage.map(str::to_owned),
             lineage_since: lineage.map(|_| "2026-09-16 00:00:00 +0000".to_owned()),
             display_name: None,
+            runtime: None,
             last_seen: Some("2026-09-16T00:00:00Z".to_owned()),
             lease_hours: 24,
             ephemeral: false,

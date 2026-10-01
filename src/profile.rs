@@ -238,6 +238,21 @@ fn pfp_taken(pfp: &str, holder_key: &str) -> AppError {
     .reason(format!("pfp is already the sigil of {holder}"))
 }
 
+/// `profile set --name` refusal: another participant that is live right now
+/// already holds the name (compared ignoring case), the same shape as
+/// [`pfp_taken`]. The holder is named by id; it is not told anything.
+pub(crate) fn name_taken(name: &str, holder_id: &str) -> AppError {
+    AppError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "profile value is invalid: name is already the name of participant:{holder_id}"
+        ),
+        "Another participant holds this name while it is live (a live watch and activity within 10 minutes), because a name is how peers address each other. Pick a different name, or set it once it is free with `post profile set --name '<name>'`: the holder releases it by running `post participant end` or `post profile clear` itself, and it stops counting once that participant is no longer live. Nothing you can run ends or clears another participant.",
+    )
+    .input(name.escape_debug().to_string())
+    .reason(format!("name is already the name of participant:{holder_id}"))
+}
+
 /// Resolve the profile to stamp for the acting `participant_id` (replying as
 /// `room`) at send time, re-validating the registry values: a hand-edited
 /// profiles.json must be inert as an injection or imitation path, so invalid
