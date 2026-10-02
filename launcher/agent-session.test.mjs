@@ -772,7 +772,7 @@ test("urandom fallback mints a real UUIDv4 (version and variant bits set)", () =
     // Toolbox PATH with every needed utility EXCEPT uuidgen.
     const toolbox = path.join(sb.work, "toolbox");
     fs.mkdirSync(toolbox);
-    for (const tool of ["sh", "od", "tr", "sed", "cut", "basename", "dirname", "shasum", "git", "node", "printf", "cat"]) {
+    for (const tool of ["sh", "od", "tr", "sed", "cut", "basename", "dirname", "git", "node", "printf", "cat"]) {
       for (const from of ["/usr/bin", "/bin"]) {
         const src = path.join(from, tool);
         if (fs.existsSync(src)) {
@@ -781,6 +781,11 @@ test("urandom fallback mints a real UUIDv4 (version and variant bits set)", () =
         }
       }
     }
+    // Hashing is not the subject of this test. Keep its utility independent
+    // of the system shasum's Perl/dispatch dependencies on a restricted PATH.
+    const shasum = path.join(toolbox, "shasum");
+    fs.writeFileSync(shasum, `#!${process.execPath}\nconst fs = require("node:fs");\nconst { createHash } = require("node:crypto");\nconsole.log(createHash("sha256").update(fs.readFileSync(0)).digest("hex") + "  -");\n`);
+    fs.chmodSync(shasum, 0o755);
     const result = spawnSync(HELPER, ["--harness", "ok", "--room", "r", "--", "sh", "-c", 'printf %s "$POST_SENDER_ADDRESS"'], {
       cwd: sb.roomDir,
       encoding: "utf8",
