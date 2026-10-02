@@ -910,6 +910,7 @@ mod tests {
             lineage: None,
             lineage_since: None,
             display_name: None,
+            runtime: None,
             dir: root.join("participants").join(id),
         };
         let a = participant("test-aaaaaaaa");

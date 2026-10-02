@@ -2,7 +2,7 @@ use crate::cli::WhoArgs;
 use crate::command_result::CommandResult;
 use crate::cursor_state::eligibility::MailCounts;
 use crate::cursor_state::ParticipantCursors;
-use crate::error::{AppResult, ErrorCode};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::mailbox::Context;
 use crate::output::{
     self, WhoActingParticipant, WhoBridgeHealth, WhoOutput, WhoParticipant, WhoRoom,
@@ -17,7 +17,20 @@ const LEASE_NOT_ATTENTION_HINT: &str = "lease is not attention; for 'did they re
 
 const STALE_DELIVERY_NOTE: &str = "mail already frozen to a stale participant is not reassigned when its lease expires; activity affects new recipient selection only";
 
-pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<CommandResult> {
+pub(super) fn run(
+    context: &Context,
+    args: WhoArgs,
+    json: bool,
+    pretty: bool,
+) -> AppResult<CommandResult> {
+    if let Some(role) = args.role.as_deref() {
+        if !crate::participant::RUNTIME_ROLES.contains(&role) {
+            return Err(AppError::invalid_argument(format!(
+                "--role must be one of {}",
+                crate::participant::RUNTIME_ROLES.join(", ")
+            )));
+        }
+    }
     let rooms = context.load_rooms()?;
     let room_filter_requested = !args.room.is_empty();
     let selected: Vec<String> = if args.room.is_empty() {
@@ -46,7 +59,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
     // which the unscoped command promises to list.
     let scope: Option<BTreeSet<&str>> =
         room_filter_requested.then(|| selected.iter().map(String::as_str).collect());
-    let doorbell = read_doorbell(context);
+    let doorbell = presence::read_doorbell(context);
     // The count of stuck or refused letters and collisions the bridge lists in
     // its health file: who is where agents look first, and the bridge's own
     // `ok` only says it is running.
@@ -105,6 +118,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
                 provenance: Some(provenance.as_str().to_owned()),
                 workspace: participant.workspace.clone(),
                 lineage: participant.lineage.clone(),
+                runtime: participant.runtime.clone(),
                 unread,
                 pending,
                 fix: None,
@@ -124,6 +138,7 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             provenance: None,
             workspace: None,
             lineage: None,
+            runtime: None,
             unread: BTreeMap::new(),
             pending: BTreeMap::new(),
             fix: Some(match &missing {
@@ -147,6 +162,12 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         Err(error) => return Err(error),
     };
     crate::participant::warn_skipped(&skipped);
+    // Names and sigils come from the profile registry. A damaged registry
+    // must not take the roster down, so it reads as "no names" here.
+    let profiles = crate::profile::load_profiles(context).unwrap_or_default();
+    // `--live`: who is here now, with the profile and runtime facts the text
+    // line shows. Keyed by id; only live participants that pass the filters.
+    let mut live_peers: BTreeMap<String, crate::peers::Peer> = BTreeMap::new();
     for participant in participant_records {
         if let Some(scope) = scope.as_ref() {
             if !participant
@@ -161,6 +182,39 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
         let state = participant.state_label(now).to_owned();
         let doorbell_armed = doorbell.participants.contains(&participant.id);
+        let live_watch = presence.live_watch || doorbell_armed;
+        let entry = profiles.get(&crate::profile::participant_key(&participant.id));
+        let name = entry
+            .and_then(|entry| entry.name.as_deref())
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        let pfp = entry.and_then(|entry| entry.pfp.clone());
+        if args.live {
+            let age = crate::peers::activity_age(&participant, now)
+                .filter(|age| live_watch && *age <= crate::peers::LIVE_WINDOW);
+            let Some(age) = age else { continue };
+            let runtime = participant.runtime.as_ref();
+            if let Some(role) = args.role.as_deref() {
+                if runtime.and_then(|runtime| runtime.role.as_deref()) != Some(role) {
+                    continue;
+                }
+            }
+            if let Some(selector) = args.repo.as_deref() {
+                let repo = runtime.and_then(|runtime| runtime.repo.as_deref());
+                if !repo.is_some_and(|repo| crate::peers::repo_matches(repo, selector)) {
+                    continue;
+                }
+            }
+            live_peers.insert(
+                participant.id.clone(),
+                crate::peers::Peer {
+                    participant: participant.clone(),
+                    name: name.clone(),
+                    pfp: pfp.clone(),
+                    age_secs: age.as_secs(),
+                },
+            );
+        }
         participants.push(WhoParticipant {
             id: participant.id,
             harness: participant.harness,
@@ -168,9 +222,12 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
             last_seen: participant.last_seen,
             lineage: participant.lineage,
             workspace: participant.workspace,
+            name,
+            pfp,
+            runtime: participant.runtime,
             unread,
             pending,
-            live_watch: presence.live_watch || doorbell_armed,
+            live_watch,
             watch_last_seen: presence.last_seen,
             doorbell_armed,
         });
@@ -180,6 +237,19 @@ pub(super) fn run(context: &Context, args: WhoArgs, pretty: bool) -> AppResult<C
         let right_acting = acting_id.as_deref() == Some(right.id.as_str());
         right_acting.cmp(&left_acting).then(left.id.cmp(&right.id))
     });
+    if args.live && !args.text && !json {
+        // One line per live participant, in the roster's order.
+        let rendered: String = participants
+            .iter()
+            .filter_map(|entry| live_peers.get(&entry.id))
+            .map(|peer| format!("{}\n", crate::peers::live_line(peer)))
+            .collect();
+        return Ok(CommandResult::success(rendered));
+    }
+    if args.live {
+        // The rooms' own heartbeats are not participants.
+        legacy_rooms.clear();
+    }
     if args.text {
         let mut rendered = String::new();
         if let Some(report) = &missing {
@@ -315,64 +385,6 @@ fn skipped_line(skipped: &[crate::participant::SkippedParticipant]) -> String {
         "skipped: {} participant record(s) could not be read and are missing from this roster: {named}. Fix: repair each participants/<id>/participant.json, or remove that directory if the participant is gone.\n",
         skipped.len()
     )
-}
-
-/// What the doorbell supervisor's `doorbell/health.json` says is armed. It
-/// rewrites the file at least every 30 seconds while it runs, so a file older
-/// than [`DOORBELL_FRESH`] belongs to a dead supervisor and arms nothing.
-struct Doorbell {
-    state: &'static str,
-    participants: BTreeSet<String>,
-    rooms: BTreeSet<String>,
-}
-
-const DOORBELL_FRESH: std::time::Duration = std::time::Duration::from_secs(90);
-const DOORBELL_HEALTH_MAX_BYTES: u64 = 4 << 20;
-
-fn read_doorbell(context: &Context) -> Doorbell {
-    let empty = |state| Doorbell {
-        state,
-        participants: BTreeSet::new(),
-        rooms: BTreeSet::new(),
-    };
-    let path = context.root.join("doorbell").join("health.json");
-    let bytes = match crate::bridge_topology::read_regular(&path, DOORBELL_HEALTH_MAX_BYTES) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return empty("absent"),
-        Err(_) => return empty("unreadable"),
-    };
-    let modified = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
-        Ok(modified) => modified,
-        Err(_) => return empty("unreadable"),
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return empty("unreadable");
-    };
-    let fresh = match std::time::SystemTime::now().duration_since(modified) {
-        Ok(age) => age <= DOORBELL_FRESH,
-        // Stamped in the future: within a few seconds is clock skew, more is
-        // a file that could vouch forever.
-        Err(ahead) => ahead.duration() <= std::time::Duration::from_secs(5),
-    };
-    if !fresh {
-        return empty("stale");
-    }
-    let armed = |key: &str, name: &str| -> BTreeSet<String> {
-        value
-            .get(key)
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|row| row.get("armed").and_then(serde_json::Value::as_bool) == Some(true))
-            .filter_map(|row| row.get(name).and_then(serde_json::Value::as_str))
-            .map(str::to_owned)
-            .collect()
-    };
-    Doorbell {
-        state: "fresh",
-        participants: armed("bindings", "participant"),
-        rooms: armed("residents", "room"),
-    }
 }
 
 fn mail_counts(

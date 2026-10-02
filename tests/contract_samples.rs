@@ -381,7 +381,37 @@ fn produce() -> BTreeMap<&'static str, String> {
     fs::remove_file(inbox.join("20260101-000200-bbbbb2.mail")).expect("remove the unreadable mail");
 
     // One JSON document per command a consumer reads.
-    let documents: [(&str, Output); 11] = [
+    let documents: [(&str, Output); 12] = [
+        // First, so the `who` and `participant show` samples below carry the
+        // reader's `runtime` too.
+        (
+            "participant-describe.json",
+            as_reader(&[
+                "participant",
+                "describe",
+                "--model",
+                "claude-opus-5-5",
+                "--effort",
+                "high",
+                "--cwd",
+                &alpha.to_string_lossy(),
+                "--repo",
+                &alpha.to_string_lossy(),
+                "--branch",
+                "main",
+                "--title",
+                "Reviewing the tax thread",
+                "--role",
+                "interactive",
+                "--state",
+                "working",
+                "--pane",
+                "w1-1",
+                "--harness-session",
+                "session-0001",
+                "--json",
+            ]),
+        ),
         ("inbox.json", as_reader(&["inbox"])),
         ("chat.json", as_reader(&["chat", "tax", "--peek", "--json"])),
         ("who.json", as_reader(&["who"])),

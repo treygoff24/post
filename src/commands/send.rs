@@ -280,6 +280,9 @@ where
         return Err(error);
     }
     let mut target = resolved_target.expect("known target was checked above");
+    // Which participant a direct send named and how (`id`, `name`, `repo`),
+    // taken before `--allow-self` can move the target.
+    let resolved = output::SendResolved::of(context, &args.to, &target);
     // `--allow-self`: a room send never reaches its own sender (workspace and
     // lineage fan-out exclude them), so a session that pings the room it is
     // bound to hears nothing. Delegate's completion notices are exactly that
@@ -287,6 +290,14 @@ where
     // lineage is delivered to the sender's own participant inbox instead. Any
     // other target is untouched: the flag widens nothing.
     let mut notes = Vec::new();
+    if let Some(found) = resolved.as_ref().filter(|found| found.via != "id") {
+        notes.push(format!(
+            "--to {} resolved to participant {} ({} match)",
+            crate::peers::clean(&args.to),
+            found.id,
+            found.via
+        ));
+    }
     let mut retargeted = None;
     if args.allow_self {
         if let Some(own) = own_participant_address(&actor, &target) {
@@ -468,6 +479,7 @@ where
                 delivery: None,
                 cross_host,
                 retargeted,
+                resolved,
                 warnings,
             },
             pretty,
@@ -726,6 +738,7 @@ where
                 }),
                 cross_host: None,
                 retargeted: None,
+                resolved: None,
                 warnings,
             },
             pretty,

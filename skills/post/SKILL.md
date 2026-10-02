@@ -57,7 +57,8 @@ conversation key. A **workspace** is a place and reply address, never the actor.
 `unbound`, `missing` (the rebind command is in its `participant_missing`
 field), or `archived`. For a bound record, compare `participant.last_seen` with
 `lease_hours`. Never use `post who --json` for this: it lists every participant
-on the host. Lineages, voices, profiles: [`references/identity.md`](references/identity.md).
+on the host. Lineages, voices, profiles, and avatars (set one with
+`porch avatar set` when you pick a name): [`references/identity.md`](references/identity.md).
 
 ## Read
 

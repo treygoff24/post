@@ -29,6 +29,9 @@ pub struct ErrorDetails {
     pub input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matches: Option<Vec<String>>,
+    /// `ambiguous_recipient`: the live participants the name or repo matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<Vec<RecipientCandidate>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +70,20 @@ pub struct MissedChannelMessage {
     pub sender_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_provenance: Option<String>,
+}
+
+/// One live participant an `ambiguous_recipient` error lists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientCandidate {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Which claim a `participant_missing` error is about.
@@ -128,10 +145,16 @@ pub enum ErrorCode {
     /// A room rename cannot prove the bridge's export guard is holding this
     /// host's copy of the name. Retryable.
     BridgeGuardUnavailable,
+    /// A recipient given by profile name or `repo:` matches no live
+    /// participant. Nothing was sent.
+    UnknownRecipient,
+    /// A recipient given by profile name or `repo:` matches more than one live
+    /// participant; `details.candidates` lists them. Nothing was sent.
+    AmbiguousRecipient,
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::UnknownRoom,
         Self::BlockedRoute,
         Self::ReservedSender,
@@ -157,6 +180,8 @@ impl ErrorCode {
         Self::BridgeUnsupported,
         Self::BridgeStatusUnavailable,
         Self::BridgeGuardUnavailable,
+        Self::UnknownRecipient,
+        Self::AmbiguousRecipient,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -186,6 +211,8 @@ impl ErrorCode {
             Self::BridgeUnsupported => "bridge_unsupported",
             Self::BridgeStatusUnavailable => "bridge_status_unavailable",
             Self::BridgeGuardUnavailable => "bridge_guard_unavailable",
+            Self::UnknownRecipient => "unknown_recipient",
+            Self::AmbiguousRecipient => "ambiguous_recipient",
         }
     }
 
@@ -202,6 +229,8 @@ impl ErrorCode {
             | Self::ParticipantMissing
             | Self::CrossedSend
             | Self::UnknownHost
+            | Self::UnknownRecipient
+            | Self::AmbiguousRecipient
             | Self::RemoteSenderUnroutable => 65,
             Self::NotYet | Self::BridgeUnsupported => 69,
             Self::NotFound => 66,
@@ -300,6 +329,11 @@ impl AppError {
 
     pub fn matches(mut self, value: Vec<String>) -> Self {
         self.details.matches = Some(value);
+        self
+    }
+
+    pub fn candidates(mut self, value: Vec<RecipientCandidate>) -> Self {
+        self.details.candidates = Some(value);
         self
     }
 

@@ -51,6 +51,7 @@ pub(crate) const SAMPLES: &[(&str, &str)] = &[
     sample!("doctor.json"),
     sample!("inbox.json"),
     sample!("participant-bind.json"),
+    sample!("participant-describe.json"),
     sample!("participant-show.json"),
     sample!("profile-avatar.json"),
     sample!("profile-list.json"),

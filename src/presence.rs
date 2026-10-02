@@ -10,6 +10,7 @@
 use crate::error::{AppError, AppResult};
 use crate::mailbox::Context;
 use crate::participant::Participant;
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -199,6 +200,64 @@ fn format_unix(secs: u64) -> String {
     // Format mirrors mail `sent` loosely as unix epoch seconds for machines;
     // humans get the number plus an age hint from live_watch.
     format!("{secs}")
+}
+
+/// What the doorbell supervisor's `doorbell/health.json` says is armed. It
+/// rewrites the file at least every 30 seconds while it runs, so a file older
+/// than [`DOORBELL_FRESH`] belongs to a dead supervisor and arms nothing.
+pub(crate) struct Doorbell {
+    pub(crate) state: &'static str,
+    pub(crate) participants: BTreeSet<String>,
+    pub(crate) rooms: BTreeSet<String>,
+}
+
+const DOORBELL_FRESH: std::time::Duration = std::time::Duration::from_secs(90);
+const DOORBELL_HEALTH_MAX_BYTES: u64 = 4 << 20;
+
+pub(crate) fn read_doorbell(context: &Context) -> Doorbell {
+    let empty = |state| Doorbell {
+        state,
+        participants: BTreeSet::new(),
+        rooms: BTreeSet::new(),
+    };
+    let path = context.root.join("doorbell").join("health.json");
+    let bytes = match crate::bridge_topology::read_regular(&path, DOORBELL_HEALTH_MAX_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return empty("absent"),
+        Err(_) => return empty("unreadable"),
+    };
+    let modified = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => modified,
+        Err(_) => return empty("unreadable"),
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return empty("unreadable");
+    };
+    let fresh = match std::time::SystemTime::now().duration_since(modified) {
+        Ok(age) => age <= DOORBELL_FRESH,
+        // Stamped in the future: within a few seconds is clock skew, more is
+        // a file that could vouch forever.
+        Err(ahead) => ahead.duration() <= std::time::Duration::from_secs(5),
+    };
+    if !fresh {
+        return empty("stale");
+    }
+    let armed = |key: &str, name: &str| -> BTreeSet<String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| row.get("armed").and_then(serde_json::Value::as_bool) == Some(true))
+            .filter_map(|row| row.get(name).and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    };
+    Doorbell {
+        state: "fresh",
+        participants: armed("bindings", "participant"),
+        rooms: armed("residents", "room"),
+    }
 }
 
 #[cfg(test)]

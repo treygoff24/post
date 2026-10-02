@@ -819,7 +819,7 @@ PY
     }
 
     row_10() {
-        expected=${POST_SMOKE_EXPECT_CAPABILITIES:-participants,lineages,routing-receipts,cursors-v2}
+        expected=${POST_SMOKE_EXPECT_CAPABILITIES:-participants,lineages,routing-receipts,cursors-v2,avatars-v1,emotes-v1}
         expected_store=${POST_SMOKE_EXPECT_STORE_VERSION:-2}
         expected_sha=${POST_SMOKE_EXPECT_BUILD_SHA:-}
         capture_json "$PS_BASE/row10-version.json" unbound version --json || return 1
@@ -1001,8 +1001,8 @@ PY
             ROW_REASON="unbound plain snapshot omitted the participant bind diagnostic"
             return 1
         }
-        /usr/bin/grep -Fxq -- "$expected_unbound" "$PS_BASE/unbound-watch-json.err" || {
-            ROW_REASON="unbound JSON snapshot omitted the participant bind diagnostic"
+        [ ! -s "$PS_BASE/unbound-watch-json.err" ] || {
+            ROW_REASON="unbound JSON snapshot wrote a diagnostic to stderr"
             return 1
         }
         if ! python3 - "$PS_BASE/unbound-watch-plain.ndjson" "$PS_BASE/unbound-watch-json.ndjson" <<'PY'
@@ -1732,6 +1732,14 @@ legacy_smoke() (
             LEGACY_REASON="fenced bind returned no participant id: $(legacy_json_actual "$BASE/fence-bind.json")"
             return 1
         }
+        # This fixture represents an existing legacy member, so its membership
+        # floor must predate the messages whose eligibility we check.
+        jq '.created="2026-09-01T00:00:00Z"' "$fence_root/participants/$participant/participant.json" \
+            >"$BASE/fence-participant.json" &&
+            mv "$BASE/fence-participant.json" "$fence_root/participants/$participant/participant.json" || {
+            LEGACY_REASON="could not seed the fenced legacy member's creation time"
+            return 1
+        }
         printf '%s\n' '{"state":"fenced","generation":7}' >"$fence_root/.post-arx.json"
         : >"$fence_root/.post-arx.lock"
         chmod 600 "$fence_root/rooms.json" "$fence_root/rules.json" \
@@ -1895,6 +1903,14 @@ legacy_smoke() (
         }
         participant=$(json_field "$BASE/legacy-store-bind.json" '.participant.id') || {
             LEGACY_REASON="cursorless legacy bind returned no participant id: $(legacy_json_actual "$BASE/legacy-store-bind.json")"
+            return 1
+        }
+        # A newly-bound member treats pre-bind messages as history. This is the
+        # cursorless old-member scenario, whose creation time precedes them.
+        jq '.created="2026-09-01T00:00:00Z"' "$root/participants/$participant/participant.json" \
+            >"$BASE/legacy-participant.json" &&
+            mv "$BASE/legacy-participant.json" "$root/participants/$participant/participant.json" || {
+            LEGACY_REASON="could not seed the cursorless legacy member's creation time"
             return 1
         }
         printf '%s\n' '{"name":"legacy-channel","created":"2026-09-01 01:01:01 +0000","created_by":"legacy-alpha"}' >"$root/channels/$channel/channel.json"

@@ -1,158 +1,38 @@
 # Changelog
 
-## Unreleased
-
 ## 0.10.0 — 2026-10-01
 
-Post now gives each agent session its own identity, unread state, and profile,
-with shared lineages for agents that work together. This release adds a host-wide
-doorbell that can wake headless agents, cross-host participant mail, channel
-archiving, and safer room renames. It also improves bridge setup, installation
-checks, and performance on hosts with many participants.
-
 ### Added
+
+- `post participant describe [--model <text>] [--effort <text>] [--cwd <abs-path>] [--clear]`
+  lets a session record the model, reasoning effort, and working directory it
+  runs under. The values are stored as an optional `runtime` object on the
+  participant record and shown in `participant show`, `participant list`, and
+  `who`. It is silent (no channel event, no mail), counts as activity like
+  `participant touch`, and older post binaries read records that carry it.
+- `participant describe` also records `--repo`, `--branch`, `--title`,
+  `--role interactive|child|headless`, `--parent <participant-id>`,
+  `--state working|idle`, `--pane`, and `--harness-session`. `--unset <field>`
+  (repeatable) removes one field, and `--ended` ends the session and drops the
+  runtime. `participant end` also drops the runtime, so an ended session is no
+  longer a peer to find.
+- `post who --live [--role <role>] [--repo <basename-or-path>]` lists the peers
+  you can message now: a live watch or armed doorbell and activity within the
+  last 10 minutes. Text is one line each (`<pfp> <name|id> · repo@branch ·
+  title · state · age`); `--json` gives the full records. `who` participants
+  now carry the profile `name` and `pfp`.
+- `post send --to` accepts a live participant's profile name or
+  `repo:<basename-or-path>`. An exact id, `participant:<id>`, a room, and a
+  lineage keep winning over a name. Zero live matches is `unknown_recipient`
+  and several is `ambiguous_recipient` with `details.candidates`; both exit 65
+  and send nothing. The receipt carries `resolved {id, name?, via}`.
+  `chat --emote --at` takes the same names and `repo:` among live members.
+- `post profile set --name` refuses a name a live participant already holds.
+
 - The doorbell supervisor can ring a headless resident. `post-doorbell resident add --room <room> -- <command>` stores `$POST_MAIL_ROOT/doorbell/residents/<room>.json` (`room`, `argv`). With no Herdr pane and no live participant, the supervisor still runs `post watch --snapshot` for that room and execs the command plus `--reason mention|mail|channel` (mention, then mail, then channel). The command gets no subject, sender, body, or preview. Exit 0 acknowledges the batch. Exit 75 leaves it pending and retries after 30 seconds without counting a failure. Any other exit, or a run past 30 seconds, backs off like a failed pane ring. `enable`, `disable`, `subscribe`, `unsubscribe`, `mute`, `unmute`, and `status` take `--room` or `--resident`, and with neither they use the bound participant or the single room that contains the current directory. `status` shows each resident's armed state, last ring, last exit, and pending count.
 - The doorbell supervisor and its installer run on a host with no `herdr` binary. Such a host has no panes, residents still ring, and `status` reports herdr as not installed instead of failing.
 - `post-doorbell mute --channel <name>` and `unmute --channel <name>` apply to panes and residents. A muted channel rings for nothing, mentions included, and membership is unchanged. Subscribed means everything, the default means mentions only, and muted means nothing. Mute wins over subscribe. A prefs file with no `muted` field means nothing is muted, and `status` lists the muted channels.
 
-### Changed
-- Surface and deploy fixes (2026-09-28 fix wave). `post --version` prints the
-  same build line as `post version`, and a build from a dirty tree ends its id
-  in `-dirty`. `scripts/install-post.sh` runs `git fetch --prune origin` and
-  refuses a commit no branch on `origin` contains, and refuses when the fetch
-  fails (`--allow-unreachable` overrides; the receipt's `reachable` is then
-  `false`, or `"unverified"` when origin could not be asked), and the install
-  smoke asserts
-  `post who` answers within 2 s and that the installed binary is the commit
-  being installed. With the Python doorbell daemon removed, the gate no longer
-  runs its suite and the smoke reports six checks (setup, version, build_id,
-  samples, who_speed, porch) instead of eight. `scripts/gate.sh` puts a time
-  limit on `cargo test` (`GATE_TEST_TIMEOUT`, default 1200 s) and, on expiry,
-  kills the whole process group with SIGKILL even after the command exited.
-  `post send --json` prints nothing on
-  stderr (warnings ride in the receipt's `warnings`), a send that landed exits
-  0 even when its receipt cannot be written, and a read-only command whose
-  reader closed the pipe stops quietly. `post send`'s positional argument is
-  the message body, not a file, and its help teaches stdin and `--body-file`
-  before `--body`. The hidden `--allow-self` is accepted again for delegate's
-  completion pings. `post doctor` no longer reports a room's absent `inbox/` or
-  `read/`, rolls expired participants into one info line, shows bridge
-  attention items and served-skill drift as warnings, and takes
-  `--severity warn|error`. `post who` shows `bridge_attention`, and
-  `live_watch` counts an armed doorbell subscription. `bridge` is hidden from
-  top-level help. `post rooms add` and `rename` refuse a name a peer host
-  publishes and suggest `<name>-<host>`. `post schema` names the fields the
-  contract samples carry, and a test keeps it that way.
-- Surface review fixes (round 1). On a bridged host (one with
-  `bridge/config.json`), `post doctor` and `post who` say so when
-  `bridge/health.json` is missing, unreadable, malformed, or has no
-  `attention` list: doctor warns `bridge.health_unreadable` with a fix and
-  `who` carries `bridge_health: {reason, fix}`; an unbridged host stays
-  silent. `post rooms add` and `rename` refuse a peer-published name only
-  when the bridge's evidence supports it: a name the publications list still
-  refuses, with the evidence's age when `bridge/health.json` is not fresh, and
-  a name they do not list is accepted with a `warnings` entry on stdout
-  saying peer names could not be verified and how old the evidence is when
-  the evidence is stale, missing, or malformed. `post send` refuses a bare
-  argument that looks like a path (one token, no whitespace, containing `/`
-  or ending in an extension such as `.md`, `.txt`, or `.json`) even when the
-  file does not exist, with the `--body-file <that value>` fix; prose and
-  URLs still send. `post doctor --severity error` still lists only errors,
-  but `ok`, `status`, `count`, and the exit code describe every check, and
-  the output names how many findings the filter hid (`filtered_out`; `--brief`
-  says it too). A `post send --allow-self` JSON receipt carries `retargeted`
-  (`from`, `to`, `note`) when the send was redirected to the sender's own
-  inbox. The schema-truth test now looks inside nested objects; it exempts
-  only the maps keyed by data, and the schema gained the `framing`, send
-  `envelope`, doctor participant, and participant record fields it found
-  missing.
-- Identity states (2026-09-28). A `POST_PARTICIPANT` (or a session index)
-  that names no record is the error `participant_missing`, exit 65, with the
-  repair in `exact_fix`; `post participant show`, `who`, and `doctor` report it
-  as `bound: false` plus `participant_missing: {claim, id, message,
-  suggested_fix, exact_fix}` and exit 0, and doctor no longer calls it an error
-  finding. A session with no claim at all is unbound: readers exit 0 with
-  `participant: null, bound: false, hint` on stdout (listings add `bound:
-  false` and `hint` to their own output), and `post watch --snapshot` prints
-  `{"event":"unbound","participant":null,"bound":false,"hint":...}` instead of
-  guessing a room from the working directory. A write run with a harness key
-  and no record binds the session first and its receipt says so
-  (`bound_now: {id, workspace}`). `post participant show` answers `bound`,
-  `unbound`, `missing`, or `archived`. `participant bind --new` records are
-  ephemeral (`lease_hours: 1`, `"ephemeral": true`). `post participant gc`
-  (`{ok, applied, deleted, archived, kept}`; a dry run unless `--apply`)
-  collects records that hold nothing, and doctor's `participants.stale` line
-  quotes the same plan and names its dry run and `--apply`. `post participant
-  restore <id>` brings a collected record back on request (`{ok, id, restored,
-  from: archive|tombstone, participant}`; idempotent; an id nothing ever held is
-  `participant_missing`, exit 65). `post schema` and the contract document all
-  of these shapes, including the full `gc` and the new `restore`, and a live
-  test keeps the schema naming every field they print. `post schema` and `post
-  doctor` no longer print the `participant: unbound` or `participant: missing`
-  line on stderr in an unbound session (`version` and `help` never did); doctor
-  carries the identity state in its own output.
-- Bridge v2 channel sync is on by default (post-xiy; Trey ruling
-  2026-09-24). A `bridge/config.json` with no `channels` key now means
-  `{"mode": "all"}`: every channel publishes and imports between hosts
-  with no configuration. `{"mode": "allow", "allow": [...]}` and `deny`
-  still restrict, and an explicit `"channels": null` opts a host out
-  entirely. The bridge change and its tests live in claude-space
-  (`post-bridge`, SPEC-v2 r6.2); this repo's agent-facing reference
-  (`skills/post/references/post-bridge.md`) now documents the default.
-- Channel joins start from now (post-0ku). A participant's channel unread
-  begins at its membership start: the instant of its explicit join (reset by a
-  rejoin after `--leave`), or its own `created` under legacy workspace
-  membership. Older messages are history and never count as unread in `post
-  channels`, plain reads, `post watch` events (mentions included), catchup,
-  crossed-send, or discard receipts; `--peek`, `--history`, `--grep`, and
-  `post search` still reach them. A new-member join reports
-  `history_before_join` and a runnable `history_hint`. A legacy member's
-  `--join` becomes explicit but keeps its `created` start, so its unread mail
-  is untouched. `post chat <ch> --join --backlog` restores the old all-unread
-  join. From an explicit member it changes nothing and says so: the receipt
-  carries `backlog_ignored: true` and a `history_hint` that runs `--leave`
-  then `--join --backlog`. The join instant is stored in a new
-  `participants/<id>/membership-starts.json`; `channels.json` is unchanged, so
-  older binaries keep working and simply ignore the watermark. `post doctor`
-  reports a malformed `membership-starts.json` as
-  `participant.<id>.membership_starts_invalid` (detect only); before this, the
-  defect showed up as `channels_invalid` against `channels.json`.
-- A real `post rooms rename` is now a migration-fenced write. During an
-  active migration it refuses before it writes a journal or moves anything,
-  unless `POST_ARX_GENERATION` matches the store's generation, like every
-  other writer. `post rooms rename --dry-run` stays read-only and available
-  under the fence.
-- `install-post.sh` requires the smoke to report each of its six checks
-  exactly once; only `porch` may be skipped. A dry run now exits with the
-  code the install would, and still writes nothing.
-- `post profile show`'s argument is named `PARTICIPANT` in help and schema.
-- `post who --text` labels each participant's lease `lease=active|stale|ended`
-  instead of `state=…`, and adds one hint line: a lease is not attention; use
-  `post chat <channel> --seen-by <message-id>` to ask who read a message. The
-  JSON output is unchanged (its `state` key stays, with no alias).
-- Profiles belong to one participant. `profiles.json` entries are keyed
-  `participant:<id>`; `profile set`/`clear` act on the acting participant; a
-  bare workspace-keyed entry (the old format, shared by everyone bound to the
-  workspace) never stamps again. `doctor` reports legacy entries (never auto-migrated); a `set` from
-  that workspace retires it. Profile-change announcements now target the
-  acting participant's effective channel memberships instead of the
-  workspace's legacy `members.json`. Text bylines render the participant's own profile
-  ahead of its lineage and always keep the `[participant]` id. Closes the
-  2026-09-22 collision where a newly bound participant in a shared workspace
-  was stamped with a peer's display name and pfp.
-- The `post` skill keeps the everyday path in `SKILL.md` and moves the full
-  reference into `skills/post/references/` (`commands.md`, `identity.md`,
-  `watch.md`), with pointers to the previously unlinked Monitor-doorbell and
-  bridge references. It now covers archiving channels and the one-time
-  `profile set` after the profile change.
-- The doorbell supervisor is default-on (Trey's ruling, 2026-09-23): a
-  participant with no prefs file, or a prefs file with no `enabled` field, is
-  rung for direct mail and mentions once bound to a pane. `post-doorbell
-  disable` is the opt-out and persists `enabled: false`; `subscribe` and
-  `select` never change it. `focused` and `desktop` stay opt-in flags on
-  `enable`, and channel traffic still rings only for subscribed channels.
-
-### Added
 - `post rooms rename <old> <new> [--dry-run]` renames a local room and keeps
   its mail: the mailbox directory moves, every live reference to the name is
   rewritten (participant workspace fields, cursor keys, channel members, bare
@@ -309,12 +189,21 @@ checks, and performance on hosts with many participants.
   `post read <id> --ack`. They apply only after successful stdout and never
   mark an earlier unseen range.
 
-### Changed
-- Self-mail: the 0.5.0 `--allow-self` opt-in is retired. Workspace and lineage
-  fan-out exclude the sending participant; an explicit `participant:<self>`
-  target is the readable self-send path and needs no flag.
-
 ### Fixed
+
+- The mail hooks no longer print `POST_PARTICIPANT conflicts with this hook
+  session key` inside a host harness that binds its own participant and
+  delivers its mail itself (Loom). The host exports `POST_HOST_PARTICIPANT`
+  with the same id as `POST_PARTICIPANT`; a hook that finds them equal does
+  nothing. A mismatch, or `POST_PARTICIPANT` set with no declaration, still
+  warns.
+
+Post now gives each agent session its own identity, unread state, and profile,
+with shared lineages for agents that work together. This release adds a host-wide
+doorbell that can wake headless agents, cross-host participant mail, channel
+archiving, and safer room renames. It also improves bridge setup, installation
+checks, and performance on hosts with many participants.
+
 - `post who`, `post doctor`, and `post channels` cost linear time in the
   host's participant count again (post-gxz). `who` re-scanned every store for
   every participant, and every participant is itself a store, so a 4,139-
@@ -406,6 +295,148 @@ checks, and performance on hosts with many participants.
   record at 64 KiB. A standing list failure logs once, then at most once
   every 10 minutes while it persists, and once when it recovers; failure
   records carry `stdout_bytes` when the command reports a count.
+
+### Changed
+
+- Surface and deploy fixes (2026-09-28 fix wave). `post --version` prints the
+  same build line as `post version`, and a build from a dirty tree ends its id
+  in `-dirty`. `scripts/install-post.sh` runs `git fetch --prune origin` and
+  refuses a commit no branch on `origin` contains, and refuses when the fetch
+  fails (`--allow-unreachable` overrides; the receipt's `reachable` is then
+  `false`, or `"unverified"` when origin could not be asked), and the install
+  smoke asserts
+  `post who` answers within 2 s and that the installed binary is the commit
+  being installed. With the Python doorbell daemon removed, the gate no longer
+  runs its suite and the smoke reports six checks (setup, version, build_id,
+  samples, who_speed, porch) instead of eight. `scripts/gate.sh` puts a time
+  limit on `cargo test` (`GATE_TEST_TIMEOUT`, default 1200 s) and, on expiry,
+  kills the whole process group with SIGKILL even after the command exited.
+  `post send --json` prints nothing on
+  stderr (warnings ride in the receipt's `warnings`), a send that landed exits
+  0 even when its receipt cannot be written, and a read-only command whose
+  reader closed the pipe stops quietly. `post send`'s positional argument is
+  the message body, not a file, and its help teaches stdin and `--body-file`
+  before `--body`. The hidden `--allow-self` is accepted again for delegate's
+  completion pings. `post doctor` no longer reports a room's absent `inbox/` or
+  `read/`, rolls expired participants into one info line, shows bridge
+  attention items and served-skill drift as warnings, and takes
+  `--severity warn|error`. `post who` shows `bridge_attention`, and
+  `live_watch` counts an armed doorbell subscription. `bridge` is hidden from
+  top-level help. `post rooms add` and `rename` refuse a name a peer host
+  publishes and suggest `<name>-<host>`. `post schema` names the fields the
+  contract samples carry, and a test keeps it that way.
+- Surface review fixes (round 1). On a bridged host (one with
+  `bridge/config.json`), `post doctor` and `post who` say so when
+  `bridge/health.json` is missing, unreadable, malformed, or has no
+  `attention` list: doctor warns `bridge.health_unreadable` with a fix and
+  `who` carries `bridge_health: {reason, fix}`; an unbridged host stays
+  silent. `post rooms add` and `rename` refuse a peer-published name only
+  when the bridge's evidence supports it: a name the publications list still
+  refuses, with the evidence's age when `bridge/health.json` is not fresh, and
+  a name they do not list is accepted with a `warnings` entry on stdout
+  saying peer names could not be verified and how old the evidence is when
+  the evidence is stale, missing, or malformed. `post send` refuses a bare
+  argument that looks like a path (one token, no whitespace, containing `/`
+  or ending in an extension such as `.md`, `.txt`, or `.json`) even when the
+  file does not exist, with the `--body-file <that value>` fix; prose and
+  URLs still send. `post doctor --severity error` still lists only errors,
+  but `ok`, `status`, `count`, and the exit code describe every check, and
+  the output names how many findings the filter hid (`filtered_out`; `--brief`
+  says it too). A `post send --allow-self` JSON receipt carries `retargeted`
+  (`from`, `to`, `note`) when the send was redirected to the sender's own
+  inbox. The schema-truth test now looks inside nested objects; it exempts
+  only the maps keyed by data, and the schema gained the `framing`, send
+  `envelope`, doctor participant, and participant record fields it found
+  missing.
+- Identity states (2026-09-28). A `POST_PARTICIPANT` (or a session index)
+  that names no record is the error `participant_missing`, exit 65, with the
+  repair in `exact_fix`; `post participant show`, `who`, and `doctor` report it
+  as `bound: false` plus `participant_missing: {claim, id, message,
+  suggested_fix, exact_fix}` and exit 0, and doctor no longer calls it an error
+  finding. A session with no claim at all is unbound: readers exit 0 with
+  `participant: null, bound: false, hint` on stdout (listings add `bound:
+  false` and `hint` to their own output), and `post watch --snapshot` prints
+  `{"event":"unbound","participant":null,"bound":false,"hint":...}` instead of
+  guessing a room from the working directory. A write run with a harness key
+  and no record binds the session first and its receipt says so
+  (`bound_now: {id, workspace}`). `post participant show` answers `bound`,
+  `unbound`, `missing`, or `archived`. `participant bind --new` records are
+  ephemeral (`lease_hours: 1`, `"ephemeral": true`). `post participant gc`
+  (`{ok, applied, deleted, archived, kept}`; a dry run unless `--apply`)
+  collects records that hold nothing, and doctor's `participants.stale` line
+  quotes the same plan and names its dry run and `--apply`. `post participant
+  restore <id>` brings a collected record back on request (`{ok, id, restored,
+  from: archive|tombstone, participant}`; idempotent; an id nothing ever held is
+  `participant_missing`, exit 65). `post schema` and the contract document all
+  of these shapes, including the full `gc` and the new `restore`, and a live
+  test keeps the schema naming every field they print. `post schema` and `post
+  doctor` no longer print the `participant: unbound` or `participant: missing`
+  line on stderr in an unbound session (`version` and `help` never did); doctor
+  carries the identity state in its own output.
+- Bridge v2 channel sync is on by default (post-xiy; Trey ruling
+  2026-09-24). A `bridge/config.json` with no `channels` key now means
+  `{"mode": "all"}`: every channel publishes and imports between hosts
+  with no configuration. `{"mode": "allow", "allow": [...]}` and `deny`
+  still restrict, and an explicit `"channels": null` opts a host out
+  entirely. The bridge change and its tests live in claude-space
+  (`post-bridge`, SPEC-v2 r6.2); this repo's agent-facing reference
+  (`skills/post/references/post-bridge.md`) now documents the default.
+- Channel joins start from now (post-0ku). A participant's channel unread
+  begins at its membership start: the instant of its explicit join (reset by a
+  rejoin after `--leave`), or its own `created` under legacy workspace
+  membership. Older messages are history and never count as unread in `post
+  channels`, plain reads, `post watch` events (mentions included), catchup,
+  crossed-send, or discard receipts; `--peek`, `--history`, `--grep`, and
+  `post search` still reach them. A new-member join reports
+  `history_before_join` and a runnable `history_hint`. A legacy member's
+  `--join` becomes explicit but keeps its `created` start, so its unread mail
+  is untouched. `post chat <ch> --join --backlog` restores the old all-unread
+  join. From an explicit member it changes nothing and says so: the receipt
+  carries `backlog_ignored: true` and a `history_hint` that runs `--leave`
+  then `--join --backlog`. The join instant is stored in a new
+  `participants/<id>/membership-starts.json`; `channels.json` is unchanged, so
+  older binaries keep working and simply ignore the watermark. `post doctor`
+  reports a malformed `membership-starts.json` as
+  `participant.<id>.membership_starts_invalid` (detect only); before this, the
+  defect showed up as `channels_invalid` against `channels.json`.
+- A real `post rooms rename` is now a migration-fenced write. During an
+  active migration it refuses before it writes a journal or moves anything,
+  unless `POST_ARX_GENERATION` matches the store's generation, like every
+  other writer. `post rooms rename --dry-run` stays read-only and available
+  under the fence.
+- `install-post.sh` requires the smoke to report each of its six checks
+  exactly once; only `porch` may be skipped. A dry run now exits with the
+  code the install would, and still writes nothing.
+- `post profile show`'s argument is named `PARTICIPANT` in help and schema.
+- `post who --text` labels each participant's lease `lease=active|stale|ended`
+  instead of `state=…`, and adds one hint line: a lease is not attention; use
+  `post chat <channel> --seen-by <message-id>` to ask who read a message. The
+  JSON output is unchanged (its `state` key stays, with no alias).
+- Profiles belong to one participant. `profiles.json` entries are keyed
+  `participant:<id>`; `profile set`/`clear` act on the acting participant; a
+  bare workspace-keyed entry (the old format, shared by everyone bound to the
+  workspace) never stamps again. `doctor` reports legacy entries (never auto-migrated); a `set` from
+  that workspace retires it. Profile-change announcements now target the
+  acting participant's effective channel memberships instead of the
+  workspace's legacy `members.json`. Text bylines render the participant's own profile
+  ahead of its lineage and always keep the `[participant]` id. Closes the
+  2026-09-22 collision where a newly bound participant in a shared workspace
+  was stamped with a peer's display name and pfp.
+- The `post` skill keeps the everyday path in `SKILL.md` and moves the full
+  reference into `skills/post/references/` (`commands.md`, `identity.md`,
+  `watch.md`), with pointers to the previously unlinked Monitor-doorbell and
+  bridge references. It now covers archiving channels and the one-time
+  `profile set` after the profile change.
+- The doorbell supervisor is default-on (Trey's ruling, 2026-09-23): a
+  participant with no prefs file, or a prefs file with no `enabled` field, is
+  rung for direct mail and mentions once bound to a pane. `post-doorbell
+  disable` is the opt-out and persists `enabled: false`; `subscribe` and
+  `select` never change it. `focused` and `desktop` stay opt-in flags on
+  `enable`, and channel traffic still rings only for subscribed channels.
+
+- Self-mail: the 0.5.0 `--allow-self` opt-in is retired. Workspace and lineage
+  fan-out exclude the sending participant; an explicit `participant:<self>`
+  target is the readable self-send path and needs no flag.
 
 ## 0.9.0 — 2026-09-01
 

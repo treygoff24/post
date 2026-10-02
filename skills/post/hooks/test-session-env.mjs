@@ -8,6 +8,7 @@
 // environment and set any identity they need explicitly.
 export const SESSION_IDENTITY_ENV = [
   "POST_PARTICIPANT",
+  "POST_HOST_PARTICIPANT",
   "POST_HARNESS",
   "POST_FROM",
   "POST_SENDER_ADDRESS",

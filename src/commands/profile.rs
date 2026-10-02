@@ -116,6 +116,11 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     let mut profiles = load_profiles(context)?;
     if let Some(name) = &args.name {
         validate_display_name(name, &room, &rooms, owner_room)?;
+        // A name is how peers address each other: refuse one a different
+        // participant holds while live.
+        if let Some(holder) = crate::peers::live_name_holder(context, name, &participant_id)? {
+            return Err(crate::profile::name_taken(name, &holder.participant.id));
+        }
     }
     // A legacy workspace-keyed entry for the actor's own workspace is retired
     // by this set (it was shared by everyone in the workspace, which is the

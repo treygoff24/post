@@ -278,7 +278,7 @@ pub(crate) fn execute(mut cli: Cli) -> AppResult<CommandResult> {
         Command::Owner(args) => owner::run(&context, args, pretty),
         Command::Schema => schema::run(&context, pretty),
         Command::Watch(args) => watch::run(&context, args),
-        Command::Who(args) => who::run(&context, args, pretty),
+        Command::Who(args) => who::run(&context, args, json, pretty),
         Command::Version => unreachable!("version dispatches before mailbox context resolution"),
         Command::Contract(_) => {
             unreachable!("contract dispatches before mailbox context resolution")
@@ -600,6 +600,7 @@ fn participant_required(command: &Command) -> bool {
         Command::Participant(crate::cli::ParticipantArgs {
             command:
                 crate::cli::ParticipantCommand::Touch
+                | crate::cli::ParticipantCommand::Describe(_)
                 | crate::cli::ParticipantCommand::End
                 | crate::cli::ParticipantCommand::Notice { .. },
         }) => true,
