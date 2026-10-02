@@ -1,13 +1,25 @@
 # Releasing post
 
-Releases are built, signed, and notarized **locally on the Mac** — Apple
+The 0.10.0 release used a split build: full gate and Linux builds on the devbox,
+with two sequential Darwin builds on the Mac under Trey's explicit exception
+to his devbox-only build rule. See
+[`receipts/2026-10-01-post-0.10.0-release.md`](receipts/2026-10-01-post-0.10.0-release.md)
+for the verified artifacts, installed state, and distinct public snapshot.
+The script below predates that machine rule: its `build` command still runs a
+full Mac gate and Linux builds, so do not use that default flow without updating
+it to the current operating contract. Signing and notarization still run on
+the Mac. The old `upload` flow also assumes shared Forgejo/GitHub history;
+0.10.0 instead used a public snapshot with no-reply metadata. Follow the
+receipt's source mapping rather than forcing the histories or tags together.
+
+The original script builds, signs, and notarizes **locally on the Mac** — Apple
 Developer ID signing cannot run on GitHub runners without exporting the
 signing key, so there is deliberately no CI release pipeline. dist
 (cargo-dist 0.32, config in `dist-workspace.toml`) orchestrates the darwin
 builds, the shell installer, and the source tarball; `scripts/release.sh`
 does everything else. Captured from the v0.7.0 ship (2026-08-30).
 
-## The flow
+## The original script flow
 
 ```sh
 # 1. CHANGELOG has a "## X.Y.Z — date" section; Cargo.toml version bumped;
