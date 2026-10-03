@@ -1509,6 +1509,10 @@ pub(super) fn bridge_attention(context: &Context) -> BridgeAttentionReport {
     }
 }
 
+/// Why a valid health file is unusable when it lacks the `attention` key.
+const NO_ATTENTION_REASON: &str =
+    "has no attention list (written by a bridge older than that format)";
+
 fn read_bridge_attention(context: &Context) -> Result<Vec<BridgeAttention>, String> {
     let path = crate::bridge_topology::bridge_dir(context).join("health.json");
     let bytes = crate::bridge_topology::read_regular(&path, BRIDGE_HEALTH_MAX_BYTES)
@@ -1519,11 +1523,7 @@ fn read_bridge_attention(context: &Context) -> Result<Vec<BridgeAttention>, Stri
     let items = match value.get("attention") {
         Some(serde_json::Value::Array(items)) => items,
         Some(_) => return Err("has an attention entry that is not a list".to_owned()),
-        None => {
-            return Err(
-                "has no attention list (written by a bridge older than that format)".to_owned(),
-            )
-        }
+        None => return Err(NO_ATTENTION_REASON.to_owned()),
     };
     let text = |item: &serde_json::Value, key: &str| {
         item.get(key)
@@ -1545,6 +1545,88 @@ fn read_bridge_attention(context: &Context) -> Result<Vec<BridgeAttention>, Stri
         .collect())
 }
 
+const LEGACY_UPDATE: &str = "Update the bridge so it writes the attention list (it then names each letter with its own fix).";
+
+/// A pre-attention bridge's health file carries counters instead of an
+/// attention list. Returns one `(id, message, fix)` per non-zero counter; zero,
+/// absent, or wrongly typed counters give nothing. `None` when the file cannot
+/// be read as a JSON object.
+fn legacy_bridge_counters(context: &Context) -> Option<Vec<(String, String, String)>> {
+    let path = crate::bridge_topology::bridge_dir(context).join("health.json");
+    let bytes = crate::bridge_topology::read_regular(&path, BRIDGE_HEALTH_MAX_BYTES)
+        .ok()
+        .flatten()?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    value.as_object()?;
+    // A count: a non-negative integer, or a list's length (`faults` has been both).
+    let count = |value: Option<&serde_json::Value>| -> u64 {
+        match value {
+            Some(serde_json::Value::Number(number)) => number.as_u64().unwrap_or(0),
+            Some(serde_json::Value::Array(items)) => items.len() as u64,
+            _ => 0,
+        }
+    };
+    let mut findings = Vec::new();
+    let mut add = |id: &str, message: String, fix: String| {
+        findings.push((format!("bridge.legacy.{id}"), message, fix));
+    };
+    let held = count(value.get("held"));
+    if held > 0 {
+        add(
+            "held",
+            format!("the bridge reports {held} held letter(s) (legacy counter)"),
+            format!("Held letters are recorded as status `held` receipts in the bridge's relay repository (BRIDGE_REPO, receipts/<host>/<room>/<id>.json); read the bridge log for each reason. {LEGACY_UPDATE}"),
+        );
+    }
+    let quarantined = count(value.get("quarantined"));
+    if quarantined > 0 {
+        add(
+            "quarantined",
+            format!("the bridge reports {quarantined} quarantined inbound letter(s) (legacy counter)"),
+            format!("Forensic copies sit under bridge/quarantine/<host>/<room>/ in this store; inspect them, then fix the sender or the room route. {LEGACY_UPDATE}"),
+        );
+    }
+    if let Some(serde_json::Value::Array(ids)) = value.get("outbound_unrelayable") {
+        let ids: Vec<&str> = ids.iter().filter_map(serde_json::Value::as_str).collect();
+        if !ids.is_empty() {
+            add(
+                "outbound_unrelayable",
+                format!(
+                    "the bridge cannot relay {} outbound letter(s) (legacy list, at most 20 shown): {}",
+                    ids.len(),
+                    ids.join(", ")
+                ),
+                format!("Find each id's .mail file in its room's inbox/read directory in this store and check why it cannot be relayed (unknown host, oversized, malformed). {LEGACY_UPDATE}"),
+            );
+        }
+    }
+    let channels_quarantined = count(value.get("channels").and_then(|c| c.get("quarantined")));
+    if channels_quarantined > 0 {
+        add(
+            "channels_quarantined",
+            format!("the bridge reports {channels_quarantined} quarantined channel message(s) (legacy counter)"),
+            format!("Read the bridge log for the channel and message ids it quarantined. {LEGACY_UPDATE}"),
+        );
+    }
+    let rejected = count(value.get("pmail").and_then(|p| p.get("rejected")));
+    if rejected > 0 {
+        add(
+            "pmail_rejected",
+            format!("the bridge reports {rejected} rejected typed (pmail) letter(s) (legacy counter)"),
+            format!("Read the bridge log for each rejection reason and resend the letter once fixed. {LEGACY_UPDATE}"),
+        );
+    }
+    let faults = count(value.get("local_held").and_then(|l| l.get("faults")));
+    if faults > 0 {
+        add(
+            "local_held_faults",
+            format!("the bridge reports {faults} local-hold fault(s) (legacy counter)"),
+            format!("Read the bridge log for the fault detail. {LEGACY_UPDATE}"),
+        );
+    }
+    Some(findings)
+}
+
 /// At most this many attention items become individual warnings; the rest are
 /// one summary line, so a bridge with hundreds of stuck letters cannot bury
 /// the rest of the report.
@@ -1554,14 +1636,32 @@ fn detect_bridge_attention(context: &Context, checks: &mut Vec<DoctorCheck>) {
     let BridgeAttentionReport { items, unreadable } = bridge_attention(context);
     let path = crate::bridge_topology::bridge_dir(context).join("health.json");
     if let Some(reason) = unreadable {
+        let legacy = (reason == NO_ATTENTION_REASON)
+            .then(|| legacy_bridge_counters(context))
+            .flatten();
+        let message = if legacy.is_some() {
+            "bridge/health.json was written by a bridge older than the attention list; its legacy counters follow, but it cannot name individual stuck letters".to_owned()
+        } else {
+            bridge_health_message(&reason)
+        };
         checks.push(check(
             "bridge.health_unreadable",
             DoctorSeverity::Warning,
             &path,
-            &bridge_health_message(&reason),
+            &message,
             false,
             BRIDGE_HEALTH_FIX,
         ));
+        for (id, message, fix) in legacy.unwrap_or_default() {
+            checks.push(check(
+                &id,
+                DoctorSeverity::Warning,
+                &path,
+                &message,
+                false,
+                &fix,
+            ));
+        }
     }
     if items.is_empty() {
         return;

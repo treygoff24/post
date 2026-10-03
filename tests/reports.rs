@@ -364,9 +364,15 @@ fn doctor_and_who_warn_when_a_bridged_hosts_health_cannot_be_read() {
             .find(|check| check.id == "bridge.health_unreadable")
             .unwrap_or_else(|| panic!("{label}: {:?}", ids(&report)));
         assert_eq!(check.severity, post::output::DoctorSeverity::Warning);
+        // A valid file from a pre-attention bridge says so instead: its
+        // counters are read, so the letters are not invisible.
+        let expected = if label == "no attention key" {
+            "older than the attention list"
+        } else {
+            "would not show up"
+        };
         assert!(
-            check.message.contains("bridge/health.json")
-                && check.message.contains("would not show up"),
+            check.message.contains("bridge/health.json") && check.message.contains(expected),
             "{label}: {}",
             check.message
         );
@@ -406,6 +412,81 @@ fn doctor_and_who_warn_when_a_bridged_hosts_health_cannot_be_read() {
     let who = who_json(&sandbox);
     assert!(who.get("bridge_health").is_none(), "{who}");
     assert!(!stdout(&sandbox.run(&["who", "--text"])).contains("bridge_health"));
+}
+
+fn legacy_check<'a>(report: &'a DoctorOutput, id: &str) -> &'a post::output::DoctorCheck {
+    report
+        .checks
+        .iter()
+        .find(|check| check.id == id)
+        .unwrap_or_else(|| panic!("{id}: {:?}", ids(report)))
+}
+
+/// A bridge older than the attention list writes counters. Doctor reads them:
+/// held or refused letters must not vanish behind `bridge.health_unreadable`.
+#[test]
+fn doctor_reads_the_legacy_counters_of_a_pre_attention_bridge() {
+    let sandbox = Sandbox::new();
+    healthy_store(&sandbox);
+    write(
+        &sandbox.mail_root.join("bridge/config.json"),
+        r#"{"host":"trey"}"#,
+    );
+    let health = sandbox.mail_root.join("bridge/health.json");
+
+    write(
+        &health,
+        r#"{"v":1,"ok":true,"held":2,"quarantined":0,"outbound_unrelayable":["id1","id2"],"channels":{"quarantined":3},"pmail":{"rejected":1,"retry":4},"local_held":{"faults":"bad"},"sender_not_homed":7}"#,
+    );
+    let (code, report) = doctor(&sandbox, &[]);
+    assert_eq!(code, Some(1), "{:?}", report.checks);
+    let listed = ids(&report);
+    for id in [
+        "bridge.health_unreadable",
+        "bridge.legacy.held",
+        "bridge.legacy.outbound_unrelayable",
+        "bridge.legacy.channels_quarantined",
+        "bridge.legacy.pmail_rejected",
+    ] {
+        assert!(listed.contains(&id), "{id}: {listed:?}");
+    }
+    for id in [
+        "bridge.legacy.quarantined",
+        "bridge.legacy.local_held_faults",
+    ] {
+        assert!(!listed.contains(&id), "{id} must stay silent: {listed:?}");
+    }
+    assert!(legacy_check(&report, "bridge.legacy.held")
+        .message
+        .contains('2'));
+    let unrelayable = legacy_check(&report, "bridge.legacy.outbound_unrelayable");
+    assert!(
+        unrelayable.message.contains("id1, id2"),
+        "{}",
+        unrelayable.message
+    );
+    assert_eq!(unrelayable.severity, post::output::DoctorSeverity::Warning);
+    assert!(unrelayable.suggested_fix.contains("attention list"));
+    // `who` keeps counting attention items only.
+    assert!(who_json(&sandbox).get("bridge_attention").is_none());
+
+    // Old format, everything zero: only the unreadable warning.
+    write(
+        &health,
+        r#"{"v":1,"held":0,"quarantined":0,"outbound_unrelayable":[],"channels":{"quarantined":0},"pmail":{"rejected":0}}"#,
+    );
+    let (_, report) = doctor(&sandbox, &[]);
+    let bridge: Vec<&str> = ids(&report)
+        .into_iter()
+        .filter(|id| id.starts_with("bridge."))
+        .collect();
+    assert_eq!(bridge, ["bridge.health_unreadable"]);
+
+    // Current format: legacy counters beside an attention list are ignored.
+    write(&health, r#"{"attention":[],"held":5}"#);
+    let (code, report) = doctor(&sandbox, &[]);
+    assert_eq!(code, Some(0), "{:?}", report.checks);
+    assert!(!ids(&report).iter().any(|id| id.starts_with("bridge.")));
 }
 
 /// A `POST_PARTICIPANT` that names no record is a diagnosis, not a store
