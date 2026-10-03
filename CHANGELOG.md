@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `post search --since YYYY-MM-DD --until YYYY-MM-DD` keeps only messages from
+  those inclusive days, each bound optional. Days are UTC, the zone message ids
+  are stamped in. The limit counts filtered hits, and JSON echoes `since` and
+  `until`. A bad date, or `--since` after `--until`, is `invalid_argument`.
+- `post version --json` reports `store`, the store root this binary would use
+  (`POST_MAIL_ROOT`, else `~/.claude-mail`), without touching it. When the
+  environment cannot resolve one, `store` is null and `store_error` says why.
+- `post doctor` warns `hooks.claude_drift` when the Claude mail hooks
+  installed in `~/.claude/hooks/` differ from the ones this binary ships, and
+  names the old single-file layout (no `mail-hook-core.mjs`). Before this, a
+  host that never re-ran the installer kept old hook behaviour with no sign.
+- The commands reference documents the format-1 avatar pack: its grammar, and
+  the 16 palette colours with hex values. The palette is Porch's own, not
+  PICO-8's.
+
+### Changed
+
+- `post doctor` on a bridge older than the attention list still warns
+  `bridge.health_unreadable`, and now also lists that bridge's non-zero legacy
+  counters (`bridge.legacy.held`, `quarantined`, `outbound_unrelayable` with
+  the ids, `channels_quarantined`, `pmail_rejected`, `local_held_faults`).
+  Before this, held or refused letters on such a host did not show anywhere.
+- `post identity list` on a store with no lineages adds a `hint` saying none
+  has been founded and how to found one. The empty list was correct but
+  looked broken.
+
 ## 0.10.0 — 2026-10-01
 
 ### Added
