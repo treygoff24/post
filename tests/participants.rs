@@ -1534,10 +1534,7 @@ fn version_json_names_the_store_it_would_use_and_never_creates_it() {
     let output = sandbox.run(&["version", "--json"]);
     assert_success(&output);
     let value: Value = from_stdout(&output);
-    assert_eq!(
-        value["store"],
-        sandbox.mail_root.to_string_lossy().as_ref()
-    );
+    assert_eq!(value["store"], sandbox.mail_root.to_string_lossy().as_ref());
     assert!(value.get("store_error").is_none());
 
     // An unresolvable root is null with a reason, and the command still works.
