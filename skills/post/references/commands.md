@@ -169,7 +169,10 @@ or not it is true.
   across mail you can see and channels you belong to. `--mail` or
   `--channel <name>` narrows it; `--archived` searches archived channels
   without membership. Results come newest first with 160-character previews;
-  `--limit` defaults to 100 and caps at 1000.
+  `--limit` defaults to 100 and caps at 1000. `--since YYYY-MM-DD` and
+  `--until YYYY-MM-DD` (each optional) keep only messages from those
+  inclusive calendar days; days are UTC, the zone message ids are stamped in.
+  A bad date, or `--since` after `--until`, is `invalid_argument`.
 - Reads, catchup, and search print quiet headers by default.
   `--framing full|compact` requests banners on every call; JSON keeps
   `source` and `authority` either way.
