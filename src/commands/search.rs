@@ -24,6 +24,14 @@ pub(super) fn run(
                 .unwrap_or_else(|| participant.id.clone()))
         },
     )?;
+    if let (Some(since), Some(until)) = (args.since.as_deref(), args.until.as_deref()) {
+        if since > until {
+            return Err(AppError::invalid_argument(format!(
+                "--since {since} is later than --until {until}; the range would be empty"
+            )));
+        }
+    }
+    let days = DayRange::new(args.since.as_deref(), args.until.as_deref());
     let framing = mailbox::resolve_framing(args.framing);
     let pattern = LiteralPattern::new(&args.pattern);
     let mut matches = MatchAccumulator::new(args.limit);
@@ -36,7 +44,14 @@ pub(super) fn run(
     if let Some(participant) = resolved.participant() {
         if search_mail {
             for address in super::inbox::visible_addresses(context, participant)? {
-                collect_mail(context, participant, &address, &pattern, &mut matches)?;
+                collect_mail(
+                    context,
+                    participant,
+                    &address,
+                    &pattern,
+                    &days,
+                    &mut matches,
+                )?;
             }
         }
 
@@ -52,7 +67,14 @@ pub(super) fn run(
                 Scan::Tolerant,
             )?;
             skipped.extend(scan.skipped.into_iter().map(|f| f.in_channel(channel_name)));
-            collect_channel(context, channel_name, scan.items, &pattern, &mut matches);
+            collect_channel(
+                context,
+                channel_name,
+                scan.items,
+                &pattern,
+                &days,
+                &mut matches,
+            );
         } else if args.archived {
             let (summaries, unreadable) =
                 crate::channel::list_channels_with(context, Scan::Tolerant)?;
@@ -69,7 +91,7 @@ pub(super) fn run(
                     Scan::Tolerant,
                 )?;
                 skipped.extend(scan.skipped.into_iter().map(|f| f.in_channel(&name)));
-                collect_channel(context, &name, scan.items, &pattern, &mut matches);
+                collect_channel(context, &name, scan.items, &pattern, &days, &mut matches);
             }
         } else if search_channels {
             for channel_name in crate::channel_state::effective_channels(context, participant)? {
@@ -84,7 +106,14 @@ pub(super) fn run(
                         .into_iter()
                         .map(|f| f.in_channel(&channel_name)),
                 );
-                collect_channel(context, &channel_name, scan.items, &pattern, &mut matches);
+                collect_channel(
+                    context,
+                    &channel_name,
+                    scan.items,
+                    &pattern,
+                    &days,
+                    &mut matches,
+                );
             }
         }
     }
@@ -127,6 +156,12 @@ pub(super) fn run(
         .map_err(|error| AppError::invalid_argument(format!("serialize search: {error}")))?;
         let object = value.as_object_mut().expect("search output is an object");
         object.insert("pending".to_owned(), serde_json::json!(pending));
+        if let Some(since) = &args.since {
+            object.insert("since".to_owned(), serde_json::json!(since));
+        }
+        if let Some(until) = &args.until {
+            object.insert("until".to_owned(), serde_json::json!(until));
+        }
         if !skipped.is_empty() {
             object.insert("skipped".to_owned(), serde_json::json!(skipped));
         }
@@ -159,6 +194,39 @@ pub(super) fn run(
     };
 
     Ok(CommandResult::success(rendered))
+}
+
+/// Inclusive UTC calendar-day window over the `YYYYMMDD` prefix of a message
+/// id (ids are stamped in UTC, so days are UTC days). With a bound set, an id
+/// whose prefix is not a date is excluded: its day is unknown.
+#[derive(Debug)]
+struct DayRange {
+    since: Option<String>,
+    until: Option<String>,
+}
+
+impl DayRange {
+    fn new(since: Option<&str>, until: Option<&str>) -> Self {
+        let compact = |day: &str| day.replace('-', "");
+        Self {
+            since: since.map(compact),
+            until: until.map(compact),
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        if self.since.is_none() && self.until.is_none() {
+            return true;
+        }
+        let Some(day) = id
+            .get(..8)
+            .filter(|day| day.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            return false;
+        };
+        self.since.as_deref().is_none_or(|since| day >= since)
+            && self.until.as_deref().is_none_or(|until| day <= until)
+    }
 }
 
 #[derive(Debug)]
@@ -274,11 +342,15 @@ fn collect_mail(
     participant: &crate::participant::Participant,
     address: &crate::participant::Address,
     pattern: &LiteralPattern,
+    days: &DayRange,
     matches: &mut MatchAccumulator,
 ) -> AppResult<()> {
     let cursors = crate::cursor_state::ParticipantCursors::load(context, participant);
     for item in crate::cursor_state::eligibility::visible_mail(context, participant, address)? {
         let already_read = item.recipient && cursors.mail_has_seen(address, &item.envelope.id);
+        if !days.contains(&item.envelope.id) {
+            continue;
+        }
         let own = item.own;
         let pending = item.pending;
         let envelope = item.envelope;
@@ -330,9 +402,13 @@ fn collect_channel(
     channel_name: &str,
     items: Vec<crate::cursor_state::eligibility::EligibleChannelMessage>,
     pattern: &LiteralPattern,
+    days: &DayRange,
     matches: &mut MatchAccumulator,
 ) {
     for item in items {
+        if !days.contains(&item.message.id) {
+            continue;
+        }
         let own = item.own;
         let already_read = item.already_read;
         let message = item.message;

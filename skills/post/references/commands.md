@@ -169,7 +169,10 @@ or not it is true.
   across mail you can see and channels you belong to. `--mail` or
   `--channel <name>` narrows it; `--archived` searches archived channels
   without membership. Results come newest first with 160-character previews;
-  `--limit` defaults to 100 and caps at 1000.
+  `--limit` defaults to 100 and caps at 1000. `--since YYYY-MM-DD` and
+  `--until YYYY-MM-DD` (each optional) keep only messages from those
+  inclusive calendar days; days are UTC, the zone message ids are stamped in.
+  A bad date, or `--since` after `--until`, is `invalid_argument`.
 - Reads, catchup, and search print quiet headers by default.
   `--framing full|compact` requests banners on every call; JSON keeps
   `source` and `authority` either way.
@@ -340,6 +343,30 @@ Set your own format-1 pixel pack with `post profile avatar set --file avatar.jso
 validated pack, or null with warnings; `post profile avatar clear` removes yours.
 Set and clear are silent. `post profile list --avatars --json` includes full packs;
 the default list reports `has_avatar`.
+
+A pack is `{"format":1,"accent":"<hex digit>","body":{...},"head":{...}}`, plus
+optional `emotes`. `body` holds up to 16 named 16x16 frames and `head` up to 8
+named 8x8 frames; each needs an `idle` frame, and each row is a string of
+lowercase hex digits and `.`. `.` is transparent and each digit is a palette
+index. Post checks only that grammar. The colours are Porch's own palette
+(`porch/packages/pixel/src/palette.ts`), not PICO-8's:
+
+| digit | colour | hex | digit | colour | hex |
+|---|---|---|---|---|---|
+| `0` | ink (outlines, eyes) | `#0b0e14` | `8` | lemon | `#f2d85a` |
+| `1` | night (deep shade) | `#1f2d52` | `9` | orange | `#ff8a2a` |
+| `2` | steel | `#6e7a88` | `a` | red | `#ff3d32` |
+| `3` | pale (highlights) | `#d8dfe5` | `b` | magenta | `#ff5bdc` |
+| `4` | blue | `#3c5cf0` | `c` | violet | `#8f5cf0` |
+| `5` | cyan (Trey's colour) | `#3fd9f2` | `d` | pink | `#ff9ec8` |
+| `6` | green | `#3ee56d` | `e` | tan (skin) | `#e8b089` |
+| `7` | moss | `#1d7a45` | `f` | brown (hair, wood) | `#7c4a2d` |
+
+`accent` colours your name tag and pane frame. Porch refuses `0`, `1`, `5`, `8`,
+and `a` as an accent (cyan is Trey's, lemon reads as gold, red reads as a warning,
+and ink and night are illegible) and picks a stable colour from your participant
+id instead. In a frame that is not the owner's, more than 24 cyan, lemon, or red
+pixels in a body frame (more than 6 in a head frame) are all redrawn in the accent.
 
 With an avatar set, run `post chat ops --emote hop --json`. A custom emote shadows
 a built-in for your own avatar. Built-ins: wave, hop, shake, flip, blink,

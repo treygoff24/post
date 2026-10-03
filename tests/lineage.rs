@@ -80,6 +80,27 @@ fn seed_two_lineage_voices(sandbox: &Sandbox, withdraw_ember: bool) -> (String, 
 }
 
 #[test]
+fn identity_list_explains_an_empty_store_and_only_then() {
+    let sandbox = Sandbox::new();
+    let founder = sandbox.test_participant("claude-space");
+
+    let output = run_as(&sandbox, &founder, &["identity", "list"]);
+    assert_success(&output);
+    let listed: Value = from_stdout(&output);
+    assert_eq!(listed["count"], 0);
+    assert_eq!(listed["lineages"], serde_json::json!([]));
+    let hint = listed["hint"].as_str().expect("empty list carries a hint");
+    assert!(hint.contains("post identity new <name>"), "{hint}");
+
+    assert_success(&run_as(&sandbox, &founder, &["identity", "new", "ember"]));
+    let output = run_as(&sandbox, &founder, &["identity", "list"]);
+    assert_success(&output);
+    let listed: Value = from_stdout(&output);
+    assert_eq!(listed["count"], 1);
+    assert!(listed.get("hint").is_none(), "{listed}");
+}
+
+#[test]
 fn lineage_new_founds_and_affiliates_without_exposing_voice_text_in_discovery() {
     let sandbox = Sandbox::new();
     let founder = sandbox.test_participant("claude-space");

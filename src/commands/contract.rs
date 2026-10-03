@@ -177,6 +177,15 @@ pub(super) fn verify_served(served: &Path) -> AppResult<SkillVerifyOutput> {
     verify_against(served, SKILL_MANIFEST)
 }
 
+/// The sha256 this binary's build recorded for one served skill file, by its
+/// path under the skill root (`hooks/claude-mail.mjs`).
+pub(super) fn manifest_sha256(path: &str) -> Option<&'static str> {
+    SKILL_MANIFEST
+        .iter()
+        .find(|file| file.path == path)
+        .map(|file| file.sha256)
+}
+
 fn verify_against(served: &Path, manifest: &[SkillFile]) -> AppResult<SkillVerifyOutput> {
     let link = std::fs::symlink_metadata(served)
         .map_err(|error| AppError::io("inspect served skill path", served, error))?;

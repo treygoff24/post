@@ -113,9 +113,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "search",
-            "post search <pattern> [--mail | --channel <channel> | --archived] [--limit <1..=1000>] [--framing auto|full|compact]",
+            "post search <pattern> [--mail | --channel <channel> | --archived] [--since <YYYY-MM-DD>] [--until <YYYY-MM-DD>] [--limit <1..=1000>] [--framing auto|full|compact]",
             "framed text; JSON with --json",
-            "read-only, cursorless literal case-insensitive Unicode substring search over party-visible direct mail and joined channels; --archived instead searches every archived channel on the host, membership not required, and no mail; --mail, --channel, and --archived are mutually exclusive, membership/party filters apply before message content is opened, results are deterministic newest-first with a default limit of 100 and hard cap of 1000, and previews are sanitized and capped at 160 Unicode scalar values; no mailbox, cursor, or banner state is changed",
+            "read-only, cursorless literal case-insensitive Unicode substring search over party-visible direct mail and joined channels; --archived instead searches every archived channel on the host, membership not required, and no mail; --mail, --channel, and --archived are mutually exclusive, membership/party filters apply before message content is opened, --since/--until keep only messages whose id day falls inside the inclusive range, either bound optional, a bad date or since after until is invalid_argument, days are UTC (the zone message ids are stamped in), and the filter applies to mail, channels, and archived channels before --limit; results are deterministic newest-first with a default limit of 100 and hard cap of 1000, and previews are sanitized and capped at 160 Unicode scalar values; no mailbox, cursor, or banner state is changed",
         ),
         command(
             "rooms",
@@ -145,7 +145,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "doctor",
             "post doctor [--fix] [--brief] [--severity warn|error]",
             "JSON; one summary line with --brief",
-            "read-only unless --fix; --fix only creates the missing root, archive, and default config files (a room's inbox/ and read/ appear with its first mail and are neither reported nor created); --severity warn drops info lines and --severity error lists errors only, but status, count, ok, and the exit code always cover every check (severity_filter names the threshold and filtered_out counts the findings it hid, so `--severity error` exits 1 while a warning remains); expired participants are one info line (participants.stale, with a `post participant gc` preview), bridge/health.json attention items are warnings carrying the bridge's own fix (bridge.attention.<kind>[.<id>]), and on a bridged host (bridge/config.json present) a health file that is missing, malformed, or has no attention list is itself a bridge.health_unreadable warning with a fix (an unbridged host is silent), and a served post skill (~/.agents/skill-library/post) that differs from the one this binary was built with is a skill.drift warning; --brief prints `post doctor: ok (N checks)` or `post doctor: N findings (run post doctor for detail)` (`N findings, M of them hidden by --severity error` under a filter) with exit codes unchanged",
+            "read-only unless --fix; --fix only creates the missing root, archive, and default config files (a room's inbox/ and read/ appear with its first mail and are neither reported nor created); --severity warn drops info lines and --severity error lists errors only, but status, count, ok, and the exit code always cover every check (severity_filter names the threshold and filtered_out counts the findings it hid, so `--severity error` exits 1 while a warning remains); expired participants are one info line (participants.stale, with a `post participant gc` preview), bridge/health.json attention items are warnings carrying the bridge's own fix (bridge.attention.<kind>[.<id>]), and on a bridged host (bridge/config.json present) a health file that is missing, malformed, or has no attention list is itself a bridge.health_unreadable warning with a fix (an unbridged host is silent); a valid file from a bridge older than the attention list is read for its legacy counters, one warning per non-zero one (bridge.legacy.held, .quarantined, .outbound_unrelayable (lists the ids), .channels_quarantined, .pmail_rejected, .local_held_faults), and who's bridge_attention counts attention items only, and a served post skill (~/.agents/skill-library/post) that differs from the one this binary was built with is a skill.drift warning, and installed Claude mail hooks (~/.claude/hooks/post-claude-mail.mjs, followed through symlinks, with mail-hook-core.mjs beside it) that differ from the ones this binary ships, or lack the core (the old single-file layout), are a hooks.claude_drift warning with the installer command (no adapter, no finding); --brief prints `post doctor: ok (N checks)` or `post doctor: N findings (run post doctor for detail)` (`N findings, M of them hidden by --severity error` under a filter) with exit codes unchanged",
         ),
         command(
             "watch",
@@ -195,7 +195,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "notice: ok, notice=string|null, busy; plain query is read-only; --claim PID reserves delivery under the registry lock (busy for a live competing owner), --release PID releases only that owner, --ack records delivery; all three flags are fenced writers; dead owner claims are reclaimable",
         ]),
         identity: fields(&[
-            "list: ok, lineages without voice bodies",
+            "list: ok, lineages without voice bodies, count, warnings, hint? (string, present only when count is 0: an empty list is correct; says how to found a lineage)",
             "show: lineage metadata and affiliates; voice bodies only with --voices",
             "new/continue/leave: acting participant affiliation and acknowledgement state",
             "voice add/withdraw and terms set: lineage content state",
@@ -205,6 +205,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "version",
             "build_sha (short commit id; a -dirty suffix marks a build from a tree with uncommitted changes to tracked files; unknown outside a git checkout)",
             "store_version=2",
+            "store (the store root this binary would use: POST_MAIL_ROOT, else $HOME/.claude-mail; null when the environment cannot resolve one; resolved without touching the disk)",
+            "store_error? (string, present only when store is null: why)",
             "capabilities",
         ]),
         doctor: fields(&[
@@ -413,6 +415,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "framing (source, authority, laws)",
             "room",
             "pattern",
+            "since? (YYYY-MM-DD, echoed when --since is given; inclusive UTC day)",
+            "until? (YYYY-MM-DD, echoed when --until is given; inclusive UTC day)",
             "match",
             "results[] (source, channel?, event? for channel, id, from, from_participant?, from_host? for channel, from_lineage?, origin, reply_to_participant?, reply_to_shared, sent, subject, preview, matched, own?, pending?, already_read?, kind? for mail)",
             "count",
