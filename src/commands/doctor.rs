@@ -309,6 +309,7 @@ fn detect(context: &Context) -> Vec<DoctorCheck> {
     detect_rename_journal(context, &mut checks);
     detect_bridge_attention(context, &mut checks);
     detect_skill_drift(context, &mut checks);
+    detect_claude_hook_drift(context, &mut checks);
 
     // owner.json is the trust anchor: a broken one makes every
     // badge-computing chat read fail closed (A0a Decision 3), so doctor
@@ -1700,6 +1701,75 @@ fn detect_bridge_attention(context: &Context, checks: &mut Vec<DoctorCheck>) {
             "Read the `attention` list in bridge/health.json for the rest.",
         ));
     }
+}
+
+/// How much of an installed hook file doctor will hash; a longer file is not
+/// the shipped one.
+const HOOK_MAX_BYTES: u64 = 1 << 20;
+
+/// `Some(true)` when the file at `path` (symlinks followed) hashes to
+/// `expected`, `Some(false)` when it differs or is too large, `None` when it
+/// does not exist or cannot be read.
+fn hook_file_matches(path: &Path, expected: &str) -> Option<bool> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(HOOK_MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > HOOK_MAX_BYTES {
+        return Some(false);
+    }
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(digest == expected)
+}
+
+/// The Claude installer copies the adapter and its core into
+/// `~/.claude/hooks/`, and Claude Code runs those copies, so a host that never
+/// re-ran the installer keeps old hook behaviour. Compare the copies with the
+/// hashes this binary's skill manifest holds. No adapter means hooks are not
+/// installed here: no finding.
+fn detect_claude_hook_drift(context: &Context, checks: &mut Vec<DoctorCheck>) {
+    let dir = context.home.join(".claude/hooks");
+    let adapter = dir.join("post-claude-mail.mjs");
+    let core = dir.join("mail-hook-core.mjs");
+    if !adapter.is_file() {
+        return;
+    }
+    let (Some(adapter_sha), Some(core_sha)) = (
+        super::contract::manifest_sha256("hooks/claude-mail.mjs"),
+        super::contract::manifest_sha256("hooks/mail-hook-core.mjs"),
+    ) else {
+        return;
+    };
+    let mut stale = Vec::new();
+    if hook_file_matches(&adapter, adapter_sha) != Some(true) {
+        stale.push("post-claude-mail.mjs differs from the adapter this binary ships".to_owned());
+    }
+    match hook_file_matches(&core, core_sha) {
+        Some(true) => {}
+        None if !core.exists() => stale.push(
+            "mail-hook-core.mjs is missing beside the adapter (the old single-file layout)"
+                .to_owned(),
+        ),
+        _ => stale.push("mail-hook-core.mjs differs from the core this binary ships".to_owned()),
+    }
+    if stale.is_empty() {
+        return;
+    }
+    checks.push(check(
+        "hooks.claude_drift",
+        DoctorSeverity::Warning,
+        &dir,
+        &format!(
+            "the installed Claude mail hooks are stale: {}",
+            stale.join("; ")
+        ),
+        false,
+        "Re-run the installer from a post checkout at the commit `post --version` reports: node <checkout>/skills/post/hooks/install-claude-hooks.mjs ~/.claude/settings.json",
+    ));
 }
 
 /// The served skill checkout, where the installer puts it by default.

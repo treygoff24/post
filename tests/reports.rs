@@ -711,6 +711,65 @@ fn doctors_prune_numbers_are_the_ones_participant_gc_reports() {
     );
 }
 
+/// The Claude hook copies a host runs must be the ones this binary ships.
+#[test]
+fn doctor_reports_stale_claude_hook_copies() {
+    let sandbox = Sandbox::new();
+    healthy_store(&sandbox);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/post/hooks");
+    let hooks = sandbox.home.join(".claude/hooks");
+    let adapter = hooks.join("post-claude-mail.mjs");
+    let core = hooks.join("mail-hook-core.mjs");
+    let drift = |sandbox: &Sandbox| {
+        let (_, report) = doctor(sandbox, &[]);
+        report
+            .checks
+            .into_iter()
+            .find(|check| check.id == "hooks.claude_drift")
+    };
+
+    // Hooks not installed: nothing to report.
+    assert!(drift(&sandbox).is_none());
+
+    // Byte-identical copies: no finding.
+    fs::create_dir_all(&hooks).expect("hooks dir");
+    fs::copy(source.join("claude-mail.mjs"), &adapter).expect("copy adapter");
+    fs::copy(source.join("mail-hook-core.mjs"), &core).expect("copy core");
+    assert!(drift(&sandbox).is_none());
+
+    // A changed core is named.
+    fs::write(&core, "// old core\n").expect("stale core");
+    let finding = drift(&sandbox).expect("a changed core is drift");
+    assert_eq!(finding.severity, post::output::DoctorSeverity::Warning);
+    assert!(
+        finding.message.contains("mail-hook-core.mjs differs")
+            && !finding.message.contains("post-claude-mail.mjs"),
+        "{}",
+        finding.message
+    );
+    assert!(finding.suggested_fix.contains("install-claude-hooks.mjs"));
+
+    // An adapter with no core beside it is the old single-file layout.
+    fs::remove_file(&core).expect("remove core");
+    let finding = drift(&sandbox).expect("a missing core is drift");
+    assert!(
+        finding.message.contains("single-file layout"),
+        "{}",
+        finding.message
+    );
+
+    // A symlinked hooks directory is followed.
+    let shared = sandbox.home.join("shared-hooks");
+    fs::rename(&hooks, &shared).expect("move hooks");
+    fs::copy(
+        source.join("mail-hook-core.mjs"),
+        shared.join("mail-hook-core.mjs"),
+    )
+    .expect("restore core");
+    std::os::unix::fs::symlink(&shared, &hooks).expect("symlink hooks");
+    assert!(drift(&sandbox).is_none());
+}
+
 #[test]
 fn doctor_reports_skill_drift_as_a_warning_with_its_fix() {
     let sandbox = Sandbox::new();
