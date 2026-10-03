@@ -113,9 +113,9 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         ),
         command(
             "search",
-            "post search <pattern> [--mail | --channel <channel> | --archived] [--limit <1..=1000>] [--framing auto|full|compact]",
+            "post search <pattern> [--mail | --channel <channel> | --archived] [--since <YYYY-MM-DD>] [--until <YYYY-MM-DD>] [--limit <1..=1000>] [--framing auto|full|compact]",
             "framed text; JSON with --json",
-            "read-only, cursorless literal case-insensitive Unicode substring search over party-visible direct mail and joined channels; --archived instead searches every archived channel on the host, membership not required, and no mail; --mail, --channel, and --archived are mutually exclusive, membership/party filters apply before message content is opened, results are deterministic newest-first with a default limit of 100 and hard cap of 1000, and previews are sanitized and capped at 160 Unicode scalar values; no mailbox, cursor, or banner state is changed",
+            "read-only, cursorless literal case-insensitive Unicode substring search over party-visible direct mail and joined channels; --archived instead searches every archived channel on the host, membership not required, and no mail; --mail, --channel, and --archived are mutually exclusive, membership/party filters apply before message content is opened, --since/--until keep only messages whose id day falls inside the inclusive range, either bound optional, a bad date or since after until is invalid_argument, days are UTC (the zone message ids are stamped in), and the filter applies to mail, channels, and archived channels before --limit; results are deterministic newest-first with a default limit of 100 and hard cap of 1000, and previews are sanitized and capped at 160 Unicode scalar values; no mailbox, cursor, or banner state is changed",
         ),
         command(
             "rooms",
@@ -413,6 +413,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "framing (source, authority, laws)",
             "room",
             "pattern",
+            "since? (YYYY-MM-DD, echoed when --since is given; inclusive UTC day)",
+            "until? (YYYY-MM-DD, echoed when --until is given; inclusive UTC day)",
             "match",
             "results[] (source, channel?, event? for channel, id, from, from_participant?, from_host? for channel, from_lineage?, origin, reply_to_participant?, reply_to_shared, sent, subject, preview, matched, own?, pending?, already_read?, kind? for mail)",
             "count",

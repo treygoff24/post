@@ -38,6 +38,38 @@ fn search_limit(value: &str) -> Result<usize, String> {
     }
 }
 
+/// A valid ISO calendar day, exactly `YYYY-MM-DD` (proleptic Gregorian).
+fn iso_day(value: &str) -> Result<String, String> {
+    let bad =
+        || format!("`{value}` is not a calendar date; use YYYY-MM-DD (for example 2026-02-28)");
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+    {
+        return Err(bad());
+    }
+    let year: u32 = value[..4].parse().map_err(|_| bad())?;
+    let month: u32 = value[5..7].parse().map_err(|_| bad())?;
+    let day: u32 = value[8..].parse().map_err(|_| bad())?;
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(bad()),
+    };
+    if year == 0 || day == 0 || day > days {
+        return Err(bad());
+    }
+    Ok(value.to_owned())
+}
+
 fn positive_bytes(value: &str) -> Result<usize, String> {
     value
         .parse::<usize>()
@@ -450,7 +482,7 @@ pub(crate) struct CatchupArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    override_usage = "post search <PATTERN> [--mail | --channel <CHANNEL>] [--limit <1..=1000>] [--framing auto|full|compact]"
+    override_usage = "post search <PATTERN> [--mail | --channel <CHANNEL>] [--since <YYYY-MM-DD>] [--until <YYYY-MM-DD>] [--limit <1..=1000>] [--framing auto|full|compact]"
 )]
 pub(crate) struct SearchArgs {
     /// Literal, case-insensitive Unicode substring to find.
@@ -473,6 +505,16 @@ pub(crate) struct SearchArgs {
     /// Search only archived channels, membership not required; no mail.
     #[arg(long, conflicts_with_all = ["mail", "channel"])]
     pub archived: bool,
+
+    /// Only messages on or after this day (inclusive). Days are UTC, the zone
+    /// message ids are stamped in.
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = iso_day)]
+    pub since: Option<String>,
+
+    /// Only messages on or before this day (inclusive). Days are UTC, the zone
+    /// message ids are stamped in.
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = iso_day)]
+    pub until: Option<String>,
 
     /// Maximum number of results (default 100; hard cap 1000).
     #[arg(

@@ -378,3 +378,228 @@ fn search_succeeds_on_fenced_store_with_stale_generation() {
     assert!(!parsed.truncated);
     assert_eq!(before, tree_bytes(&sandbox.mail_root));
 }
+
+// --- --since / --until: inclusive UTC calendar days over the id prefix ---
+
+fn day_fixture(sandbox: &Sandbox) -> PathBuf {
+    let (_alpha, beta) = register_alpha_beta(sandbox);
+    channel_fixture(sandbox, "days", r#"{"alpha":"joined","beta":"joined"}"#);
+    for (id, body) in [
+        ("20260814-235959-000001-aaaaaa", "dayneedle before"),
+        ("20260815-000000-000001-aaaaab", "dayneedle first-boundary"),
+        ("20260816-120000-000001-aaaaac", "dayneedle middle"),
+        ("20260817-235959-000001-aaaaad", "dayneedle last-boundary"),
+        ("20260818-000000-000001-aaaaae", "dayneedle after"),
+    ] {
+        write_channel_message(sandbox, "days", id, "alpha", "", body);
+    }
+    beta
+}
+
+fn day_search(sandbox: &Sandbox, beta: &Path, extra: &[&str]) -> Vec<String> {
+    let mut args = vec!["search", "dayneedle", "--channel", "days", "--json"];
+    args.extend_from_slice(extra);
+    let output = sandbox.run_in(&args, None, beta);
+    assert_success(&output);
+    let parsed: SearchOutput = from_stdout(&output);
+    let mut ids: Vec<String> = parsed.results.into_iter().map(|r| r.id).collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn search_since_until_is_inclusive_on_both_boundary_days() {
+    let sandbox = Sandbox::new();
+    let beta = day_fixture(&sandbox);
+    let ids = day_search(
+        &sandbox,
+        &beta,
+        &["--since", "2026-08-15", "--until", "2026-08-17"],
+    );
+    assert_eq!(
+        ids,
+        [
+            "20260815-000000-000001-aaaaab",
+            "20260816-120000-000001-aaaaac",
+            "20260817-235959-000001-aaaaad",
+        ]
+    );
+}
+
+#[test]
+fn search_since_only_and_until_only_are_independent() {
+    let sandbox = Sandbox::new();
+    let beta = day_fixture(&sandbox);
+    let since = day_search(&sandbox, &beta, &["--since", "2026-08-17"]);
+    assert_eq!(
+        since,
+        [
+            "20260817-235959-000001-aaaaad",
+            "20260818-000000-000001-aaaaae"
+        ]
+    );
+    let until = day_search(&sandbox, &beta, &["--until", "2026-08-15"]);
+    assert_eq!(
+        until,
+        [
+            "20260814-235959-000001-aaaaaa",
+            "20260815-000000-000001-aaaaab"
+        ]
+    );
+    assert_eq!(day_search(&sandbox, &beta, &[]).len(), 5);
+}
+
+#[test]
+fn search_single_day_and_outside_range_and_json_echo() {
+    let sandbox = Sandbox::new();
+    let beta = day_fixture(&sandbox);
+    let one = day_search(
+        &sandbox,
+        &beta,
+        &["--since", "2026-08-16", "--until", "2026-08-16"],
+    );
+    assert_eq!(one, ["20260816-120000-000001-aaaaac"]);
+    assert!(day_search(&sandbox, &beta, &["--since", "2027-01-01"]).is_empty());
+    assert!(day_search(&sandbox, &beta, &["--until", "2025-01-01"]).is_empty());
+
+    let output = sandbox.run_in(
+        &[
+            "search",
+            "dayneedle",
+            "--channel",
+            "days",
+            "--json",
+            "--since",
+            "2026-08-16",
+            "--until",
+            "2026-08-17",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&output);
+    let value: serde_json::Value = from_stdout(&output);
+    assert_eq!(value["since"], "2026-08-16");
+    assert_eq!(value["until"], "2026-08-17");
+    let unfiltered: serde_json::Value = from_stdout(&sandbox.run_in(
+        &["search", "dayneedle", "--channel", "days", "--json"],
+        None,
+        &beta,
+    ));
+    assert!(unfiltered.get("since").is_none() && unfiltered.get("until").is_none());
+}
+
+#[test]
+fn search_rejects_bad_dates_and_inverted_range() {
+    let sandbox = Sandbox::new();
+    let beta = day_fixture(&sandbox);
+    for (flag, value) in [
+        ("--since", "2026-02-30"),
+        ("--since", "2026-1-5"),
+        ("--until", "yesterday"),
+        ("--until", "20260815"),
+        ("--since", "2026-13-01"),
+        ("--until", ""),
+    ] {
+        let output = sandbox.run_in(&["search", "dayneedle", "--json", flag, value], None, &beta);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{flag} {value:?} must be rejected"
+        );
+    }
+    // Leap day is real in 2028, not in 2027.
+    assert_success(&sandbox.run_in(
+        &[
+            "search",
+            "dayneedle",
+            "--channel",
+            "days",
+            "--since",
+            "2028-02-29",
+        ],
+        None,
+        &beta,
+    ));
+    let inverted = sandbox.run_in(
+        &[
+            "search",
+            "dayneedle",
+            "--json",
+            "--since",
+            "2026-08-17",
+            "--until",
+            "2026-08-16",
+        ],
+        None,
+        &beta,
+    );
+    assert_eq!(inverted.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&inverted.stderr).into_owned()
+        + &String::from_utf8_lossy(&inverted.stdout);
+    assert!(text.contains("later than --until"), "{text}");
+}
+
+#[test]
+fn search_limit_counts_filtered_hits() {
+    let sandbox = Sandbox::new();
+    let beta = day_fixture(&sandbox);
+    // Newest two overall are outside the range; limit 2 must still fill from inside.
+    let output = sandbox.run_in(
+        &[
+            "search",
+            "dayneedle",
+            "--channel",
+            "days",
+            "--json",
+            "--until",
+            "2026-08-16",
+            "--limit",
+            "2",
+        ],
+        None,
+        &beta,
+    );
+    assert_success(&output);
+    let parsed: SearchOutput = from_stdout(&output);
+    assert_eq!(parsed.count, 2);
+    assert!(parsed.truncated, "three hits are in range, limit is 2");
+    assert!(parsed.results.iter().all(|r| r.id.as_str() < "20260817"));
+}
+
+#[test]
+fn search_day_filter_applies_to_mail_by_id_day() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    let alpha_participant = sandbox.test_participant("alpha");
+    let beta_participant = sandbox.test_participant("beta");
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            "workspace:beta",
+            "--body",
+            "mailneedle",
+            "--json",
+        ],
+        &alpha_participant,
+        &alpha,
+    );
+    assert_success(&sent);
+    let sent: serde_json::Value = from_stdout(&sent);
+    let id = sent["envelope"]["id"].as_str().expect("id");
+    let day = format!("{}-{}-{}", &id[..4], &id[4..6], &id[6..8]);
+    let count = |extra: &[&str]| {
+        let mut args = vec!["search", "mailneedle", "--mail", "--json"];
+        args.extend_from_slice(extra);
+        let output = sandbox.run_as_participant(&args, &beta_participant, &beta);
+        assert_success(&output);
+        from_stdout::<SearchOutput>(&output).count
+    };
+    assert_eq!(count(&["--since", &day, "--until", &day]), 1);
+    assert_eq!(
+        count(&["--since", "2000-01-01", "--until", "2000-01-02"]),
+        0
+    );
+    assert_eq!(count(&["--since", "2999-01-01"]), 0);
+}
