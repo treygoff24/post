@@ -195,7 +195,7 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "notice: ok, notice=string|null, busy; plain query is read-only; --claim PID reserves delivery under the registry lock (busy for a live competing owner), --release PID releases only that owner, --ack records delivery; all three flags are fenced writers; dead owner claims are reclaimable",
         ]),
         identity: fields(&[
-            "list: ok, lineages without voice bodies",
+            "list: ok, lineages without voice bodies, count, warnings, hint? (string, present only when count is 0: an empty list is correct; says how to found a lineage)",
             "show: lineage metadata and affiliates; voice bodies only with --voices",
             "new/continue/leave: acting participant affiliation and acknowledgement state",
             "voice add/withdraw and terms set: lineage content state",
