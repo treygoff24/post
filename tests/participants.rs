@@ -1529,6 +1529,36 @@ fn participant_round4_rooms_add_waits_for_participants_lock() {
 }
 
 #[test]
+fn version_json_names_the_store_it_would_use_and_never_creates_it() {
+    let sandbox = Sandbox::new_unseeded();
+    let output = sandbox.run(&["version", "--json"]);
+    assert_success(&output);
+    let value: Value = from_stdout(&output);
+    assert_eq!(
+        value["store"],
+        sandbox.mail_root.to_string_lossy().as_ref()
+    );
+    assert!(value.get("store_error").is_none());
+
+    // An unresolvable root is null with a reason, and the command still works.
+    let before = tree(&sandbox.mail_root);
+    let output = sandbox.run_in_env(
+        &["version", "--json"],
+        None,
+        &sandbox.path,
+        &[("POST_MAIL_ROOT", "relative/root")],
+    );
+    assert_success(&output);
+    let value: Value = from_stdout(&output);
+    assert!(value["store"].is_null());
+    assert!(value["store_error"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("not absolute")));
+    assert_eq!(tree(&sandbox.mail_root), before);
+    assert!(!sandbox.path.join("relative").exists());
+}
+
+#[test]
 fn participant_review_version_is_pure_under_broken_or_ambiguous_identity() {
     let broken = Sandbox::new();
     let dir = broken.mail_root.join("participants/broken-id");

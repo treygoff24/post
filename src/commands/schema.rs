@@ -205,6 +205,8 @@ pub(super) fn run(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             "version",
             "build_sha (short commit id; a -dirty suffix marks a build from a tree with uncommitted changes to tracked files; unknown outside a git checkout)",
             "store_version=2",
+            "store (the store root this binary would use: POST_MAIL_ROOT, else $HOME/.claude-mail; null when the environment cannot resolve one; resolved without touching the disk)",
+            "store_error? (string, present only when store is null: why)",
             "capabilities",
         ]),
         doctor: fields(&[

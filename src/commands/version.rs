@@ -1,5 +1,6 @@
 use crate::command_result::CommandResult;
 use crate::error::AppResult;
+use crate::mailbox::Context;
 use serde::Serialize;
 
 pub(crate) const CAPABILITIES: [&str; 6] = [
@@ -19,7 +20,22 @@ struct VersionOutput {
     version: &'static str,
     build_sha: &'static str,
     store_version: u64,
+    /// The store root this binary would use (`POST_MAIL_ROOT`, else
+    /// `$HOME/.claude-mail`); null when the environment cannot resolve one.
+    store: Option<String>,
+    /// Why `store` is null; absent when it resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_error: Option<String>,
     capabilities: &'static [&'static str],
+}
+
+/// Resolve the store root the way every other command does, touching nothing:
+/// `Context::from_env` only reads the environment.
+fn resolved_store() -> (Option<String>, Option<String>) {
+    match Context::from_env() {
+        Ok(context) => (Some(context.root.display().to_string()), None),
+        Err(error) => (None, Some(error.message)),
+    }
 }
 
 fn build_sha() -> &'static str {
@@ -41,11 +57,14 @@ fn version_line() -> String {
 }
 
 pub(super) fn run(json: bool, pretty: bool) -> AppResult<CommandResult> {
+    let (store, store_error) = resolved_store();
     let output = VersionOutput {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         build_sha: build_sha(),
         store_version: STORE_VERSION,
+        store,
+        store_error,
         capabilities: &CAPABILITIES,
     };
     if json {

@@ -261,6 +261,8 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "version",
             "build_sha",
             "store_version",
+            "store",
+            "store_error",
             "capabilities"
         ]
     );
