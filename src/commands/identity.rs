@@ -16,6 +16,9 @@ struct ListOutput {
     lineages: Vec<LineageSummary>,
     count: usize,
     warnings: Vec<String>,
+    /// Only when `count` is 0: an empty list is correct, not a fault.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -256,6 +259,8 @@ pub(super) fn run(
     }
 }
 
+const EMPTY_LIST_HINT: &str = "no lineages founded in this store yet; `post identity new <name>` founds one and affiliates you (a fresh lineage has no terms to acknowledge)";
+
 fn list(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let list = lineage_store::list(context)?;
     let count = list.lineages.len();
@@ -265,6 +270,7 @@ fn list(context: &Context, pretty: bool) -> AppResult<CommandResult> {
             lineages: list.lineages,
             count,
             warnings: list.warnings,
+            hint: (count == 0).then_some(EMPTY_LIST_HINT),
         },
         pretty,
     )
