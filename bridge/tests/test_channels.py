@@ -122,6 +122,27 @@ class ConfigTest(unittest.TestCase):
             ):
                 channels.parse_channels_config(value)
 
+    def test_record_unlisted_is_an_optional_boolean(self):
+        base = channel_record("agents-x", "alice")
+        for value in (True, False):
+            with self.subTest(unlisted=value):
+                parsed = channels._parse_record(
+                    channels._json_bytes({**base, "unlisted": value}), "agents-x", "fixture"
+                )
+                self.assertIs(parsed["unlisted"], value)
+        self.assertNotIn(
+            "unlisted",
+            channels._parse_record(channels._json_bytes(base), "agents-x", "fixture"),
+        )
+        for value in ("yes", 1, 0, None, [], {}):
+            with (
+                self.subTest(unlisted=value),
+                self.assertRaisesRegex(common.ConfigError, "unlisted must be a boolean"),
+            ):
+                channels._parse_record(
+                    channels._json_bytes({**base, "unlisted": value}), "agents-x", "fixture"
+                )
+
 
 class ChannelIntegrationTest(unittest.TestCase):
     @classmethod
@@ -1218,6 +1239,42 @@ class ChannelIntegrationTest(unittest.TestCase):
         self.assertEqual(after["created_by"], record["created_by"])
         self.assertEqual(len(self.log.actions("chan_description_adopted")), 1)
 
+    def test_unlisted_rides_first_import_and_only_the_origin_changes_it(self):
+        name = "agents-x"
+        message_id = channel_id(11)
+        messages = {message_id: channel_message(message_id, "alice", name)}
+        unlisted = {**channel_record(name, "alice"), "unlisted": True}
+        path = self.beta.root / "channels" / name / "channel.json"
+
+        # First import copies the whole origin record, flag included.
+        write_peer_channel(self.alpha, name, unlisted, messages)
+        self.import_alpha()
+        self.assertIs(json.loads(path.read_text())["unlisted"], True)
+
+        # The origin relists, then unlists again: each change is adopted,
+        # and a listed record carries no key at all, as post writes it.
+        write_peer_channel(self.alpha, name, channel_record(name, "alice"), messages)
+        self.import_alpha()
+        self.assertNotIn("unlisted", json.loads(path.read_text()))
+        write_peer_channel(self.alpha, name, unlisted, messages)
+        self.import_alpha()
+        self.assertIs(json.loads(path.read_text())["unlisted"], True)
+
+        # A non-origin host's record (gamma relisted its copy) is never adopted.
+        gamma = self.topology.add("gamma", ["gary"])
+        write_peer_channel(gamma, name, channel_record(name, "alice"), {})
+        snapshot = snapshot_for(
+            self.beta,
+            ["alpha", "gamma"],
+            published={"alpha": frozenset({"alice"}), "gamma": frozenset({"gary"})},
+            v2_peers=("alpha", "gamma"),
+            placeholders={"alice": "alpha", "gary": "gamma"},
+            routes={"alice": "alpha", "gary": "gamma"},
+        )
+        self.import_alpha(snapshot)
+        self.assertIs(json.loads(path.read_text())["unlisted"], True)
+        self.assertEqual(len(self.log.actions("chan_description_adopted")), 3)
+
     def test_record_only_peer_channel_is_created_and_joinable(self):
         write_peer_channel(
             self.alpha,
@@ -1236,6 +1293,88 @@ class ChannelIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(joined.returncode, 0, joined.stdout + joined.stderr)
         self.assertIn("alpha", stats.completed)
+
+    def test_unchanged_record_is_reconciled_again_only_when_an_input_changes(self):
+        # post-lx89: every tick re-reconciled every peer channel record (a
+        # blob read, the channels lock and a dozen local file reads each), so
+        # ~1,500 quiet records made Mac ticks take minutes under load.
+        write_peer_channel(self.alpha, "quiet", channel_record("quiet", "alice"), {})
+        channel_root = self.beta.root / "channels" / "quiet"
+        cache = self.beta.root / "bridge" / "chan-reconciled" / "alpha"
+
+        def record_reads(snapshot=None):
+            git = Git(self.beta.repo)
+            stats = channels.import_channels(
+                self.beta.settings,
+                ALL,
+                git,
+                snapshot or self.alpha_snapshot(),
+                self.log,
+                self.deadline,
+                lambda: False,
+            )
+            self.assertIn("alpha", stats.completed)
+            return [
+                call
+                for call in git.calls
+                if call and call[0] == "show"
+                and call[-1].endswith(":channels/quiet/channel.json")
+            ]
+
+        self.assertEqual(len(record_reads()), 1)
+        self.assertTrue(cache.is_file())
+        self.assertEqual(record_reads(), [])
+
+        # C6 still repairs a deleted local file, on the very next tick.
+        (channel_root / "members.json").unlink()
+        self.assertEqual(len(record_reads()), 1)
+        self.assertEqual((channel_root / "members.json").read_bytes(), b"{}\n")
+        origin = self.beta.root / "bridge" / "chan-origin" / "quiet"
+        origin.unlink()
+        self.assertEqual(len(record_reads()), 1)
+        self.assertEqual(origin.read_text(), "alpha\n")
+        self.assertEqual(record_reads(), [])
+
+        # A local membership write is a changed input too.
+        (channel_root / "members.json").write_text('{"bob": "2026-09-02"}\n')
+        self.assertEqual(len(record_reads()), 1)
+        self.assertEqual(record_reads(), [])
+
+        # The creator's route moving changes the origin with no file change.
+        moved = self.alpha_snapshot(routes={"alice": "gamma"})
+        self.assertEqual(len(record_reads(moved)), 1)
+        self.assertEqual(
+            [row["new"] for row in self.log.actions("chan_origin_changed")], ["gamma"]
+        )
+        self.assertEqual(record_reads(moved), [])
+
+        # The origin's new record blob is read and adopted.
+        write_peer_channel(
+            self.alpha, "quiet", channel_record("quiet", "alice", "renamed"), {}
+        )
+        self.assertEqual(len(record_reads()), 1)
+        self.assertEqual(
+            json.loads((channel_root / "channel.json").read_text())["description"],
+            "renamed",
+        )
+        self.assertEqual(record_reads(), [])
+
+        # An entry past its age, or a cache file that is not ours, misses.
+        value = json.loads(cache.read_text())
+        value["channels"]["quiet"]["at"] -= (
+            channels.RECONCILED_MAX_AGE_SECONDS + channels.RECONCILED_JITTER_SECONDS
+        )
+        cache.write_text(json.dumps(value))
+        self.assertEqual(len(record_reads()), 1)
+        cache.write_text("not json")
+        self.assertEqual(len(record_reads()), 1)
+        self.assertEqual(record_reads(), [])
+
+        # A record gone from the peer tree leaves the cache.
+        self.alpha.git("rm", "-r", "-q", "channels/quiet")
+        self.alpha.commit("drop quiet")
+        record_reads()
+        self.assertEqual(json.loads(cache.read_text())["channels"], {})
 
     def test_c6_partial_states_are_reconciled(self):
         variants = ("dir", "record", "members", "origin")

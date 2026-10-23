@@ -226,3 +226,105 @@ fn a_corrupt_archive_file_fails_open_and_doctor_reports_it() {
         "doctor did not report the bad archive.json: {text}"
     );
 }
+
+/// Age a throwaway channel, including its join events, without sleeping or
+/// changing the clock. The live store is never used by this test helper.
+fn age_channel(sandbox: &Sandbox, name: &str) {
+    let dir = sandbox.mail_root.join("channels").join(name);
+    let info_path = dir.join("channel.json");
+    let mut info: Value = serde_json::from_slice(&fs::read(&info_path).unwrap()).unwrap();
+    info["created"] = "2000-01-01 00:00:00 +0000".into();
+    fs::write(info_path, serde_json::to_vec(&info).unwrap()).unwrap();
+    let files: Vec<_> = fs::read_dir(dir.join("messages"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(!files.is_empty(), "a real join must exist before aging");
+    for (index, path) in files.iter().enumerate() {
+        let text = fs::read_to_string(path).unwrap();
+        let (header, body) = text.split_once("\n---\n").unwrap();
+        let mut header: Value = serde_json::from_str(header).unwrap();
+        let id = format!("20000101-000000-{index:06}-abcdef");
+        header["id"] = id.clone().into();
+        header["sent"] = "2000-01-01 00:00:00 +0000".into();
+        let aged = path.with_file_name(format!("{id}.msg"));
+        fs::write(&aged, format!("{header}\n---\n{body}")).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn idle_channels_archive_once_and_a_post_revives_without_losing_history() {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "quiet", &alpha);
+    chat(
+        &sandbox,
+        &alpha,
+        &["quiet", "--send", "--body", "preserve this"],
+    );
+    age_channel(&sandbox, "quiet");
+    join_channel(&sandbox, "fresh", &alpha);
+    let before = message_count(&sandbox, "quiet");
+    let listing = channels(&sandbox, &alpha, &[]);
+    assert_eq!(names(&listing), ["fresh"]);
+    assert_eq!(listing["archived_hidden"], 1);
+    let archived = channels(&sandbox, &alpha, &["--archived"]);
+    assert_eq!(names(&archived), ["quiet"]);
+    assert_eq!(archived["channels"][0]["archived_reason"], "idle");
+    assert!(archived["channels"][0]["archived_at"].is_string());
+    assert_eq!(message_count(&sandbox, "quiet"), before);
+    let sidecar = sandbox.mail_root.join("channels/quiet/archive.json");
+    let mark = fs::read(&sidecar).unwrap();
+    channels(&sandbox, &alpha, &[]);
+    assert_eq!(
+        fs::read(&sidecar).unwrap(),
+        mark,
+        "no repeated archival writes"
+    );
+    join_channel(&sandbox, "quiet", &beta);
+    assert_eq!(
+        names(&channels(&sandbox, &alpha, &["--archived"])),
+        ["quiet"]
+    );
+    chat(&sandbox, &beta, &["quiet", "--send", "--body", "revived"]);
+    assert_eq!(names(&channels(&sandbox, &alpha, &[])), ["fresh", "quiet"]);
+    assert_eq!(
+        fs::read(&sidecar).unwrap(),
+        mark,
+        "revival needs no sidecar rewrite"
+    );
+    assert_eq!(message_count(&sandbox, "quiet"), before + 2);
+}
+
+#[test]
+fn idle_empty_channel_archives_on_listing_and_explicit_unarchive_grants_a_fresh_day() {
+    let sandbox = Sandbox::new();
+    let (alpha, _beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "empty", &alpha);
+    age_channel(&sandbox, "empty");
+    // Exercise the creation-time fallback on a truly empty legacy channel.
+    for entry in fs::read_dir(sandbox.mail_root.join("channels/empty/messages")).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    assert_eq!(message_count(&sandbox, "empty"), 0);
+    let sidecar = sandbox.mail_root.join("channels/empty/archive.json");
+    assert!(!sidecar.exists());
+    let fence = sandbox.mail_root.join(".post-arx.json");
+    fs::write(&fence, br#"{"state":"fenced","generation":7}"#).unwrap();
+    assert_eq!(names(&channels(&sandbox, &alpha, &[])), ["empty"]);
+    assert!(
+        !sidecar.exists(),
+        "fenced listing must not write archive metadata"
+    );
+    fs::remove_file(fence).unwrap();
+    assert!(names(&channels(&sandbox, &alpha, &[])).is_empty());
+    let mark: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(mark["archived"]["reason"], "idle");
+    assert_eq!(mark["log"][0]["action"], "auto_archive");
+    chat(&sandbox, &alpha, &["empty", "--unarchive"]);
+    assert_eq!(names(&channels(&sandbox, &alpha, &[])), ["empty"]);
+    chat(&sandbox, &alpha, &["empty", "--archive"]);
+    let manual = channels(&sandbox, &alpha, &["--archived"]);
+    assert!(manual["channels"][0].get("archived_reason").is_none());
+}

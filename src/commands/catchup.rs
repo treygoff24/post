@@ -862,6 +862,8 @@ impl CatchupRemainderIndex {
                                 &item.body,
                                 item.signed_verified,
                                 max_bytes,
+                                false,
+                                false,
                             )?,
                         });
                     }

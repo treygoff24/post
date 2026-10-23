@@ -1120,13 +1120,21 @@ fn routing_direct_self_read_consumes_because_sender_is_a_frozen_recipient() {
     let sandbox = Sandbox::new();
     let (alpha, _beta) = register_alpha_beta(&sandbox);
     let actor = sandbox.test_participant("alpha");
-    let sent = send_as(
-        &sandbox,
+    let sent = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{actor}"),
+            "--allow-self",
+            "--body",
+            "direct self consumes",
+            "--json",
+        ],
         &actor,
         &alpha,
-        &format!("participant:{actor}"),
-        "direct self consumes",
     );
+    assert_success(&sent);
+    let sent: Value = from_stdout(&sent);
     let id = sent["envelope"]["id"].as_str().expect("mail id");
     assert_eq!(inbox_as(&sandbox, &actor, &alpha)["unread_count"], 1);
 
@@ -1306,6 +1314,7 @@ fn routing_send_text_prints_a_runnable_readback_for_routed_and_pending_own_mail(
             "send",
             "--to",
             &format!("participant:{actor}"),
+            "--allow-self",
             "--body",
             "printed self",
         ],
@@ -1597,6 +1606,7 @@ fn routing_text_read_modes_share_own_pending_and_consumption_state() {
             "send",
             "--to",
             &format!("participant:{actor}"),
+            "--allow-self",
             "--body",
             "self consumption",
             "--json",
@@ -1660,13 +1670,21 @@ fn routing_text_read_state_wording_uses_recipient_status() {
     assert_success(&history);
     assert!(common::stdout(&history).contains("mail remains sender history (never unread for you)"));
 
-    let self_delivery = send_as(
-        &sandbox,
+    let self_delivery = sandbox.run_as_participant(
+        &[
+            "send",
+            "--to",
+            &format!("participant:{recipient}"),
+            "--allow-self",
+            "--body",
+            &body,
+            "--json",
+        ],
         &recipient,
         &alpha,
-        &format!("participant:{recipient}"),
-        &body,
     );
+    assert_success(&self_delivery);
+    let self_delivery: Value = from_stdout(&self_delivery);
     let self_id = self_delivery["envelope"]["id"].as_str().expect("self id");
     let self_slice = sandbox.run_as_participant(
         &[
@@ -1793,7 +1811,13 @@ fn routing_read_and_catchup_continuations_run_for_every_address_kind() {
         let sender = if kind == "participant" { &actor } else { &peer };
         let sender_cwd = if kind == "participant" { &alpha } else { &beta };
         let body = format!("{kind}-continuation-{}", "x".repeat(6000));
-        let sent = send_as(&sandbox, sender, sender_cwd, &target, &body);
+        let mut args = vec!["send", "--to", &target, "--body", &body, "--json"];
+        if kind == "participant" {
+            args.push("--allow-self");
+        }
+        let sent = sandbox.run_as_participant(&args, sender, sender_cwd);
+        assert_success(&sent);
+        let sent: Value = from_stdout(&sent);
         let id = sent["envelope"]["id"].as_str().expect("mail id");
 
         let bounded = sandbox.run_as_participant(
@@ -2306,7 +2330,8 @@ fn routing_legacy_workspace_member_blocks_participant_join_and_lists_both_projec
     assert_eq!(error.error.code, "blocked_route");
     assert!(error.error.message.contains("legacy member block"));
 
-    let listed = sandbox.run_as_participant(&["channels"], &beta_participant, &beta);
+    // --all: the fixture channel is older than the 24-hour idle auto-archive.
+    let listed = sandbox.run_as_participant(&["channels", "--all"], &beta_participant, &beta);
     assert_success(&listed);
     let listed: Value = from_stdout(&listed);
     let legacy = listed["channels"]

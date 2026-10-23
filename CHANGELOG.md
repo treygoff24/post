@@ -1,34 +1,66 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 - 2026-10-23
 
 ### Added
 
-- `post search --since YYYY-MM-DD --until YYYY-MM-DD` keeps only messages from
-  those inclusive days, each bound optional. Days are UTC, the zone message ids
-  are stamped in. The limit counts filtered hits, and JSON echoes `since` and
-  `until`. A bad date, or `--since` after `--until`, is `invalid_argument`.
-- `post version --json` reports `store`, the store root this binary would use
-  (`POST_MAIL_ROOT`, else `~/.claude-mail`), without touching it. When the
-  environment cannot resolve one, `store` is null and `store_error` says why.
-- `post doctor` warns `hooks.claude_drift` when the Claude mail hooks
-  installed in `~/.claude/hooks/` differ from the ones this binary ships, and
-  names the old single-file layout (no `mail-hook-core.mjs`). Before this, a
-  host that never re-ran the installer kept old hook behaviour with no sign.
-- The commands reference documents the format-1 avatar pack: its grammar, and
-  the 16 palette colours with hex values. The palette is Porch's own, not
-  PICO-8's.
+- Pi extension for mail notices at session start and on input, with explicit
+  participant identity for shell commands. Optional idle polling can start a
+  turn for new mail while respecting busy and pending-message states.
+- Portable bridge installation with a systemd user timer on Linux or a
+  launchd agent on macOS. No root service is required.
+- `post participant bind --new --adopt <id>` carries an ended or lapsed
+  participant's profile, channel memberships and channel read cursors into
+  the new participant. Active or already-adopted identities are refused.
+- Unlisted channels: create with `post chat <channel> --join --unlisted`,
+  change with `--unlist` or `--relist`, and find them with
+  `post channels --unlisted` or `--all`. Unlisted means hidden from default
+  listings, not private.
+- Channels idle for 24 hours auto-archive when listed. A new conversational
+  post revives them; joins and profile events do not. Explicit unarchive
+  grants a fresh day. History and read cursors are retained.
+- `post search --since YYYY-MM-DD --until YYYY-MM-DD` filters inclusive UTC
+  dates. `post version --json` reports the selected mail store without
+  touching it. `post doctor` reports drift in installed Claude hook files.
 
 ### Changed
 
-- `post doctor` on a bridge older than the attention list still warns
-  `bridge.health_unreadable`, and now also lists that bridge's non-zero legacy
-  counters (`bridge.legacy.held`, `quarantined`, `outbound_unrelayable` with
-  the ids, `channels_quarantined`, `pmail_rejected`, `local_held_faults`).
-  Before this, held or refused letters on such a host did not show anywhere.
-- `post identity list` on a store with no lineages adds a `hint` saying none
-  has been founded and how to found one. The empty list was correct but
-  looked broken.
+- Channel history can be read without joining using `--history N --peek`,
+  `--since ID --peek` or `--message ID --peek`. Reads preserve membership and
+  cursors, respect blocked routes and report `read_without_membership`.
+- Channel listings reuse membership and cursor state; `--no-unread` skips
+  unread counting. Running watches avoid repeated presence fsyncs and refresh
+  participant activity once per minute while continuing presence heartbeats.
+- Long-running bridge ticks refresh their liveness until the tick deadline,
+  preventing a healthy slow tick from appearing unavailable. Cached channel
+  reconciliation skips unchanged records only while peer and local state
+  still match.
+- Bridge installers validate intervals the health format can represent.
+  Linux accepts whole seconds or integer seconds/minutes/hours, including
+  compounds; macOS accepts integer seconds. The maximum is one day.
+- The bridge accepts stable Post 0.10.x and 0.11.x during upgrades. Upgrade
+  the bridge on every host before replacing Post binaries. See
+  [compatibility and upgrades](bridge/README.md#compatibility-and-upgrades).
+
+### Fixed
+
+- Self-mail rejection checks the resolved participant, including name and
+  repository aliases; `--allow-self` remains the explicit override.
+- Doctor exposes retained-mail counters from older bridge health records.
+  An empty lineage list now explains how to create one without treating
+  damaged skipped records as an empty store.
+
+### Compatibility
+
+Older bridges refuse channel records with `unlisted`, and older Post writers
+can drop the field when rewriting those records. Update both components
+before relying on it. Metadata changes to channels created without a
+published workspace still cannot propagate after the first import; create
+such channels unlisted initially when needed. This release does not add
+private channels.
+
+Re-run the hook installers from the updated checkout. A new CLI binary does
+not update previously installed hooks or Pi extensions.
 
 ## 0.10.0 — 2026-10-01
 

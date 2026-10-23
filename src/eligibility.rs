@@ -406,7 +406,7 @@ pub(crate) fn unread_channel_with(
 /// The equivalence holds only where this is called: `post watch` uses it for
 /// event-wake scans. Every pass that owes complete validation -- startup,
 /// `--once`, `--snapshot`, the periodic reconciliation pass, and full-history
-/// readers (read, chat, catchup, channels, search) -- uses `unread_channel`
+/// readers (read, chat, catchup, search) -- uses `unread_channel`
 /// (or `visible_channel_with`) instead. Its one behavioral difference is not
 /// observable as a lost report: a corrupt message which is ALREADY consumed
 /// does not fail this projection (the consumed id is excluded before its
@@ -420,43 +420,77 @@ pub(crate) fn unread_channel_skipping_consumed(
     participant: &Participant,
     channel_name: &str,
 ) -> AppResult<Vec<EligibleChannelMessage>> {
-    let Some(start) = channel_history_floor(context, participant, channel_name)? else {
-        return Ok(Vec::new());
-    };
-    let cursors = ParticipantCursors::load(context, participant);
-    let paths = ChannelPaths::new(context, channel_name)?;
-    if !paths.exists() {
-        return Ok(Vec::new());
+    Ok(ChannelUnread::new(context, participant)?
+        .scan(channel_name, Scan::Strict)?
+        .items)
+}
+
+/// A command-local unread projection: load membership and seen sets once, then
+/// exclude history and consumed ids by filename before opening message bodies.
+/// Listings intentionally leave validation of consumed history to doctor/read.
+pub(crate) struct ChannelUnread<'a> {
+    context: &'a Context,
+    participant: &'a Participant,
+    membership: ParticipantChannels,
+    cursors: ParticipantCursors,
+}
+
+impl<'a> ChannelUnread<'a> {
+    pub(crate) fn new(context: &'a Context, participant: &'a Participant) -> AppResult<Self> {
+        Ok(Self {
+            context,
+            participant,
+            membership: ParticipantChannels::load(participant)?,
+            cursors: ParticipantCursors::load(context, participant),
+        })
     }
-    let mut unread = Vec::new();
-    for path in channel::message_files(&paths.messages)? {
-        let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
+
+    pub(crate) fn scan(&self, channel_name: &str, scan: Scan) -> AppResult<ChannelScan> {
+        let Some(start) =
+            self.membership
+                .membership_start(self.context, self.participant, channel_name)?
+        else {
+            return Ok(ChannelScan::default());
         };
-        // History is excluded by id before its body is opened, like a consumed
-        // id: a pre-membership message can never be delivered, so parsing it
-        // was pure cost.
-        if is_channel_history(id, &start) {
-            continue;
+        let paths = ChannelPaths::new(self.context, channel_name)?;
+        if !paths.exists() {
+            return Ok(ChannelScan::default());
         }
-        if cursors.channel_has_seen(channel_name, id) {
-            continue;
+        let mut result = ChannelScan::default();
+        for path in channel::message_files(&paths.messages)? {
+            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if is_channel_history(id, &start) || self.cursors.channel_has_seen(channel_name, id) {
+                continue;
+            }
+            let parsed = match channel::parse_channel_message(&path) {
+                Ok(parsed) => parsed,
+                Err(error) if scan == Scan::Tolerant => {
+                    match SkippedFile::from_error(&path, &error) {
+                        Some(file) => {
+                            result.skipped.push(file);
+                            continue;
+                        }
+                        None => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
+            let own = message_is_own(self.context, self.participant, &parsed.message);
+            if own || channel::is_opaque_event(&parsed.message) {
+                continue;
+            }
+            result.items.push(EligibleChannelMessage {
+                path,
+                message: parsed.message,
+                body: parsed.body,
+                own,
+                already_read: false,
+            });
         }
-        let parsed = channel::parse_channel_message(&path)?;
-        let own = message_is_own(context, participant, &parsed.message);
-        if own || channel::is_opaque_event(&parsed.message) {
-            continue;
-        }
-        unread.push(EligibleChannelMessage {
-            path,
-            message: parsed.message,
-            body: parsed.body,
-            own,
-            already_read: false,
-        });
+        Ok(result)
     }
-    unread.sort_by(|left, right| left.message.id.cmp(&right.message.id));
-    Ok(unread)
 }
 
 /// Complete channel history for an effective member. Read state and sender

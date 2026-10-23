@@ -457,6 +457,33 @@ fn produce() -> BTreeMap<&'static str, String> {
     assert_success(&emote);
     samples.insert("chat-emote.json", normalizer.document(&emote));
 
+    // Adoption: a gone participant's name, sigil and channels pass to a new bind.
+    let gone = participant_id(&sandbox.bind_claude("contract-gone", &alpha, Some("alpha")));
+    for args in [
+        &["profile", "set", "--name", "Capcom", "--pfp", "🌙"][..],
+        &["chat", "relay", "--join", "--backlog", "--json"][..],
+        &["participant", "end"][..],
+    ] {
+        assert_success(&sandbox.run_as_participant(args, &gone, &alpha));
+    }
+    let adopt = sandbox.run_in_env(
+        &["participant", "bind", "--new", "--adopt", &gone, "--json"],
+        None,
+        &alpha,
+        &[],
+    );
+    assert_success(&adopt);
+    // `--new` mints from a random key; pin its id to a fixed stand-in.
+    let minted: Value = serde_json::from_slice(&adopt.stdout).expect("adopt JSON");
+    let minted = minted["id"].as_str().expect("minted id").to_owned();
+    let adopt = Output {
+        stdout: String::from_utf8_lossy(&adopt.stdout)
+            .replace(&minted, "shell-0a1b2c3d")
+            .into_bytes(),
+        ..adopt
+    };
+    samples.insert("participant-bind-adopt.json", normalizer.document(&adopt));
+
     // Cursor re-report: a participant whose cursor state is unusable sees its
     // history as unread, and each event says so.
     let cursor = sandbox

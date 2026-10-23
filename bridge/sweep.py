@@ -93,19 +93,18 @@ from bridgelib.snapshot import (  # noqa: E402
 )
 
 # The post versions this bridge is written for: 0.10.0 up to, but not
-# including, 0.11.0. Every 0.10.x is the same mail model (a patch release does
-# not change a store or command contract), so a patch bump must not stop the
-# bridge on the hosts it reaches; 0.11.0 is where a check is needed again.
-POST_VERSION_RANGE = "post 0.10.0 up to, but not including, post 0.11.0"
+# including, 0.12.0. Both 0.10.x and 0.11.x use the supported mail contract,
+# so hosts can upgrade their bridge before changing their Post binary.
+POST_VERSION_RANGE = "post 0.10.0 up to, but not including, post 0.12.0"
 # `post --version` may carry build metadata after the semver
 # (`post 0.10.4 (build abc1234, ...)`); only the semver is judged. A patch
 # number is a plain integer: no leading zeros, and no pre-release tag.
-_POST_VERSION_RE = re.compile(r"post 0\.10\.(?:0|[1-9][0-9]*)(?: \(build [^()\n]*\))?")
+_POST_VERSION_RE = re.compile(r"post 0\.(?:10|11)\.(?:0|[1-9][0-9]*)(?: \(build [^()\n]*\))?")
 
 
 def post_version_accepted(text):
     """True when ``post --version`` printed a version from 0.10.0 up to, but
-    not including, 0.11.0, with or without a trailing ``(build ...)``."""
+    not including, 0.12.0, with or without a trailing ``(build ...)``."""
     return _POST_VERSION_RE.fullmatch(text.strip()) is not None
 
 
@@ -238,12 +237,34 @@ class Config:
     channels: object = None
 
 
+# Subcommands that only read: they never invalidate Git.rev's cache.
+READ_ONLY_GIT = frozenset(
+    {
+        "rev-parse",
+        "ls-tree",
+        "show",
+        "diff",
+        "status",
+        "ls-files",
+        "ls-remote",
+        "for-each-ref",
+        "merge-base",
+        "cat-file",
+    }
+)
+
+
 class Git:
     def __init__(self, settings, deadline):
         self.settings = settings
         self.deadline = deadline
         # m6: per-host read failures this tick (host, ref, path).
         self.read_failures = []
+        # Resolved refs, valid until a command that can move one runs.
+        self.rev_cache = {}
+        # One long-lived `git cat-file --batch` serves every show() of the
+        # tick instead of one `git show` process per object.
+        self._batch = None
         self.environment = os.environ.copy()
         self.environment["GIT_SSH_COMMAND"] = (
             f"ssh -o ConnectTimeout=10 -o BatchMode=yes -i {shlex_quote(str(settings.ssh_key))} "
@@ -251,6 +272,12 @@ class Git:
         )
 
     def run(self, args, check=True, network=False, text=True):
+        if not args or args[0] not in READ_ONLY_GIT:
+            # Anything not known to be a pure read may move HEAD or a ref.
+            self.rev_cache.clear()
+            # A writer (fetch, commit, update-ref, gc) may move refs or
+            # repack: the next read starts a fresh batch process.
+            self.close_batch()
         timeout = self.deadline.timeout(
             GIT_NETWORK_TIMEOUT_SECONDS if network else GIT_TIMEOUT_SECONDS
         )
@@ -272,8 +299,12 @@ class Git:
         return result
 
     def rev(self, ref):
+        if ref in self.rev_cache:
+            return self.rev_cache[ref]
         result = self.run(["rev-parse", "--verify", ref], check=False)
-        return result.stdout.strip() if result.returncode == 0 else None
+        value = result.stdout.strip() if result.returncode == 0 else None
+        self.rev_cache[ref] = value
+        return value
 
     def is_ancestor(self, older, newer):
         return (
@@ -325,7 +356,71 @@ class Git:
             )
         return entries
 
+    def close_batch(self):
+        process, self._batch = self._batch, None
+        if process is None:
+            return
+        for stream in (process.stdin, process.stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+    def _batch_blob(self, spec):
+        """Blob bytes, ``False`` for a missing object, ``None`` to fall back.
+
+        Any protocol error, timeout or non-blob reply kills the batch process
+        and returns None, so the caller reruns the read as a one-shot show.
+        """
+        if "\n" in spec:
+            return None
+        timeout = self.deadline.timeout(GIT_TIMEOUT_SECONDS)
+        if self._batch is None:
+            try:
+                self._batch = subprocess.Popen(
+                    ["git", "-C", str(self.settings.repo), "cat-file", "--batch"],
+                    env=self.environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                return None
+        process = self._batch
+        timer = threading.Timer(timeout, process.kill)
+        timer.start()
+        try:
+            process.stdin.write(spec.encode("utf-8") + b"\n")
+            process.stdin.flush()
+            header = process.stdout.readline()
+            if header.endswith(b" missing\n"):
+                # The spec echoes the path, which may hold spaces.
+                return False
+            fields = header.split()
+            if len(fields) != 3 or fields[1] != b"blob":
+                # Ambiguous, a tree/commit, or garbage: the size of a non-blob
+                # reply is still on the wire, so the stream is not reusable.
+                raise ValueError(header)
+            size = int(fields[2])
+            data = process.stdout.read(size)
+            if len(data) != size or process.stdout.read(1) != b"\n":
+                raise ValueError("short read")
+            return data
+        except (OSError, ValueError):
+            self.close_batch()
+            return None
+        finally:
+            timer.cancel()
+
     def show(self, ref, path):
+        data = self._batch_blob(f"{ref}:{path}")
+        if data is False:
+            return None
+        if data is not None:
+            return data
         result = self.run(["show", f"{ref}:{path}"], check=False, text=False)
         return result.stdout if result.returncode == 0 else None
 
@@ -499,7 +594,45 @@ def validate_post_version(settings):
         )
 
 
-def validate_repo(settings, config, git):
+REPO_VALIDATED_FILE = "repo-validated.json"
+
+
+def _repo_stamp(settings, config):
+    """What validate_repo's answer depends on, from three stats and no git.
+
+    The checked-out branch lives in .git/HEAD and both origin URLs in
+    .git/config, so a stamp of their identity and the expected host and URL
+    says whether a verdict from an earlier tick still holds. None when the
+    repo is not a plain clone (a worktree's .git is a file), so it always
+    asks git.
+    """
+    git_dir = settings.repo / ".git"
+    try:
+        if not git_dir.is_dir() or git_dir.is_symlink():
+            return None
+        entries = []
+        for name in ("HEAD", "config"):
+            value = (git_dir / name).lstat()
+            if not stat.S_ISREG(value.st_mode):
+                return None
+            entries.append([value.st_mtime_ns, value.st_size, value.st_ino])
+    except OSError:
+        return None
+    return {"host": settings.host, "relay_url": config.relay_url, "git": entries}
+
+
+def validate_repo(settings, config, git, record=True):
+    stamp = _repo_stamp(settings, config)
+    stamp_path = destination(settings.root, "bridge", REPO_VALIDATED_FILE)
+    if stamp is not None:
+        try:
+            if (
+                load_json_bytes(open_regular(stamp_path, 4096), str(stamp_path))
+                == stamp
+            ):
+                return
+        except (OSError, ConfigError):
+            pass
     branch = git.run(["symbolic-ref", "--quiet", "--short", "HEAD"]).stdout.strip()
     if branch != f"machines/{settings.host}":
         raise ConfigError(f"BRIDGE_REPO must have machines/{settings.host} checked out")
@@ -507,6 +640,17 @@ def validate_repo(settings, config, git):
     push_url = git.run(["remote", "get-url", "--push", "origin"]).stdout.strip()
     if fetch_url != config.relay_url or push_url != config.relay_url:
         raise ConfigError("origin fetch and push URLs must equal config.relay_url")
+    if stamp is not None and record:
+        # Re-stat after the checks: a change racing them leaves no stamp.
+        if _repo_stamp(settings, config) == stamp:
+            try:
+                atomic_replace(
+                    stamp_path,
+                    (json.dumps(stamp, sort_keys=True) + "\n").encode("utf-8"),
+                    settings.root,
+                )
+            except OSError:
+                pass
 
 
 def run_post_rooms(settings):
@@ -2552,6 +2696,70 @@ def write_busy_health(settings):
         return value
 
 
+class TickHeartbeat:
+    """Keep ``ticked_at`` fresh while this process runs a tick (post-lx89).
+
+    health.json is otherwise written when a tick ends, and launchd and
+    systemd never start a second run while one is going, so no busy probe
+    runs either: a tick slower than three intervals read as a dead bridge and
+    post refused cross-host sends. Only the tick-lock holder beats, so it
+    vouches for itself alone (the busy writer still never refreshes
+    ``ticked_at``). It beats once per interval, stops at the tick's deadline
+    so a wedged tick still goes stale, and stops for good once anything else
+    writes a full health file (its ``ts`` moves), which is how this tick's
+    own final write retires it. It never touches ``ts``: backoff reads that.
+    """
+
+    def __init__(self, settings, deadline):
+        self.settings = settings
+        self.deadline = deadline
+        self.interval = interval_of(settings)
+        self.stopped = threading.Event()
+        self.thread = None
+        self.seen_ts = read_health(settings).get("ts")
+        self.beats = 0
+
+    def start(self):
+        if self.interval:
+            self.thread = threading.Thread(
+                target=self._run, name="health-heartbeat", daemon=True
+            )
+            self.thread.start()
+        return self
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(timeout=10)
+
+    def _run(self):
+        while not self.stopped.wait(self.interval):
+            if self.deadline.remaining() <= 0:
+                return
+            try:
+                if not self.beat():
+                    return
+            except Exception:  # noqa: BLE001 - never disturb the tick itself
+                return
+
+    def beat(self):
+        with health_lock(self.settings.root, required=True):
+            if self.stopped.is_set():
+                return False
+            prior = read_health(self.settings)
+            if prior.get("ts") != self.seen_ts or "ticked_at" not in prior:
+                return False
+            prior.pop("interval_s", None)
+            prior.update(pmail.capability_fields(self.interval, utc_now()))
+            atomic_replace(
+                destination(self.settings.root, "bridge", "health.json"),
+                (json.dumps(prior, sort_keys=True) + "\n").encode("utf-8"),
+                self.settings.root,
+            )
+            self.beats += 1
+            return True
+
+
 def write_quiet_health(settings):
     """Advance only the quiet tick fields while preserving prior health."""
     with health_lock(settings.root, required=True):
@@ -2571,6 +2779,13 @@ def write_quiet_health(settings):
         value.update(pmail.capability_fields(interval_of(settings), value["ts"]))
         value["quiet"] = True
         value["quiet_streak"] = streak + 1 if isinstance(streak, int) else 1
+        # The gap this tick asks for before the next one that does work: post
+        # reads freshness as three times interval_s, so it must say so.
+        stretched = tick.effective_interval(
+            interval_of(settings), value["quiet_streak"]
+        )
+        if stretched is not None:
+            value["interval_s"] = stretched
         atomic_replace(
             destination(settings.root, "bridge", "health.json"),
             (json.dumps(value, sort_keys=True) + "\n").encode("utf-8"),
@@ -2731,17 +2946,38 @@ def ignored_branches(config, git, logger, peers=None):
 
 
 def execute(check_config=False):
+    holder = []
+    try:
+        return _execute(check_config, holder)
+    finally:
+        # No leaked `git cat-file --batch` on any exit path.
+        for git in holder:
+            git.close_batch()
+
+
+def _execute(check_config, holder):
     settings = load_settings()
+    if (
+        not check_config
+        and os.environ.get("BRIDGE_BACKOFF", "1") != "0"
+        and tick.skip_tick(settings, read_health(settings))
+    ):
+        # Backing off after quiet ticks and nothing local moved: no git, no
+        # lock, no write. health.json's interval_s already told post to
+        # expect this gap.
+        return 0
     deadline = Deadline(settings.deadline_seconds)
     config = load_config(settings)
     git = Git(settings, deadline)
-    validate_repo(settings, config, git)
+    holder.append(git)
+    validate_repo(settings, config, git, record=not check_config)
     if check_config:
         validate_post_version(settings)
         print(json.dumps({"ok": True, "host": settings.host}, sort_keys=True))
         return 0
     logger = Logger(settings.root)
     lock_descriptor = acquire_tick_lock(settings)
+    heartbeat = None
     try:
         if lock_descriptor is None:
             # Busy probe: inside the try so a missing .health.lock surfaces
@@ -2761,6 +2997,7 @@ def execute(check_config=False):
             # heartbeat, and a line per quiet tick was ~4,000 a day per host.
             write_quiet_health(settings)
             return 0
+        heartbeat = TickHeartbeat(settings, deadline).start()
         if fence_present(settings):
             logger.emit("fenced", root=str(settings.root))
             write_health(settings, False, "fenced")
@@ -3002,6 +3239,8 @@ def execute(check_config=False):
             )
         return 1
     finally:
+        if heartbeat is not None:
+            heartbeat.stop()
         # An aborted tick keeps what it saw without clearing anything.
         logger.settle_conditions(prune=False)
         if lock_descriptor is not None:

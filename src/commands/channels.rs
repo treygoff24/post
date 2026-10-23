@@ -1,4 +1,4 @@
-use crate::channel::{list_channels_with, Scan};
+use crate::channel::{list_channels_refresh_idle, Scan};
 use crate::cli::ChannelsArgs;
 use crate::command_result::CommandResult;
 use crate::cursor_state::{eligibility, routing};
@@ -9,25 +9,52 @@ use crate::output::{self, ChannelListItem, ChannelsOutput};
 pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppResult<CommandResult> {
     // One unreadable channel file or message never fails the listing: it is
     // skipped and reported (contract 2026-09-28 section 3).
-    let (summaries, mut skipped) = list_channels_with(context, Scan::Tolerant)?;
+    let (summaries, mut skipped) = list_channels_refresh_idle(context, Scan::Tolerant)?;
 
     let resolved = crate::participant::resolve(context)?;
     let participant = resolved.participant();
     let acting_room = participant.and_then(|actor| actor.workspace.clone());
     let mut channels = Vec::new();
     let mut archived_hidden = 0;
+    let mut unlisted_hidden = 0;
     let mut roster = crate::channel_state::ChannelRoster::new(context);
+    let unread_state = if args.no_unread {
+        None
+    } else {
+        match participant.map(|actor| eligibility::ChannelUnread::new(context, actor)) {
+            Some(Ok(state)) => Some(state),
+            // The tolerant roster below omits and reports this participant.
+            Some(Err(error)) if error.code == crate::error::ErrorCode::ConfigInvalid => None,
+            Some(Err(error)) => return Err(error),
+            None => None,
+        }
+    };
     for summary in summaries {
+        // Unlisted and archived are independent states, and a channel can be
+        // both. Unlisted is the stronger hide: the default listing and
+        // --archived leave every unlisted channel out, and --unlisted shows
+        // them all, archived or not (each item says which). So every hidden
+        // channel is counted exactly once, unlisted ones in unlisted_hidden
+        // whatever their archive state, and each hint names the flag that
+        // lists exactly what it counted. The idle auto-archive pass ignores
+        // the flag: an idle unlisted channel is archived like any other.
+        // Both states come from files the listing already reads (channel.json
+        // and archive.json), so unlisted costs no extra I/O.
         let archived = summary.archived.is_some();
+        let unlisted = summary.info.unlisted;
         let listed = if args.all {
             true
+        } else if args.unlisted {
+            unlisted
         } else if args.archived {
-            archived
+            archived && !unlisted
         } else {
-            !archived
+            !archived && !unlisted
         };
         if !listed {
-            if archived {
+            if unlisted {
+                unlisted_hidden += 1;
+            } else if archived {
                 archived_hidden += 1;
             }
             continue;
@@ -35,14 +62,9 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         let effective_members = roster.effective_participants(&summary.info.name)?;
         let is_member = participant
             .is_some_and(|actor| effective_members.iter().any(|member| member.id == actor.id));
-        let unread = match (participant, is_member) {
-            (Some(actor), true) => {
-                let scan = eligibility::unread_channel_with(
-                    context,
-                    actor,
-                    &summary.info.name,
-                    Scan::Tolerant,
-                )?;
+        let unread = match (&unread_state, is_member) {
+            (Some(state), true) => {
+                let scan = state.scan(&summary.info.name, Scan::Tolerant)?;
                 skipped.extend(
                     scan.skipped
                         .into_iter()
@@ -76,10 +98,15 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
             unread,
             archived,
             archived_at: summary.archived.as_ref().map(|mark| mark.at.clone()),
+            archived_reason: summary
+                .archived
+                .as_ref()
+                .and_then(|mark| mark.reason.clone()),
             archived_by: summary
                 .archived
                 .as_ref()
                 .map(|mark| mark.by_participant.clone()),
+            unlisted,
         });
     }
 
@@ -117,6 +144,8 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         if channels.is_empty() {
             rendered.push_str(if args.archived {
                 "post: no archived channels\n"
+            } else if args.unlisted {
+                "post: no unlisted channels\n"
             } else {
                 "post: no channels\n"
             });
@@ -130,8 +159,9 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
                     ),
                     _ => String::new(),
                 };
+                let unlisted_note = if channel.unlisted { ", unlisted" } else { "" };
                 rendered.push_str(&format!(
-                    "#{}  ({} members, {} messages, by {}{archived_note})\n",
+                    "#{}  ({} members, {} messages, by {}{archived_note}{unlisted_note})\n",
                     output::sanitize_text_header(&channel.name),
                     channel.members.len(),
                     channel.messages,
@@ -150,6 +180,11 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
                 "({archived_hidden} archived channel(s) hidden; `post channels --archived --text` lists them)\n"
             ));
         }
+        if unlisted_hidden > 0 {
+            rendered.push_str(&format!(
+                "({unlisted_hidden} unlisted channel(s) hidden; `post channels --unlisted --text` lists them)\n"
+            ));
+        }
         if let Some(notice) = crate::channel::skipped_notice(&skipped) {
             rendered.push_str(&notice);
         }
@@ -164,6 +199,7 @@ pub(super) fn run(context: &Context, args: ChannelsArgs, pretty: bool) -> AppRes
         channels,
         count,
         archived_hidden,
+        unlisted_hidden,
     })
     .map_err(|error| {
         crate::error::AppError::invalid_argument(format!("serialize channels: {error}"))

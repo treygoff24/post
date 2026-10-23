@@ -36,6 +36,10 @@ struct ParticipantOutput {
     /// empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<&'static str>,
+    /// `participant bind --new --adopt` only: what the new participant took
+    /// over from the adopted one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adopted: Option<participant::adopt::Adopted>,
 }
 
 /// `participant_missing`, as a diagnostic surface reports it.
@@ -182,6 +186,10 @@ pub(super) fn run(
                     error,
                 )
             })?;
+            // Checked before minting so a refusal leaves no orphan participant.
+            if let Some(old_id) = args.adopt.as_deref() {
+                participant::adopt::check(context, old_id)?;
+            }
             let participant = participant::bind(
                 context,
                 &cwd,
@@ -189,6 +197,14 @@ pub(super) fn run(
                 bootstrap,
                 args.fresh,
             )?;
+            let (participant, adopted) = match args.adopt.as_deref() {
+                Some(old_id) => {
+                    let (participant, adopted) =
+                        participant::adopt::adopt(context, participant, old_id)?;
+                    (participant, Some(adopted))
+                }
+                None => (participant, None),
+            };
             crate::cursor_state::routing::route_for_participant(context, &participant)?;
             // Only the bootstrap's text form (one `export` line) is not a JSON
             // document; every other bind answer is, and carries the notice.
@@ -202,8 +218,17 @@ pub(super) fn run(
                 None
             };
             if text_export {
-                let result =
-                    CommandResult::success(format!("export POST_PARTICIPANT={}\n", participant.id));
+                let mut text = format!("export POST_PARTICIPANT={}\n", participant.id);
+                if let Some(adopted) = &adopted {
+                    text.push_str(&format!(
+                        "# adopted participant {}: name {}, sigil {}, {} channel(s)\n",
+                        adopted.from,
+                        adopted.name.as_deref().unwrap_or("(none)"),
+                        adopted.pfp.as_deref().unwrap_or("(none)"),
+                        adopted.channels.len()
+                    ));
+                }
+                let result = CommandResult::success(text);
                 super::participant_auto_gc::maybe_run(context);
                 return Ok(result);
             }
@@ -227,6 +252,7 @@ pub(super) fn run(
                     participant_error: None,
                     participant_missing: None,
                     notice,
+                    adopted,
                 },
                 pretty,
             )?;
@@ -278,6 +304,7 @@ fn lifecycle(context: &Context, end: bool, pretty: bool) -> AppResult<CommandRes
             participant_error: None,
             participant_missing: None,
             notice: None,
+            adopted: None,
         },
         pretty,
     )
@@ -444,6 +471,7 @@ fn unbound_output(status: &'static str, fix: Option<String>) -> ParticipantOutpu
         participant_error: None,
         participant_missing: None,
         notice: None,
+        adopted: None,
     }
 }
 
@@ -459,6 +487,7 @@ fn bound_output(participant: Participant, provenance: &'static str) -> Participa
         participant_error: None,
         participant_missing: None,
         notice: None,
+        adopted: None,
     }
 }
 

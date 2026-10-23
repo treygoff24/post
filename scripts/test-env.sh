@@ -1,5 +1,7 @@
 # shellcheck shell=bash
 # Shared defaults for local tests and the gate. Explicit environment overrides win.
+# Imported test helpers must not add untracked inputs to a prepared release tree.
+export PYTHONDONTWRITEBYTECODE=1
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-16}"
 export POST_NODE_TEST_JOBS="${POST_NODE_TEST_JOBS:-4}"

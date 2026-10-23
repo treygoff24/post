@@ -964,7 +964,7 @@ class PmailTest(unittest.TestCase):
             #!/bin/sh
             for arg in "$@"; do
               case "$arg" in
-                *:pmail/*) [ -f '{flag}' ] && exit 128 ;;
+                *:pmail/*|--batch) [ -f '{flag}' ] && exit 128 ;;
               esac
             done
             exec '{real}' "$@"

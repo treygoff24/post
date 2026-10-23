@@ -278,7 +278,56 @@ pub(crate) fn received_addresses(
     context: &Context,
     participant: &Participant,
 ) -> AppResult<Vec<Address>> {
-    ReceivedIndex::read(context).received(participant)
+    let mut received = Vec::new();
+    for address in store_addresses(context) {
+        if store_names(context, &address, &participant.id)? {
+            received.push(address);
+        }
+    }
+    Ok(received)
+}
+
+/// The single-participant walk represented by `StoreSenders::names`, without
+/// reading receipts or sender history after this participant's first match.
+fn store_names(context: &Context, address: &Address, participant: &str) -> AppResult<bool> {
+    let inbox = inbox_path(context, address);
+    if let Ok(entries) = fs::read_dir(routing_dir(context, address)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            match receipt(context, address, id) {
+                Ok(Some(receipt)) => {
+                    if receipt.recipients.iter().any(|id| id == participant)
+                        || parse_mail(&inbox.join(format!("{id}.mail")))
+                            .ok()
+                            .and_then(|mail| local_author(context, &mail.envelope))
+                            .as_deref()
+                            == Some(participant)
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) if error.code == ErrorCode::ConfigInvalid => warn_once(
+                    path,
+                    format!("corrupt routing receipt skipped: {}", error.message),
+                ),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(message_files(&inbox)?.iter().any(|path| {
+        parse_mail(path)
+            .ok()
+            .and_then(|mail| local_author(context, &mail.envelope))
+            .as_deref()
+            == Some(participant)
+    }))
 }
 
 /// `received_addresses` for every participant from one read of every store.
@@ -997,4 +1046,121 @@ fn merge_report(target: &mut RouteReport, source: RouteReport) {
     target.routed.extend(source.routed);
     target.pending += source.pending;
     target.held.extend(source.held);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{test_root, trash_test_root};
+
+    /// `received_addresses` stops each store's walk at the first match; it must
+    /// answer exactly as the whole-host `ReceivedIndex` does, including which
+    /// errors surface, over stores mixing valid, corrupt and unreadable
+    /// receipts and inboxes that cannot be listed.
+    #[test]
+    fn single_participant_walk_matches_the_index_over_mixed_stores() {
+        let root = test_root("received-walk");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let seed = |id: &str| {
+            let dir = root.join(participant::PARTICIPANTS_DIR).join(id);
+            fs::create_dir_all(&dir).unwrap();
+            let record = serde_json::json!({
+                "version": 1,
+                "id": id,
+                "harness": "claude",
+                "conversation_key_digest": hex_sha256(id.as_bytes()),
+                "created": "2026-01-01T00:00:00Z",
+                "last_seen": "2026-01-01T00:00:00Z",
+                "lease_hours": 24,
+            });
+            fs::write(dir.join("participant.json"), record.to_string()).unwrap();
+            id.to_owned()
+        };
+        let (me, other) = (seed("claude-aaaaaaaa"), seed("claude-bbbbbbbb"));
+        let load = |id: &str| participant::load(&context, id).unwrap().unwrap();
+        let (me, other) = (load(&me), load(&other));
+        let names = [me.id.clone(), other.id.clone()];
+
+        // 0 = receipt naming me, 1 = naming the other, 2 = naming neither,
+        // 3 = corrupt, 4 = unreadable (a directory where the file belongs).
+        let mut seed_state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u64| {
+            seed_state ^= seed_state << 13;
+            seed_state ^= seed_state >> 7;
+            seed_state ^= seed_state << 17;
+            seed_state % bound
+        };
+        let (mut errors, mut hits) = (0, 0);
+        for round in 0..300 {
+            let lineages = root.join(lineage::LINEAGES_DIR);
+            let _ = fs::remove_dir_all(&lineages);
+            for store in 0..3 {
+                let name = format!("l{store}");
+                let address = Address {
+                    kind: AddressKind::Lineage,
+                    name: name.clone(),
+                };
+                fs::create_dir_all(routing_dir(&context, &address)).unwrap();
+                match next(4) {
+                    0 => {}
+                    1 => {
+                        fs::write(inbox_path(&context, &address), b"not a directory").unwrap();
+                    }
+                    _ => fs::create_dir_all(inbox_path(&context, &address)).unwrap(),
+                }
+                for index in 0..next(5) {
+                    let id = format!("m{index:02}");
+                    let path = receipt_path(&context, &address, &id);
+                    match next(5) {
+                        3 => fs::write(&path, b"{").unwrap(),
+                        4 => fs::create_dir_all(&path).unwrap(),
+                        kind => {
+                            let recipients = match kind {
+                                0 => vec![names[0].clone()],
+                                1 => vec![names[1].clone()],
+                                _ => vec!["nobody".to_owned()],
+                            };
+                            let receipt = Receipt {
+                                version: RECEIPT_VERSION,
+                                message: id.clone(),
+                                digest: String::new(),
+                                address: address.clone(),
+                                recipients,
+                                excluded: Vec::new(),
+                                routed_at: "2026-01-01 00:00:00 +0000".to_owned(),
+                                routed_by: "test".to_owned(),
+                            };
+                            fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+                        }
+                    }
+                }
+            }
+            let index = ReceivedIndex::read(&context);
+            for who in [&me, &other] {
+                let full = index.received(who);
+                let walk = received_addresses(&context, who);
+                match (&full, &walk) {
+                    (Ok(left), Ok(right)) => {
+                        assert_eq!(left, right, "round {round} {}", who.id);
+                        hits += usize::from(!left.is_empty());
+                    }
+                    (Err(left), Err(right)) => {
+                        assert_eq!(
+                            (left.code, &left.message),
+                            (right.code, &right.message),
+                            "round {round} {}",
+                            who.id
+                        );
+                        errors += 1;
+                    }
+                    _ => panic!("round {round} {}: {full:?} vs {walk:?}", who.id),
+                }
+            }
+        }
+        assert!(errors > 20 && hits > 20, "errors={errors} hits={hits}");
+        trash_test_root(&root);
+    }
 }

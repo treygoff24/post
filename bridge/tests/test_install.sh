@@ -17,6 +17,14 @@ SEED="$TMP/seed"
 CLONE="$TMP/clone"
 BIN="$TMP/bin"
 mkdir -p "$HOME_DIR" "$MAIL_ROOT" "$BIN"
+# Pin the interpreter before changing HOME. Version-manager shims can resolve
+# a different installation (or try to download one) inside a fixture home.
+REAL_PYTHON=$(python3 -c 'import sys; print(sys.executable)')
+export REAL_PYTHON
+ln -s "$REAL_PYTHON" "$BIN/python3"
+
+printf '#!/bin/sh\nprintf "Linux\\n"\n' >"$BIN/uname"
+chmod 0755 "$BIN/uname"
 
 cat >"$BIN/post" <<'SH'
 #!/bin/sh
@@ -53,10 +61,14 @@ cat >"$BIN/fj" <<'SH'
 #!/bin/sh
 case ${2:-} in
   /users/*) printf '%s\n' "$FAKE_FJ_USER_BODY" ;;
-  /repos/estate/post-relay/branch_protections)
-    printf '%s\n' '[{"rule_name":"registry","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":["trey","mac"],"push_whitelist_teams":[],"push_whitelist_deploy_keys":false},{"rule_name":"machines/*","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":[],"push_whitelist_teams":[],"push_whitelist_deploy_keys":false}]'
+  /repos/example/relay/branch_protections)
+    if [ "${FAKE_FJ_UNSAFE:-}" = true ]; then
+      printf '%s\n' '[{"rule_name":"registry","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":["operator"],"push_whitelist_teams":[],"push_whitelist_deploy_keys":false},{"rule_name":"machines/*","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":["operator"],"push_whitelist_teams":[],"push_whitelist_deploy_keys":false}]'
+      exit 0
+    fi
+    printf '%s\n' '[{"rule_name":"registry","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":["operator"],"push_whitelist_teams":[],"push_whitelist_deploy_keys":false},{"rule_name":"machines/*","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":[],"push_whitelist_teams":[],"push_whitelist_deploy_keys":false}]'
     ;;
-  /repos/estate/post-relay/branches) printf '%s\n' '[{"name":"registry"}]' ;;
+  /repos/example/relay/branches) printf '%s\n' '[{"name":"registry"}]' ;;
   *) printf '%s\n' '{"message":"unexpected fake fj request"}' ;;
 esac
 SH
@@ -84,6 +96,8 @@ COMMON_ENV=(
   "XDG_CONFIG_HOME=$XDG_CONFIG"
   "POST_MAIL_ROOT=$MAIL_ROOT"
   "POST_BRIDGE_RELAY_URL=$REMOTE"
+  "POST_BRIDGE_API_REPO=/repos/example/relay"
+  'POST_BRIDGE_REGISTRY_USERS=["operator"]'
   "PATH=$BIN:$PATH"
   "POST_BRIDGE_SYSTEMCTL_LOG=$TMP/systemctl.log"
 )
@@ -107,8 +121,16 @@ env "${COMMON_ENV[@]}" FAKE_FJ_USER_BODY="$SCOPE_ERROR" \
   >"$TMP/enroll-scope.out" 2>"$TMP/enroll-scope.err"
 grep -Fq 'user check unavailable (token lacks read:user); relying on the branch-protection API to validate the username' "$TMP/enroll-scope.err"
 grep -Fq '# user check returned:' "$TMP/enroll-scope.out"
-grep -Fq '+ fj POST /repos/estate/post-relay/branch_protections body <<<' "$TMP/enroll-scope.out"
+grep -Fq '+ fj POST /repos/example/relay/branch_protections body <<<' "$TMP/enroll-scope.out"
 grep -Fq '+ add x to hosts.json (sorted, unique)' "$TMP/enroll-scope.out"
+
+# A catch-all granting any username is not a deny-by-default backstop.
+if env "${COMMON_ENV[@]}" FAKE_FJ_USER_BODY="$SCOPE_ERROR" FAKE_FJ_UNSAFE=true \
+  "$ROOT/bridge/enroll.sh" --dry-run --host x >"$TMP/unsafe.out" 2>"$TMP/unsafe.err"; then
+  printf '%s\n' 'unsafe wildcard writers were accepted' >&2
+  exit 1
+fi
+grep -Fq 'catch-all protection is missing or unsafe' "$TMP/unsafe.err"
 
 if env "${COMMON_ENV[@]}" FAKE_FJ_USER_BODY='{"message":"user not found"}' \
   "$ROOT/bridge/enroll.sh" --host x \
@@ -123,19 +145,19 @@ INSTALL_ARGS=(
   --host cell-a
   --ssh-key "$KEY"
   --config "$CONFIG"
-  --interval 23
+  --interval '1h 30s'
 )
 
-if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" "${INSTALL_ARGS[@]}" --post-bin "$BIN/post-old" >"$TMP/old.out" 2>"$TMP/old.err"; then
+if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" "${INSTALL_ARGS[@]}" --interval 23 --post-bin "$BIN/post-old" >"$TMP/old.out" 2>"$TMP/old.err"; then
   printf '%s\n' 'old Post version was accepted' >&2
   exit 1
 fi
-grep -Fq "post version must be post 0.10.0 up to, but not including, post 0.11.0, optionally followed by ' (build ...)'; got post 0.6.0" "$TMP/old.err"
+grep -Fq "post version must be post 0.10.0 up to, but not including, post 0.12.0, optionally followed by ' (build ...)'; got post 0.6.0" "$TMP/old.err"
 [ ! -e "$CLONE" ] || { printf '%s\n' 'version refusal cloned the relay' >&2; exit 1; }
-# Any version from 0.10.0 up to, but not including, 0.11.0 is accepted, with or
-# without a build annotation; 0.11.0, another major, a malformed version or a
+# Any version from 0.10.0 up to, but not including, 0.12.0 is accepted, with or
+# without a build annotation; 0.12.0, another major, a malformed version or a
 # malformed annotation is not. Each variant gets its own fake post.
-for variant in 'post 0.10.0 (build abc1234, 2026-09-28)' 'post 0.10.0 (build abc1234-dirty)' 'post 0.10.1' 'post 0.10.12 (build abc1234)'; do
+for variant in 'post 0.10.0 (build abc1234, 2026-09-28)' 'post 0.10.0 (build abc1234-dirty)' 'post 0.10.1' 'post 0.10.12 (build abc1234)' 'post 0.11.0' 'post 0.11.12 (build abc1234)'; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$variant" >"$BIN/post-annotated"
   chmod 0755 "$BIN/post-annotated"
   env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-annotated" --host cell-a \
@@ -144,7 +166,7 @@ for variant in 'post 0.10.0 (build abc1234, 2026-09-28)' 'post 0.10.0 (build abc
   env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --uninstall --clone-dir "$TMP/clone-annotated" >/dev/null
   rm -rf "$TMP/clone-annotated" "$MAIL_ROOT/bridge/config.json"
 done
-for variant in 'post 0.8.9' 'post 0.11.0' 'post 0.11.0 (build abc1234)' 'post 1.0.0' 'post 0.10' 'post 0.10.' 'post 0.10.01' 'post 0.90.0' 'post 0.10.0 build abc1234' 'post 0.10.0 (build abc) trailing' 'post 0.10.0-rc1' 'post 0.10.1-rc1' 'post 0.10.0 (build (nested))' 'xpost 0.10.0' 'post  0.10.0' 'post 0.10.0 (build abc1234)x'; do
+for variant in 'post 0.8.9' 'post 0.12.0' 'post 0.12.0 (build abc1234)' 'post 1.0.0' 'post 0.10' 'post 0.10.' 'post 0.10.01' 'post 0.90.0' 'post 0.10.0 build abc1234' 'post 0.10.0 (build abc) trailing' 'post 0.10.0-rc1' 'post 0.10.1-rc1' 'post 0.11.0-rc1' 'post 0.11.0+build' 'post 0.10.0 (build (nested))' 'xpost 0.10.0' 'post  0.10.0' 'post 0.10.0 (build abc1234)x'; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$variant" >"$BIN/post-annotated"
   chmod 0755 "$BIN/post-annotated"
   if env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-annotated" --host cell-a \
@@ -158,7 +180,7 @@ rm -f "$BIN/post-annotated"
 
 env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" "${INSTALL_ARGS[@]}" 2> >(tee "$TMP/first.err" >&2)
 # A config with no channels key syncs every channel; the installer says so
-# and points at the template that carries the estate deny list.
+# and points at the template that disables channels until explicitly enabled.
 grep -Fq 'has no "channels" key, so this host will publish and import every channel' "$TMP/first.err" || { printf '%s\n' 'no-channels config gave no warning' >&2; exit 1; }
 grep -Fq 'bridge/config.template.json' "$TMP/first.err" || { printf '%s\n' 'no-channels warning does not name the template' >&2; exit 1; }
 
@@ -176,12 +198,15 @@ done
 [ -f "$DATA/BUILD" ] || { printf '%s\n' 'installed BUILD file is missing' >&2; exit 1; }
 grep -Fqx "commit=$(git -C "$ROOT" rev-parse HEAD)" "$DATA/BUILD" || { printf 'BUILD does not name the source commit: %s\n' "$(cat "$DATA/BUILD")" >&2; exit 1; }
 [ -x "$LAUNCHER" ] || { printf '%s\n' 'launcher is missing or not executable' >&2; exit 1; }
-grep -Fqx "exec python3 \"$DATA/sweep.py\" \"\$@\"" "$LAUNCHER"
+python3 - "$DATA" "$LAUNCHER" <<'PY'
+import pathlib, shlex, sys
+assert ('exec python3 ' + shlex.quote(sys.argv[1] + '/sweep.py') + ' "$@"') in pathlib.Path(sys.argv[2]).read_text().splitlines()
+PY
 grep -Fqx "Environment=\"POST_BIN=$BIN/post\"" "$SERVICE"
 grep -Fqx 'Environment="BRIDGE_TICK_DEADLINE_SECONDS=240"' "$SERVICE"
-grep -Fqx 'Environment="BRIDGE_INTERVAL_SECONDS=23"' "$SERVICE"
+grep -Fqx 'Environment="BRIDGE_INTERVAL_SECONDS=1h 30s"' "$SERVICE" || { printf '%s\n' 'legacy timespan missing from health environment' >&2; exit 1; }
 grep -Fqx 'TimeoutStartSec=5min' "$SERVICE"
-grep -Fqx 'OnUnitActiveSec=23' "$TIMER"
+grep -Fqx 'OnUnitActiveSec=1h 30s' "$TIMER" || { printf '%s\n' 'legacy timespan missing from timer' >&2; exit 1; }
 grep -Fqx 'AccuracySec=1s' "$TIMER"
 grep -Fq -- 'enable --now post-bridge.timer' "$TMP/systemctl.log"
 if grep -Fq -- 'start post-bridge.service' "$TMP/systemctl.log"; then
@@ -232,7 +257,8 @@ fi
 mkdir -p "$TMP/failbin"
 cat >"$TMP/failbin/python3" <<'SH'
 #!/bin/sh
-exit 1
+case ${1:-} in */sweep.py) [ "${2:-}" != --check-config ] || exit 1 ;; esac
+exec "$REAL_PYTHON" "$@"
 SH
 chmod 0755 "$TMP/failbin/python3"
 : >"$TMP/systemctl.log"
@@ -352,18 +378,17 @@ env "${COMMON_ENV[@]}" "$ROOT/bridge/install.sh" --uninstall --clone-dir "$CLONE
 cmp -s "$CONFIG" "$MAIL_ROOT/bridge/config.json" || { printf '%s\n' 'uninstall changed the mail root' >&2; exit 1; }
 
 # A config that names channels installs without the warning, and the
-# template itself carries the estate deny list.
+# template itself keeps channels local until explicitly enabled.
 python3 - "$ROOT/bridge/config.template.json" <<'PY2'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
-assert cfg["channels"]["mode"] == "all", cfg
-assert {"devbox-build", "litigation-work", "wade-overnight", "cos", "cos-urgent"} <= set(cfg["channels"]["deny"]), cfg
+assert cfg["channels"] is None, cfg
 PY2
 CH_HOME="$TMP/home-ch"
 CH_MAIL="$TMP/mailroot-ch"
 mkdir -p "$CH_HOME" "$CH_MAIL"
 CH_CONFIG="$TMP/config-channels.json"
-printf '{"host":"cell-a","relay_url":"%s","channels":{"mode":"all","deny":["devbox-build"]}}\n' "$REMOTE" >"$CH_CONFIG"
+printf '{"host":"cell-a","relay_url":"%s","channels":{"mode":"all","deny":["private-notes"]}}\n' "$REMOTE" >"$CH_CONFIG"
 env HOME="$CH_HOME" XDG_CONFIG_HOME="$TMP/config-ch" POST_MAIL_ROOT="$CH_MAIL" PATH="$BIN:$PATH" \
   POST_BRIDGE_SYSTEMCTL_LOG="$TMP/systemctl-ch.log" \
   "$ROOT/bridge/install.sh" --repo-url "$REMOTE" --clone-dir "$TMP/clone-ch" --host cell-a \

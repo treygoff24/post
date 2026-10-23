@@ -17,6 +17,7 @@
         "codex-37cdb648"
       ],
       "room": "alpha",
+      "unlisted": false,
       "unread": 4
     },
     {
@@ -32,11 +33,13 @@
         "claude-dd611847"
       ],
       "room": "alpha",
+      "unlisted": false,
       "unread": 0
     }
   ],
   "count": 2,
   "ok": true,
   "participant": "claude-dd611847",
-  "pending": 1
+  "pending": 1,
+  "unlisted_hidden": 0
 }

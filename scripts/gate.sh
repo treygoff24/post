@@ -27,7 +27,7 @@ step "clippy";  cargo clippy --all-targets --all-features -- -D warnings || err 
 # macOS has no `timeout`, so scripts/with-timeout.py does the job, killing the
 # test binaries' process group with the cargo that started them.
 test_timeout="${GATE_TEST_TIMEOUT:-1200}"
-step "test";    python3 scripts/with-timeout.py "$test_timeout" cargo test --all-targets --all-features \
+step "test";    python3 scripts/with-timeout.py "$test_timeout" cargo test --all-targets --all-features --no-fail-fast \
   || err "cargo test (failed, or exceeded the ${test_timeout} s limit: GATE_TEST_TIMEOUT)"
 # POST_BIN comes from the build's own compiler-artifact message (see
 # scripts/build-release-bin.sh), never from a second cargo invocation.
@@ -65,6 +65,7 @@ fi
 step "python: bridge"
 if command -v python3 >/dev/null 2>&1; then
   python3 scripts/test_runner_test.py || err "test runner resource and exit checks"
+  python3 scripts/release.test.py || err "release preparation checks"
   bridge/tests/run-all.sh || err "bridge tests (bridge/tests/run-all.sh)"
 else
   err "python3 not found; the bridge suite is part of this gate"

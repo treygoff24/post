@@ -106,6 +106,25 @@ function run(input, { stateDir, throttleMs = 0, defaultCwd = true, env: extraEnv
   return JSON.parse(result.stdout);
 }
 
+test("Codex prompts and tools share a scan window without postponing the next scan", () => {
+  const stateDir = freshStateDir();
+  const session_id = "shared-scan-window";
+  setStub({ events: [] });
+  run({ hook_event_name: "SessionStart", session_id }, { stateDir });
+  const before = allStubCalls().length;
+  const stateFile = path.join(stateDir, `session-${session_id}.json`);
+  const stamp = fs.statSync(stateFile).mtimeMs;
+  for (const hook_event_name of ["UserPromptSubmit", "PostToolUse", "UserPromptSubmit"]) {
+    assert.deepEqual(run({ hook_event_name, session_id }, { stateDir, throttleMs: 30_000 }), {});
+  }
+  assert.equal(allStubCalls().length, before, "recent scans must skip all Post subprocesses");
+  assert.equal(fs.statSync(stateFile).mtimeMs, stamp, "skips must not extend the window");
+  const expired = new Date(Date.now() - 31_000);
+  fs.utimesSync(stateFile, expired, expired);
+  run({ hook_event_name: "UserPromptSubmit", session_id }, { stateDir, throttleMs: 30_000 });
+  assert.ok(allStubCalls().slice(before).some(call => call.args[0] === "watch"));
+});
+
 const MAIL_A = {
   event: "mail",
   room: "codex",
@@ -200,7 +219,8 @@ test("release binary binds from payload keys and reuses the participant later", 
     const stateDir = path.join(proofRoot, "state");
     fs.mkdirSync(cwd, { recursive: true });
     const repoRoot = path.resolve(path.dirname(ADAPTER), "../../..");
-    const releaseBin = execFileSync(
+    // Prebuilt installations can verify the same contract without a local build.
+    const releaseBin = process.env.POST_CODEX_TEST_BINARY || execFileSync(
       process.execPath,
       [path.join(repoRoot, "scripts", "cargo-release-bin.mjs")],
       { encoding: "utf8" }

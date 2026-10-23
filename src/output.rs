@@ -662,6 +662,10 @@ pub struct ChatJoinOutput {
     /// --history 20`) after a new join; `post chat <ch> --leave && post chat
     /// <ch> --join --backlog` when `backlog_ignored`; otherwise null.
     pub history_hint: Option<String>,
+    /// Whether the channel is unlisted after the join (`--join --unlisted`
+    /// sets it; a plain join reports the state it found).
+    #[serde(default)]
+    pub unlisted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -961,6 +965,8 @@ pub struct ChatMessageSliceOutput {
     pub framing: ChannelFraming,
     pub channel: String,
     pub room: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_without_membership: bool,
     pub message: crate::model::ChannelMessage,
     pub origin: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -986,6 +992,8 @@ pub struct ChatReadOutput {
     pub channel: String,
     pub room: String,
     pub peek: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_without_membership: bool,
     pub messages: Vec<ChatMessageItem>,
     pub count: usize,
     /// Un-emitted messages left outside the bounded display window. Consuming
@@ -1150,6 +1158,13 @@ pub struct ChannelListItem {
     /// Participant that archived the channel; absent for live channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_by: Option<String>,
+    /// "idle" for automatic 24-hour archival; absent on manual archives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_reason: Option<String>,
+    /// True when channel.json marks the channel unlisted (hidden from the
+    /// default listing; shown by --unlisted and --all).
+    #[serde(default)]
+    pub unlisted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1157,9 +1172,15 @@ pub struct ChannelsOutput {
     pub ok: bool,
     pub channels: Vec<ChannelListItem>,
     pub count: usize,
-    /// Archived channels left out of this listing (0 with --archived/--all).
+    /// Listed archived channels left out of this listing (0 with
+    /// --archived/--all). An unlisted channel is counted in
+    /// `unlisted_hidden` instead, whatever its archive state.
     #[serde(default)]
     pub archived_hidden: usize,
+    /// Unlisted channels left out of this listing, archived ones included
+    /// (0 with --unlisted/--all).
+    #[serde(default)]
+    pub unlisted_hidden: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1464,6 +1485,10 @@ pub enum WatchEvent {
         display_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pfp: Option<String>,
+        /// System-event kind of the message (`"profile"`, `"join"`, ...);
+        /// absent for ordinary messages, so existing NDJSON is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_event: Option<String>,
         /// Identity-layer fields, carried raw (Sol's M1 review); absent
         /// keeps the pre-identity NDJSON byte-identical.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1648,7 +1673,7 @@ impl WatchEvent {
             from_participant,
             from_host,
             from_lineage,
-            event: _,
+            event,
             display_name,
             pfp,
             re: _,
@@ -1678,6 +1703,7 @@ impl WatchEvent {
             sent,
             display_name,
             pfp,
+            system_event: event,
             sender_address,
             sender_provenance,
             reason,
@@ -2359,6 +2385,39 @@ mod tests {
         .contains("2020-01-01"));
     }
 
+    #[test]
+    fn channel_message_forwards_system_event_through_the_constructor() {
+        let (root, context) = remote_fixture("system-event-forward", "{}");
+        let json_for = |event: Option<&str>| {
+            let mut raw = serde_json::json!({
+                "id": "20260101-120000-000001-aaaaaa",
+                "from": "alpha",
+                "channel": "ops",
+                "sent": "2026-01-01 12:00:00 -0500",
+            });
+            if let Some(event) = event {
+                raw["event"] = event.into();
+            }
+            let message: crate::model::ChannelMessage =
+                serde_json::from_value(raw).expect("channel message");
+            let watch = WatchEvent::channel_message_at(
+                &context,
+                message,
+                WatchAddress {
+                    kind: "workspace".to_owned(),
+                    name: "alpha".to_owned(),
+                },
+                false,
+                None,
+            );
+            serde_json::to_value(watch).expect("watch json")
+        };
+        assert!(json_for(None).get("system_event").is_none());
+        assert_eq!(json_for(Some("join"))["system_event"], "join");
+        assert_eq!(json_for(Some("profile"))["system_event"], "profile");
+        crate::test_support::trash_test_root(&root);
+    }
+
     fn stamped(display_name: Option<&str>, pfp: Option<&str>) -> WatchEvent {
         WatchEvent::ChannelMessage {
             address: WatchAddress {
@@ -2379,6 +2438,7 @@ mod tests {
             sent: "2026-07-22 01:30:00 -0500".to_owned(),
             display_name: display_name.map(str::to_owned),
             pfp: pfp.map(str::to_owned),
+            system_event: None,
             sender_address: None,
             sender_provenance: None,
             reason: WatchReason::Channel,

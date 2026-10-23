@@ -988,8 +988,13 @@ fn run_watch_loop(
     // so every tick is a full scan, behavior identical to the pre-event loop.
     let mut slow_deadline = Instant::now() + slow_period;
     // Heartbeat cadence stays at --interval-ms even when wakes arrive faster
-    // or slower than ticks (`post who` presence depends on it).
+    // or slower than ticks (`post who` presence depends on it). The
+    // participant record (`last_seen`, the 24 h lease) is rewritten only
+    // every RECORD_TOUCH_PERIOD: its write is a durable atomic replace (two
+    // F_FULLFSYNC calls on macOS), and doing that every second per watcher
+    // put four watches at 25-35% CPU each under saturated I/O (2026-10-09).
     let mut last_beat = Instant::now();
+    let mut last_record_touch = Instant::now();
     loop {
         let wake_result = wake.wait(Duration::from_millis(interval_ms));
         let (admission, allow_writes) = watch_admission(context, &mut admission_warnings)?;
@@ -1008,11 +1013,12 @@ fn run_watch_loop(
             }
             Some(Wake::TimedOut) => {
                 if allow_writes {
-                    touch_admitted_heartbeats(
+                    beat_heartbeats(
                         context,
                         targets,
                         interval_ms,
                         &mut warned_touch_failures,
+                        &mut last_record_touch,
                     );
                 }
                 last_beat = Instant::now();
@@ -1020,11 +1026,12 @@ fn run_watch_loop(
             }
             Some(Wake::Events(dirs)) => {
                 if allow_writes && last_beat.elapsed() >= Duration::from_millis(interval_ms) {
-                    touch_admitted_heartbeats(
+                    beat_heartbeats(
                         context,
                         targets,
                         interval_ms,
                         &mut warned_touch_failures,
+                        &mut last_record_touch,
                     );
                     last_beat = Instant::now();
                 }
@@ -1131,6 +1138,43 @@ fn watch_admission(
         }
     };
     Ok((admission, allow_writes))
+}
+
+/// How often a running watch rewrites its participant record. The record's
+/// `last_seen` feeds a lease measured in hours, so a minute of staleness is
+/// invisible; the presence heartbeat file, not the record, is what `post who`
+/// reads at --interval-ms resolution.
+const RECORD_TOUCH_PERIOD: Duration = Duration::from_secs(60);
+
+/// One heartbeat tick: the presence file every tick, the participant record
+/// (a durable atomic replace) only once per RECORD_TOUCH_PERIOD.
+fn beat_heartbeats(
+    context: &Context,
+    targets: &[WatchTarget],
+    interval_ms: u64,
+    warned_failures: &mut HashSet<String>,
+    last_record_touch: &mut Instant,
+) {
+    if last_record_touch.elapsed() >= RECORD_TOUCH_PERIOD {
+        touch_admitted_heartbeats(context, targets, interval_ms, warned_failures);
+        *last_record_touch = Instant::now();
+    } else {
+        touch_presence_heartbeats(targets, interval_ms);
+    }
+}
+
+/// The presence file only, for every admitted participant: no record write,
+/// no fsync.
+fn touch_presence_heartbeats(targets: &[WatchTarget], interval_ms: u64) {
+    let mut participants = HashSet::new();
+    for participant in targets
+        .iter()
+        .filter_map(|target| target.participant.as_ref())
+    {
+        if participants.insert(participant.id.clone()) {
+            crate::presence::touch_participant_heartbeat(participant, interval_ms);
+        }
+    }
 }
 
 fn touch_admitted_heartbeats(
@@ -2723,6 +2767,69 @@ mod tests {
     }
 
     #[test]
+    fn beat_writes_presence_every_tick_but_the_record_only_once_a_period() {
+        use std::os::unix::fs::MetadataExt;
+        let root = crate::test_support::test_root("watch-beat-record-cadence");
+        let context = Context {
+            root: root.clone(),
+            home: root.clone(),
+        };
+        let participant = crate::participant::bind_test_actor(&context, "alpha");
+        let record = participant.dir.join("participant.json");
+        let heartbeat = crate::presence::participant_heartbeat_path(&participant);
+        let targets = vec![WatchTarget {
+            room: "alpha".to_owned(),
+            inbox: root.join("alpha/inbox"),
+            participant: Some(participant),
+            address: None,
+            dirs: BTreeSet::new(),
+            channel_seen: HashMap::new(),
+            seen: HashSet::new(),
+            scan_failing: false,
+            route_pending: false,
+        }];
+        let mut warned = HashSet::new();
+        let inode = |path: &Path| fs::metadata(path).expect("metadata").ino();
+        let record_before = inode(&record);
+
+        // Inside the period: the presence file is written, the record is not
+        // replaced (an atomic replace renames a fresh inode into place).
+        let mut last_record_touch = Instant::now();
+        beat_heartbeats(
+            &context,
+            &targets,
+            1000,
+            &mut warned,
+            &mut last_record_touch,
+        );
+        assert!(
+            heartbeat.is_file(),
+            "presence heartbeat written on every tick"
+        );
+        assert_eq!(
+            inode(&record),
+            record_before,
+            "record untouched inside the period"
+        );
+
+        // Period elapsed: the record is replaced and the clock resets.
+        let mut stale = Instant::now()
+            .checked_sub(RECORD_TOUCH_PERIOD)
+            .expect("instant arithmetic");
+        beat_heartbeats(&context, &targets, 1000, &mut warned, &mut stale);
+        assert_ne!(
+            inode(&record),
+            record_before,
+            "record rewritten once the period is due"
+        );
+        assert!(
+            stale.elapsed() < RECORD_TOUCH_PERIOD,
+            "record clock reset after the write"
+        );
+        crate::test_support::trash_test_root(&root);
+    }
+
+    #[test]
     fn production_touch_wrapper_preserves_warning_episode_state() {
         let root = crate::test_support::test_root("watch-touch-wrapper-warning-episodes");
         let context = Context {
@@ -3312,6 +3419,7 @@ mod tests {
                 sent: "2026-08-22 00:00:00 +0000".to_owned(),
                 display_name: None,
                 pfp: None,
+                system_event: None,
                 sender_address: None,
                 sender_provenance: None,
                 reason,

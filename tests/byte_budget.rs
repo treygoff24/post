@@ -1353,9 +1353,8 @@ fn slice_overflow_eof_and_mode_conflicts_are_explicit() {
     assert_eq!(overflow.status.code(), Some(2));
     assert!(common::stderr(&overflow).contains("overflows"));
 
-    let invalid_cases: Vec<Vec<&str>> = vec![
-        vec!["chat", "args", "--message", id],
-        vec![
+    let peek = sandbox.run_in(
+        &[
             "chat",
             "args",
             "--message",
@@ -1363,7 +1362,18 @@ fn slice_overflow_eof_and_mode_conflicts_are_explicit() {
             "--max-bytes",
             "1400",
             "--peek",
+            "--json",
         ],
+        None,
+        &beta,
+    );
+    assert_success(&peek);
+    let peek: Value = from_stdout(&peek);
+    assert_eq!(peek["body_slice"], "é");
+    assert_eq!(peek["body_complete"], true);
+
+    let invalid_cases: Vec<Vec<&str>> = vec![
+        vec!["chat", "args", "--message", id],
         vec!["chat", "args", "--ack", id, "--max-bytes", "1400"],
         vec!["read", "id", "--offset", "0"],
         vec!["read", "id", "--ack", "--peek"],

@@ -983,7 +983,9 @@ fn a_join_never_splits_a_channel_that_differs_only_by_letter_case() {
     assert_eq!(dirs, vec!["Ops".to_owned()]);
 
     // Messages and membership agree on that one spelling.
-    let listing = ok_json(&sandbox, &["channels"], &alpha);
+    // This fixture intentionally has old creation metadata; include archives
+    // so name canonicalization is independent of the 24-hour lifecycle.
+    let listing = ok_json(&sandbox, &["channels", "--all"], &alpha);
     assert_eq!(
         listing["channels"].as_array().expect("channels").len(),
         1,
@@ -1412,4 +1414,309 @@ fn a_blocked_route_refuses_a_join_in_either_direction_and_writes_nothing() {
             "{from} -> {to}: a refused join writes no join event"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Read-only history for a non-member: `--history/--since/--message --peek`.
+// ---------------------------------------------------------------------------
+
+/// Fail naming the changed paths, not dumping both trees.
+fn assert_store_unchanged(
+    sandbox: &Sandbox,
+    before: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    why: &str,
+) {
+    let after = common::tree_snapshot(&sandbox.mail_root);
+    let changed: Vec<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| before.get(*path) != after.get(*path))
+        .collect();
+    assert!(changed.is_empty(), "{why}: changed {changed:?}");
+}
+
+/// `alpha` is joined to `ops`; `beta` (a bound participant) is not.
+fn ops_with_outsider() -> (Sandbox, PathBuf, PathBuf) {
+    let sandbox = Sandbox::new();
+    let (alpha, beta) = register_alpha_beta(&sandbox);
+    join_channel(&sandbox, "ops", &alpha);
+    write_channel_message(&sandbox, "ops", A, "alpha", "", "first");
+    write_channel_message(&sandbox, "ops", B, "alpha", "", &"x".repeat(3000));
+    // Let beta's identity settle so the before/after snapshots compare reads.
+    sandbox.test_participant("beta");
+    (sandbox, alpha, beta)
+}
+
+#[test]
+fn a_non_member_peeks_history_labelled_and_changes_nothing() {
+    let (sandbox, alpha, beta) = ops_with_outsider();
+    let before = common::tree_snapshot(&sandbox.mail_root);
+
+    for args in [
+        vec!["chat", "ops", "--history", "5", "--peek", "--json"],
+        vec!["chat", "ops", "--since", A, "--peek", "--json"],
+        vec![
+            "chat",
+            "ops",
+            "--history",
+            "5",
+            "--peek",
+            "--max-bytes",
+            "1200",
+            "--json",
+        ],
+    ] {
+        let value = ok_json(&sandbox, &args, &beta);
+        assert_eq!(value["read_without_membership"], true, "{args:?}: {value}");
+        assert_eq!(value["peek"], true, "{args:?}");
+        assert!(
+            !message_ids(&value).is_empty() || value["omitted"].is_object(),
+            "{args:?} returned nothing: {value}"
+        );
+    }
+    let all = ok_json(
+        &sandbox,
+        &["chat", "ops", "--history", "5", "--peek", "--json"],
+        &beta,
+    );
+    // alpha's own join event is history too.
+    let ids = message_ids(&all);
+    assert_eq!(ids.len(), 3, "{all}");
+    assert!(ids.contains(&A.to_owned()) && ids.contains(&B.to_owned()));
+
+    let text = run(
+        &sandbox,
+        &["chat", "ops", "--history", "5", "--peek"],
+        &beta,
+    );
+    assert_success(&text);
+    assert!(
+        stdout(&text).contains("read without membership"),
+        "text label: {}",
+        stdout(&text)
+    );
+
+    // A member's peek carries no label.
+    let member = ok_json(
+        &sandbox,
+        &["chat", "ops", "--history", "5", "--peek", "--json"],
+        &alpha,
+    );
+    assert!(member.get("read_without_membership").is_none(), "{member}");
+
+    assert_store_unchanged(
+        &sandbox,
+        &before,
+        "a non-member peek writes nothing: no join, membership, cursor, or lease change",
+    );
+}
+
+#[test]
+fn a_non_member_slice_peek_and_its_continuations_stay_read_only() {
+    let (sandbox, _alpha, beta) = ops_with_outsider();
+    let before = common::tree_snapshot(&sandbox.mail_root);
+
+    // Omission continuation of a bounded history peek keeps --peek.
+    let bounded = ok_json(
+        &sandbox,
+        &[
+            "chat",
+            "ops",
+            "--history",
+            "5",
+            "--peek",
+            "--max-bytes",
+            "1200",
+            "--json",
+        ],
+        &beta,
+    );
+    let continuation = bounded["omitted"]["continuation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("omission continuation: {bounded}"));
+    assert!(continuation.ends_with("--peek"), "{continuation}");
+    let mut command = continuation.to_owned();
+    let mut rebuilt = String::new();
+    for _ in 0..64 {
+        let output = sandbox.run_fix(&command, &beta);
+        assert_success(&output);
+        let slice: Value = from_stdout(&output);
+        assert_eq!(slice["read_without_membership"], true, "{slice}");
+        rebuilt.push_str(slice["body_slice"].as_str().expect("body slice"));
+        match slice["continuation"].as_str() {
+            Some(next) => {
+                assert!(next.ends_with("--peek"), "{next}");
+                command = next.to_owned();
+            }
+            None => break,
+        }
+    }
+    assert_eq!(rebuilt, "x".repeat(3000));
+
+    // Without --peek the same slice is still refused.
+    let refused = run(
+        &sandbox,
+        &[
+            "chat",
+            "ops",
+            "--message",
+            B,
+            "--max-bytes",
+            "1200",
+            "--json",
+        ],
+        &beta,
+    );
+    assert_eq!(refused.status.code(), Some(65), "{}", stderr(&refused));
+    assert_store_unchanged(&sandbox, &before, "slice peeks and refusals write nothing");
+}
+
+#[test]
+fn a_non_member_refusal_offers_a_runnable_read_only_recovery() {
+    let (sandbox, _alpha, beta) = ops_with_outsider();
+    let before = common::tree_snapshot(&sandbox.mail_root);
+
+    let refused = run(
+        &sandbox,
+        &[
+            "chat",
+            "ops",
+            "--history",
+            "3",
+            "--grep",
+            "fi rst",
+            "--json",
+        ],
+        &beta,
+    );
+    assert_eq!(refused.status.code(), Some(65), "{}", stderr(&refused));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "not_a_member");
+    let fix = error
+        .error
+        .details
+        .exact_fix
+        .as_deref()
+        .expect("exact_fix on a refused --history read");
+    assert_eq!(
+        fix,
+        "post chat 'ops' --history 3 --peek --grep='fi rst' --json"
+    );
+    let ran = sandbox.run_fix(fix, &beta);
+    assert_success(&ran);
+    let value: Value = from_stdout(&ran);
+    assert_eq!(value["read_without_membership"], true);
+    assert_eq!(
+        message_ids(&value),
+        Vec::<String>::new(),
+        "grep 'fi rst' matches nothing"
+    );
+
+    // A plain (non-history) peek stays refused.
+    let plain = run(&sandbox, &["chat", "ops", "--peek", "--json"], &beta);
+    assert_eq!(plain.status.code(), Some(65), "{}", stderr(&plain));
+    assert_store_unchanged(&sandbox, &before, "refusals write nothing");
+}
+
+#[test]
+fn a_non_member_cannot_send_and_the_refusal_names_the_join() {
+    let (sandbox, _alpha, beta) = ops_with_outsider();
+    let refused = run(
+        &sandbox,
+        &["chat", "ops", "--send", "--body", "hi", "--json"],
+        &beta,
+    );
+    assert_eq!(refused.status.code(), Some(65), "{}", stderr(&refused));
+    let error: ErrorEnvelope = from_stderr(&refused);
+    assert_eq!(error.error.code, "not_a_member");
+    assert!(
+        error.error.suggested_fix.contains("--join"),
+        "{}",
+        error.error.suggested_fix
+    );
+    // The refused send wrote no message: history is still alpha's join event
+    // plus the two seeded messages.
+    let history = ok_json(
+        &sandbox,
+        &["chat", "ops", "--history", "9", "--peek", "--json"],
+        &beta,
+    );
+    assert_eq!(message_ids(&history).len(), 3, "{history}");
+}
+
+#[test]
+fn a_blocked_route_also_refuses_a_non_member_history_peek() {
+    // The same pair that a block bars from sharing a channel cannot read its
+    // history without joining either, in either direction of the rule.
+    for (from, to) in [("alpha", "beta"), ("beta", "alpha")] {
+        let sandbox = Sandbox::new();
+        let (alpha, _beta) = register_alpha_beta(&sandbox);
+        write_bad_channel(
+            &sandbox,
+            "shared",
+            Some(r#"{"beta":"2026-09-06 12:00:00 +0000"}"#),
+            true,
+            r#"{"name":"shared","created":"2026-09-06 12:00:00 +0000","created_by":"beta"}"#,
+        );
+        write_channel_message(&sandbox, "shared", A, "beta", "", "from the armed room");
+        let args = ["chat", "shared", "--history", "5", "--peek", "--json"];
+
+        // Without a rule the peek works: this is the control.
+        let open = ok_json(&sandbox, &args, &alpha);
+        assert_eq!(open["read_without_membership"], true, "{open}");
+        assert_eq!(message_ids(&open), vec![A.to_owned()]);
+
+        fs::write(
+            sandbox.mail_root.join("rules.json"),
+            format!(
+                r#"{{"blocked":[{{"from":"{from}","to":"{to}","reason":"armed instrument"}}]}}"#
+            ),
+        )
+        .expect("rules");
+        let refused = run(&sandbox, &args, &alpha);
+        assert_eq!(
+            refused.status.code(),
+            Some(77),
+            "{from} -> {to}: {}",
+            stderr(&refused)
+        );
+        let error: ErrorEnvelope = from_stderr(&refused);
+        assert_eq!(error.error.code, "blocked_route", "{from} -> {to}");
+        assert!(
+            stdout(&refused).is_empty(),
+            "{from} -> {to}: no history leaks"
+        );
+    }
+}
+
+#[test]
+fn channels_skip_consumed_bodies_and_no_unread_skips_unread_bodies_too() {
+    let (sandbox, alpha, beta) = ops_room();
+    write_raw_message(&sandbox, "ops", A, json!({}), "read this once");
+    let read = ok_json(&sandbox, &["chat", "ops", "--json"], &beta);
+    assert!(
+        message_ids(&read).contains(&A.to_owned()),
+        "precondition: A consumed"
+    );
+    write_corrupt_message(&sandbox, "ops", A);
+    write_raw_message(&sandbox, "ops", B, json!({}), "still unread");
+    let listing = ok_json(&sandbox, &["channels", "--json"], &beta);
+    assert_eq!(channel_row(&listing, "ops")["unread"], 1);
+    assert!(
+        listing.get("skipped").is_none(),
+        "consumed corrupt body wasn't opened: {listing}"
+    );
+    write_corrupt_message(&sandbox, "ops", B);
+    let listing = ok_json(&sandbox, &["channels", "--json", "--no-unread"], &beta);
+    assert!(channel_row(&listing, "ops")["unread"].is_null());
+    assert!(
+        listing.get("skipped").is_none(),
+        "no unread body opened: {listing}"
+    );
+    assert_eq!(channel_row(&listing, "ops")["messages"], 4);
+    // Normal listing still reports corruption in an eligible unread file.
+    let listing = ok_json(&sandbox, &["channels", "--json"], &beta);
+    assert_eq!(listing["skipped"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["skipped"][0]["id"], B);
+    let _ = alpha;
 }

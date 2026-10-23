@@ -16,7 +16,8 @@ struct ListOutput {
     lineages: Vec<LineageSummary>,
     count: usize,
     warnings: Vec<String>,
-    /// Only when `count` is 0: an empty list is correct, not a fault.
+    /// Only when `count` is 0 and nothing was skipped: an empty list is
+    /// correct, not a fault. A skipped (damaged) lineage is not "none founded".
     #[serde(skip_serializing_if = "Option::is_none")]
     hint: Option<&'static str>,
 }
@@ -264,13 +265,14 @@ const EMPTY_LIST_HINT: &str = "no lineages founded in this store yet; `post iden
 fn list(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     let list = lineage_store::list(context)?;
     let count = list.lineages.len();
+    let hint = (count == 0 && list.warnings.is_empty()).then_some(EMPTY_LIST_HINT);
     CommandResult::json(
         &ListOutput {
             ok: true,
             lineages: list.lineages,
             count,
             warnings: list.warnings,
-            hint: (count == 0).then_some(EMPTY_LIST_HINT),
+            hint,
         },
         pretty,
     )

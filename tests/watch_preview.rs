@@ -151,6 +151,7 @@ fn watch_channel_message_includes_preview() {
         sent: "2026-08-31 22:42:43 +0000".to_owned(),
         display_name: None,
         pfp: None,
+        system_event: None,
         sender_address: None,
         sender_provenance: None,
         reason: WatchReason::Channel,

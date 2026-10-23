@@ -188,6 +188,7 @@ where
         (actor.from.clone(), provenance)
     };
     let sender_address = identity.address;
+    let requested_to = args.to.clone();
     match crate::bridge_topology::resolve_host_qualified(context, &args.to)? {
         Some(crate::bridge_topology::HostQualified::Remote { id, host }) => {
             return send_remote(
@@ -283,12 +284,38 @@ where
     // Which participant a direct send named and how (`id`, `name`, `repo`),
     // taken before `--allow-self` can move the target.
     let resolved = output::SendResolved::of(context, &args.to, &target);
+    // Check participant identity, not the reply address: several participants
+    // can share a workspace. Remote host-qualified targets returned above and
+    // are not this local participant even when their id happens to match.
+    if !args.allow_self
+        && target.kind == crate::participant::AddressKind::Participant
+        && target.name == actor.participant.id
+    {
+        let via = resolved
+            .as_ref()
+            .expect("participant target has resolution");
+        return Err(AppError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "--to '{}' resolved to participant '{}' ({} match), which is the bound sending participant '{}' (reply address '{}'); refusing self-mail",
+                crate::peers::clean(&requested_to),
+                target.name,
+                via.via,
+                actor.participant.id,
+                actor.from
+            ),
+            "Run `post who --live` to find another recipient, or pass --allow-self if you intend to mail yourself.",
+        )
+        .input(requested_to)
+        .reason("resolved recipient is the sending participant"));
+    }
     // `--allow-self`: a room send never reaches its own sender (workspace and
     // lineage fan-out exclude them), so a session that pings the room it is
     // bound to hears nothing. Delegate's completion notices are exactly that
     // ping. With the flag, a target that names the sender's own room or
     // lineage is delivered to the sender's own participant inbox instead. Any
-    // other target is untouched: the flag widens nothing.
+    // other target is untouched by retargeting; a direct self-target is
+    // permitted by the flag at the identity check above.
     let mut notes = Vec::new();
     if let Some(found) = resolved.as_ref().filter(|found| found.via != "id") {
         notes.push(format!(

@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import time
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -32,7 +33,10 @@ from .snapshot import (
 CHANNEL_ID_RE = re.compile(r"^\d{8}-\d{6}-\d{6}-[0-9a-f]{6}$")
 CHANNEL_CONFIG_KEYS = frozenset({"mode", "allow", "deny"})
 CHANNEL_RECORD_REQUIRED = frozenset({"name", "created", "created_by"})
-CHANNEL_RECORD_OPTIONAL = frozenset({"description"})
+# ``unlisted`` (post 0.10, a bool) keeps a channel out of the default
+# ``post channels`` listing. A bridge older than this key rejects a record that
+# carries it, so such a peer holds that channel until it upgrades.
+CHANNEL_RECORD_OPTIONAL = frozenset({"description", "unlisted"})
 CHANNEL_ENVELOPE_REQUIRED = frozenset({"id", "from", "channel", "subject", "sent"})
 CHANNEL_ENVELOPE_OPTIONAL = frozenset(
     {
@@ -59,6 +63,17 @@ CHANNEL_SEEN_MAX = 1000
 CHANNEL_PAGE_MAX = 4096
 CHANNEL_DEADLINE_STRIDE = 500
 CHANNEL_TIP_RE = re.compile(r"^[0-9a-f]{40,64}$")
+# bridge/chan-reconciled/<host>: the peer channel records this host already
+# reconciled and what they were reconciled against (post-lx89). Bump the
+# version when reconciliation reads something new, so old entries miss.
+RECONCILED_VERSION = 1
+RECONCILED_MAX = 16 * 1024 * 1024
+# An entry is trusted at most this long (plus up to an hour of per-channel
+# jitter, so a host's entries do not all expire on the same tick).
+RECONCILED_MAX_AGE_SECONDS = 6 * 3600
+RECONCILED_JITTER_SECONDS = 3600
+# Entries written per flush during a walk, so a deadline keeps its progress.
+RECONCILED_FLUSH_EVERY = 200
 
 
 @dataclass(frozen=True)
@@ -190,6 +205,8 @@ def _parse_record(data: bytes, expected_name: str, label: str) -> dict:
             raise common.ConfigError(
                 "channel record description contains a control character"
             )
+    if "unlisted" in value and not isinstance(value["unlisted"], bool):
+        raise common.ConfigError("channel record unlisted must be a boolean")
     return value
 
 
@@ -946,6 +963,16 @@ def _adopt_description_locked(
     logger,
     fence_present,
 ) -> None:
+    """Adopt the origin host's mutable record fields: description, unlisted.
+
+    Only the origin's record is authoritative; a non-origin peer's record is
+    never adopted. The first import (``_ensure_channel_locked``) copies the
+    whole peer record, so both fields arrive with the channel. ``unlisted`` is
+    written only when true, as post writes it. An unlist or relist set on a
+    non-origin host is that host's own: it is never adopted elsewhere, and it
+    lasts on that host until the origin's record next changes (a new record
+    blob), when the origin's value is adopted over it.
+    """
     local_record = _load_local_record(settings, name)
     if local_record is None or _origin(snapshot, local_record["created_by"]) != host:
         return
@@ -961,12 +988,130 @@ def _adopt_description_locked(
     }
     if "description" in peer_record:
         adopted["description"] = peer_record["description"]
+    if peer_record.get("unlisted") is True:
+        adopted["unlisted"] = True
     record_path = common.destination(settings.root, "channels", name, "channel.json")
     payload = _json_bytes(adopted)
     if common.open_regular(record_path, CHANNEL_RECORD_MAX) != payload:
         _replace_mail_file(settings, record_path, payload)
     common.atomic_replace(marker, desired_marker, settings.root)
     logger.emit("chan_description_adopted", host=host, channel=name, oid=record_oid)
+
+
+def _reconciled_path(settings, host: str) -> Path:
+    return common.destination(settings.root, "bridge", "chan-reconciled", host)
+
+
+def _load_reconciled(settings, host: str) -> dict:
+    """The host's reconciled-record entries; anything unreadable is empty.
+
+    The file is a cache: every entry is re-checked against the peer tree,
+    the snapshot and the local files before it is trusted, so a lost or
+    hostile file only costs one full reconcile of that host's records.
+    """
+    try:
+        path = _reconciled_path(settings, host)
+        value = common.load_json_bytes(
+            common.open_regular(path, RECONCILED_MAX), str(path)
+        )
+    except (FileNotFoundError, common.ConfigError, OSError, UnicodeDecodeError):
+        return {}
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != RECONCILED_VERSION
+        or not isinstance(value.get("channels"), dict)
+    ):
+        return {}
+    return dict(value["channels"])
+
+
+def _write_reconciled(settings, host: str, entries: dict) -> None:
+    try:
+        common.atomic_replace(
+            _reconciled_path(settings, host),
+            _json_bytes({"version": RECONCILED_VERSION, "channels": entries}),
+            settings.root,
+        )
+    except (common.ConfigError, OSError):
+        # A cache that cannot be written only means the next tick
+        # reconciles these records in full again.
+        pass
+
+
+def _file_signature(path: str):
+    """``[mode, inode, size, mtime_ns]`` of ``path`` itself, or None if absent."""
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "unreadable"
+    return [metadata.st_mode, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns]
+
+
+def _local_signature(settings, name: str) -> list:
+    """What reconciling ``name`` reads locally, as cheap ``lstat`` facts.
+
+    ``name`` was validated by the tree walk, and nothing here follows a link
+    or writes: a changed, replaced, deleted or symlinked file changes the
+    signature and sends the channel back through full reconciliation.
+    """
+    root = str(settings.root)
+    channel_root = os.path.join(root, "channels", name)
+    try:
+        messages_is_dir = stat.S_ISDIR(
+            os.lstat(os.path.join(channel_root, "messages")).st_mode
+        )
+    except OSError:
+        messages_is_dir = False
+    return [
+        _file_signature(os.path.join(channel_root, "channel.json")),
+        _file_signature(os.path.join(channel_root, "members.json")),
+        _file_signature(os.path.join(root, "bridge", "chan-origin", name)),
+        _file_signature(os.path.join(root, "bridge", "chan-desc", name)),
+        messages_is_dir,
+    ]
+
+
+def _reconciled_entry(settings, snapshot, name: str, local_record: dict, record_oid: str):
+    return {
+        "oid": record_oid,
+        "created_by": local_record["created_by"],
+        "origin": _origin(snapshot, local_record["created_by"]),
+        "files": _local_signature(settings, name),
+        "at": int(time.time()),
+    }
+
+
+def _reconciled_unchanged(settings, snapshot, name: str, entry: dict, cached) -> bool:
+    """True when reconciling this record now would read exactly what it read last.
+
+    Reconciling a record with no new messages reads the peer record blob,
+    the snapshot's route for its creator, and the local channel files. The
+    blob is named by its OID, the route is recomputed here from the current
+    snapshot, and the local files are compared by signature, so a hit is a
+    tick on which full reconciliation would change nothing and log nothing.
+    """
+    if not isinstance(cached, dict):
+        return False
+    if (
+        entry.get("mode") != "100644"
+        or entry.get("type") != "blob"
+        or cached.get("oid") != entry.get("object")
+    ):
+        return False
+    stamp = cached.get("at")
+    if not isinstance(stamp, int) or isinstance(stamp, bool):
+        return False
+    limit = RECONCILED_MAX_AGE_SECONDS + (
+        zlib.crc32(name.encode("utf-8")) % RECONCILED_JITTER_SECONDS
+    )
+    if not 0 <= time.time() - stamp < limit:
+        return False
+    created_by = cached.get("created_by")
+    if not isinstance(created_by, str) or _origin(snapshot, created_by) != cached.get("origin"):
+        return False
+    return cached.get("files") == _local_signature(settings, name)
 
 
 def _reservation_key(message_id: str, suffix: str = ".msg") -> str:
@@ -1541,6 +1686,8 @@ def import_channels(
             continue
         records, messages, page = listing
         skipped = False
+        reconciled = _load_reconciled(settings, host)
+        reconciled_dirty = 0
         for name in sorted(set(records) | set(messages)):
             record_entry = records.get(name)
             if record_entry is None:
@@ -1548,6 +1695,15 @@ def import_channels(
                 hold_channel(host, name, messages.get(name, ()))
                 skipped = True
                 continue
+            if not messages.get(name) and _reconciled_unchanged(
+                settings, snapshot, name, record_entry, reconciled.get(name)
+            ):
+                # post-lx89: neither this record, its creator's route nor
+                # its local files changed since its last full reconcile, so
+                # reconciling it again would change and log nothing.
+                continue
+            if reconciled.pop(name, None) is not None:
+                reconciled_dirty += 1
             peer_record = _read_peer_record(
                 settings,
                 git,
@@ -1577,7 +1733,7 @@ def import_channels(
             if not messages.get(name):
                 try:
                     with _channel_lock(settings, fence_present):
-                        _ensure_channel_locked(
+                        local_record = _ensure_channel_locked(
                             settings,
                             name,
                             peer_record,
@@ -1595,6 +1751,13 @@ def import_channels(
                             logger,
                             fence_present,
                         )
+                        # Signed under the lock, after every write above, so
+                        # a local join racing this tick changes the signature.
+                        reconciled[name] = _reconciled_entry(
+                            settings, snapshot, name, local_record,
+                            record_entry["object"],
+                        )
+                        reconciled_dirty += 1
                 except (common.ConfigError, OSError) as error:
                     logger.emit(
                         "chan_local_unreadable",
@@ -1603,6 +1766,12 @@ def import_channels(
                         reason=str(error),
                     )
                     skipped = True
+                if reconciled_dirty >= RECONCILED_FLUSH_EVERY:
+                    # A deadline later in this walk must not discard the
+                    # entries that let the next tick skip these records.
+                    _fence(fence_present)
+                    _write_reconciled(settings, host, reconciled)
+                    reconciled_dirty = 0
                 continue
             for message_id, entry in sorted(messages[name], key=lambda row: (row[0], row[1]["path"])):
                 suffix = PurePosixPath(entry["path"]).suffix
@@ -1995,6 +2164,13 @@ def import_channels(
                 # Imported (or already present with these bytes): any stamp
                 # an earlier page or tick left for it is done.
                 holds.release(host, name, message_id)
+        # Records gone from the peer tree drop out of the cache.
+        for name in [name for name in reconciled if name not in records]:
+            del reconciled[name]
+            reconciled_dirty += 1
+        if reconciled_dirty:
+            _fence(fence_present)
+            _write_reconciled(settings, host, reconciled)
         # r5.6 (P1): a skip on any page of a paged walk holds the whole walk.
         # The cursor steps past held entries, so the bit rides with it and
         # the last page completes the host only when no page skipped; the

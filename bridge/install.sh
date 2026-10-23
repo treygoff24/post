@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-POST_VERSION_RANGE='post 0.10.0 up to, but not including, post 0.11.0'
+POST_VERSION_RANGE='post 0.10.0 up to, but not including, post 0.12.0'
 
 # `post --version` prints a version from 0.10.0 up to, but not including,
-# 0.11.0, optionally followed by build metadata: `post 0.10.4 (build abc1234,
+# 0.12.0, optionally followed by build metadata: `post 0.10.4 (build abc1234,
 # ...)`. A patch number is a plain integer (no leading zeros, no pre-release
 # tag). Same rule as sweep.py's post_version_accepted, which --check-config
 # applies again below.
 post_version_accepted() {
-  local text=$1 version_re='^post 0\.10\.(0|[1-9][0-9]*)( \(build [^()]*\))?$'
+  local text=$1 version_re='^post 0\.(10|11)\.(0|[1-9][0-9]*)( \(build [^()]*\))?$'
   case $text in
     *$'\n'*) return 1 ;;
   esac
@@ -30,7 +30,7 @@ Options:
                           $POST_MAIL_ROOT/bridge/config.json (required;
                           refuses to overwrite a differing one)
   --post-bin <path>       Post executable (default: post resolved from PATH)
-  --interval <seconds>    systemd interval (default: 15)
+  --interval <timespan>   Linux: whole seconds/minutes/hours (default 15); macOS: integer seconds (default 60); maximum 24h
   --uninstall             Remove the user units, launcher, and installed package
   -h, --help              Show this help
 EOF
@@ -123,14 +123,22 @@ systemctl_user_available() {
 
 uninstall() {
   local has_systemd=false
-  if systemctl_user_available; then
+  if [ "$PLATFORM" = Darwin ]; then
+    if launchctl print "$LAUNCH_TARGET" >/dev/null 2>&1; then
+      launchctl bootout "$LAUNCH_TARGET" || die 'could not stop launch agent; package left intact'
+    fi
+    rm -f "$PLIST_FILE"
+  elif systemctl_user_available; then
     has_systemd=true
     systemctl --user disable --now post-bridge.timer >/dev/null 2>&1 || true
   else
     say 'systemctl --user is unavailable; skipping timer stop/disable'
   fi
 
-  rm -f "$SERVICE_FILE" "$TIMER_FILE" "$LAUNCHER"
+  if [ "$PLATFORM" = Linux ]; then
+    rm -f "$SERVICE_FILE" "$TIMER_FILE"
+  fi
+  rm -f "$LAUNCHER"
   if [ -n "$DATA_DIR" ] && [ "$DATA_DIR" != / ]; then
     rm -rf "$DATA_DIR"
   fi
@@ -146,7 +154,14 @@ CONFIG_SRC=''
 CLONE_DIR="$HOME/post-relay"
 HOST=''
 SSH_KEY=''
-INTERVAL=15
+PLATFORM=$(uname -s)
+case $PLATFORM in
+  Darwin) INTERVAL=60 ;;
+  Linux) INTERVAL=15 ;;
+  *) die 'supported platforms are macOS and Linux' ;;
+esac
+PYTHON_BIN=$(command -v python3 || true)
+[ -n "$PYTHON_BIN" ] || die 'python3 is required'
 UNINSTALL=false
 MAIL_ROOT="${POST_MAIL_ROOT:-$HOME/.claude-mail}"
 POST_BIN=${POST_BIN:-}
@@ -202,9 +217,24 @@ done
 
 
 
-case $INTERVAL in
-  '') die '--interval must not be empty' ;;
-esac
+if [ "$PLATFORM" = Darwin ]; then
+  case $INTERVAL in
+    ''|*[!0-9]*|0*) die '--interval must be a positive integer in seconds (no leading zeros)' ;;
+  esac
+fi
+# Use the health reader's parser before cloning, writing files or stopping a
+# service. An interval the scheduler accepts but health cannot report makes
+# the running bridge appear unavailable to Post.
+SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if ! "$PYTHON_BIN" -I - "$SOURCE_DIR" "$INTERVAL" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from bridgelib.pmail import interval_seconds
+sys.exit(0 if interval_seconds(sys.argv[2]) is not None else 1)
+PY
+then
+  die '--interval must be a supported interval: positive whole seconds, minutes or hours totalling at most 86400 seconds (macOS: positive integer seconds)'
+fi
 
 case $CLONE_DIR in
   '') die '--clone-dir must not be empty' ;;
@@ -225,6 +255,32 @@ SERVICE_FILE="$CONFIG_DIR/post-bridge.service"
 TIMER_FILE="$CONFIG_DIR/post-bridge.timer"
 DATA_DIR="$HOME/.local/lib/post-bridge"
 LAUNCHER="$HOME/.local/bin/post-bridge-sweep"
+
+LABEL=org.post.bridge
+PLIST_FILE="$HOME/Library/LaunchAgents/$LABEL.plist"
+LAUNCH_DOMAIN="gui/$(id -u)"
+LAUNCH_TARGET="$LAUNCH_DOMAIN/$LABEL"
+if [ "$PLATFORM" = Darwin ]; then
+  CONFIG_DIR="$HOME/Library/LaunchAgents"
+  # A legacy job can use the same launcher/data even with a different label.
+  # Refuse before modifying either; never stop someone else's launch agent.
+  for candidate in "$CONFIG_DIR"/*.plist; do
+    [ -f "$candidate" ] || continue
+    [ "$candidate" = "$PLIST_FILE" ] && continue
+    if "$PYTHON_BIN" - "$candidate" <<'PY'
+import plistlib, sys
+try:
+    with open(sys.argv[1], 'rb') as f:
+        value = plistlib.load(f)
+except Exception:
+    sys.exit(0)  # Unknown plist: do not claim ownership.
+sys.exit(0 if 'post-bridge' in repr(value) else 1)
+PY
+    then
+      die "another or unreadable launch agent may own the bridge: $candidate; migrate it explicitly before installing or uninstalling"
+    fi
+  done
+fi
 
 if [ "$UNINSTALL" = true ]; then
   uninstall
@@ -265,7 +321,8 @@ esac
 # Every git network call here and in the sweeper goes through the relay key
 # only; the clone also carries it as core.sshCommand so an operator's manual
 # git inside the clone cannot silently use a different identity.
-SSH_COMMAND="ssh -o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes -i $SSH_KEY"
+SSH_KEY_QUOTED=$("$PYTHON_BIN" -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$SSH_KEY")
+SSH_COMMAND="ssh -o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes -i $SSH_KEY_QUOTED"
 export GIT_SSH_COMMAND="$SSH_COMMAND"
 
 if [ -e "$CLONE_DIR" ]; then
@@ -308,7 +365,6 @@ fi
 
 # The sweeper and unit templates ship next to this script (the source repo),
 # never inside the relay clone, which holds only mail in transit.
-SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SOURCE_SWEEP="$SOURCE_DIR/sweep.py"
 SOURCE_BRIDGELIB="$SOURCE_DIR/bridgelib"
 SOURCE_SERVICE="$SOURCE_DIR/services/post-bridge.service"
@@ -353,9 +409,16 @@ chmod 0644 "$package_tmp/sweep.py" "$package_tmp/bridgelib"/*.py "$package_tmp/B
 # before --init-held-sentinel below writes the local-held floors (review 4,
 # finding 2). enable --now restarts it once the checks pass; a failure before
 # that leaves it stopped but enabled (never disabled: review 5, finding 1),
-# and the EXIT trap says so. A tick already running finishes under the tick
-# lock, which --init-held-sentinel waits for. launchd is not managed here.
-if systemctl_user_available && systemctl --user is-active --quiet post-bridge.timer; then
+# and the EXIT trap says so. On Linux, a tick already running finishes under
+# the tick lock, which --init-held-sentinel waits for. On macOS, bootout sends
+# SIGTERM to a running tick; the next tick uses the normal crash-recovery path.
+# Boot out our launch agent before the swap; bootstrap only after validation.
+if [ "$PLATFORM" = Darwin ]; then
+  if launchctl print "$LAUNCH_TARGET" >/dev/null 2>&1; then
+    launchctl bootout "$LAUNCH_TARGET" || die 'could not stop launch agent before package swap'
+    warn 'launch agent stopped; if installation fails, fix the error and rerun install.sh'
+  fi
+elif systemctl_user_available && systemctl --user is-active --quiet post-bridge.timer; then
   systemctl --user stop post-bridge.timer || die "could not stop post-bridge.timer before the package swap"
   TIMER_STOPPED_BY_INSTALL=true
 fi
@@ -392,7 +455,10 @@ if [ -n "${POST_MAIL_ROOT:-}" ]; then
   fi
 fi
 SH
-  printf 'exec python3 "%s/sweep.py" "$@"\n' "$DATA_DIR"
+  "$PYTHON_BIN" - "$DATA_DIR/sweep.py" <<'PY'
+import shlex, sys
+print('exec python3 ' + shlex.quote(sys.argv[1]) + ' "$@"')
+PY
 } >"$launcher_tmp"
 chmod 0755 "$launcher_tmp"
 if [ ! -f "$LAUNCHER" ] || ! cmp -s "$launcher_tmp" "$LAUNCHER"; then
@@ -424,13 +490,36 @@ fi
 # No channels key means every channel syncs (SPEC-v2 r6.2), and a deny list
 # only protects anything on the host that publishes the channel. Warn, not
 # refuse: sync-all is a legitimate default, but a new host should normally
-# start from config.template.json, which carries the estate deny list.
+# start from config.template.json, which disables channels until explicitly enabled.
 if ! python3 -c 'import json, sys; sys.exit(0 if "channels" in json.load(open(sys.argv[1])) else 1)' "$CONFIG_DEST" 2>/dev/null; then
-  warn "$CONFIG_DEST has no \"channels\" key, so this host will publish and import every channel. Deny only works at the publisher: start from bridge/config.template.json to carry the estate deny list, or set \"channels\" deliberately."
+  warn "$CONFIG_DEST has no \"channels\" key, so this host will publish and import every channel. Deny only works at the publisher: start from bridge/config.template.json to opt in to channel publication, or set \"channels\" deliberately."
 fi
 
-render_template "$SOURCE_SERVICE" "$SERVICE_FILE"
-render_template "$SOURCE_TIMER" "$TIMER_FILE"
+if [ "$PLATFORM" = Darwin ]; then
+  "$PYTHON_BIN" - "$PLIST_FILE" "$LABEL" "$LAUNCHER" "$MAIL_ROOT" "$CLONE_DIR" "$HOST" "$SSH_KEY" "$POST_BIN" "$INTERVAL" "$PYTHON_BIN" <<'PY'
+import os, plistlib, sys, tempfile
+(dest, label, launcher, root, repo, host, key, post, interval, python) = sys.argv[1:]
+job = dict(Label=label, ProgramArguments=[launcher, '--tick'],
+           StartInterval=int(interval), RunAtLoad=True,
+           EnvironmentVariables=dict(POST_MAIL_ROOT=root, BRIDGE_REPO=repo,
+               BRIDGE_HOST=host, BRIDGE_SSH_KEY=key, POST_BIN=post,
+               BRIDGE_INTERVAL_SECONDS=interval,
+               PATH=os.path.dirname(python) + ':/usr/bin:/bin:/usr/sbin:/sbin'),
+           StandardOutPath=root + '/bridge/launchd.log',
+           StandardErrorPath=root + '/bridge/launchd.log')
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest))
+try:
+    with os.fdopen(fd, 'wb') as f:
+        plistlib.dump(job, f)
+    os.replace(tmp, dest)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PY
+else
+  render_template "$SOURCE_SERVICE" "$SERVICE_FILE"
+  render_template "$SOURCE_TIMER" "$TIMER_FILE"
+fi
 
 # The sweeper validates env + config + clone identity before the timer is
 # allowed to run; a failing check leaves the units installed and the timer not
@@ -445,6 +534,13 @@ env POST_MAIL_ROOT="$MAIL_ROOT" BRIDGE_REPO="$CLONE_DIR" BRIDGE_HOST="$HOST" \
 env POST_MAIL_ROOT="$MAIL_ROOT" BRIDGE_REPO="$CLONE_DIR" BRIDGE_HOST="$HOST" \
   BRIDGE_SSH_KEY="$SSH_KEY" POST_BIN="$POST_BIN" \
   "$LAUNCHER" --init-held-sentinel || die "sweep.py --init-held-sentinel failed; the timer was not started"
+
+if [ "$PLATFORM" = Darwin ]; then
+  launchctl enable "$LAUNCH_TARGET" || die 'could not enable launch agent'
+  launchctl bootstrap "$LAUNCH_DOMAIN" "$PLIST_FILE" || die 'could not bootstrap launch agent; a logged-in GUI user session is required'
+  say "launch agent $LABEL enabled (interval ${INTERVAL}s)"
+  exit 0
+fi
 
 if ! systemctl_user_available; then
   say 'systemctl --user is unavailable; units installed but timer was not enabled or started'

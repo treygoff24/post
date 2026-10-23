@@ -235,7 +235,8 @@ fn channels_reads_the_roster_once_not_once_per_channel() {
     );
     assert_success(&joined);
 
-    let channels = timed(&store, &["channels", "--json"], actor, DEADLINE);
+    // --all: the fixtures are older than the listing's 24-hour idle auto-archive.
+    let channels = timed(&store, &["channels", "--json", "--all"], actor, DEADLINE);
     assert_success(&channels);
     let channels: Value = from_stdout(&channels);
     assert_eq!(channels["pending"], UNROUTED);

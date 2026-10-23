@@ -178,18 +178,27 @@ pub(super) fn run(
                 continue;
             }
         }
-        let (unread, pending) = mail_counts(context, &mut counts, &participant)?;
-        let presence = presence::read_presence(&participant_presence_context, &participant.id)?;
-        let state = participant.state_label(now).to_owned();
+        // Preserve plain who's read order, but do not project mail for rows
+        // that the live roster will discard.
+        let mail = if args.live {
+            None
+        } else {
+            Some(mail_counts(context, &mut counts, &participant)?)
+        };
+        let presence = match presence::read_presence(&participant_presence_context, &participant.id)
+        {
+            Ok(presence) => presence,
+            Err(error) => {
+                // Keep mail errors ahead of heartbeat errors as before.
+                if mail.is_none() {
+                    mail_counts(context, &mut counts, &participant)?;
+                }
+                return Err(error);
+            }
+        };
         let doorbell_armed = doorbell.participants.contains(&participant.id);
         let live_watch = presence.live_watch || doorbell_armed;
-        let entry = profiles.get(&crate::profile::participant_key(&participant.id));
-        let name = entry
-            .and_then(|entry| entry.name.as_deref())
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty());
-        let pfp = entry.and_then(|entry| entry.pfp.clone());
-        if args.live {
+        let age = if args.live {
             let age = crate::peers::activity_age(&participant, now)
                 .filter(|age| live_watch && *age <= crate::peers::LIVE_WINDOW);
             let Some(age) = age else { continue };
@@ -205,6 +214,22 @@ pub(super) fn run(
                     continue;
                 }
             }
+            Some(age)
+        } else {
+            None
+        };
+        let (unread, pending) = match mail {
+            Some(mail) => mail,
+            None => mail_counts(context, &mut counts, &participant)?,
+        };
+        let state = participant.state_label(now).to_owned();
+        let entry = profiles.get(&crate::profile::participant_key(&participant.id));
+        let name = entry
+            .and_then(|entry| entry.name.as_deref())
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        let pfp = entry.and_then(|entry| entry.pfp.clone());
+        if let Some(age) = age {
             live_peers.insert(
                 participant.id.clone(),
                 crate::peers::Peer {

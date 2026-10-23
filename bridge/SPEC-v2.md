@@ -513,7 +513,15 @@ C8 description, under the same flock: adopt the peer's validated description iff
    (last adopted oid): re-read channel.json under the lock, atomic-replace with our
    name/created/created_by and the peer's description, record the oid. Origin local ⇒
    never adopt. Any other host's edits stay local to that host. No clocks, no ping-pong.
-   created/created_by never change.
+   created/created_by never change. The optional `unlisted` flag (a bool; post 0.10
+   writes it only when true) is adopted the same way and only from the origin: the
+   adopted record carries `"unlisted": true` iff the origin's does. An unlist or
+   relist made on a non-origin host stays on that host until the origin's record
+   next changes, when the origin's value replaces it. C6's first import copies the
+   whole peer record, so a channel created unlisted arrives unlisted even when its
+   origin is unknown (e.g. `created_by` is a roomless participant id), which never
+   adopts later changes. A bridge older than this key refuses records carrying it
+   (`chan_record_invalid` on import, unpublishable on publish).
 ```
 
 **Divergence** (Sol B5). Two hosts can, in principle, originate the same
@@ -598,9 +606,21 @@ polling it is nearly free. Rulings:
   `git status --porcelain` empty and `HEAD == origin/machines/<self>`.
   Quiet is permitted **only** when the prior health was exactly
   `ok:true` — any `ok:false`, any probe failure, any pending state ⇒
-  full tick. And **at most three consecutive quiet ticks**: the fourth
-  is always full, so v1's 60 s full-tick contract survives as a floor
-  for whatever the fingerprint cannot see.
+  full tick. And **at most six consecutive quiet ticks**
+  (`tick.QUIET_STREAK_MAX`): the seventh is always full, a safety net
+  for whatever the fingerprint cannot see (was three, with the timer at
+  a fixed interval, until the backoff below).
+  **Idle backoff.** A quiet tick writes `interval_s` as the gap it asks
+  for before the next tick that does work: the timer interval doubled
+  per consecutive quiet tick, capped at 60 s (never below the timer's
+  own interval), so post's three-times-`interval_s` freshness test
+  stays true. A timer firing inside that gap, with `ok:true` quiet
+  prior health that has an `attention` list and no pmail `retry`
+  entries, a streak below the cap, and an unchanged local
+  fingerprint (config, rooms, rules, archive, channels, pending joins,
+  fence), exits 0 before any git process, lock or write. Any local
+  change, an elapsed gap, or `BRIDGE_BACKOFF=0` runs the tick; remote
+  change is seen at the next tick that runs, within the 60 s cap.
 - The fingerprint and `bridge/remote-heads.json` are written **only at
   the end of a full tick that completed** (Sol B1): a failed, fenced,
   deadline-expired, or `internal_error` tick advances neither, so the
@@ -608,7 +628,11 @@ polling it is nearly free. Rulings:
 - Tick deadline, busy semantics, subprocess timeouts: unchanged.
 
 Net effect: cell↔cell delivery ≤ ~30 s worst case instead of ~2 min, at
-the cost of one `ls-remote` every 15 s per cell. Correctness does not
+the cost of one `ls-remote` every 15 s per cell while the bridge is busy.
+An idle cell backs off (§Idle backoff above): inbound mail waits up to the
+60 s cap, and work the fingerprint cannot see waits for the seventh tick
+(a few minutes at a 15 s timer); local sends still wake it within one
+timer period. Correctness does not
 depend on the pre-check; it only decides whether this tick is worth the
 fetch.
 
@@ -1416,6 +1440,8 @@ vouch for a tick it did not run (Grok G3).
 - `interval_s`: the timer interval in seconds, from
   `BRIDGE_INTERVAL_SECONDS` (the service template renders install.sh's
   `--interval` into it; a systemd timespan such as `2min` is accepted).
+  A quiet tick writes the stretched gap instead (§Latency, idle backoff),
+  never above 60 s unless the timer itself is slower;
   Unset, unparseable, or over 86400 (post's ceiling) is unknown, and
   the key is omitted; it is never a config error. The quiet writer,
   which carries the rest of the previous health, drops a previous

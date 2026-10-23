@@ -1,110 +1,135 @@
-# Releasing post
+# Releasing Post
 
-The 0.10.0 release used a split build: full gate and Linux builds on the devbox,
-with two sequential Darwin builds on the Mac under Trey's explicit exception
-to his devbox-only build rule. See
-[`receipts/2026-10-01-post-0.10.0-release.md`](receipts/2026-10-01-post-0.10.0-release.md)
-for the verified artifacts, installed state, and distinct public snapshot.
-The script below predates that machine rule: its `build` command still runs a
-full Mac gate and Linux builds, so do not use that default flow without updating
-it to the current operating contract. Signing and notarization still run on
-the Mac. The old `upload` flow also assumes shared Forgejo/GitHub history;
-0.10.0 instead used a public snapshot with no-reply metadata. Follow the
-receipt's source mapping rather than forcing the histories or tags together.
+Prepare and verify a public source snapshot before publishing. The release
+helpers build and check local artifacts; they do not push commits, create a
+GitHub release or upload files. Publishing is a separate maintainer decision.
 
-The original script builds, signs, and notarizes **locally on the Mac** — Apple
-Developer ID signing cannot run on GitHub runners without exporting the
-signing key, so there is deliberately no CI release pipeline. dist
-(cargo-dist 0.32, config in `dist-workspace.toml`) orchestrates the darwin
-builds, the shell installer, and the source tarball; `scripts/release.sh`
-does everything else. Captured from the v0.7.0 ship (2026-08-30).
+A release consists of four binary archives (macOS and Linux, each arm64 and
+x86_64), their checksums, a source archive, and an installer that verifies the
+checksums of the final archives. Keep the mapping from reviewed source to
+those binaries with the release evidence.
 
-## The original script flow
+## Prepare the source
+
+Commit the intended changes and finish the version and changelog updates.
+The crate version, lockfile, bridge compatibility window and release notes
+must agree. Read the bridge's [upgrade order](../bridge/README.md#compatibility-and-upgrades)
+when changing the Post version.
+
+The examples use a remote named `github` for the public repository. Check
+`git remote -v`; if that remote is absent, add it with
+`git remote add github https://github.com/treygoff24/post.git`. If your public
+remote already has another name, substitute it in both the fetch command
+and the baseline ref below.
+
+Refresh the public baseline, then create a new public checkout. Substitute
+an unused absolute destination and a public author identity:
 
 ```sh
-# 1. CHANGELOG has a "## X.Y.Z — date" section; Cargo.toml version bumped;
-#    everything committed.
-git tag -a vX.Y.Z -m vX.Y.Z
-
-# 2. Build everything locally (runs scripts/gate.sh first):
-scripts/release.sh build
-
-# 3. GITHUB-GATED — needs an explicit Trey authorization, every time:
-scripts/release.sh upload
+git fetch github main
+scripts/release.sh prepare-public /absolute/path/to/public-post \
+  --source-ref HEAD --base-ref refs/remotes/github/main \
+  --public-name 'Public author' --public-email '12345+author@users.noreply.github.com'
 ```
 
-`build` produces in `target/distrib/`: four tarballs (darwin arm64/x86_64
-signed with hardened runtime + timestamp and notarized; musl arm64/x86_64
-fully static via cargo-zigbuild), per-artifact `.sha256` sidecars, a unified
-`sha256.sum`, `post-installer.sh`, and `source.tar.gz`. It touches nothing
-off-machine except the notarization submission to Apple.
+`scripts/release-public-paths.txt` is the export manifest. Review it and the
+resulting tree: include required source, tests, documentation, hooks and build
+files; exclude local ledgers, operational records and private helpers. Inspect
+commit and tag metadata as well as file contents. A clean source scan does
+not establish that history or author metadata is suitable for publication.
 
-`upload` pushes `main` + the tag to the `github` remote, creates the release
-with the version's CHANGELOG section as notes, uploads all twelve assets,
-and verifies the installer from the live URL.
+Run the integrated gate on that exact public source revision, on the build
+workhorse. Fix findings in the source and prepare a new snapshot before
+building if anything changes. Retain gate output and source mapping outside
+the public package.
 
-## One-time setup
+## Build on the appropriate machines
 
-- **Signing**: a `Developer ID Application` certificate in the login
-  keychain. `security find-identity -v -p codesigning` must list it; the
-  identity string is pinned in `release.sh` (override:
-  `POST_SIGN_IDENTITY`).
-- **Notarization**: `xcrun notarytool store-credentials post-notary
-  --apple-id <apple-id> --team-id LRU27MC63Q` with an app-specific password.
-  Profile name override: `POST_NOTARY_PROFILE`.
-- **Tools**: `brew install cargo-dist cargo-zigbuild zig`; `rustup target
-  add x86_64-apple-darwin aarch64-unknown-linux-musl
-  x86_64-unknown-linux-musl`. `gh` authenticated for the repo.
+Use the prepared public checkout for both platforms. Builds require Python
+3.11 or newer, the locked Rust toolchain/dependencies, cargo-dist 0.32.0 and the tools named by
+the helpers. Linux builds use cargo-zigbuild and Zig for the static musl
+targets. macOS builds require explicit `POST_SIGN_IDENTITY` and
+`POST_NOTARY_PROFILE` environment variables for the release; keep their credentials in the trusted signing
+machine's keychain.
 
-## Why the script does what dist won't
+On Linux:
 
-- dist tars the darwin binaries **before** we sign, so the script re-signs
-  the unpacked `target/distrib/post-<target>/post` and repacks the tarball.
-- Standalone executables cannot be stapled; the notarization ticket lives
-  with Apple, and Gatekeeper fetches it online. `Accepted` status is the
-  proof, saved as `notarize-<target>.json`.
-- dist cannot cross-build musl from macOS; `cargo zigbuild --profile dist`
-  produces fully static binaries (pure-Rust dep tree — the script asserts
-  `statically linked`).
-- dist's local-mode `--artifacts=global` writes a `sha256.sum` covering only
-  the source tarball, and leaves the installer's embedded checksum slots
-  empty (no runtime verification — the sidecars serve manual checks). The
-  script regenerates `sha256.sum` over every artifact.
+```sh
+scripts/release.sh build-linux
+```
 
-## After the release
+On the signing Mac, from the same reviewed source revision:
 
-- Smoke the installed binary: `scripts/smoke-installed.sh /path/to/post`
-  runs a live end-to-end pass (doctor bootstrap, watch semantics, digest
-  fencepost) against a throwaway mail root — safe to run anywhere.
-- **Where post lives is free; who can update it is not** (Trey ruling,
-  2026-09-29, superseding the 2026-08-31 one-root-owned-copy rule): any
-  install location is fine so long as an agent on the devbox, without sudo,
-  can install and update post.
-- Mac and the trey cell: `scripts/install-post.sh <full-sha>` on each host
-  installs to `~/.local/bin/post`. It builds the commit in a temporary
-  worktree, refuses a commit no Forgejo branch contains or a build whose
-  skill manifest disagrees with its source, smokes the binary, keeps a
-  `.bak`, and writes a receipt to `~/.local/share/post/install-receipt.json`.
-  `post --version` names the build and `post doctor` lists other post
-  binaries on PATH, which is what now guards against the drift that forked
-  the trey cell at 0.7.0/0.8.0. The trey cell's `/usr/local/bin/post` is a
-  stale Aug 31 build, shadowed on PATH; the bridge unit hardcodes
-  `~/.local/bin/post`.
-- Reinstall the bridge on the same commit: `bridge/install.sh` on the
-  devbox (arguments in `bridge/README.md`, values from the running
-  `post-bridge` unit's environment); on the Mac, copy `bridge/sweep.py`,
-  `bridge/bridgelib/*.py` and a `BUILD` file (`commit=<sha>`, `dirty=no`)
-  into a temp dir, swap it over `~/.local/lib/post-bridge`, and run
-  `post-bridge-sweep --check-config` with the LaunchAgent's environment.
-- The other cells (matt/jc/fc/sol) still run the root-owned
-  `/usr/local/bin/post`, updated from the Mac via the host (`sudo incus
-  file push <binary> <cell>/usr/local/bin/post.new --uid 0 --gid 0 --mode
-  0755`, then in-cell `mv post post-<old>.bak && mv post.new post`). That
-  layout does not yet meet the no-sudo rule; moving them is open work. In
-  fc/sol, `~/.local/bin/post` is a symlink to the canonical copy (their
-  systemd units and hooks hardcode that path).
-- Verify each install: `scripts/smoke-installed.sh <path-to-post>` on at
-  least one devbox cell, and `sha256sum` against the release sidecar for
-  release binaries.
-- Announce in `#machineroom-devbox`; leave running watches on their old
-  inode — they pick up the new binary on restart.
+```sh
+scripts/release.sh build-darwin
+```
+
+macOS archives must contain the signed binaries, with hardened runtime and
+successful notarization. Signing changes bytes: calculate final checksums
+only after signing and repacking. Keep notarization responses and verify
+signatures locally. Linux archives must contain binaries for the stated
+architecture with the expected static linkage.
+
+The build helpers remap the builder's home path to `/build` and refuse a
+binary that still contains the original path.
+
+## Assemble and verify
+
+Collect all four final archives in the release distribution directory. Keep
+the source identity with each build; do not combine outputs from different
+source trees or versions. Each binary archive has a matching
+`post-<target>.tar.xz.build.json` receipt; transfer those receipts with the
+archives. Include `notarize-<target>.json` for each macOS archive, with its
+`Accepted` response. Darwin build receipts are written on the signing Mac
+after signature verification. Preserve `target/distrib/source-map.json` too
+when assembling on a different host. Asset preparation checks the source,
+target, archive and binary hashes, and the notarization receipts. Then run:
+
+```sh
+scripts/release.sh installer
+scripts/release.sh prepare-assets target/distrib
+scripts/release.sh verify target/distrib
+```
+
+The installer step uses pinned cargo-dist 0.32.0 and regenerates the source
+archive without compiling. Asset preparation embeds the final binary archive
+checksums and writes `asset-manifest.json` for the twelve upload files,
+`release-notes.md` and `source-map.json`. The snapshot also retains its source
+mapping in `.git/post-release-source.json`; review the included and omitted
+paths. Keep mapping and build evidence outside the upload set unless you
+have reviewed them for publication. Verification must reject a damaged archive and a
+missing or mismatched installer checksum. Checksums establish byte integrity;
+the recorded source mapping and build evidence establish what was built.
+
+Inspect archive entries before extracting. Test clean installation and an
+upgrade in disposable locations on supported platforms, then run
+`scripts/smoke-installed.sh /path/to/post` against the installed binary. The
+smoke uses a temporary mail root. Verify the packaged skill manifest and
+hook files, not just the binary version. Bridge tests need both a clean
+installation and an old/new overlap in the documented upgrade order.
+
+Check the complete artifact set and release notes before requesting
+publication approval. The old `build` and `upload` shortcuts are disabled;
+there is no automatic publish step.
+
+## Publish after approval
+
+Push only the reviewed public source and tag, using the repository's normal
+release authorization. Keep private development history out of that push.
+Create a draft GitHub release, upload the complete verified artifact set,
+then download it again into a fresh directory and verify every checksum.
+Do not overwrite artifacts belonging to an already-published release.
+
+Publish the draft only after all files, notes and source references agree.
+Verify the public release's installer and all download links again. Retain
+the local verification evidence and source mapping; document any platform or
+runtime check that could not be completed instead of treating a build as an
+installation test.
+
+## Update running installations
+
+Update the bridge first on each host, then the Post binary, then the hook
+adapters from the same source revision. Run `post doctor --brief`, check the
+bridge health and test delivery both ways. Restart owned long-running
+processes deliberately; replacing a binary does not change a running
+process's code. Keep rollback copies until the new installation is verified.

@@ -64,6 +64,29 @@ impl ParticipantCursors {
         }
     }
 
+    /// Copy `from`'s read cursor for each of `channels` onto `to`, so a
+    /// participant that took over `from`'s channels is not re-delivered what
+    /// `from` already read.
+    pub(crate) fn adopt_channels(
+        context: &Context,
+        from: &Participant,
+        to: &Participant,
+        channels: &[String],
+    ) -> AppResult<()> {
+        let old = Self::load(context, from);
+        for channel in channels {
+            let ids: Vec<String> = old
+                .channels
+                .get(channel)
+                .map(|seen| seen.iter().cloned().collect())
+                .unwrap_or_default();
+            if !ids.is_empty() {
+                Self::consume_channel(context, to, channel, &ids)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn mail_has_seen(&self, address: &Address, id: &str) -> bool {
         self.mail
             .get(&mail_key(address))

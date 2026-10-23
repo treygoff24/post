@@ -82,6 +82,17 @@ pub struct ChannelInfo {
     /// `--join --description`. Cap 1 KiB. Absent on pre-description stores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Kept out of the default `post channels` listing (and so out of the
+    /// owner's clients) without being archived: Loom's per-session agent
+    /// channels. Lives here rather than in a host-local sidecar because
+    /// channel.json is what the bridge carries, so a channel unlisted where it
+    /// was created stays unlisted on every host. Written only when true;
+    /// absent means listed. Set by `--join --unlisted` and `--unlist`,
+    /// cleared by `--relist`. A binary older than this field reads the file
+    /// fine but drops the field if it rewrites the file (`--join
+    /// --description`), relisting the channel.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlisted: bool,
 }
 
 #[derive(Debug)]
@@ -303,6 +314,9 @@ pub(crate) struct JoinIntent {
     pub create: bool,
     pub backlog: bool,
     pub has_description: bool,
+    /// `--unlisted`: a suggested command must carry it, or pasting the fix
+    /// would create a listed channel.
+    pub unlisted: bool,
 }
 
 impl JoinIntent {
@@ -315,6 +329,9 @@ impl JoinIntent {
         let mut command = format!("post chat {} --join", crate::mailbox::shell_quote(name));
         if self.backlog {
             command.push_str(" --backlog");
+        }
+        if self.unlisted {
+            command.push_str(" --unlisted");
         }
         if force_create {
             command.push_str(" --create");
@@ -631,6 +648,8 @@ pub(crate) struct JoinOutcome {
     /// Messages that predated this join and now read as history. Absent on
     /// an already-member response, which records no new membership start.
     pub history_before_join: Option<usize>,
+    /// Whether channel.json says unlisted once the join is done.
+    pub unlisted: bool,
 }
 
 /// Join the channel `given` means. Which channel that is (an existing one, a
@@ -638,13 +657,16 @@ pub(crate) struct JoinOutcome {
 /// UNDER the channels lock, in the same critical section that creates it:
 /// deciding first and locking after let two joins of look-alike names both find
 /// nothing and create two channels. `announce` runs once the name is settled and
-/// before anything is written.
+/// before anything is written. `unlisted` creates a new channel unlisted from
+/// its first write, and marks an existing one unlisted; false leaves the
+/// channel's state as it is (a join never relists).
 pub(crate) fn join(
     context: &Context,
     given: &str,
     description: Option<&str>,
     backlog: bool,
     create: bool,
+    unlisted: bool,
     announce: impl FnOnce(&JoinTarget),
 ) -> AppResult<(JoinTarget, JoinOutcome)> {
     let _lock = lock_channels(context)?;
@@ -655,60 +677,34 @@ pub(crate) fn join(
             create,
             backlog,
             has_description: description.is_some(),
+            unlisted,
         },
     )?;
     announce(&target);
-    let outcome = join_resolved(context, &target.name, description, backlog)?;
+    let outcome = join_resolved(context, &target.name, description, backlog, unlisted)?;
     Ok((target, outcome))
 }
 
-/// The membership and channel writes of a join, with the channels lock held by
-/// the caller.
-fn join_resolved(
+/// Refuse when `actor` (acting as `room`) sharing `channel` with any current
+/// member would cross a blocked route, in either direction. Joining and reading
+/// a channel's history without joining both answer to it, so a block that bars
+/// shared membership also bars reading what the blocked counterpart wrote.
+pub(crate) fn refuse_blocked_shared_route(
     context: &Context,
+    rooms: &RoomMap,
     channel: &str,
-    description: Option<&str>,
-    backlog: bool,
-) -> AppResult<JoinOutcome> {
-    let rooms = context.load_rooms()?;
-    let (room, provenance) = acting_room(context, &rooms)?;
-    let actor = context.sender()?;
-    let paths = ChannelPaths::new(context, channel)?;
-
-    if let Some(description) = description {
-        validate_description(description)?;
-    }
-
-    let membership = crate::channel_state::ParticipantChannels::load(&actor.participant)?;
-    if membership.joined_names().contains(channel) {
-        // Already a member: --description still updates the norms carrier.
-        if let Some(description) = description {
-            write_description(&paths, description)?;
-        }
-        return Ok(JoinOutcome {
-            room,
-            channel_created: false,
-            already_member: true,
-            event_id: None,
-            history_before_join: None,
-        });
-    }
-
-    // A legacy workspace member already has a membership start (its
-    // `created`). Its explicit join keeps that floor rather than minting now,
-    // so no message it has not yet read turns into history.
-    let legacy_start = membership.membership_start(context, &actor.participant, channel)?;
-
-    // Blocked routes bar shared membership, both directions, before any
-    // state is written. Checked under the lock so a concurrent join of the
-    // blocked counterpart cannot slip in between check and write.
-    let rules = context.load_rules(&rooms)?;
+    paths: &ChannelPaths,
+    actor: &crate::participant::Participant,
+    room: &str,
+    action: &str,
+) -> AppResult<()> {
+    let rules = context.load_rules(rooms)?;
     let mut existing_members: Vec<(String, String)> =
         crate::channel_state::participants_for_join_validation(
             context,
             channel,
-            &actor.participant,
-            &room,
+            actor,
+            room,
             &rules.blocked,
         )?
         .into_iter()
@@ -730,25 +726,78 @@ fn join_resolved(
     }
     for (member_id, member_address) in existing_members {
         if let Some(rule) = rules.blocked.iter().find(|rule| {
-            rule.matches_route(&room, &member_address)
-                || rule.matches_route(&member_address, &room)
-                || rule.matches_route(&actor.participant.id, &member_id)
-                || rule.matches_route(&member_id, &actor.participant.id)
+            rule.matches_route(room, &member_address)
+                || rule.matches_route(&member_address, room)
+                || rule.matches_route(&actor.id, &member_id)
+                || rule.matches_route(&member_id, &actor.id)
         }) {
             return Err(AppError::new(
                 ErrorCode::BlockedRoute,
                 format!(
-                    "joining '{channel}' would put '{room}' and existing member '{member}' in one channel, and that route is blocked: {}",
+                    "{action} '{channel}' would put '{room}' and existing member '{member}' in one channel, and that route is blocked: {}",
                     rule.reason,
                     member = member_id
                 ),
                 "Do not route around this block. Ask the human operator to review rules.json.",
             )
-            .input(format!("{} <-> {}", actor.participant.id, member_id))
+            .input(format!("{} <-> {}", actor.id, member_id))
             .reason(rule.reason.clone())
             .rule(rule.clone()));
         }
     }
+    Ok(())
+}
+
+/// The membership and channel writes of a join, with the channels lock held by
+/// the caller.
+fn join_resolved(
+    context: &Context,
+    channel: &str,
+    description: Option<&str>,
+    backlog: bool,
+    unlisted: bool,
+) -> AppResult<JoinOutcome> {
+    let rooms = context.load_rooms()?;
+    let (room, provenance) = acting_room(context, &rooms)?;
+    let actor = context.sender()?;
+    let paths = ChannelPaths::new(context, channel)?;
+
+    if let Some(description) = description {
+        validate_description(description)?;
+    }
+
+    let membership = crate::channel_state::ParticipantChannels::load(&actor.participant)?;
+    if membership.joined_names().contains(channel) {
+        // Already a member: --description still updates the norms carrier,
+        // and --unlisted still unlists.
+        let now_unlisted = update_channel_info(&paths, description, unlisted)?;
+        return Ok(JoinOutcome {
+            room,
+            channel_created: false,
+            already_member: true,
+            event_id: None,
+            history_before_join: None,
+            unlisted: now_unlisted,
+        });
+    }
+
+    // A legacy workspace member already has a membership start (its
+    // `created`). Its explicit join keeps that floor rather than minting now,
+    // so no message it has not yet read turns into history.
+    let legacy_start = membership.membership_start(context, &actor.participant, channel)?;
+
+    // Blocked routes bar shared membership, both directions, before any
+    // state is written. Checked under the lock so a concurrent join of the
+    // blocked counterpart cannot slip in between check and write.
+    refuse_blocked_shared_route(
+        context,
+        &rooms,
+        channel,
+        &paths,
+        &actor.participant,
+        &room,
+        "joining",
+    )?;
 
     fs::create_dir_all(&paths.messages).map_err(|error| {
         AppError::io("create channel messages directory", &paths.messages, error)
@@ -762,8 +811,8 @@ fn join_resolved(
     // existing ids that sort below the start.
     let start = if backlog {
         crate::channel_state::BACKLOG_MEMBERSHIP_START.to_owned()
-    } else if let Some(existing) = legacy_start {
-        existing
+    } else if let Some(existing) = &legacy_start {
+        existing.clone()
     } else {
         local_timestamp_micros()?.0
     };
@@ -777,12 +826,11 @@ fn join_resolved(
         .count();
 
     let (_, sent) = local_timestamp_micros()?;
-    let channel_created = if paths.exists() {
-        if let Some(description) = description {
-            write_description(&paths, description)?;
-        }
-        false
+    let (channel_created, now_unlisted) = if paths.exists() {
+        (false, update_channel_info(&paths, description, unlisted)?)
     } else {
+        // Unlisted from the first write: there is never a moment when a
+        // listing could show a channel created with --unlisted.
         let info = ChannelInfo {
             name: channel.to_owned(),
             created: sent.clone(),
@@ -790,30 +838,36 @@ fn join_resolved(
             description: description
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned),
+            unlisted,
         };
         write_channel_info(&paths, &info)?;
-        true
+        (true, unlisted)
     };
 
     // Event first, membership second: a crash between the two leaves a
     // visible join event without membership, which the next join attempt
-    // repairs (at worst a duplicate event). The other order leaves a
-    // member whose join the history never shows — a permanent hole.
-    let event_id = write_message(
-        context,
-        &paths,
-        WriteMessage {
-            room: &room,
-            channel,
-            subject: "",
-            body: &format!("=== {room} joined ==="),
-            event: Some(JOIN_EVENT),
-            re: None,
-            mentions: Vec::new(),
-            signature_tag: None,
-            provenance,
-        },
-    )?;
+    // repairs (at worst a duplicate event). A legacy workspace member's
+    // explicit join is silent: its binding is not news to the channel, and
+    // every notice is a mail event for every member (token noise).
+    let event_id = if legacy_start.is_some() {
+        None
+    } else {
+        Some(write_message(
+            context,
+            &paths,
+            WriteMessage {
+                room: &room,
+                channel,
+                subject: "",
+                body: &format!("=== {room} joined ==="),
+                event: Some(JOIN_EVENT),
+                re: None,
+                mentions: Vec::new(),
+                signature_tag: None,
+                provenance,
+            },
+        )?)
+    };
     crate::channel_state::ParticipantChannels::join_at(
         context,
         &actor.participant,
@@ -825,8 +879,9 @@ fn join_resolved(
         room,
         channel_created,
         already_member: false,
-        event_id: Some(event_id),
+        event_id,
         history_before_join: Some(history_before_join),
+        unlisted: now_unlisted,
     })
 }
 
@@ -863,14 +918,81 @@ fn write_channel_info(paths: &ChannelPaths, info: &ChannelInfo) -> AppResult<()>
         .map_err(|error| AppError::io("write channel info", &paths.channel_json, error))
 }
 
-fn write_description(paths: &ChannelPaths, description: &str) -> AppResult<()> {
+/// A join's edits to an existing channel.json: `description` replaces the
+/// norms carrier (empty clears it), `unlisted` marks the channel unlisted.
+/// Every other field, `unlisted` included, is carried through the rewrite.
+/// Nothing is written when there is nothing to change; a join with neither
+/// only reads, and a channel.json it cannot read then reads as listed rather
+/// than failing a join that asked for nothing here. Returns whether the
+/// channel is unlisted afterwards.
+fn update_channel_info(
+    paths: &ChannelPaths,
+    description: Option<&str>,
+    unlisted: bool,
+) -> AppResult<bool> {
+    if description.is_none() && !unlisted {
+        return Ok(paths.load_info().is_ok_and(|info| info.unlisted));
+    }
     let mut info = paths.load_info()?;
-    info.description = if description.is_empty() {
-        None
-    } else {
-        Some(description.to_owned())
-    };
-    write_channel_info(paths, &info)
+    if let Some(description) = description {
+        info.description = if description.is_empty() {
+            None
+        } else {
+            Some(description.to_owned())
+        };
+    }
+    info.unlisted |= unlisted;
+    write_channel_info(paths, &info)?;
+    Ok(info.unlisted)
+}
+
+/// What `post chat <channel> --unlist | --relist` did.
+pub(crate) struct UnlistOutcome {
+    /// State after the command.
+    pub unlisted: bool,
+    /// False when the channel was already in the requested state.
+    pub changed: bool,
+}
+
+/// Unlist (`unlisted = true`) or relist a channel. Mirrors archive: any bound
+/// participant may do either, membership is not required, it never creates a
+/// channel, and asking for the state the channel is already in writes
+/// nothing. Unlike archive the state lives in channel.json, so the bridge
+/// carries it (from the channel's origin host only).
+pub(crate) fn set_unlisted(
+    context: &Context,
+    channel_name: &str,
+    unlisted: bool,
+) -> AppResult<UnlistOutcome> {
+    let rooms = context.load_rooms()?;
+    acting_room(context, &rooms)?;
+    let paths = ChannelPaths::new(context, channel_name)?;
+    let _lock = lock_channels(context)?;
+    if !paths.exists() {
+        let flag = if unlisted { "--unlist" } else { "--relist" };
+        return Err(AppError::new(
+            ErrorCode::NotFound,
+            format!("channel '{channel_name}' does not exist"),
+            format!(
+                "List channels with `post channels --all`; {flag} never creates a channel. To create one unlisted, use `post chat {} --join --unlisted`.",
+                crate::mailbox::shell_quote(channel_name)
+            ),
+        )
+        .input(channel_name));
+    }
+    let mut info = paths.load_info()?;
+    if info.unlisted == unlisted {
+        return Ok(UnlistOutcome {
+            unlisted,
+            changed: false,
+        });
+    }
+    info.unlisted = unlisted;
+    write_channel_info(&paths, &info)?;
+    Ok(UnlistOutcome {
+        unlisted,
+        changed: true,
+    })
 }
 
 pub(crate) struct SendOptions<'a> {
@@ -1956,6 +2078,13 @@ pub(crate) fn find_channel_message(
 }
 
 pub(crate) fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
+    let mut files = message_entries(directory)?;
+    files.sort();
+    Ok(files)
+}
+
+/// Directory-entry types avoid a stat per message; summary counts need no sort.
+fn message_entries(directory: &Path) -> AppResult<Vec<PathBuf>> {
     let mut files = Vec::new();
     let entries = fs::read_dir(directory)
         .map_err(|error| AppError::io("list channel messages directory", directory, error))?;
@@ -1963,11 +2092,15 @@ pub(crate) fn message_files(directory: &Path) -> AppResult<Vec<PathBuf>> {
         let entry =
             entry.map_err(|error| AppError::io("read channel messages entry", directory, error))?;
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("msg") {
+        if path.extension().and_then(|value| value.to_str()) == Some("msg")
+            && entry
+                .file_type()
+                .map_err(|error| AppError::io("read channel message type", &path, error))?
+                .is_file()
+        {
             files.push(path);
         }
     }
-    files.sort();
     Ok(files)
 }
 
@@ -1985,6 +2118,23 @@ pub(crate) struct ChannelSummary {
 pub(crate) fn list_channels_with(
     context: &Context,
     scan: Scan,
+) -> AppResult<(Vec<ChannelSummary>, Vec<SkippedFile>)> {
+    list_channels_inner(context, scan, false)
+}
+
+/// The public channels command also maintains host-local idle archive marks.
+/// Search's enumeration above remains strictly read-only.
+pub(crate) fn list_channels_refresh_idle(
+    context: &Context,
+    scan: Scan,
+) -> AppResult<(Vec<ChannelSummary>, Vec<SkippedFile>)> {
+    list_channels_inner(context, scan, true)
+}
+
+fn list_channels_inner(
+    context: &Context,
+    scan: Scan,
+    refresh_idle: bool,
 ) -> AppResult<(Vec<ChannelSummary>, Vec<SkippedFile>)> {
     let dir = context.root.join(CHANNELS_DIR);
     let entries = match fs::read_dir(&dir) {
@@ -2013,10 +2163,8 @@ pub(crate) fn list_channels_with(
         if !paths.exists() {
             continue;
         }
-        let messages = match message_files(&paths.messages) {
-            Ok(files) => files.len(),
-            Err(_) => 0,
-        };
+        let files = message_entries(&paths.messages).unwrap_or_default();
+        let messages = files.len();
         let loaded = paths
             .load_info()
             .map_err(|error| ("channel.json", error))
@@ -2050,7 +2198,12 @@ pub(crate) fn list_channels_with(
             // Fail open: an unreadable archive.json lists the channel as live
             // (visible) instead of failing the listing and every watch that
             // enumerates channels. `post doctor` reports the bad file.
-            archived: crate::channel_archive::effective_mark(&paths).unwrap_or(None),
+            archived: if refresh_idle {
+                crate::channel_archive::refresh_idle(context, &paths, &files)
+            } else {
+                crate::channel_archive::effective_mark(&paths)
+            }
+            .unwrap_or(None),
         });
     }
     summaries.sort_by(|left, right| left.info.name.cmp(&right.info.name));
@@ -2239,6 +2392,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_member_join_is_silent_but_new_explicit_join_posts_one_event() {
+        let (root, context) = test_context("joinsilent", "{}", r#"{"blocked":[]}"#);
+        fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
+        fs::create_dir_all(root.join("alpha")).expect("alpha tree");
+        let actor = context.sender().expect("actor").participant;
+        let workspace = actor.workspace.clone().expect("test actor workspace");
+
+        // Brand-new explicit join: exactly one join event.
+        let fresh = ChannelPaths::new(&context, "fresh").expect("paths");
+        let out = join_resolved(&context, "fresh", None, false, false).expect("join");
+        assert!(out.event_id.is_some());
+        let files = message_files(&fresh.messages).expect("list");
+        assert_eq!(files.len(), 1);
+        let ev = parse_channel_message(&files[0]).expect("parse");
+        assert_eq!(ev.message.event.as_deref(), Some(JOIN_EVENT));
+
+        // Legacy workspace member: binding is silent.
+        let legacy = ChannelPaths::new(&context, "legacy").expect("paths");
+        fs::create_dir_all(&legacy.messages).expect("dir");
+        let mut members = MemberMap::new();
+        members.insert(workspace, "2026-07-22 01:00:00 -0500".to_owned());
+        let bytes = serde_json::to_vec_pretty(&members).expect("json");
+        atomic_replace(&legacy.members_json, &bytes).expect("members");
+        let out = join_resolved(&context, "legacy", None, false, false).expect("join");
+        assert!(out.event_id.is_none());
+        assert!(message_files(&legacy.messages).expect("list").is_empty());
+        trash_test_root(&root);
+    }
+
+    #[test]
     fn send_stamps_profile_as_of_send_time_and_rename_does_not_retcon() {
         let (root, context) = test_context("stamp", "{}", r#"{"blocked":[]}"#);
         fs::write(root.join("rooms.json"), rooms_json(&root)).expect("rooms");
@@ -2318,6 +2501,7 @@ mod tests {
             created: "2026-07-22 01:00:00 -0500".to_owned(),
             created_by: "alpha".to_owned(),
             description: None,
+            unlisted: false,
         };
         let bytes = serde_json::to_vec_pretty(&info).expect("info json");
         atomic_replace(&paths.channel_json, &bytes).expect("info write");

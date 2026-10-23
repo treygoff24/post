@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(crate) mod adopt;
 pub(crate) mod gc;
 
 pub(crate) const PARTICIPANTS_DIR: &str = "participants";
@@ -123,6 +124,17 @@ pub(crate) struct Participant {
     pub lineage_since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Set on the new record by `participant bind --new --adopt`: the ended
+    /// participant whose name, sigil and channels this one took over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_from: Option<String>,
+    /// Set on the old record by the same adoption: the participant that took
+    /// it over. A record is adopted at most once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
+    /// When the adoption happened (RFC3339 UTC), on both records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_at: Option<String>,
     /// Minted by `participant bind --new`: a throwaway identity that
     /// `participant gc` collects after a day instead of a week.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1039,6 +1051,9 @@ fn from_tombstone(id: &str, tombstone: gc::Tombstone, dir: PathBuf) -> Participa
         lineage: None,
         lineage_since: None,
         display_name: tombstone.display_name,
+        adopted_from: None,
+        adopted_by: None,
+        adopted_at: None,
         ephemeral: tombstone.ephemeral,
         runtime: None,
         dir,
@@ -1257,6 +1272,9 @@ pub(crate) fn bind(
             lineage: None,
             lineage_since: None,
             display_name: None,
+            adopted_from: None,
+            adopted_by: None,
+            adopted_at: None,
             ephemeral,
             runtime: None,
             dir,
@@ -2119,6 +2137,9 @@ pub(crate) fn bind_test_actor(context: &Context, workspace: &str) -> Participant
             lineage: None,
             lineage_since: None,
             display_name: None,
+            adopted_from: None,
+            adopted_by: None,
+            adopted_at: None,
             runtime: None,
             dir: dir.clone(),
         };
@@ -2177,6 +2198,9 @@ mod tests {
             lineage: None,
             lineage_since: None,
             display_name: None,
+            adopted_from: None,
+            adopted_by: None,
+            adopted_at: None,
             last_seen: last_seen.map(str::to_owned),
             lease_hours,
             ephemeral: false,

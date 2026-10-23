@@ -97,6 +97,7 @@ impl ParticipantChannels {
         participant: &Participant,
         channel: &str,
     ) -> AppResult<bool> {
+        crate::channel::validate_channel_name(channel)?;
         self.effective_among(
             participant,
             channel,
@@ -110,7 +111,7 @@ impl ParticipantChannels {
         channel: &str,
         members: &mut LegacyMembers,
     ) -> AppResult<bool> {
-        crate::channel::validate_channel_name(channel)?;
+        // Callers validate once, outside any participant roster loop.
         if self.joined.contains(channel) {
             return Ok(true);
         }
@@ -186,6 +187,36 @@ impl ParticipantChannels {
             Ok(was_effective)
         })
     }
+}
+
+/// Join `to` to every channel `from` explicitly joined, keeping `from`'s
+/// membership start so history `from` already had stays history for `to`.
+/// Returns the channels joined, in name order.
+pub(crate) fn adopt_memberships(
+    context: &Context,
+    from: &Participant,
+    to: &Participant,
+) -> AppResult<Vec<String>> {
+    let old = ParticipantChannels::load(from)?;
+    let mut joined = Vec::new();
+    for channel in old.joined_names() {
+        let start = old
+            .starts
+            .get(channel)
+            .cloned()
+            .or_else(|| from.created_watermark())
+            .unwrap_or_else(|| BACKLOG_MEMBERSHIP_START.to_owned());
+        ParticipantChannels::join_at(context, to, channel, &start)?;
+        joined.push(channel.clone());
+    }
+    Ok(joined)
+}
+
+/// Channels the participant explicitly joined (never legacy workspace
+/// membership). Profile-change notices go only here.
+pub(crate) fn explicit_channels(participant: &Participant) -> AppResult<Vec<String>> {
+    let state = ParticipantChannels::load(participant)?;
+    Ok(state.joined_names().iter().cloned().collect())
 }
 
 pub(crate) fn effective_channels(
@@ -429,6 +460,7 @@ impl<'a> ChannelRoster<'a> {
     }
 
     pub(crate) fn effective_participants(&mut self, channel: &str) -> AppResult<Vec<Participant>> {
+        crate::channel::validate_channel_name(channel)?;
         let context = self.context;
         let mut members = LegacyMembers::new(context, channel);
         let mut effective = Vec::new();
@@ -910,6 +942,9 @@ mod tests {
             lineage: None,
             lineage_since: None,
             display_name: None,
+            adopted_from: None,
+            adopted_by: None,
+            adopted_at: None,
             runtime: None,
             dir: root.join("participants").join(id),
         };

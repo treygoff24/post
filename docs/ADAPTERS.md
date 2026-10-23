@@ -11,10 +11,10 @@ Run relative commands below from the post checkout root.
 post itself never pushes. It is files on disk plus a CLI; something in your
 harness has to ask. An **adapter** is the small piece that asks at the right
 moments and injects the answer into your session without violating post's
-laws. Four ready-made lifecycle adapters ship in `skills/post/hooks/` (Claude
-Code, Codex CLI, Cursor CLI, Grok Build), plus a validating watch-notice
-renderer for native idle wake and an out-of-band Herdr doorbell. Everything
-else is a recipe.
+laws. Five ready-made adapters ship in `skills/post/hooks/` (Claude Code,
+Codex CLI, Cursor CLI, Grok Build, and a Pi extension), plus a validating
+watch-notice renderer for native idle wake and an out-of-band Herdr doorbell.
+Everything else is a recipe.
 
 ## The two alerting layers
 
@@ -48,6 +48,7 @@ still complete mail notification — it is simply activity-gated.
 | Codex CLI hooks | Shipped lifecycle adapter | No native idle wake; shipped macOS/Linux options use external Herdr |
 | Cursor CLI hooks | Shipped lifecycle adapter | Native: wrap `post watch --once` with `watch-notice.mjs` (Cursor starts a turn on background-task completion). |
 | Grok Build hooks | Shipped lifecycle adapter (UserPromptSubmit only) | Native: point Grok `monitor` at `watch-notice.mjs`, never at raw `post watch`. |
+| Pi | Shipped session-start / input extension | Opt-in idle polling; accepts validated context before requesting a native turn (best effort). |
 | Addressable session controller | Lifecycle adapter plus controller port | Yes, after controller acceptance |
 
 ## The adapter contract
@@ -184,6 +185,22 @@ Files: `skills/post/hooks/claude-mail.mjs` (+ tests),
 node skills/post/hooks/install-claude-hooks.mjs ~/.claude/settings.json
 ```
 
+For manual wiring, this is a minimal copyable **session-start-only** fragment.
+Replace the absolute placeholder with your reviewed adapter copy, and keep
+`mail-hook-core.mjs` beside it. Merge into existing settings, not over them.
+The installer above is preferred: it copies both files and registers all events.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{
+      "type": "command", "command": "node",
+      "args": ["/absolute/path/to/post-claude-mail.mjs"], "timeout": 10
+    }] }]
+  }
+}
+```
+
 The target path is a required argument on purpose — the installer never
 guesses at a live config. It registers the adapter for SessionStart /
 UserPromptSubmit / root PostToolUse / Stop / SessionEnd in exec form (no shell), merges without
@@ -203,6 +220,11 @@ line; another tool's `claude-mail.mjs` is left alone. Cleanup visits every
 event in the settings file, so a registration left on an event the adapter no
 longer uses (PreToolUse, from the first turn-mark version) is removed on
 upgrade.
+
+The current [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
+confirms the installer's exec form: `command: "node"` with an `args` array
+spawns directly without a shell. Its documented lifecycle context output is
+`hookSpecificOutput.additionalContext`. No configuration-format change is needed.
 
 **Idle wake, Claude Code flavor:** Claude Code has a Monitor primitive that
 can own a long-running process and turn output into a session wake. Monitor is
@@ -237,6 +259,22 @@ Files: `skills/post/hooks/codex-mail.mjs` (+ tests),
 node skills/post/hooks/install-codex-hooks.mjs "${CODEX_HOME:-$HOME/.codex}/hooks.json"
 ```
 
+For manual wiring, this minimal **session-start-only** fragment belongs in
+`hooks.json`. Replace the absolute placeholder with a reviewed adapter copy,
+keep `mail-hook-core.mjs` beside it, and merge rather than replace existing
+hooks. The installer above copies both files and registers all supported events.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{
+      "type": "command",
+      "command": "node \"/absolute/path/to/post-codex-mail.mjs\"", "timeout": 5
+    }] }]
+  }
+}
+```
+
 Codex loads `hooks.json` from the active config folder — `$CODEX_HOME`,
 default `~/.codex`, plus project `.codex/` layers — so pass the path for the
 profile you actually run. Note the split: the *registration* follows your
@@ -251,13 +289,79 @@ honestly.
 
 Tested against Codex CLI 0.147.0 (`hooks` reported as a stable enabled
 feature). This is a tested version, not a claim that earlier versions work.
-Event-level behavior was verified against the open-source Codex CLI source;
-official web documentation did not describe lifecycle hooks when this guide
-was written. Treat a Codex update as a reason to re-run the adapter tests.
+The current [official hooks reference](https://learn.chatgpt.com/docs/hooks)
+now documents `hooks.json`, command-string handlers, `/hooks` trust review,
+and `hookSpecificOutput.additionalContext` for the shipped events. These match
+the installer and adapter; no format migration is needed. Background hooks
+explicitly do **not** start an idle turn. Treat a Codex update as a reason to
+re-run the adapter tests.
 Same invariants as the Claude adapter: envelope-only, 30 s throttle,
-per-session dedupe, fail-open. Plain Codex without an external controller is
+per-session dedupe, fail-open. Codex prompts and tool events share the same
+scan window; startup checks run immediately. Plain Codex without an external controller is
 exactly this lifecycle-only tier: it learns about waiting mail on its next
 session event, but cannot be started from idle by a hook.
+
+## Shipped adapter: Pi
+
+Files: `skills/post/hooks/pi-mail.mjs`, `mail-hook-core.mjs`, and tests.
+Requires Node.js and Post on `PATH` (or at `~/.local/bin/post`). From this
+checkout, install a reviewed copy into a dedicated Pi extension directory:
+
+```bash
+mkdir -p ~/.pi/agent/extensions/post-mail
+cp skills/post/hooks/mail-hook-core.mjs ~/.pi/agent/extensions/post-mail/mail-hook-core.mjs
+cp skills/post/hooks/pi-mail.mjs ~/.pi/agent/extensions/post-mail/index.js
+```
+
+Start a new Pi session or use `/reload`. This changes only that extension
+folder; it does not rewrite Pi settings or grant project trust. Re-run the
+copy commands deliberately when upgrading. To remove it, remove only this
+extension folder while Pi is stopped. For a one-session trial without copying:
+
+```bash
+pi --extension ./skills/post/hooks/pi-mail.mjs
+```
+
+The default is **activity-gated**, with no timer and no automatic model turns.
+`session_start` checks existing mail immediately; `input` checks again before
+idle user-input runs. Input queued while busy waits until the next idle check.
+Pi marks `before_agent_start` busy already, so it is not an acceptance boundary.
+`session_shutdown` ends presence and releases the timer.
+Pi has no ambient Post session key, so the extension binds its own participant
+and prints `POST_PARTICIPANT=<id>` with the instruction to prefix Post commands.
+It never mutates Pi's process environment or reads a message body.
+
+For native idle wake, explicitly opt into polling (minimum 5 seconds):
+
+```bash
+POST_PI_IDLE_POLL_MS=15000 pi
+```
+
+The timer starts only at `session_start`, skips streaming sessions and sessions
+with pending messages, and is cleared at shutdown/reload/session replacement.
+It uses the same bounded snapshot validation and current-snapshot dedupe as the
+other adapters. It first sends a metadata-only custom message with
+`triggerTurn: false`, then verifies that the exact receipt and content reached
+the active session branch. Only that acceptance permits dedupe and activation
+acknowledgment. A refused/deferred context append remains eligible next time.
+A separate fixed custom message requests a turn with `triggerTurn: true`.
+This is **best-effort native wake**, not a guaranteed model run: Pi's public
+`sendMessage` returns void and reports asynchronous provider/start failures
+separately. A failed wake leaves the accepted notice in session context for the
+next turn; it does not consume mail or retry model starts indefinitely. An
+empty or unchanged snapshot never requests a turn. Polling may incur model cost.
+Checks invoke Post synchronously inside Pi: a slow Post can block the UI for up
+to the shared 4.5-second check budget. Leave idle polling off if that tradeoff
+is unsuitable. Older-binary repair notices assume a source checkout at
+`~/Code/post`; that path is optional. If you installed elsewhere or use a release
+binary, follow the README install instructions instead of that repair command.
+
+Checked against the current public [Pi extension guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md),
+[extension types](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts),
+and [session implementation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/agent-session.ts).
+Pi auto-loads directory `index.js` entries; explicit `--extension` supports the
+source file directly. Sandboxed tests exercise a simulated Pi API and Post
+process boundary, not a live Pi/model run. Recheck these APIs after Pi upgrades.
 
 ## Shipped adapter: Cursor CLI
 
@@ -384,8 +488,7 @@ than running two.
 **Herdr is a separate prerequisite, not part of post.** The supervisor
 targets [Herdr](https://herdr.dev) (a multi-agent terminal controller with a
 public install: `curl -fsSL https://herdr.dev/install.sh | sh`; see its
-[installation guide](https://herdr.dev/docs/install/)) because that is the
-controller this machine runs.
+[installation guide](https://herdr.dev/docs/install/)) because it is the terminal controller this supervisor supports.
 
 ```bash
 node skills/post/hooks/install-doorbell-supervisor.mjs --dry-run   # what it would do
@@ -399,8 +502,7 @@ reported. To move an old per-agent timer over, run
 `--list-legacy`, then `--migrate <agent>` (or `--migrate-all`): each timer is
 disabled only after the supervisor shows the same subscription armed and
 scanning. `--uninstall` removes only the supervisor and prints the commands to
-restore the legacy units; `--restore-legacy` re-enables them. Design and safety
-properties: [`docs/plans/doorbell-supervisor-design.md`](plans/doorbell-supervisor-design.md).
+restore the legacy units; `--restore-legacy` re-enables them. Installation, recovery and removal: [operator guide](../skills/post/references/operator.md#doorbell-supervisor-install-migrate-uninstall).
 
 ## Participants and lineage voices (layer 2)
 

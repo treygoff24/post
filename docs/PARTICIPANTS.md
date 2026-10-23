@@ -92,7 +92,7 @@ The id is `<harness>-<first 8 hex of sha256(conversation-key)>` (12 hex on colli
 
 ## 7. Channels
 
-Channel messages and history are unchanged. Membership becomes per participant: `participants/<id>/channels.json` `{joined, left}`. Effective membership(P, ch) = `ch ∈ joined`, or (`P.workspace` is a legacy key in `channels/<ch>/members.json` and `ch ∉ left`). Legacy room memberships are therefore a per-workspace default with an individual opt-out; one participant leaving never removes another, and hooks never rejoin. `chat --join` writes `joined` and the usual join event (now carrying `from_participant`); it does not write `members.json` for participants, so cross-host membership visibility stays workspace-level this release. Sending requires effective membership. Self-suppression, seen sets, and the crossed-send check are per participant.
+Channel messages and history are unchanged. Membership becomes per participant: `participants/<id>/channels.json` `{joined, left}`. Effective membership(P, ch) = `ch ∈ joined`, or (`P.workspace` is a legacy key in `channels/<ch>/members.json` and `ch ∉ left`). Legacy room memberships are therefore a per-workspace default with an individual opt-out; one participant leaving never removes another, and hooks never rejoin. `chat --join` writes `joined` and the usual join event (now carrying `from_participant`; none when the workspace is already a legacy member of the channel, whose binding is not news); it does not write `members.json` for participants, so cross-host membership visibility stays workspace-level this release. Sending requires effective membership. Self-suppression, seen sets, and the crossed-send check are per participant.
 
 ## 8. Lineages, voices, terms
 

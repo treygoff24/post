@@ -135,33 +135,36 @@ fn an_unreadable_receipt_fails_only_the_walks_that_reach_it() {
     let reader = bind(&sandbox, "reader", &alpha, "alpha");
     let sender = bind(&sandbox, "sender", &beta, "beta");
     let outsider = bind(&sandbox, "outsider", &beta, "beta");
-    for _ in 0..3 {
+    for _ in 0..4 {
         send(&sandbox, &sender, &beta, "workspace:alpha");
     }
 
-    // A receipt that cannot be read, placed after a readable one in directory
-    // order: every alpha walk has stopped at a receipt naming it by then.
+    // Keep three messages readable and make the last existing receipt unreadable.
+    // Earlier receipts name alpha, so its address walk stops before this one;
+    // no filename or insertion-order assumption is needed.
     let routing = sandbox.mail_root.join("alpha/routing");
-    let json_entries = || -> Vec<PathBuf> {
-        fs::read_dir(&routing)
-            .expect("list routing")
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-            .collect()
-    };
-    let unreadable = (0..64)
-        .map(|index| routing.join(format!("20990101-000000-{index:06x}.json")))
-        .find(|candidate| {
-            fs::write(candidate, "{}").expect("write receipt");
-            if json_entries().first() != Some(candidate) {
-                return true;
-            }
-            fs::remove_file(candidate).expect("remove candidate");
-            false
-        })
-        .expect("a name that does not list first");
-    assert!(json_entries().len() >= 4, "three readable receipts and it");
+    let entries: Vec<PathBuf> = fs::read_dir(&routing)
+        .expect("list routing")
+        .map(|entry| entry.expect("read routing entry").path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(entries.len(), 4, "four messages produced four receipts");
+    let unreadable = entries.last().expect("last receipt").clone();
+    let stem = unreadable
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .expect("stem");
+    // Its envelope must be absent: pending-message projection reads each
+    // inbox message's receipt, independently of the early-stopping address walk.
+    let envelope = sandbox
+        .mail_root
+        .join("alpha/inbox")
+        .join(format!("{stem}.mail"));
+    assert!(
+        envelope.is_file(),
+        "the selected receipt has an inbox message"
+    );
+    fs::remove_file(envelope).expect("remove only the selected message");
     let _locked = Locked::new(&unreadable);
 
     // Scoped to alpha, every projected walk stops before it.
@@ -180,10 +183,6 @@ fn an_unreadable_receipt_fails_only_the_walks_that_reach_it() {
 
     // Nothing in alpha names the outsider: its walk reaches the receipt.
     let doctor = json_of(&sandbox.run_as_participant(&["doctor", "--json"], &outsider, &beta));
-    let stem = unreadable
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .expect("stem");
     assert!(check(&doctor, "projection.addresses")["message"]
         .as_str()
         .expect("message")

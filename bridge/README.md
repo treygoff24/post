@@ -1,12 +1,13 @@
 # post-bridge
 
-This directory is the bridge's home. Its history before the move into the post
-repo lives in `claude-space` (`post-bridge/`, up to commit 6f57ce1), together
-with the reviews, candidates and research that were left behind.
+This directory is the bridge's maintained implementation, including its
+installer, protocol specification and tests. The earlier standalone prototype
+is not needed to run it.
 
 `post-bridge` carries direct Post mail between pinned hosts through one
-single-writer Git branch per host. It does not change Post, discover rooms, read
-`main`, or treat envelope identity fields as credentials. The forge-authenticated
+single-writer Git branch per host. It discovers published rooms through the
+operator-pinned registry and each host's `rooms.json`; it does not read `main`
+or treat envelope identity fields as credentials. The server-authenticated
 branch identifies the sending host; the receiver still validates the room
 binding, destination, envelope, local rules, and exact bytes.
 
@@ -19,75 +20,227 @@ a follow-up fetch fails) and tidy placeholder copies. This is the authoritative
 §Outbound order of SPEC r3.5, and the code runs it in exactly that sequence.
 Crashes reconcile from disk on the next tick.
 
-## Install
+## Compatibility and upgrades
+
+This bridge supports stable Post 0.10.x and 0.11.x. Update the bridge package
+on every host first, using `bridge/install.sh` from the new source checkout
+with that host's existing settings. Confirm its health, then update the Post
+binaries and re-run any hook installers. The overlap allows old and new
+binaries while hosts are updated one at a time. Versions below 0.10, 0.12 or
+newer, prereleases and semver build metadata are outside this compatibility
+window.
+
+Before updating, keep the current package and configuration for recovery.
+Reinstallation preserves the mail store and relay clone. After each host's
+update, run `post doctor --json`, inspect bridge health and test mail in both
+directions. A successful install alone does not establish cross-host delivery.
+
+Unlisted channels change discoverability, not access control. Older bridges
+reject channel records containing `unlisted`; older Post writers can remove
+that field when rewriting a record. Upgrade both components before relying
+on unlisted status, and avoid old writers after the transition.
+
+A channel created by a participant without a published workspace has no
+origin host for later metadata updates. Its first import works, but later
+description, unlist and relist changes do not propagate. Create it with
+`--join --unlisted` initially when that is intended, or create shared
+channels from a registered, published workspace. This limitation remains in
+0.11.0.
+
+## Optional relay setup (macOS and Linux)
+
+Post is machine-local without this bridge. Enable the bridge only when you want
+mail and optionally channels copied between trusted computers. Relay blobs contain
+message bodies and metadata, not end-to-end encrypted mail: use a **private** Git
+repository, restrict read access, and account for Git history, backups and logs.
+Deleting queue entries does not erase historical copies.
+
+### 1. Provision the relay and its trust boundary
+
+Use a dedicated private repository, not the Post source checkout. Runtime uses
+Git/SSH only; Forgejo is **not required**. The server must enforce a separate
+credential per host, with each credential allowed to update **only** its own
+`machines/<host>` branch. Prevent cross-host writes, force pushes and branch
+deletion. Only trusted operators may update `registry`; deny other branch
+creation. Merely making a repository private or using a shared write key is not
+sufficient: the bridge trusts branch ownership as sender authentication. Verify
+these restrictions with each credential before connecting real mail. A Git host
+without suitable branch controls is not a safe relay for this protocol.
+
+Choose host names matching `[a-z0-9-]{1,32}` (for example `node-a`, `node-b`).
+As an operator, create an orphan `registry` branch containing a regular
+`hosts.json` file with the complete, sorted host list:
+
+```json
+{"v":1,"hosts":["node-a","node-b"]}
+```
+
+For a newly created empty remote, initialize that branch from a **new scratch
+clone** (replace the example URL and operator Git identity as appropriate):
 
 ```sh
-bridge/install.sh --repo-url ssh://git@<forge>:2222/estate/post-relay.git \
-  --host <host> --ssh-key /abs/path/to/relay_key --config /abs/path/to/config.json \
-  [--post-bin /abs/path/to/post] [--interval 15]
+git clone 'ssh://git@git.example.org/team/relay.git' relay-admin
+cd relay-admin
+git switch --orphan registry
+printf '%s\n' '{"v":1,"hosts":["node-a","node-b"]}' >hosts.json
+git add -- hosts.json
+git -c user.name=relay-operator -c user.email=operator@example.invalid \
+  commit -m 'Initialize bridge registry'
+git push origin HEAD:refs/heads/registry
 ```
 
-Start `--config` from `config.template.json`: fill in `host` and `relay_url`
-(the relay clone's `origin` URL), and keep its `channels` deny list. A deny
-only protects a channel on the host that publishes it, so every host carries
-the same list. The installer warns when a config has no `channels` key.
+Do not run this sequence in an existing mail clone. Configure the protections
+above using the server's operator tools, then leave this admin clone separate
+from each running bridge's clone. The installer creates an empty local
+`machines/<host>` branch if it is absent; the first tick publishes it. If your
+server requires existing branches before protecting them, pre-create empty host
+branches with an operator credential, then apply protections before installation.
+Each bridge publishes its own `rooms.json`; do not edit that file manually.
 
-The installer requires Python 3.9 or newer and Post 0.10.0 up to, but not
-including, 0.11.0 (`post --version` may add a trailing `(build ...)`
-annotation; the semver is judged, and a pre-release tag such as `0.10.1-rc1` is
-refused). It resolves
-Post at install time, installs `sweep.py` and `bridgelib/` from this
-directory under `~/.local/lib/post-bridge/` together with a `BUILD` file that
-names the post repo commit it was installed from (`commit=<sha>`, and
-`dirty=yes` when `bridge/` had uncommitted changes), writes `~/.local/bin/post-bridge-sweep`, clones the
-relay with the relay key baked into `core.sshCommand`, and exclusively creates
-`$POST_MAIL_ROOT/bridge/config.json`. It runs `--check-config` before enabling
-the systemd timer and never starts the service directly. The Linux interval is
-15 seconds by default; the macOS launchd default remains 60 seconds. Run
-`install.sh --uninstall` to remove the package, launcher, and units without
-touching the mail root or relay clone.
+Forgejo operators can optionally use `enroll.sh` (requires `fj`, `jq`, Git and
+operator authentication configured outside this repository):
 
-The systemd service carries `BRIDGE_INTERVAL_SECONDS` (rendered from
-`--interval`) and the timer sets `AccuracySec=1s`. `install.sh` has no launchd
-path: a macOS host's plist is built by hand, and it must set
-`BRIDGE_INTERVAL_SECONDS` to the job's `StartInterval` under
-`EnvironmentVariables`, for example:
-
-```xml
-<key>StartInterval</key><integer>60</integer>
-<key>EnvironmentVariables</key>
-<dict>
-  <key>BRIDGE_INTERVAL_SECONDS</key><string>60</string>
-</dict>
+```sh
+export POST_BRIDGE_RELAY_URL='ssh://git@git.example.org/team/relay.git'
+export POST_BRIDGE_API_REPO='/repos/team/relay'
+export POST_BRIDGE_REGISTRY_USERS='["operator"]'
+bridge/enroll.sh --host node-a --dry-run --init-registry
+# Review the planned changes, then repeat without --dry-run.
+bridge/enroll.sh --verify node-a
 ```
 
-Without it, health omits `interval_s`, and post refuses participant sends
-from that host with `bridge_status_unavailable` (SPEC-v2 r6.0 Health).
+Create the host's Forgejo user and SSH key first; this helper assumes the username
+matches the host. The `machines/*` catch-all protection must already exist and
+block unlisted writers; the helper adds exact per-host rules and refuses to
+replace conflicting protections. Check rule precedence on your server. Enrollment
+now requires explicit repository and operator settings; existing operators must
+supply their current values. This changes provisioning only, not running bridges.
 
-If the plist sets `StandardOutPath`, point it at
-`$POST_MAIL_ROOT/bridge/launchd.log`. The launcher renames that file to
-`launchd.log.1` once it reaches 10 MiB, before it runs the sweep, and launchd
-opens a fresh file at the next spawn. Keep stdout captured rather than sending
-it to `/dev/null`: `config_error` on exit 2, `deadline`, and an unwritable
-health record reach stdout only.
+### 2. Prepare each computer
 
-## Enroll
+Install Git, OpenSSH, Python 3.9+ and stable Post 0.10.x or 0.11.x. Prereleases and versions with semver build
+metadata are refused. Upgrade the bridge first when moving from 0.10 to
+0.11; see [Compatibility and upgrades](#compatibility-and-upgrades).
+Create an SSH key per host, register the public key on your relay, set its private
+key to mode `0600`, and verify the server's SSH host key through a trusted channel.
+The services are noninteractive: resolve SSH trust/authentication before install.
+Initialize your local Post root and register local rooms with Post normally.
 
-Set `POST_BRIDGE_RELAY_URL` to your relay repository URL, then run
-`bridge/enroll.sh --host <host> [--dry-run] [--init-registry]` as a
-Forgejo operator, or `bridge/enroll.sh --verify <host>` to check an existing
-enrollment. The script checks the Forgejo user when its token has `read:user`;
-otherwise it relies on the exact branch-protection API to validate the username.
-It checks registry and wildcard protections, then adds the host to the sorted
-registry and prints the `post chat machineroom-devbox --send` announcement for
-the operator; it does not send the message. `--dry-run` executes GET requests
-only and prints every write it would perform.
+Copy `bridge/config.template.json` to a private config file and set `host` and
+`relay_url` (the exact Git origin URL). The template uses `"channels": null` so
+channel contents stay local until explicitly enabled. Missing `channels` means
+**all channels sync**, not none. For an opt-in policy use
+`"channels":{"mode":"allow","allow":["shared-notes"]}` (see Channels below).
+Deny lists protect only at the publisher, so configure every publishing host.
+
+### 3. Install as your normal user (no sudo)
+
+From the Post source checkout, using absolute canonical paths:
+
+```sh
+bridge/install.sh --repo-url 'ssh://git@git.example.org/team/relay.git' \
+  --host node-a --ssh-key "$HOME/.ssh/post-relay" \
+  --config "$HOME/bridge-config.json" --post-bin "$HOME/.local/bin/post"
+```
+
+Optional `--clone-dir` defaults to `~/post-relay`. On Linux, `--interval` takes
+positive whole seconds, or integer seconds/minutes/hours with units, such as
+`30s`, `2min` or `'1h 30s'` (default **15** seconds). The sum must be at most
+86400 seconds. Fractional values, milliseconds, days and `infinity` are
+refused before installation. On macOS it takes integer seconds from 1 to
+86400, with no leading zeros (default **60**). Each machine needs its own clone, host
+credential and config. `POST_MAIL_ROOT` defaults to
+`~/.claude-mail`; override it deliberately before install if needed.
+
+The installer copies the package to `~/.local/lib/post-bridge`, records source
+commit/dirty status in `BUILD`, writes `~/.local/bin/post-bridge-sweep`, pins the
+relay SSH identity in the clone, and creates the bridge config without overwriting
+a differing one. It checks configuration and initializes the local-held sentinel
+before starting the scheduler. Reinstallation retains clone and mailbox data.
+
+- **Linux:** installs `post-bridge.service` and `post-bridge.timer` under
+  `${XDG_CONFIG_HOME:-~/.config}/systemd/user`. Requires an available systemd user
+  manager to start; otherwise it installs files and reports the timer not started.
+  Start with `systemctl --user daemon-reload` then
+  `systemctl --user enable --now post-bridge.timer`. Staying up after logout may
+  require administrator-enabled user lingering, depending on your distribution.
+- **macOS:** installs `~/Library/LaunchAgents/org.post.bridge.plist` and uses
+  `launchctl enable` then `bootstrap` in the current GUI user domain. Run from a
+  logged-in user session. The plist carries the resolved Python PATH, all bridge
+  settings and matching `StartInterval`/`BRIDGE_INTERVAL_SECONDS`. It runs at load
+  and then on the interval; no root daemon is installed.
+
+### Two-host smoke test
+
+Use distinct room names across hosts; a remote room name may not collide with a
+real local room. For example, on `node-a`:
+
+```sh
+mkdir -p "$HOME/work/sender"
+post rooms add sender "$HOME/work/sender"
+cd "$HOME/work/sender"
+eval "$(post participant bind --new)"
+```
+
+On `node-b`, register and bind from its own room:
+
+```sh
+mkdir -p "$HOME/work/receiver"
+post rooms add receiver "$HOME/work/receiver"
+cd "$HOME/work/receiver"
+eval "$(post participant bind --new)"
+```
+
+Install each bridge with its matching host: `--host node-a` and config
+`{"host":"node-a","relay_url":"ssh://git@git.example.org/team/relay.git","channels":null}`
+on the first computer; `--host node-b` and the same config with `host` changed to
+`node-b` on the second. Run the installation command above separately on each.
+With `peers` omitted, registered hosts and their published rooms are discovered
+from the relay. Wait for both bridges to publish/fetch and confirm `receiver`
+appears in `post rooms --json` on `node-a` before sending there:
+
+```sh
+post send --to receiver --subject 'relay smoke test' --body 'Hello from node-a'
+```
+
+On `node-b`, in the still-bound receiver shell, run `post check`, then
+`post read <message-id>` using the returned id. Reply to `sender` the same way.
+If no peer rooms appear, inspect bridge health/logs and registry/branch access
+rather than editing placeholder directories. Participant bindings are shell/session
+specific; keep these commands in their respective bound shells.
+
+### Existing macOS bridges: explicit migration required
+
+The generic label is `org.post.bridge`. Before changing shared launcher/package
+files, the installer refuses other LaunchAgents whose plist mentions
+`post-bridge` (or cannot be parsed). It never unloads those jobs. Back up your
+config and identify/stop the old job yourself, move its plist out of LaunchAgents,
+and confirm it no longer runs before installing. Also check for custom launchers,
+cron jobs, and agents stored elsewhere: those cannot be detected automatically.
+Keep the same host, clone, key and mail root when migrating. Do not run two
+schedulers against one bridge. No installed legacy service is modified by this
+repository merely being checked out or updated.
+
+### Check and remove
+
+Check `post doctor --json` and `$POST_MAIL_ROOT/bridge/health.json` after
+the first tick; verify peer rooms appear via `post rooms --json`. Linux logs are
+in `journalctl --user -u post-bridge.service`; macOS stdout/stderr are in
+`$POST_MAIL_ROOT/bridge/launchd.log`. The launcher rotates that file at 10 MiB;
+keep it captured because configuration/deadline errors may appear only there.
+Normal protocol logs are `bridge/log.jsonl`.
+
+`bridge/install.sh --uninstall` stops/removes this platform's scheduler, launcher
+and package only; the mail root, configuration and relay clone are retained.
+Use the same HOME/root settings used for installation. A failed reinstall may
+leave the scheduler stopped: fix the reported error and rerun installation.
 
 ## Run
 
-`post-bridge-sweep --check-config` validates the installed environment and
-`post-bridge-sweep` runs one tick. Normal operation uses the installed timer and
-the service keeps `ExecStart=%h/.local/bin/post-bridge-sweep`.
+`post-bridge-sweep --check-config` validates configuration and
+`post-bridge-sweep` runs one tick **when the required environment below is set**.
+The installed systemd timer or launchd agent supplies those variables automatically.
+The systemd service keeps `ExecStart=%h/.local/bin/post-bridge-sweep`.
 
 ## Required environment
 
@@ -135,15 +288,14 @@ are fatal.
 
 ```json
 {
-  "host": "fc",
-  "relay_url": "forge:estate/post-relay.git",
+  "host": "node-a",
+  "relay_url": "ssh://git@git.example.org/team/relay.git",
   "peers": {
-    "trey": ["hq", "atlasos", "post-devbox"],
-    "mac": ["claude-space", "porch"]
+    "node-b": ["research", "review"]
   },
   "channels": {
     "mode": "all",
-    "deny": ["devbox-build", "litigation-work", "wade-overnight", "cos", "cos-urgent"]
+    "deny": ["private-notes"]
   }
 }
 ```
@@ -284,7 +436,7 @@ Receipts have this exact shape:
 {
   "v": 1,
   "status": "delivered",
-  "host": "fc",
+  "host": "node-a",
   "room": "hq",
   "id": "20260823-050000-abc123",
   "sha256": "<64 lowercase hex>",
@@ -528,6 +680,21 @@ fatal-config path a missing lock means `health.json` is written unlocked
 rather than creating a file, and on any live path a missing lock propagates as
 `internal_error` (misinstall).
 
+A tick that runs longer than its interval keeps `ticked_at` fresh itself: the
+process holding the tick lock rewrites `ticked_at`, `capabilities` and
+`interval_s` (and nothing else; `ts` stays the last tick's) once per interval,
+so post does not refuse cross-host sends with `bridge_status_unavailable` while
+a slow but live tick is still working. The heartbeat stops at the tick's
+deadline, so a wedged tick still goes stale, and stops as soon as anything else
+writes a full health file. A busy probe never refreshes `ticked_at`.
+
+`bridge/chan-reconciled/<host>` records the peer channel records this host has
+reconciled, keyed by record blob OID with the creator's computed origin and
+`lstat` signatures of the local channel files. A later tick skips reconciling a
+record with no new messages only when all of those still match, so a host with
+hundreds of quiet channels does not re-read every record each tick. It is a
+cache: deleting it is safe and costs one full reconcile of that host's records.
+
 After a successful push, the sweeper skips the post-push fetch when the local
 tracking ref already equals `HEAD`. A foreign commit that lands after that push
 therefore raises `branch_diverged` on the next tick rather than the current one.
@@ -611,8 +778,8 @@ POST_BIN=/abs/path/to/post bridge/tests/run-all.sh
 suite's log if any fail. One module alone: `POST_BIN=... python3 -m unittest
 bridge.tests.test_sweep`.
 
-The suites refuse to run unless `post --version` is a version from 0.10.0 up
-to, but not including, 0.11.0, optionally followed by a ` (build ...)`
-annotation as a release build prints. All mail
+The suites require stable Post 0.10.x or 0.11.x, optionally followed by a
+` (build ...)` annotation as a release build prints. Prereleases and semver
+build metadata are refused. All mail
 roots are temporary and initialized by `post doctor --fix`; the suite never
 touches the user's real Post root or relay repo.

@@ -365,6 +365,10 @@ pub(crate) struct ParticipantBindArgs {
     /// Mint from a fresh UUID conversation key (default harness: shell).
     #[arg(long = "new", conflicts_with = "key")]
     pub fresh: bool,
+
+    /// With --new: take over an ended (or lapsed) participant's display name, sigil and channel memberships, with its read cursors. Refused while that participant is active, or if it was already adopted.
+    #[arg(long, value_name = "PARTICIPANT_ID", requires = "fresh", value_parser = nonempty_without_controls)]
+    pub adopt: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -581,7 +585,8 @@ pub(crate) struct SendArgs {
     /// Deliver to the sender's own participant inbox when `--to` names the
     /// sender's own room or lineage. A room send never reaches its own
     /// sender, so a session that pings its own room (delegate completion
-    /// notices) would otherwise hear nothing. No effect on any other target.
+    /// notices) would otherwise hear nothing. Also permits a direct target
+    /// that resolves to the sending participant (otherwise refused).
     #[arg(long = "allow-self", hide = true)]
     pub allow_self: bool,
 
@@ -623,15 +628,17 @@ impl SendArgs {
      post chat <CHANNEL> --peek [--framing MODE]     (read without advancing)\n       \
      post chat <CHANNEL> --limit <N> [--framing MODE] (oldest N unread; --limit 0 = all)\n       \
      post chat <CHANNEL> --history <N> [--grep PAT] [--framing MODE] (last N messages, cursor untouched)\n       \
-     post chat <CHANNEL> --since <ID> [--framing MODE] (messages after ID, cursor untouched)\n       \
-     post chat <CHANNEL> --message <ID> [--offset B] [--length B] --max-bytes N (cursorless UTF-8 body slice)\n       \
+     post chat <CHANNEL> --history <N> --peek [--json] (open history without joining; no state changes)\n       \
+     post chat <CHANNEL> --since <ID> [--peek] [--framing MODE] (messages after ID, cursor untouched; --peek needs no membership)\n       \
+     post chat <CHANNEL> --message <ID> [--peek] [--offset B] [--length B] --max-bytes N (cursorless UTF-8 body slice; --peek needs no membership)\n       \
      post chat <CHANNEL> --ack <ID>                    (mark exactly one message seen)\n       \
      post chat <CHANNEL> --discard                   (mark all unread seen without printing)\n       \
      post chat <CHANNEL> --discard-through <MSG_ID>  (mark unread at or before MSG_ID seen)\n       \
      post chat <CHANNEL> --seen-by <MSG_ID>          (which members have MSG_ID in their seen-set)\n       \
-     post chat <CHANNEL> --join [--description TEXT] [--create] (join; creates the channel on first join, spelled lowercase-with-hyphens; --create forces a new one beside a look-alike)\n\n\
+     post chat <CHANNEL> --join [--description TEXT] [--create] [--unlisted] (join; creates the channel on first join, spelled lowercase-with-hyphens; --create forces a new one beside a look-alike; --unlisted keeps it out of the default `post channels`)\n\n\
      post chat <CHANNEL> --leave                      (leave for this participant only)\n       \
-     post chat <CHANNEL> --archive | --unarchive      (hide from / restore to `post channels`; never deletes)\n\n\
+     post chat <CHANNEL> --archive | --unarchive      (hide from / restore to `post channels`; never deletes)\n       \
+     post chat <CHANNEL> --unlist | --relist          (mark unlisted / listed: out of the default `post channels`, on every host the bridge carries it to)\n\n\
      These forms are alternatives; pass exactly one. --body/--body-file imply --send.\n\
      Direct mail to a single room is a different verb: `post send --to <ROOM>`."
 )]
@@ -656,6 +663,22 @@ pub(crate) struct ChatArgs {
     /// that looks like an existing channel is refused and names that channel.
     #[arg(long, requires = "join")]
     pub create: bool,
+
+    /// With --join: keep the channel out of the default `post channels`
+    /// listing (and so out of the owner's clients). A new channel is created
+    /// unlisted; an existing one is marked unlisted. `--relist` undoes it.
+    #[arg(long, requires = "join")]
+    pub unlisted: bool,
+
+    /// Mark the channel unlisted: left out of `post channels` unless asked
+    /// for with `--unlisted` or `--all`. Any participant may unlist; history
+    /// and membership are untouched, and the channel works as before.
+    #[arg(long, conflicts_with_all = ["relist", "archive", "unarchive", "leave", "join", "send", "peek", "discard", "body", "body_file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description", "emote"])]
+    pub unlist: bool,
+
+    /// Return an unlisted channel to the default `post channels` listing.
+    #[arg(long, conflicts_with_all = ["unlist", "archive", "unarchive", "leave", "join", "send", "peek", "discard", "body", "body_file", "subject", "seen_by", "history", "since", "limit", "grep", "re", "discard_through", "message", "ack", "framing", "max_bytes", "offset", "length", "oversize", "signature_ref", "description", "emote"])]
+    pub relist: bool,
 
     /// Archive the channel for everyone on this host: hidden from `post
     /// channels` and Porch, never deleted. Any participant may archive; a new
@@ -736,10 +759,12 @@ pub(crate) struct ChatArgs {
     pub stray: Vec<String>,
 
     /// Read without advancing the cursor.
+    /// With --history, --since, or --message, read an open channel without joining; the result labels reads without membership.
     #[arg(long)]
     pub peek: bool,
 
     /// Show the last N messages regardless of read state; never advances the cursor.
+    /// Add --peek to read an open channel without joining.
     #[arg(long, value_name = "N", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "seen_by", "re"])]
     pub history: Option<usize>,
 
@@ -748,6 +773,7 @@ pub(crate) struct ChatArgs {
     pub grep: Option<String>,
 
     /// Only messages with id strictly after this id (ignores the cursor); never advances the cursor.
+    /// Add --peek to read an open channel without joining.
     #[arg(long, value_name = "ID", conflicts_with_all = ["send", "join", "discard", "body", "body_file", "seen_by", "re", "grep"], value_parser = nonempty_without_controls)]
     pub since: Option<String>,
 
@@ -789,12 +815,13 @@ pub(crate) struct ChatArgs {
 
     /// Read one channel message body by UTF-8 byte range without consuming it.
     /// Requires --max-bytes; full ids and channel-unique prefixes are accepted.
+    /// Add --peek to read without joining; continuations preserve --peek.
     #[arg(
         long,
         value_name = "ID",
         value_parser = nonempty_without_controls,
         requires = "max_bytes",
-        conflicts_with_all = ["send", "join", "peek", "discard", "discard_through", "seen_by", "body", "body_file", "history", "since", "limit", "grep", "re", "subject", "oversize", "description", "signature_ref"]
+        conflicts_with_all = ["send", "join", "discard", "discard_through", "seen_by", "body", "body_file", "history", "since", "limit", "grep", "re", "subject", "oversize", "description", "signature_ref"]
     )]
     pub message: Option<String>,
 
@@ -839,16 +866,26 @@ pub(crate) struct ChatArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ChannelsArgs {
+    /// Skip unread counting; each channel's unread field is null.
+    #[arg(long)]
+    pub no_unread: bool,
+
     /// Emit human-readable text instead of the default JSON.
     #[arg(long, conflicts_with = "json")]
     pub text: bool,
 
     /// List only archived channels (hidden from the default listing).
-    #[arg(long, conflicts_with = "all")]
+    /// Unlisted ones stay hidden; `--unlisted` or `--all` shows them.
+    #[arg(long, conflicts_with_all = ["all", "unlisted"])]
     pub archived: bool,
 
-    /// List live and archived channels together.
-    #[arg(long, conflicts_with = "archived")]
+    /// List only unlisted channels, archived or not (hidden from the
+    /// default listing).
+    #[arg(long, conflicts_with_all = ["all", "archived"])]
+    pub unlisted: bool,
+
+    /// List every channel: live, archived and unlisted together.
+    #[arg(long, conflicts_with_all = ["archived", "unlisted"])]
     pub all: bool,
 }
 

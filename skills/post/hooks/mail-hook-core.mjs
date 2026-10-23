@@ -1,4 +1,4 @@
-// Shared core of the four harness mail hooks (claude, codex, cursor, grok).
+// Shared core of the harness mail hooks and Pi extension.
 //
 // Each harness hook is a thin adapter that says how ITS payloads look (event
 // names, where the session id and cwd live, how a subagent is recognised, what
@@ -9,7 +9,7 @@
 // Codex sessions) had to be made four times.
 //
 // Adapter contract (all fields required unless marked optional):
-//   harness          "claude" | "codex" | "cursor" | "grok": the `--harness` value
+//   harness          "claude" | "codex" | "cursor" | "grok" | "pi": `--harness`
 //   envPrefix        POST_CLAUDE_HOOK etc.; <prefix>_BIN, _STATE_DIR, _THROTTLE_MS,
 //                    _DEADLINE_MS (test override of the whole-invocation budget)
 //   stateDirName     default state directory name under the OS temp dir
@@ -131,7 +131,7 @@ function emit(payload) {
   writeAllSync(1, JSON.stringify(payload));
 }
 
-function tryEmit(payload) {
+function tryEmitStdout(payload) {
   try {
     emit(payload);
     return true;
@@ -577,7 +577,14 @@ function pathContains(root, candidate) {
 
 // ------------------------------------------------------------------- runner
 
-export function runMailHook(adapter) {
+// Embedded adapters supply an already parsed input and a synchronous sink.
+// A sink must return true only after context acceptance; false/throw retains state.
+// CLI callers keep stdin/stdout delivery and the historical exit behavior.
+export function runMailHook(adapter, runtime = null) {
+  const tryEmit = (payload) => {
+    if (!runtime) return tryEmitStdout(payload);
+    try { return runtime.deliver(payload) === true; } catch { return false; }
+  };
   const { harness } = adapter;
   const THROTTLE_MS = Number(process.env[`${adapter.envPrefix}_THROTTLE_MS`] ?? 30_000);
   const configuredDeadline = Number(process.env[`${adapter.envPrefix}_DEADLINE_MS`]);
@@ -748,7 +755,7 @@ export function runMailHook(adapter) {
   function main() {
     let input;
     try {
-      input = JSON.parse(readStdin());
+      input = runtime ? runtime.input : JSON.parse(readStdin());
     } catch {
       return tryEmit({});
     }
@@ -761,6 +768,7 @@ export function runMailHook(adapter) {
     const parsedInput = adapter.parse(input, process.env);
     if (!parsedInput) return tryEmit({});
     const { event: eventName, phase, sessionRaw, cwd } = parsedInput;
+    const throttleTurn = phase === "tool" || (adapter.throttlePrompts && phase === "prompt");
     const sessionId = sessionRaw.replace(/[^A-Za-z0-9._-]/g, "_");
     const stateFile = path.join(stateDir(), `session-${sessionId}.json`);
     const payloadOf = (context) => adapter.payload(eventName, context);
@@ -812,7 +820,7 @@ export function runMailHook(adapter) {
     if (deferredTurn) {
       // Not minted at start. Ask, cheaply and without minting, whether the CLI
       // has minted it since (its first write command does).
-      if (phase === "tool" && throttled(stateFile)) return tryEmit({});
+      if (throttleTurn && throttled(stateFile)) return tryEmit({});
       const minted = probeMinted(session);
       if (minted.status !== "bound") return stayUnbound(minted.status === "unknown");
       session.participantId = minted.id;
@@ -836,7 +844,7 @@ export function runMailHook(adapter) {
       setupPerformed = true;
     }
 
-    if (phase === "tool" && throttled(stateFile)) return tryEmit({});
+    if (throttleTurn && throttled(stateFile)) return tryEmit({});
 
     prepareActivation(session, state);
     if (activationDelivery) Object.assign(activationDelivery, { eventName });
@@ -903,5 +911,5 @@ export function runMailHook(adapter) {
     // harness's own timeout could still fire on a delivered notice.
     runPost(["participant", "notice", "--release", String(process.pid), "--json"], activationDelivery.cwd, activationDelivery.options);
   }
-  process.exit(0);
+  if (!runtime) process.exit(0);
 }

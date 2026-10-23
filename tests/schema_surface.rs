@@ -430,6 +430,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "event_id",
             "history_before_join",
             "history_hint",
+            "unlisted",
             "bound_now",
             "normalized_from"
         ]
@@ -456,6 +457,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "channel",
             "room",
             "peek",
+            "read_without_membership",
             "messages",
             "count",
             "skipped",
@@ -476,6 +478,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "framing",
             "channel",
             "room",
+            "read_without_membership",
             "message",
             "origin",
             "reply_to_participant",
@@ -561,6 +564,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "channels",
             "count",
             "archived_hidden",
+            "unlisted_hidden",
             "participant",
             "pending",
             "bound",
@@ -577,6 +581,7 @@ fn schema_states_canonical_cursor_history_and_bound_watch_truth() {
             "avatar",
             "warnings",
             "announced",
+            "sigil_freed_from",
             "list:"
         ]
     );
@@ -848,7 +853,8 @@ fn schema_matches_catchup_and_search_help_and_json() {
 
     // The channels keys are pinned by the contract sample and the schema-truth
     // check; what only this fixture has is a channel the reader is not in.
-    let channels_output = sandbox.run_in(&["channels"], None, &beta);
+    // Fixed historical fixtures may now be auto-archived for idleness.
+    let channels_output = sandbox.run_in(&["channels", "--all"], None, &beta);
     assert_success(&channels_output);
     let channels_json = json_object(&channels_output);
     let private = channels_json["channels"]
@@ -1131,4 +1137,30 @@ fn doctor_reports_legacy_state_as_info_and_downgrades_inert_legacy_errors() {
         .find(|check| check.id == "channel_state.claude-space.invalid")
         .expect("inert legacy check");
     assert_eq!(legacy_invalid.severity, DoctorSeverity::Warning);
+}
+
+#[test]
+fn schema_documents_explicit_join_profile_notices_and_system_event() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["schema"]);
+    let text = common::stdout(&output);
+    let schema: SchemaOutput = from_stdout(&output);
+    assert!(
+        schema
+            .output_shapes
+            .watch
+            .join("\n")
+            .contains("system_event?"),
+        "watch channel_message shape omits system_event"
+    );
+    assert!(
+        schema
+            .output_shapes
+            .profile
+            .join("\n")
+            .contains("explicitly joined channels"),
+        "profile announced shape omits explicit-join scope"
+    );
+    assert!(text.contains("only in the channels the acting participant explicitly joined"));
+    assert!(!text.contains("in every channel the room belongs to"));
 }

@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-PINNED_POST_VERSION = "post 0.10.0 up to, but not including, post 0.11.0"
+PINNED_POST_VERSION = "post 0.10.0 up to, but not including, post 0.12.0"
 HERE = Path(__file__).resolve().parent
 SWEEP = HERE.parent / "sweep.py"
 POST = os.environ.get("POST_BIN", "post")
@@ -1446,8 +1446,11 @@ class SweeperTest(unittest.TestCase):
         self.fc.post("identity", "new", "fern", cwd=garden)
         sent = []
         for target in ("lineage:fern", "participant:" + self.fc.participant("garden")):
+            # The participant target is garden itself; post refuses resolved
+            # self-mail without --allow-self since f917968.
+            extra = ["--allow-self"] if target.startswith("participant:") else []
             result = self.fc.post(
-                "send", "--to", target, "--body", target, "--json", cwd=garden
+                "send", "--to", target, *extra, "--body", target, "--json", cwd=garden
             )
             sent.append(json.loads(result.stdout)["envelope"]["id"])
         # A lineage whose name a peer room later shares: post refuses that
@@ -4196,11 +4199,21 @@ class SweeperTest(unittest.TestCase):
         self.assertFalse((self.fc.repo / ".git" / "rebase-merge").exists())
 
     def test_cross_filesystem_mail_root_round_trip(self):
-        shm = Path("/dev/shm")
-        if not shm.is_dir() or not os.access(str(shm), os.W_OK):
-            self.skipTest("/dev/shm is unavailable; EXDEV fixture cannot be built")
+        repo_device = Path(self.temporary.name).stat().st_dev
+        other_parent = next(
+            (
+                candidate
+                for candidate in (Path("/dev/shm"), Path("/tmp"))
+                if candidate.is_dir()
+                and os.access(candidate, os.W_OK)
+                and candidate.stat().st_dev != repo_device
+            ),
+            None,
+        )
+        if other_parent is None:
+            self.skipTest("no writable second filesystem; EXDEV fixture cannot be built")
         with CanonicalTemporaryDirectory(
-            prefix="post-bridge-shm-", dir=str(shm)
+            prefix="post-bridge-exdev-", dir=str(other_parent)
         ) as shm_temp:
             topology = Topology(Path(self.temporary.name) / "exdev")
             fc = topology.add("fc", ["garden"], mail_parent=Path(shm_temp) / "fc")
@@ -4277,6 +4290,170 @@ class SweeperTest(unittest.TestCase):
         self.assertEqual(len(reaped), 1)
         self.assertEqual(reaped[0]["count"], 1)
 
+
+
+class TickHeartbeatTest(unittest.TestCase):
+    """post-lx89: a slow tick keeps ticked_at fresh, and only while it may."""
+
+    def setUp(self):
+        self.temporary = CanonicalTemporaryDirectory(prefix="post-bridge-beat-")
+        self.root = Path(self.temporary.name)
+        (self.root / "bridge").mkdir()
+        (self.root / "bridge" / ".health.lock").touch()
+        self.health = self.root / "bridge" / "health.json"
+        self.settings = types.SimpleNamespace(root=self.root, interval_seconds=0.05)
+        self.stale = "2026-01-01T00:00:00+00:00"
+        self.write({"ts": "T0", "ticked_at": self.stale, "interval_s": 900,
+                    "ok": False, "reason": "deadline", "capabilities": []})
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write(self, value):
+        self.health.write_text(json.dumps(value) + "\n", encoding="utf-8")
+
+    def read(self):
+        return json.loads(self.health.read_text(encoding="utf-8"))
+
+    def wait_for(self, condition, seconds=5.0):
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends:
+            if condition():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_beats_refresh_only_the_tick_fields_until_a_full_write(self):
+        beat = SWEEPER.TickHeartbeat(self.settings, SWEEPER.Deadline(60)).start()
+        try:
+            self.assertTrue(self.wait_for(lambda: beat.beats >= 2))
+            value = self.read()
+            self.assertNotEqual(value["ticked_at"], self.stale)
+            self.assertEqual(value["interval_s"], 0.05)
+            self.assertEqual(value["capabilities"], sorted(SWEEPER.pmail.CAPABILITIES))
+            # ts (backoff's clock), ok and reason are the last tick's own.
+            self.assertEqual(
+                (value["ts"], value["ok"], value["reason"]), ("T0", False, "deadline")
+            )
+
+            # The tick's own final write moves ts: the heartbeat retires.
+            self.write({**value, "ts": "T1", "ticked_at": self.stale})
+            self.assertTrue(self.wait_for(lambda: not beat.thread.is_alive()))
+            self.assertEqual(self.read()["ticked_at"], self.stale)
+        finally:
+            beat.stop()
+
+    def test_no_beat_after_the_deadline_or_without_an_interval(self):
+        expired = SWEEPER.TickHeartbeat(self.settings, SWEEPER.Deadline(0)).start()
+        self.assertTrue(self.wait_for(lambda: not expired.thread.is_alive()))
+        expired.stop()
+        unknown = SWEEPER.TickHeartbeat(
+            types.SimpleNamespace(root=self.root, interval_seconds=None),
+            SWEEPER.Deadline(60),
+        ).start()
+        unknown.stop()
+        self.assertIsNone(unknown.thread)
+        self.assertEqual((expired.beats, self.read()["ticked_at"]), (0, self.stale))
+
+
+class GitBatchShowTest(unittest.TestCase):
+    """Git.show reads through one long-lived `git cat-file --batch`."""
+
+    def setUp(self):
+        self.temporary = CanonicalTemporaryDirectory(prefix="post-bridge-batch-")
+        self.repo = Path(self.temporary.name) / "repo"
+        self.repo.mkdir()
+        self.calls = Path(self.temporary.name) / "calls.log"
+        shim = Path(self.temporary.name) / "shim"
+        shim.mkdir()
+        wrapper = shim / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'echo "$@" >> "{self.calls}"\n'
+            f'exec "{GIT_PATH}" "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        self.git_env = {"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        (self.repo / "a b.txt").write_bytes(b"one\n\x00\xff")
+        (self.repo / "dir").mkdir()
+        (self.repo / "dir" / "f").write_bytes(b"")
+        self.git("add", "a b.txt", "dir/f")
+        self.git("commit", "-q", "-m", "one")
+        settings = types.SimpleNamespace(repo=self.repo, ssh_key=Path("/nonexistent"))
+        self.sweeper_git = SWEEPER.Git(settings, SWEEPER.Deadline(60))
+        self.sweeper_git.environment["PATH"] = self.git_env["PATH"]
+
+    def tearDown(self):
+        self.sweeper_git.close_batch()
+        self.temporary.cleanup()
+
+    def git(self, *args):
+        subprocess.run(
+            [GIT_PATH, "-C", str(self.repo), *args],
+            check=True,
+            capture_output=True,
+            env={**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+                 "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"},
+        )
+
+    def calls_text(self):
+        return self.calls.read_text() if self.calls.exists() else ""
+
+    def test_many_reads_start_one_process_with_exact_bytes(self):
+        g = self.sweeper_git
+        for _ in range(20):
+            self.assertEqual(g.show("HEAD", "a b.txt"), b"one\n\x00\xff")
+            self.assertEqual(g.show("HEAD", "dir/f"), b"")
+            self.assertIsNone(g.show("HEAD", "absent with space"))
+        self.assertEqual(self.calls_text().count("cat-file --batch"), 1)
+        self.assertNotIn(" show ", " " + self.calls_text())
+        # Missing objects did not poison the stream.
+        self.assertEqual(g.show("HEAD", "a b.txt"), b"one\n\x00\xff")
+
+    def test_non_blob_falls_back_to_one_shot_show(self):
+        g = self.sweeper_git
+        expected = subprocess.run(
+            [GIT_PATH, "-C", str(self.repo), "show", "HEAD:dir"],
+            capture_output=True, check=True,
+        ).stdout
+        self.assertEqual(g.show("HEAD", "dir"), expected)
+        self.assertIn("show HEAD:dir", self.calls_text())
+        self.assertEqual(g.show("HEAD", "dir/f"), b"")
+
+    def test_read_after_ref_update_sees_the_new_object(self):
+        g = self.sweeper_git
+        self.assertEqual(g.show("HEAD", "dir/f"), b"")
+        (self.repo / "dir" / "f").write_bytes(b"two")
+        # An external writer (no Git.run in between) is seen too.
+        self.git("commit", "-q", "-a", "-m", "two")
+        self.assertEqual(g.show("HEAD", "dir/f"), b"two")
+        (self.repo / "dir" / "f").write_bytes(b"three")
+        g.run(["commit", "-q", "-a", "-m", "three"])
+        self.assertIsNone(g._batch, "a write command closes the batch process")
+        self.assertEqual(g.show("HEAD", "dir/f"), b"three")
+
+    def test_stuck_batch_process_is_killed_and_read_falls_back(self):
+        g = self.sweeper_git
+        self.assertEqual(g.show("HEAD", "dir/f"), b"")
+        process = g._batch
+        process.kill()
+        process.wait()
+        self.assertEqual(g.show("HEAD", "a b.txt"), b"one\n\x00\xff")
+        self.assertIsNone(g._batch)
+        self.assertEqual(g.show("HEAD", "a b.txt"), b"one\n\x00\xff")
+
+    def test_close_batch_leaves_no_process(self):
+        g = self.sweeper_git
+        g.show("HEAD", "dir/f")
+        process = g._batch
+        self.assertIsNone(process.poll())
+        g.close_batch()
+        self.assertIsNotNone(process.poll())
+        g.close_batch()
 
 
 class LogDedupeStateTest(unittest.TestCase):

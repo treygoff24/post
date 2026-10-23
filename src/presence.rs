@@ -86,8 +86,12 @@ fn write_heartbeat_nofollow(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             }
             file.set_len(0)?;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            file.write_all(bytes)?;
-            return file.sync_all();
+            // No fsync: this file is rewritten every poll interval, and on
+            // macOS `sync_all` is F_FULLFSYNC (a full drive cache flush).
+            // One per watcher per second queued behind saturated I/O put
+            // four watches at 25-35% CPU each (Mac, 2026-10-09). A torn
+            // heartbeat after a crash costs one interval of presence.
+            return file.write_all(bytes);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
@@ -98,8 +102,7 @@ fn write_heartbeat_nofollow(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .mode(0o600)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    file.write_all(bytes)
 }
 
 #[derive(Debug, Clone)]

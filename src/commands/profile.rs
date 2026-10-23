@@ -30,6 +30,10 @@ struct ProfileOutput<'a> {
     announced: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retired_legacy_entry: Option<String>,
+    /// Set when `profile set --pfp` took a sigil whose previous holder is no
+    /// longer live: says who it was freed from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sigil_freed_from: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -138,12 +142,14 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     if let Some(legacy) = &retired_legacy_entry {
         profiles.remove(legacy);
     }
+    let mut sigil_freed_from: Option<String> = None;
     if let Some(pfp) = &args.pfp {
         let active: std::collections::BTreeSet<String> = crate::participant::list_active(context)?
             .into_iter()
             .map(|record| record.id)
             .collect();
         validate_pfp(pfp, &key, &profiles, &rooms, &active)?;
+        sigil_freed_from = freed_sigil_note(context, pfp, &key, &profiles, &active)?;
     }
     // Trim before store: untrimmed whitespace pads the gap before the
     // rendered (room) suffix (wade F3).
@@ -172,7 +178,7 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
     // a retry still sees the change and still announces it (history stays
     // honest). Per-channel announcement failures after commit only warn.
     let targets = if name_changed || pfp_changed {
-        crate::channel_state::effective_channels(context, &actor.participant)?
+        crate::channel_state::explicit_channels(&actor.participant)?
     } else {
         Vec::new()
     };
@@ -201,8 +207,38 @@ fn set(context: &Context, args: ProfileSetArgs, pretty: bool) -> AppResult<Comma
         legacy: false,
         announced,
         retired_legacy_entry,
+        sigil_freed_from,
     };
     Ok(CommandResult::json(&output, pretty)?.registration_committed())
+}
+
+/// When another participant-keyed profile still records `pfp` but that
+/// participant is ended or its lease has lapsed, the sigil is free to take;
+/// say whom it was freed from. `validate_pfp` has already allowed the set.
+fn freed_sigil_note(
+    context: &Context,
+    pfp: &str,
+    own_key: &str,
+    profiles: &crate::profile::ProfileMap,
+    active: &std::collections::BTreeSet<String>,
+) -> AppResult<Option<String>> {
+    for (key, profile) in profiles {
+        let Some(id) = participant_of_key(key) else {
+            continue;
+        };
+        if key == own_key || profile.pfp.as_deref() != Some(pfp) || active.contains(id) {
+            continue;
+        }
+        let why = match crate::participant::load(context, id)? {
+            Some(record) if record.ended_at.is_some() => "ended",
+            Some(_) => "lapsed (lease expired)",
+            None => "gone",
+        };
+        return Ok(Some(format!(
+            "sigil {pfp} was freed from participant:{id}, which is {why}"
+        )));
+    }
+    Ok(None)
 }
 
 /// Whether the working directory lies inside a registered room: the only place
@@ -270,6 +306,7 @@ fn show(context: &Context, args: ProfileShowArgs, pretty: bool) -> AppResult<Com
         legacy,
         announced: Vec::new(),
         retired_legacy_entry: None,
+        sigil_freed_from: None,
     };
     CommandResult::json(&output, pretty)
 }
@@ -392,7 +429,7 @@ fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {
     // Same pre-commit ordering as `set`: listing failure aborts before the
     // registry write so a retry still announces the change.
     let targets = if existed {
-        crate::channel_state::effective_channels(context, &actor.participant)?
+        crate::channel_state::explicit_channels(&actor.participant)?
     } else {
         Vec::new()
     };
@@ -411,6 +448,7 @@ fn clear(context: &Context, pretty: bool) -> AppResult<CommandResult> {
         legacy: false,
         announced,
         retired_legacy_entry: None,
+        sigil_freed_from: None,
     };
     Ok(CommandResult::json(&output, pretty)?.registration_committed())
 }

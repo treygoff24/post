@@ -107,9 +107,10 @@ fn shape_for_sample(name: &str) -> &'static str {
         "chat-emote.json" => "chat_send",
         "doctor.json" => "doctor",
         "inbox.json" => "inbox",
-        "participant-bind.json" | "participant-describe.json" | "participant-show.json" => {
-            "participant"
-        }
+        "participant-bind.json"
+        | "participant-bind-adopt.json"
+        | "participant-describe.json"
+        | "participant-show.json" => "participant",
         "profile-list.json" | "profile-show.json" | "profile-avatar.json" => "profile",
         "rooms.json" => "rooms",
         "version.json" => "version",

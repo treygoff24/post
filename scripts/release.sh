@@ -1,178 +1,140 @@
 #!/usr/bin/env bash
-# Local release build + publish for post. Captured from the v0.7.0 ship
-# (2026-08-30); see docs/RELEASING.md for the narrative and one-time setup.
-#
-# Releases are built and signed HERE, on the Mac, because Apple Developer ID
-# signing and notarization cannot run on GitHub runners without exporting the
-# signing key. dist only orchestrates the darwin builds and the installer;
-# musl builds, signing, notarization, repacking, and the unified checksum
-# file are this script's job (dist's local-mode global build writes a
-# sha256.sum covering only the source tarball, and leaves the installer's
-# embedded checksum slots empty -- sidecars serve manual verification).
-#
-#   scripts/release.sh build [--skip-gate]   everything local, no network writes
-#   scripts/release.sh upload                GATED: pushes to GitHub + creates the
-#                                            release. One explicit Trey
-#                                            authorization per invocation.
+# Local release preparation only. Review the export and run the gate separately.
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 
-SIGN_IDENTITY="${POST_SIGN_IDENTITY:-Developer ID Application: Lawrence Goff (LRU27MC63Q)}"
-NOTARY_PROFILE="${POST_NOTARY_PROFILE:-post-notary}"
-GITHUB_REPO="${POST_GITHUB_REPO:-treygoff24/post}"
-DARWIN_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
-MUSL_TARGETS=(aarch64-unknown-linux-musl x86_64-unknown-linux-musl)
-DISTRIB=target/distrib
-
 die() { printf 'release: %s\n' "$*" >&2; exit 1; }
-step() { printf '\n=== %s ===\n' "$*"; }
-
-VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-TAG="v${VERSION}"
-
-preflight() {
-  step "preflight ($TAG)"
-  for t in dist cargo-zigbuild zig jq gh shasum xcrun; do
-    command -v "$t" >/dev/null || die "missing tool: $t (see docs/RELEASING.md)"
-  done
-  if ! git diff --quiet || ! git diff --cached --quiet; then
-    die "working tree not clean"
-  fi
-  git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
-    || die "tag $TAG does not exist (create it: git tag -a $TAG -m '$TAG')"
-  [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ] \
-    || die "tag $TAG does not point at HEAD"
-  security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY" \
-    || die "codesign identity not found: $SIGN_IDENTITY"
-  for t in "${DARWIN_TARGETS[@]}" "${MUSL_TARGETS[@]}"; do
-    rustup target list --installed | grep -qx "$t" \
-      || die "rustup target missing: $t (rustup target add $t)"
+version() { python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])'; }
+prepared_source() {
+  python3 -B - <<'PY'
+import importlib.util
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('release', 'scripts/release.py')
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
+release.source_map(Path.cwd())
+PY
+}
+dist_check() {
+  command -v dist >/dev/null || die 'cargo-dist 0.32.0 is required'
+  [[ "$(dist --version)" == *'0.32.0'* ]] || die 'use the pinned cargo-dist 0.32.0'
+}
+release_rustflags() {
+  CARGO_ENCODED_RUSTFLAGS=$(python3 - <<'PYFLAGS'
+import os, sys
+home = os.environ.get('HOME', '')
+if not os.path.isabs(home) or home == '/' or '\x1f' in home:
+    raise SystemExit('release: HOME must be a non-root absolute path')
+if 'CARGO_ENCODED_RUSTFLAGS' in os.environ:
+    encoded = os.environ['CARGO_ENCODED_RUSTFLAGS']
+    flags = encoded.split('\x1f') if encoded else []
+else:
+    flags = os.environ.get('RUSTFLAGS', '').split()
+flags.append(f'--remap-path-prefix={home}=/build')
+sys.stdout.write('\x1f'.join(flags))
+PYFLAGS
+)
+  export CARGO_ENCODED_RUSTFLAGS
+}
+check_binary_privacy() {
+  python3 - "$1" "$HOME" <<'PYPRIVACY'
+import os, pathlib, sys
+if os.fsencode(sys.argv[2]) in pathlib.Path(sys.argv[1]).read_bytes():
+    raise SystemExit('release: binary contains the builder home path; refusing to sign or archive')
+PYPRIVACY
+}
+package_binary() {
+  local target="$1" binary="$2" out="target/distrib/post-$1"
+  check_binary_privacy "$binary"
+  [ ! -e "$out" ] || die "$out exists; preserve or move it before rebuilding"
+  mkdir -p "$out"
+  cp "$binary" "$out/post"
+  cp LICENSE CHANGELOG.md README.md "$out/"
+  COPYFILE_DISABLE=1 tar -C target/distrib -cJf "target/distrib/post-$target.tar.xz" "post-$target"
+}
+build_linux() {
+  [ "$(uname -s)" = Linux ] || die 'Linux release builds run on the Linux workhorse'
+  prepared_source
+  release_rustflags
+  command -v cargo-zigbuild >/dev/null || die 'cargo-zigbuild is required'
+  for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+    local messages binary
+    messages=$(mktemp "${TMPDIR:-/tmp}/post-release-build.XXXXXX")
+    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" cargo zigbuild --locked --profile dist --target "$target" --message-format=json-render-diagnostics > "$messages"
+    binary=$(python3 - "$messages" <<'PYBUILD'
+import json, sys
+binary = None
+for line in open(sys.argv[1]):
+    try:
+        item = json.loads(line)
+    except ValueError:
+        continue
+    if item.get('reason') == 'compiler-artifact' and item.get('target', {}).get('name') == 'post' and item.get('executable'):
+        binary = item['executable']
+if not binary:
+    raise SystemExit('release build returned no post binary')
+print(binary)
+PYBUILD
+)
+    [ -x "$binary" ] || die "reported binary is missing: $binary"
+    local binary_kind
+    binary_kind=$(file "$binary")
+    printf '%s\n' "$binary_kind" | grep -Eq 'statically linked|static-pie linked' || die "$target is not statically linked"
+    case "$target" in
+      aarch64-*) printf '%s\n' "$binary_kind" | grep -Eq 'ARM aarch64|aarch64' || die "$target has the wrong architecture" ;;
+      x86_64-*) printf '%s\n' "$binary_kind" | grep -q 'x86-64' || die "$target has the wrong architecture" ;;
+    esac
+    package_binary "$target" "$binary"
+    python3 scripts/release.py record-build "$target"
   done
 }
-
-build() {
-  local skip_gate=0
-  [ "${1:-}" = "--skip-gate" ] && skip_gate=1
-
-  preflight
-
-  if [ "$skip_gate" -eq 0 ]; then
-    step "gate"
-    scripts/gate.sh || die "gate failed; fix or rerun with --skip-gate at your peril"
-  fi
-
-  step "darwin builds (dist local)"
-  # Host mode on a Mac builds exactly the two darwin targets from
-  # dist-workspace.toml, leaving unpacked dirs + tar.xz in target/distrib.
-  dist build --artifacts=local
-
-  step "sign + notarize + repack darwin"
-  for t in "${DARWIN_TARGETS[@]}"; do
-    local dir="$DISTRIB/post-$t" bin
-    bin="$dir/post"
-    [ -f "$bin" ] || die "expected dist output missing: $bin"
-    codesign --force --options runtime --timestamp \
-      --sign "$SIGN_IDENTITY" "$bin"
-    codesign --verify --strict "$bin" || die "codesign verify failed: $bin"
-
-    local zip="$DISTRIB/notarize-$t.zip"
-    rm -f "$zip"
-    ditto -c -k "$bin" "$zip"
-    # The ticket lives with Apple; standalone executables cannot be stapled.
-    xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" \
-      --wait --output-format json > "$DISTRIB/notarize-$t.json"
-    local status
-    status=$(jq -r '.status' "$DISTRIB/notarize-$t.json")
-    [ "$status" = "Accepted" ] \
-      || die "notarization not Accepted for $t: $status (see $DISTRIB/notarize-$t.json)"
-    rm -f "$zip"
-
-    # Repack the tarball so it carries the signed binary (dist tarred the
-    # pre-signing one), preserving the post-<target>/ layout.
-    tar -C "$DISTRIB" -cJf "$DISTRIB/post-$t.tar.xz" "post-$t"
+build_darwin() {
+  [ "$(uname -s)" = Darwin ] || die 'Darwin signing runs on macOS'
+  prepared_source
+  release_rustflags
+  dist_check
+  [ -n "${POST_SIGN_IDENTITY:-}" ] || die 'set POST_SIGN_IDENTITY to the authorized Developer ID identity'
+  [ -n "${POST_NOTARY_PROFILE:-}" ] || die 'set POST_NOTARY_PROFILE to the authorized notarytool profile'
+  for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    local out="target/distrib/post-$target"
+    [ ! -e "$out" ] || die "$out exists; preserve or move it before rebuilding"
+    dist build --artifacts=local --target "$target" --tag "v$(version)"
+    local binary="$out/post" receipt="target/distrib/notarize-$target.json"
+    /usr/bin/strip -S "$binary"
+    check_binary_privacy "$binary"
+    codesign --options runtime --timestamp --sign "$POST_SIGN_IDENTITY" "$binary"
+    codesign --verify --strict "$binary"
+    local zip
+    zip=$(mktemp "${TMPDIR:-/tmp}/post-notarize.XXXXXX.zip")
+    ditto -c -k "$binary" "$zip"
+    xcrun notarytool submit "$zip" --keychain-profile "$POST_NOTARY_PROFILE" --wait --output-format json > "$receipt"
+    python3 - "$receipt" <<'PY'
+import json, sys
+if json.load(open(sys.argv[1])).get('status') != 'Accepted':
+    raise SystemExit('notarization not Accepted; inspect the saved receipt')
+PY
+    # Retain the notarization zip and receipt for review; standalone binaries cannot be stapled.
+    COPYFILE_DISABLE=1 tar -C target/distrib -cJf "target/distrib/post-$target.tar.xz" "post-$target"
+    python3 scripts/release.py record-build "$target"
   done
-
-  step "musl builds (cargo-zigbuild, fully static)"
-  for t in "${MUSL_TARGETS[@]}"; do
-    cargo zigbuild --profile dist --target "$t"
-    local dir="$DISTRIB/post-$t"
-    rm -rf "$dir"
-    mkdir -p "$dir"
-    cp "target/$t/dist/post" "$dir/post"
-    cp LICENSE CHANGELOG.md README.md "$dir/"
-    file "$dir/post" | grep -q 'statically linked' \
-      || die "musl binary for $t is not statically linked"
-    tar -C "$DISTRIB" -cJf "$DISTRIB/post-$t.tar.xz" "post-$t"
-  done
-
-  step "installer + source tarball (dist global)"
-  dist build --artifacts=global
-
-  step "checksums"
-  (
-    cd "$DISTRIB"
-    : > sha256.sum
-    for f in source.tar.gz \
-             post-aarch64-apple-darwin.tar.xz post-x86_64-apple-darwin.tar.xz \
-             post-aarch64-unknown-linux-musl.tar.xz post-x86_64-unknown-linux-musl.tar.xz; do
-      [ -f "$f" ] || { printf 'release: missing artifact %s\n' "$f" >&2; exit 1; }
-      shasum -a 256 -b "$f" > "$f.sha256"
-      cat "$f.sha256" >> sha256.sum
-    done
-    shasum -a 256 -c -- *.sha256
-  )
-
-  step "build complete"
-  ls -l "$DISTRIB"/*.tar.xz "$DISTRIB"/*.tar.gz "$DISTRIB"/post-installer.sh
-  printf '\nNext (GITHUB-GATED -- needs explicit Trey authorization):\n'
-  printf '  scripts/release.sh upload\n'
 }
-
-upload() {
-  preflight
-  for t in "${DARWIN_TARGETS[@]}" "${MUSL_TARGETS[@]}"; do
-    [ -f "$DISTRIB/post-$t.tar.xz" ] || die "run 'build' first: missing post-$t.tar.xz"
-  done
-  printf 'GITHUB-GATED ACTION: pushing %s + main and creating release %s on %s.\n' \
-    "$TAG" "$TAG" "$GITHUB_REPO"
-
-  step "push"
-  git push github main "$TAG"
-
-  step "release"
-  # Notes = this version's CHANGELOG section (between its heading and the next).
-  awk -v v="$VERSION" '$0 ~ "^## "v" " {p=1; next} /^## / {p=0} p' CHANGELOG.md \
-    > "$DISTRIB/release-notes.md"
-  [ -s "$DISTRIB/release-notes.md" ] || die "no CHANGELOG section found for $VERSION"
-  if ! gh release view "$TAG" --repo "$GITHUB_REPO" >/dev/null 2>&1; then
-    gh release create "$TAG" --repo "$GITHUB_REPO" --title "$TAG" \
-      --notes-file "$DISTRIB/release-notes.md"
-  fi
-  (
-    cd "$DISTRIB"
-    gh release upload "$TAG" --repo "$GITHUB_REPO" --clobber \
-      post-aarch64-apple-darwin.tar.xz post-aarch64-apple-darwin.tar.xz.sha256 \
-      post-x86_64-apple-darwin.tar.xz post-x86_64-apple-darwin.tar.xz.sha256 \
-      post-aarch64-unknown-linux-musl.tar.xz post-aarch64-unknown-linux-musl.tar.xz.sha256 \
-      post-x86_64-unknown-linux-musl.tar.xz post-x86_64-unknown-linux-musl.tar.xz.sha256 \
-      source.tar.gz source.tar.gz.sha256 sha256.sum post-installer.sh
-  )
-
-  step "verify from the live URL"
-  local tmp
-  tmp=$(mktemp -d)
-  curl -fsSL "https://github.com/$GITHUB_REPO/releases/download/$TAG/post-installer.sh" \
-    -o "$tmp/post-installer.sh"
-  grep -q "$VERSION" "$tmp/post-installer.sh" \
-    || die "live installer does not mention $VERSION"
-  rm -rf "$tmp"
-  printf '\nrelease %s is live: https://github.com/%s/releases/tag/%s\n' \
-    "$TAG" "$GITHUB_REPO" "$TAG"
-}
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 case "${1:-}" in
-  check)  preflight; printf 'preflight ok for %s\n' "$TAG" ;;
-  build)  shift; build "$@" ;;
-  upload) upload ;;
-  *) die "usage: scripts/release.sh check | build [--skip-gate] | upload" ;;
+  prepare-public|prepare-assets|verify) exec python3 scripts/release.py "$@" ;;
+  build-linux) build_linux ;;
+  build-darwin) build_darwin ;;
+  installer)
+    prepared_source
+    dist_check
+    dist build --artifacts=global --tag "v$(version)"
+    git archive --format=tar.gz --prefix="post-$(version)/" -o target/distrib/source.tar.gz HEAD
+    ;;
+  build|upload|publish)
+    die 'the old build/upload flow is retired; see docs/RELEASING.md. This script never publishes.' ;;
+  *)
+    printf '%s\n' 'Usage: scripts/release.sh prepare-public DEST --public-name NAME --public-email EMAIL' \
+      '       scripts/release.sh build-linux | build-darwin | installer' \
+      '       scripts/release.sh prepare-assets [DISTRIB] | verify [DISTRIB]'
+    ;;
 esac

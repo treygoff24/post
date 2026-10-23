@@ -2,6 +2,7 @@
 """End-to-end integration tests for the SPEC-v2 sweep tick."""
 
 import ast
+import datetime
 import hashlib
 import json
 import os
@@ -29,6 +30,7 @@ from .test_sweep import (  # noqa: E402
     fixed_id,
     run,
 )
+from bridgelib import tick  # noqa: E402
 from bridgelib.snapshot import UNPUBLISHED_SENDER  # noqa: E402
 
 GIT = shutil.which("git") or "git"
@@ -96,7 +98,7 @@ class TickV2Test(unittest.TestCase):
         # `post --version` gains build metadata after the semver; the bridge
         # judges the semver, not the annotation, or a rebuilt post would stop
         # every tick on the host it was installed to. The same goes for a
-        # patch release: anything from 0.10.0 up to, but not including, 0.11.0.
+        # patch release: anything from 0.10.0 up to, but not including, 0.12.0.
         for line in (
             "post 0.10.0 (build abc1234, 2026-09-28)",
             "post 0.10.0 (build abc1234-dirty)",
@@ -104,6 +106,9 @@ class TickV2Test(unittest.TestCase):
             "post 0.10.1",
             "post 0.10.12 (build abc1234)",
             "post 0.10.999",
+            "post 0.11.0",
+            "post 0.11.0 (build abc1234)",
+            "post 0.11.999",
         ):
             result = self.check_config_with_version_line(line)
             self.assertEqual(result.returncode, 0, line + result.stdout + result.stderr)
@@ -112,8 +117,8 @@ class TickV2Test(unittest.TestCase):
         for line in (
             "post 0.8.9",
             "post 0.9.0",
-            "post 0.11.0",
-            "post 0.11.0 (build abc1234)",
+            "post 0.12.0",
+            "post 0.12.0 (build abc1234)",
             "post 0.100.0",
             "post 1.0.0",
             "post 0.10",
@@ -124,6 +129,8 @@ class TickV2Test(unittest.TestCase):
             "post 0.10.0 (build abc) trailing",
             "post 0.10.0-rc1",
             "post 0.10.1-rc1",
+            "post 0.11.0-rc1",
+            "post 0.11.0+build",
             "post 0.10.0 (build (nested))",
             "xpost 0.10.0",
             "post  0.10.0",
@@ -131,7 +138,7 @@ class TickV2Test(unittest.TestCase):
         ):
             result = self.check_config_with_version_line(line)
             self.assertEqual(result.returncode, 2, line + result.stdout + result.stderr)
-            self.assertIn("post 0.10.0 up to, but not including, post 0.11.0", result.stdout)
+            self.assertIn("post 0.10.0 up to, but not including, post 0.12.0", result.stdout)
 
     def test_check_config_refuses_a_missing_or_non_executable_post_bin(self):
         """SPEC-v2 §Onboarding: POST_BIN must exist and be executable.
@@ -369,6 +376,53 @@ class TickV2Test(unittest.TestCase):
         envelope = json.loads(path.read_bytes().split(b"\n---\n", 1)[0])
         self.assertEqual(envelope["from"], sender)
         self.assertEqual(envelope["from_host"], "trey")
+
+    def test_importing_channel_messages_starts_one_batch_not_one_git_per_message(self):
+        self.enable_channels(self.trey)
+        self.enable_channels(self.mac)
+        self.full_rounds(2, machines=(self.trey, self.mac))
+        bound = run(
+            [POST, "participant", "bind", "--new", "--harness", "bridge-test"],
+            cwd=self.trey.base,
+            env=self.trey.env(),
+        )
+        sender = next(
+            line.removeprefix("export POST_PARTICIPANT=")
+            for line in bound.stdout.splitlines()
+            if line.startswith("export POST_PARTICIPANT=")
+        )
+        sender_env = self.trey.env(POST_PARTICIPANT=sender)
+        run([POST, "chat", "batch-count", "--join"], cwd=self.trey.base, env=sender_env)
+        count = 12
+        for number in range(count):
+            run(
+                [POST, "chat", "batch-count", "--body", f"m{number}", "--json"],
+                cwd=self.trey.base,
+                env=sender_env,
+            )
+        self.assertEqual(self.trey.sweep().returncode, 0)
+        shim = Path(self.temporary.name) / "shim"
+        shim.mkdir()
+        calls = Path(self.temporary.name) / "git-calls.log"
+        wrapper = shim / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'echo "$@" >> "{calls}"\n'
+            f'exec "{shutil.which("git")}" "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        result = self.mac.sweep(PATH=str(shim) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = calls.read_text().splitlines()
+        received = list((self.mac.root / "channels" / "batch-count" / "messages").glob("*.msg"))
+        self.assertGreaterEqual(len(received), count)
+        shows = [line for line in lines if line.startswith("-C") and " show " in line]
+        batches = [line for line in lines if "cat-file --batch" in line]
+        print(f"importing {count} messages: {len(lines)} git processes, "
+              f"{len(shows)} show, {len(batches)} cat-file --batch")
+        self.assertLessEqual(len(batches), 3)
+        self.assertEqual(shows, [])
 
     def test_stamped_roomless_import_adopts_unstamped_shim_copy(self):
         self.enable_channels(self.trey)
@@ -1137,7 +1191,7 @@ class TickV2Test(unittest.TestCase):
         )
         self.assertTrue(health["channels"]["diverged"])
 
-    def test_quiet_ticks_skip_fetch_preserve_health_and_force_fourth_full(self):
+    def test_quiet_ticks_skip_fetch_preserve_health_and_force_seventh_full(self):
         first = self.fc.sweep()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         # The first tick registers placeholders, writes rooms.json and pushes,
@@ -1156,7 +1210,7 @@ class TickV2Test(unittest.TestCase):
         fetches = sum(record["action"] == "fetch" for record in self.fc.logs())
         time.sleep(1.05)
 
-        for streak in (1, 2, 3):
+        for streak in range(1, tick.QUIET_STREAK_MAX + 1):
             result = self.fc.sweep()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             health = json.loads(
@@ -1170,8 +1224,8 @@ class TickV2Test(unittest.TestCase):
             sum(record["action"] == "fetch" for record in self.fc.logs()), fetches
         )
 
-        fourth = self.fc.sweep()
-        self.assertEqual(fourth.returncode, 0, fourth.stdout + fourth.stderr)
+        forced = self.fc.sweep()
+        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
         health = json.loads(
             (self.fc.root / "bridge" / "health.json").read_text(encoding="utf-8")
         )
@@ -1180,6 +1234,160 @@ class TickV2Test(unittest.TestCase):
         self.assertEqual(
             sum(record["action"] == "fetch" for record in self.fc.logs()), fetches + 1
         )
+
+
+class TickV2BackoffTest(unittest.TestCase):
+    """Quiet ticks lengthen the gap; skipped firings start no git at all."""
+
+    def setUp(self):
+        self.temporary = CanonicalTemporaryDirectory(prefix="post-bridge-v2-backoff-")
+        self.topology = TopologyV2(self.temporary.name)
+        self.fc = self.topology.add("fc", ["garden"])
+        self.topology.push_registry({"v": 1, "hosts": ["fc"]})
+        self.topology.finalize(include_peers=False)
+        shim = Path(self.temporary.name) / "shim"
+        shim.mkdir()
+        self.calls = Path(self.temporary.name) / "git-calls.log"
+        real = shutil.which("git")
+        wrapper = shim / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'echo "$@" >> "{self.calls}"\n'
+            f'exec "{real}" "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        self.shim = str(shim)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def sweep(self, **env):
+        env.setdefault("BRIDGE_INTERVAL_SECONDS", "15")
+        env["PATH"] = self.shim + os.pathsep + os.environ["PATH"]
+        before = self.git_calls()
+        result = self.fc.sweep(**env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return self.git_calls() - before
+
+    def git_calls(self):
+        if not self.calls.exists():
+            return 0
+        return len(self.calls.read_text(encoding="utf-8").splitlines())
+
+    def health(self):
+        return json.loads(
+            (self.fc.root / "bridge" / "health.json").read_text(encoding="utf-8")
+        )
+
+    def settle(self):
+        for _ in range(10):
+            self.sweep(BRIDGE_BACKOFF="0")
+            if self.health().get("quiet"):
+                return
+        self.fail("never reached a quiet tick")
+
+    def test_effective_interval_doubles_to_the_cap(self):
+        gaps = [tick.effective_interval(15, streak) for streak in range(0, 6)]
+        self.assertEqual(gaps, [15, 15, 30, 60, 60, 60])
+        self.assertIsNone(tick.effective_interval(None, 3))
+        # A timer slower than the cap never backs off.
+        self.assertEqual(tick.effective_interval(90, 4), 90)
+
+    def test_idle_firing_starts_few_git_processes_and_backoff_starts_none(self):
+        full = self.sweep(BRIDGE_BACKOFF="0")
+        settle_full = self.sweep(BRIDGE_BACKOFF="0")
+        self.settle()
+        quiet_no_backoff = self.sweep(BRIDGE_BACKOFF="0")
+        self.assertTrue(self.health()["quiet"])
+        # Measured, printed for the commit body.
+        print(
+            f"git processes: first full={full} settling full={settle_full} "
+            f"quiet={quiet_no_backoff}"
+        )
+        self.assertLessEqual(quiet_no_backoff, 3)
+        # Streak is now >= 2: the health asks for a 30 s gap, and the next
+        # firing inside it exits before any git.
+        while self.health()["quiet_streak"] < 2:
+            self.sweep(BRIDGE_BACKOFF="0")
+        health = self.health()
+        self.assertEqual(health["interval_s"], 30)
+        self.assertEqual(self.sweep(), 0)
+        self.assertEqual(self.health(), health, "a skipped firing writes nothing")
+
+    def test_local_change_wakes_a_backed_off_bridge(self):
+        self.settle()
+        while self.health()["quiet_streak"] < 2:
+            self.sweep(BRIDGE_BACKOFF="0")
+        self.assertEqual(self.sweep(), 0)
+        os.utime(self.fc.root / "rooms.json")
+        self.assertGreater(self.sweep(), 0)
+        self.assertFalse(self.health()["quiet"])
+
+    def test_gap_elapsed_runs_the_tick(self):
+        self.settle()
+        while self.health()["quiet_streak"] < 2:
+            self.sweep(BRIDGE_BACKOFF="0")
+        path = self.fc.root / "bridge" / "health.json"
+        value = self.health()
+        value["ts"] = "2000-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        self.assertGreater(self.sweep(), 0)
+
+    def test_standing_retry_or_pre_attention_health_is_not_backed_off(self):
+        self.settle()
+        while self.health()["quiet_streak"] < 2:
+            self.sweep(BRIDGE_BACKOFF="0")
+        path = self.fc.root / "bridge" / "health.json"
+        base = self.health()
+
+        def write(value):
+            value["ts"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        write(dict(base))
+        self.assertEqual(self.sweep(), 0, "precondition: this health backs off")
+        retrying = json.loads(json.dumps(base))
+        retrying["pmail"]["retry"] = {"trey": {"count": 1, "oldest_age_seconds": 5}}
+        write(retrying)
+        self.assertGreater(self.sweep(), 0, "a letter in retry waits for no gap")
+        old = dict(base)
+        del old["attention"]
+        write(old)
+        self.assertGreater(self.sweep(), 0, "pre-attention health runs one full tick")
+
+    def test_idle_full_tick_resolves_each_ref_few_times(self):
+        self.settle()
+        while self.health()["quiet_streak"] < tick.QUIET_STREAK_MAX:
+            self.sweep(BRIDGE_BACKOFF="0")
+        before = self.git_calls()
+        total = self.sweep(BRIDGE_BACKOFF="0")
+        self.assertFalse(self.health()["quiet"], "precondition: a full tick ran")
+        lines = self.calls.read_text().splitlines()[before:]
+        verifies = [line for line in lines if " rev-parse --verify HEAD" in line]
+        print(f"idle full tick: {total} git processes, {len(verifies)} HEAD lookups")
+        # Seven before the cache; HEAD moves at most once (commit/push paths).
+        self.assertLessEqual(len(verifies), 2, verifies)
+        self.assertLessEqual(total, 30)
+
+    def test_repo_validation_is_cached_until_head_or_config_changes(self):
+        self.settle()
+        stamp = self.fc.root / "bridge" / "repo-validated.json"
+        self.assertTrue(stamp.exists())
+        self.sweep(BRIDGE_BACKOFF="0")
+        self.assertNotIn("symbolic-ref", self.calls.read_text().splitlines()[-1])
+        before = self.git_calls()
+        self.fc.git("config", "touched.by", "test")
+        self.sweep(BRIDGE_BACKOFF="0")
+        recent = self.calls.read_text().splitlines()[before:]
+        self.assertTrue(any("symbolic-ref" in line for line in recent), recent)
+        # A different branch checked out is never waved through by the stamp.
+        self.sweep(BRIDGE_BACKOFF="0")
+        self.fc.git("checkout", "-q", "-b", "elsewhere")
+        env = {"BRIDGE_INTERVAL_SECONDS": "15", "BRIDGE_BACKOFF": "0"}
+        env["PATH"] = self.shim + os.pathsep + os.environ["PATH"]
+        result = self.fc.sweep(**env)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
 
 class TickV2QuietMatrixTest(unittest.TestCase):

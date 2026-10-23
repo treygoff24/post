@@ -733,8 +733,9 @@ function defaultWatch(target, { recursive }, onEvent, onError) {
 // Writes that are not mail: live `post watch` heartbeats and the participant
 // record's activity refresh, activation notices, locks, and temps (the rename
 // that follows a temp is its own event). A live watch refreshes
-// participant.json every interval; hinting on it scanned the participant
-// every time (and, against a spinning watch, several times a second).
+// participant.json about once a minute (and watch.heartbeat every interval);
+// hinting on them scanned the participant every time (and, against a spinning
+// watch, several times a second).
 function ignoredHintFile(filename) {
   if (!filename) return false;
   const base = path.basename(String(filename));
@@ -969,7 +970,7 @@ export class Supervisor {
 
   // ---------------------------------------------------------- discovery
 
-  async discover() {
+  async discover({ deferRearm = false } = {}) {
     if (this.halted) return;
     this.stats.discoveries += 1;
     const listed = await this.exec("herdr", ["agent", "list"], { capBytes: this.config.participantListCapBytes });
@@ -1141,13 +1142,15 @@ export class Supervisor {
       this.retire(sub, reason);
     }
     this.bindings = bindings;
-    this.rearmWatches();
-    this.pump();
+    if (!deferRearm) {
+      this.rearmWatches();
+      this.pump();
+    }
   }
 
   // Room-keyed command rings. A resident needs no pane, no digest, and no
   // live participant: the scan is `post watch --snapshot --room <room>`.
-  discoverResidents() {
+  discoverResidents({ deferRearm = false } = {}) {
     if (this.halted) return;
     let names = [];
     try {
@@ -1202,7 +1205,7 @@ export class Supervisor {
       if (sub.sink !== SINK_COMMAND || seen.has(key)) continue;
       this.retire(sub, "resident removed");
     }
-    this.rearmWatches();
+    if (!deferRearm) this.rearmWatches();
   }
 
   createSub(participant, sink, generation, genHash) {
@@ -2138,10 +2141,12 @@ export class Supervisor {
   // One supervisor tick: discovery, the reconciliation clock, health.
   async tick() {
     if (this.halted) return;
-    await this.discover();
+    await this.discover({ deferRearm: true });
     if (this.halted) return;
-    this.discoverResidents();
+    this.discoverResidents({ deferRearm: true });
     if (this.halted) return;
+    // Cover both discoveries before any scans start, with one watch pass.
+    this.rearmWatches();
     // The first discovery arms every enabled subscription dirty, and those
     // arming scans are the initial full pass; the reconcile clock starts
     // there. Reconciling now too would mark the in-flight first scans dirty

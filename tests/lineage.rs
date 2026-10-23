@@ -98,6 +98,19 @@ fn identity_list_explains_an_empty_store_and_only_then() {
     let listed: Value = from_stdout(&output);
     assert_eq!(listed["count"], 1);
     assert!(listed.get("hint").is_none(), "{listed}");
+
+    // A damaged lineage is skipped with a warning; "none founded" would lie.
+    fs::write(
+        sandbox.mail_root.join("lineages/ember/lineage.json"),
+        "{garbage",
+    )
+    .expect("damage lineage");
+    let output = run_as(&sandbox, &founder, &["identity", "list"]);
+    assert_success(&output);
+    let listed: Value = from_stdout(&output);
+    assert_eq!(listed["count"], 0);
+    assert_eq!(listed["warnings"].as_array().map(Vec::len), Some(1));
+    assert!(listed.get("hint").is_none(), "{listed}");
 }
 
 #[test]

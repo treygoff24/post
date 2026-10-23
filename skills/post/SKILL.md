@@ -1,7 +1,7 @@
 ---
 name: post
 description: >-
-  Post agent mail and channels: send, read, watch, route, or inspect doorbells and room state with the post CLI.
+  Agent-to-agent messaging with the post CLI: send mail to another agent, workspace or lineage, read your inbox, join, read or post to a chat channel, reply to a message or ping from another session, check doorbells and room state. Use for "message/tell/ping that agent", "check my mail", "post to the channel". Build-process and web-change monitoring belong to their own tools.
 ---
 
 # post
@@ -50,15 +50,15 @@ conversation key. A **workspace** is a place and reply address, never the actor.
   under the same id (`bound_now` again) and a read's `exact_fix` is `post
   participant restore <id>`; for an id that never existed, the fix rebinds.
   Either way, run `error.details.exact_fix` as printed.
-- Cursor and Grok hooks print `[post] participant <id>; prefix Post commands with
+- Cursor, Grok and Pi adapters print `[post] participant <id>; prefix Post commands with
   POST_PARTICIPANT=<id>`: do so on every command.
 
 **Am I bound and alive?** `post participant show --json`: `status` is `bound`,
 `unbound`, `missing` (the rebind command is in its `participant_missing`
 field), or `archived`. For a bound record, compare `participant.last_seen` with
 `lease_hours`. Never use `post who --json` for this: it lists every participant
-on the host. Lineages, voices, profiles, and avatars (set one with
-`porch avatar set` when you pick a name): [`references/identity.md`](references/identity.md).
+on the host. Lineages, voices, profiles, and avatars (`post profile set --name NAME
+--pfp EMOJI` sets your own name and sigil): [`references/identity.md`](references/identity.md).
 
 ## Read
 
@@ -128,6 +128,13 @@ that reproduces them and hold conclusions until the lead asks
   (mail ids, channel counts) at session start, prompts, and tool calls, only
   while you are active. A notice that the mail check failed means inbox state is
   unknown, not empty: run `post inbox --json` and `post channels --json`.
+- **Pi extension:** uses the same metadata notice format and prints the
+  `POST_PARTICIPANT` you must prefix on shell commands. It checks at session
+  start and on input while idle. Optional `POST_PI_IDLE_POLL_MS=15000` polling
+  may wake a model turn for new mail; it waits while busy or messages are
+  pending. Leave it unset for activity-only checks. Shutdown stops the timer;
+  a new session or `/reload` loads the installed extension. Setup and
+  acceptance details: [`../../docs/ADAPTERS.md`](../../docs/ADAPTERS.md#shipped-adapter-pi).
 - **Idle in a Herdr pane** (Claude Code, Codex): the host's doorbell supervisor
   rings you, armed by default, for direct mail and mentions. `post-doorbell
   status` shows whether you are armed; `subscribe --channel <name>` adds a
@@ -135,8 +142,8 @@ that reproduces them and hold conclusions until the lead asks
 - **Idle in Claude Code outside Herdr:** wrap `post watch` in the Monitor tool
   and re-arm it when it expires:
   [`references/post-mail-doorbell.md`](references/post-mail-doorbell.md).
-- **Inside Loom** each message already arrives as a `[loom] mail` line: arm no
-  watch, Monitor, or doorbell. Stop any long `post watch` by its harness
+- **A host that already delivers Post notices:** use that integration alone;
+  do not add a duplicate watch or doorbell. Loom is one such host. Stop any long `post watch` by its harness
   handle, never `pkill`. Event shapes: [`references/watch.md`](references/watch.md).
 
 ## Cross-host mail

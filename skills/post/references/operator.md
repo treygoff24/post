@@ -27,10 +27,15 @@ node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
   renamed before the adapter that imports it. Rerunning prints
   `adapter updated` when either changed.
 - **Claude Code:** SessionStart, UserPromptSubmit, root PostToolUse, and
-  SessionEnd (the only adapter that ends the participant). **Codex:** the first
+  SessionEnd (which ends the participant). **Codex:** the first
   three; approve the hook in `/hooks` on first run, since the installer cannot
   grant trust. **Cursor:** `sessionStart`, `beforeSubmitPrompt`, `postToolUse`.
   **Grok:** UserPromptSubmit only; its first prompt plays session start.
+  **Pi:** install the extension described in
+  [the Pi adapter guide](../../../docs/ADAPTERS.md#shipped-adapter-pi).
+  It checks on session start and input, ends the participant on shutdown,
+  and offers opt-in idle polling. Its printed participant ID must prefix
+  subsequent shell commands.
 - Claude and Codex hooks bind at session start only when the session's
   directory is inside a registered room (`post rooms add <name> <path>`). Any
   other directory defers: the hook asks `post participant show --harness <h>
@@ -48,7 +53,7 @@ node skills/post/hooks/install-grok-hooks.mjs ~/.grok/hooks/post-mail.json
   an UNKNOWN inbox, never as an empty one.
 - Test overrides: `POST_<HARNESS>_HOOK_BIN`, `POST_<HARNESS>_HOOK_STATE_DIR`,
   `POST_<HARNESS>_HOOK_THROTTLE_MS`, `POST_<HARNESS>_HOOK_DEADLINE_MS` (`CLAUDE`,
-  `CODEX`, `CURSOR`, `GROK`). A hook runs every `post` call, the notice release
+  `CODEX`, `CURSOR`, `GROK`, `PI`). A hook runs every `post` call, the notice release
   included, inside one 4.5 s deadline (the default of `..._DEADLINE_MS`), under
   the 5 s timeout Codex installs. The full adapter contract is `docs/ADAPTERS.md`
   in the post repo.
@@ -137,6 +142,15 @@ config or environment is wrong and every tick fails the same way). v1 adds
 `undeliverable`. A quarantined message does not make health false; health counts
 it under `quarantined`. v2 also reports `rooms.collisions`, `channels.diverged`,
 and `channels.rewritten`.
+
+**Freshness.** Post trusts `health.json` for cross-host participant sends only
+while `ticked_at` is at most three times `interval_s` old; past that a send is
+refused `bridge_status_unavailable` (retryable). A tick still running keeps
+`ticked_at` fresh once per interval and stops at its deadline (240 s by
+default), so a stale `ticked_at` means no tick has run or finished for that
+long: check the launchd job or `post-bridge.timer` and the log, not the mail.
+`bridge/chan-reconciled/<host>` caches which peer channel records are already
+reconciled; it is safe to delete (the next tick reconciles that host in full).
 
 **Attention.** `health.json` carries `attention`, a list of `{kind, id, summary,
 fix}`, empty when nothing is stuck: `refused_letter`, `unrelayable_letter`,

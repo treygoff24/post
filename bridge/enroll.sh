@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-API_REPO='/repos/estate/post-relay'
+API_REPO=${POST_BRIDGE_API_REPO:-}
+REGISTRY_USERS=${POST_BRIDGE_REGISTRY_USERS:-}
 RELAY_URL=${POST_BRIDGE_RELAY_URL:-}
 DRY_RUN=false
 INIT_REGISTRY=false
@@ -71,6 +72,8 @@ esac
 command -v fj >/dev/null 2>&1 || die 'fj is required'
 command -v jq >/dev/null 2>&1 || die 'jq is required'
 command -v git >/dev/null 2>&1 || die 'git is required'
+[[ $API_REPO =~ ^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die 'set POST_BRIDGE_API_REPO to /repos/<owner>/<repo>'
+printf '%s' "$REGISTRY_USERS" | jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[A-Za-z0-9_.-]+$")) and (unique | length) == length' >/dev/null || die 'set POST_BRIDGE_REGISTRY_USERS to a nonempty JSON array of operator usernames'
 
 api_get() {
   local path=$1 body
@@ -161,10 +164,9 @@ if ! verify_protection "$HOST_RULE" "$HOST_USERS"; then
   api_write POST "$API_REPO/branch_protections" "$(protection_payload "$HOST_RULE" "$HOST_USERS")"
 fi
 
-REGISTRY_USERS='["trey","mac"]'
 if ! verify_protection registry "$REGISTRY_USERS"; then
   if printf '%s' "$PROTECTIONS" | jq -e 'any(.[]; .rule_name == "registry")' >/dev/null; then
-    die 'registry protection exists but is not operator-only (trey, mac)'
+    die 'registry protection exists but does not match POST_BRIDGE_REGISTRY_USERS'
   fi
   if [ "$INIT_REGISTRY" = true ]; then
     api_write POST "$API_REPO/branch_protections" "$(protection_payload registry "$REGISTRY_USERS")"
@@ -178,7 +180,7 @@ fi
 # Forgejo cannot express a dynamic "branch owner" in a wildcard rule. The
 # catch-all is therefore only a deny-by-default backstop; exact per-host rules
 # above grant each owner its branch.
-if ! printf '%s' "$PROTECTIONS" | jq -e 'any(.[]; .rule_name == "machines/*" and .enable_push == true and .enable_push_whitelist == true and .push_whitelist_deploy_keys == false)' >/dev/null; then
+if ! verify_protection 'machines/*' '[]'; then
   die 'machines/* owner-only catch-all protection is missing or unsafe'
 fi
 
@@ -211,7 +213,7 @@ if [ "$DRY_RUN" = true ]; then
   printf '+ add %s to hosts.json (sorted, unique)\n' "$HOST"
   printf '+ git -C <temp>/relay commit -m registry: enroll %s\n' "$HOST"
   printf '+ git -C <temp>/relay push origin HEAD:refs/heads/registry\n'
-  printf "post chat machineroom-devbox --send --body 'Enrolled post-bridge host %s.'\n" "$HOST"
+  printf "Enrollment ready for host %s; notify peers through your own coordination channel.\n" "$HOST"
   exit 0
 fi
 
@@ -223,7 +225,7 @@ if [ "$REGISTRY_EXISTS" = false ]; then
   git -C "$TMP/relay" rm -rf --ignore-unmatch . >/dev/null
   printf '%s\n' '{"v":1,"hosts":[]}' >"$TMP/relay/hosts.json"
   git -C "$TMP/relay" add -- hosts.json
-  git -C "$TMP/relay" -c user.name=post-bridge-operator -c user.email=post-bridge-operator@estate.invalid commit -q -m 'registry: init'
+  git -C "$TMP/relay" -c user.name=post-bridge-operator -c user.email=post-bridge-operator@example.invalid commit -q -m 'registry: init'
   git -C "$TMP/relay" push -q origin HEAD:refs/heads/registry
   cleanup
   TMP=''
@@ -242,8 +244,8 @@ git -C "$TMP/relay" add -- hosts.json
 if git -C "$TMP/relay" diff --cached --quiet; then
   printf 'post-bridge enroll: %s is already enrolled\n' "$HOST"
 else
-  git -C "$TMP/relay" -c user.name=post-bridge-operator -c user.email=post-bridge-operator@estate.invalid commit -q -m "registry: enroll $HOST"
+  git -C "$TMP/relay" -c user.name=post-bridge-operator -c user.email=post-bridge-operator@example.invalid commit -q -m "registry: enroll $HOST"
   git -C "$TMP/relay" push -q origin HEAD:refs/heads/registry
 fi
 
-printf "post chat machineroom-devbox --send --body 'Enrolled post-bridge host %s.'\n" "$HOST"
+printf "Enrollment ready for host %s; notify peers through your own coordination channel.\n" "$HOST"

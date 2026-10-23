@@ -8929,6 +8929,7 @@ fn exact_fix_carries_a_body_full_of_angle_brackets_without_tripping_the_guard() 
             "send",
             "--to",
             &format!("participant:{sender}"),
+            "--allow-self",
             "--body",
             body,
         ],
@@ -12185,6 +12186,7 @@ fn workspace_send_to_own_address_reaches_a_sibling_and_direct_self_is_readable()
             "send",
             "--to",
             &format!("participant:{sender}"),
+            "--allow-self",
             "--body",
             "direct self",
             "--json",
@@ -12777,7 +12779,10 @@ fn jfn_bind(sandbox: &Sandbox, key: &str, cwd: &Path, workspace: &str) -> String
 }
 
 fn jfn_unread(sandbox: &Sandbox, participant: &str, cwd: &Path, channel: &str) -> Option<usize> {
-    let output = sandbox.run_as_participant(&["channels", "--json"], participant, cwd);
+    // --all: the fixtures are dated 2026-01-01, so the listing's 24-hour idle
+    // auto-archive hides them from the default view; this helper only wants
+    // the unread count, whatever the channel's visibility.
+    let output = sandbox.run_as_participant(&["channels", "--json", "--all"], participant, cwd);
     assert_success(&output);
     let listed: ChannelsOutput = from_stdout(&output);
     listed
@@ -13398,5 +13403,57 @@ fn join_from_now_corrupt_history_file_does_not_ring() {
     assert_eq!(
         unreadable(&sandbox).0,
         vec!["20990101-000000-000001-00beef".to_owned()]
+    );
+}
+
+#[test]
+fn profile_change_notice_goes_only_to_explicitly_joined_channels() {
+    let sandbox = Sandbox::new();
+    create_default_room_paths(&sandbox);
+    let alpha = sandbox.path.join("alpha");
+    fs::create_dir_all(&alpha).expect("alpha dir");
+    register_room(&sandbox, "alpha", &alpha);
+    join_channel(&sandbox, "expl", &alpha);
+    // A channel alpha belongs to only through legacy workspace membership.
+    let legacy = sandbox.mail_root.join("channels/legacy");
+    fs::create_dir_all(legacy.join("messages")).expect("legacy messages");
+    fs::write(
+        legacy.join("channel.json"),
+        r#"{"name":"legacy","created":"x","created_by":"alpha"}"#,
+    )
+    .expect("legacy info");
+    fs::write(
+        legacy.join("members.json"),
+        r#"{"alpha":"2026-01-01 00:00:00 +0000"}"#,
+    )
+    .expect("legacy members");
+    let profile_events = |channel: &str| -> usize {
+        fs::read_dir(
+            sandbox
+                .mail_root
+                .join("channels")
+                .join(channel)
+                .join("messages"),
+        )
+        .expect("messages")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            fs::read_to_string(entry.path())
+                .is_ok_and(|text| text.contains("\"event\": \"profile\""))
+        })
+        .count()
+    };
+    assert_eq!(profile_events("expl"), 0);
+    let set = sandbox.run_in(&["profile", "set", "--name", "Mara"], None, &alpha);
+    assert_success(&set);
+    assert_eq!(
+        profile_events("expl"),
+        1,
+        "explicit channel gets the notice"
+    );
+    assert_eq!(
+        profile_events("legacy"),
+        0,
+        "legacy-membership channel does not"
     );
 }

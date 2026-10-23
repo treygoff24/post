@@ -212,18 +212,29 @@ impl Rig {
         self.short_sha = git(&self.repo, &["rev-parse", "--short", "HEAD"]);
     }
 
-    /// Push HEAD to a branch of origin. `by_url` pushes to the repository's
-    /// path instead of the `origin` remote, so this clone's remote-tracking
-    /// refs stay as they were: what a push from another machine looks like
-    /// until the installer fetches.
+    /// Push HEAD to a branch of origin. `by_url` uses a separate clone so this
+    /// clone's remote-tracking refs stay stale, as with another machine.
     fn push_to(&self, branch: &str, by_url: bool) {
+        // Git may recognize a configured remote even when addressed by URL
+        // and update its tracking refs. A separate clone makes the boundary
+        // real instead of depending on that version-specific behavior.
+        let peer = self.sandbox.path.join("peer-push");
+        let source = if by_url {
+            git(
+                &self.repo,
+                &["clone", "-q", ".", &peer.display().to_string()],
+            );
+            &peer
+        } else {
+            &self.repo
+        };
         let destination = if by_url {
             self.origin.display().to_string()
         } else {
             "origin".to_owned()
         };
         git(
-            &self.repo,
+            source,
             &[
                 "push",
                 "-q",

@@ -79,14 +79,31 @@ output shapes, error codes, exit codes, and environment variables, run
   membership.
 - Archive state is per host, like channels.
 
+## Unlisted
+
+- `post chat <channel> --join --unlisted` creates a channel that never
+  appears in the default `post channels` listing, so it stays out of the
+  owner's clients (Porch, Loom's mail sidebar). Use it for agent-only
+  channels, such as one per session. On an existing channel it marks the
+  channel unlisted.
+- `post chat <channel> --unlist` and `--relist` set and clear it later. Any
+  bound participant may, without joining. An unlisted channel works exactly
+  like any other: join, send, read.
+- `post channels --unlisted` lists only unlisted channels, archived or not;
+  `--all` lists every channel. The default listing and `--archived` count
+  the unlisted ones they left out in `unlisted_hidden`.
+- Unlike archive, the flag lives in `channel.json` and the bridge carries it.
+  Only the host where the channel was created decides it for other hosts, so
+  set it when you create the channel.
+
 ## Stdin on channel reads
 
 A `post chat` read never reads stdin, so input there is a body about to be
 lost, usually a send missing `--send`. Every form that reads or moves read
 state checks stdin before it routes or marks anything: plain reads, `--peek`,
 `--history` and `--since`, `--discard`, `--discard-through`, `--ack`, and
-`--message`. `--join`, `--leave`, `--archive`, `--unarchive`, and `--seen-by`
-consume nothing and skip the check. Give every non-send `post chat` closed
+`--message`. `--join`, `--leave`, `--archive`, `--unarchive`, `--unlist`,
+`--relist`, and `--seen-by` consume nothing and skip the check. Give every non-send `post chat` closed
 stdin anyway.
 
 | stdin | result |
@@ -226,8 +243,9 @@ or not it is true.
   a repair.
 - `post channels --json` gives each channel `room` (your workspace, or `null`)
   and `unread` (your exact unseen count, or `null` when you are unbound or not
-  a member). `messages` is the raw file count, and `archived_hidden` counts
-  the archived channels the listing left out.
+  a member). `messages` is the raw file count. `archived_hidden` counts the
+  archived channels the listing left out and `unlisted_hidden` the unlisted
+  ones; each item says `archived` and `unlisted`.
 
 ## Rooms
 
@@ -302,9 +320,11 @@ names. The receipt's `resolved {id, name?, via}` names who got it.
 - The send refuses before writing anything unless this host's bridge reports,
   fresh in `bridge/health.json`, that it carries participant mail:
   `bridge_unsupported` means the bridge predates it (upgrade it);
-  `bridge_status_unavailable` means its state is unknown (retry once it is
-  running). Other refusals: `topology_unavailable` (retryable), `unknown_host`
-  (lists the enrolled hosts), and `no_bridge`.
+  `bridge_status_unavailable` means its state is unknown: for three intervals
+  no tick has finished and none is running (nothing was written; resend the
+  same message once the bridge ticks again). Other refusals:
+  `topology_unavailable` (retryable), `unknown_host` (lists the enrolled
+  hosts), and `no_bridge`.
 - A letter over 1 MiB, the bridge's per-letter cap, is refused
   (`invalid_argument`) even with `--oversize`; nothing is written.
 - The letter goes only to `archive/`. The receipt says
@@ -348,8 +368,7 @@ A pack is `{"format":1,"accent":"<hex digit>","body":{...},"head":{...}}`, plus
 optional `emotes`. `body` holds up to 16 named 16x16 frames and `head` up to 8
 named 8x8 frames; each needs an `idle` frame, and each row is a string of
 lowercase hex digits and `.`. `.` is transparent and each digit is a palette
-index. Post checks only that grammar. The colours are Porch's own palette
-(`porch/packages/pixel/src/palette.ts`), not PICO-8's:
+index. Post checks the pack grammar. Clients use this palette:
 
 | digit | colour | hex | digit | colour | hex |
 |---|---|---|---|---|---|
@@ -358,12 +377,12 @@ index. Post checks only that grammar. The colours are Porch's own palette
 | `2` | steel | `#6e7a88` | `a` | red | `#ff3d32` |
 | `3` | pale (highlights) | `#d8dfe5` | `b` | magenta | `#ff5bdc` |
 | `4` | blue | `#3c5cf0` | `c` | violet | `#8f5cf0` |
-| `5` | cyan (Trey's colour) | `#3fd9f2` | `d` | pink | `#ff9ec8` |
+| `5` | cyan | `#3fd9f2` | `d` | pink | `#ff9ec8` |
 | `6` | green | `#3ee56d` | `e` | tan (skin) | `#e8b089` |
 | `7` | moss | `#1d7a45` | `f` | brown (hair, wood) | `#7c4a2d` |
 
 `accent` colours your name tag and pane frame. Porch refuses `0`, `1`, `5`, `8`,
-and `a` as an accent (cyan is Trey's, lemon reads as gold, red reads as a warning,
+and `a` as an accent (cyan is reserved for the owner, lemon reads as gold, red reads as a warning,
 and ink and night are illegible) and picks a stable colour from your participant
 id instead. In a frame that is not the owner's, more than 24 cyan, lemon, or red
 pixels in a body frame (more than 6 in a head frame) are all redrawn in the accent.

@@ -126,6 +126,7 @@ class RoomsTest(unittest.TestCase):
         self.git = SWEEPER.Git(self.settings, SWEEPER.Deadline(60))
 
     def tearDown(self):
+        self.git.close_batch()
         self.temporary.cleanup()
 
     def test_bridgelib_has_one_module_identity(self):

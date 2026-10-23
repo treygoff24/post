@@ -9,7 +9,7 @@
 // - runs `post watch --snapshot` from the hook cwd, so post resolves the
 //   deepest registered room itself (read-only, envelope-only);
 // - subagent PostToolUse events are suppressed;
-// - PostToolUse scans are throttled to one per 30s via state-file mtime;
+// - prompts and PostToolUse share one scan per 30s via state-file mtime;
 // - per-session dedupe keyed by session_id; SessionStart resets it;
 // - a failed scan emits ONE generic diagnostic per failure streak, never a
 //   fake empty inbox, never a per-event flood;
@@ -29,7 +29,7 @@
 // Test overrides (all optional):
 //   POST_CODEX_HOOK_BIN         path to the post binary
 //   POST_CODEX_HOOK_STATE_DIR   state directory (default <tmpdir>/post-codex-mail)
-//   POST_CODEX_HOOK_THROTTLE_MS PostToolUse throttle (default 30000)
+//   POST_CODEX_HOOK_THROTTLE_MS prompt/tool scan interval (default 30000)
 
 import path from "node:path";
 import { runMailHook } from "./mail-hook-core.mjs";
@@ -60,6 +60,7 @@ runMailHook({
     manualCheck: "Check manually from the project directory with: post inbox",
   },
   lazyMint: true, // Codex exports CODEX_THREAD_ID to every shell call
+  throttlePrompts: true,
   parse(input) {
     const event = input.hook_event_name;
     if (!Object.hasOwn(PHASES, event)) return null;

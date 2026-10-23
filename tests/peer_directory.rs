@@ -466,6 +466,30 @@ fn who_live_lists_live_participants_only_with_the_ten_minute_window() {
 }
 
 #[test]
+fn who_live_does_not_read_excluded_cursor_state() {
+    let fx = fixture();
+    let s = &fx.sandbox;
+    let quiet = peer(s, "dir-excluded-cursor", &fx.alpha);
+    let cursor = record_path(s, &quiet).with_file_name("cursors.json");
+    fs::write(cursor, "not json").unwrap();
+
+    let live = who_live(s, &fx.observer, &fx.alpha, &["--json"]);
+    assert_success(&live);
+    assert!(!live_ids(&from_stdout(&live)).contains(&quiet));
+    assert!(
+        !stderr(&live).contains("cursor state"),
+        "excluded cursor must not be projected: {}",
+        stderr(&live)
+    );
+
+    // Prove that the broken cursor is visible to a projection that includes it.
+    let all = run(s, &fx.observer, &fx.alpha, &["who", "--json"]);
+    assert!(all.status.success(), "{}", stderr(&all));
+    assert!(live_ids(&from_stdout(&all)).contains(&quiet));
+    assert!(stderr(&all).contains("cursor state"));
+}
+
+#[test]
 fn who_live_text_is_one_line_per_participant() {
     let fx = fixture();
     let (s, alpha) = (&fx.sandbox, &fx.alpha);
@@ -589,6 +613,96 @@ fn send_reaches_a_live_participant_by_name_or_repo() {
     );
     assert!(room.get("resolved").is_none(), "{room}");
     assert_eq!(room["envelope"]["address_kind"], "workspace");
+}
+
+#[test]
+fn a_resolved_self_recipient_is_refused_unless_explicitly_allowed() {
+    let fx = fixture();
+    let (s, alpha) = (&fx.sandbox, &fx.alpha);
+    // Fern is live and is the only participant in /work/porch. A colleague
+    // selecting that repo would reach Fern; Fern selecting it must not
+    // silently report that a warning to a colleague was sent.
+    let peers = who_live(s, &fx.fern, alpha, &["--json", "--repo", "porch"]);
+    assert_success(&peers);
+    assert_eq!(live_ids(&from_stdout(&peers)), vec![fx.fern.clone()]);
+    // An own-host-qualified address normalizes to the same local identity;
+    // its refusal must still name the address the caller actually supplied.
+    fs::create_dir_all(s.mail_root.join("bridge")).unwrap();
+    fs::write(s.mail_root.join("bridge/config.json"), r#"{"host":"here"}"#).unwrap();
+    let before = common::tree_snapshot(&s.mail_root);
+    for (to, via) in [
+        ("repo:porch".to_owned(), "repo"),
+        ("repo:/work/porch".to_owned(), "repo"),
+        ("fErN".to_owned(), "name"),
+        (fx.fern.clone(), "id"),
+        (format!("participant:{}", fx.fern), "id"),
+        (format!("participant:{}@here", fx.fern), "id"),
+    ] {
+        let output = run(
+            s,
+            &fx.fern,
+            alpha,
+            &["send", "--to", &to, "--json", "--body", "warn a colleague"],
+        );
+        let error = error_of(&output);
+        assert_eq!(output.status.code(), Some(2), "{to}");
+        assert!(stdout(&output).is_empty(), "no sent receipt: {to}");
+        assert_eq!(error.error.code, "invalid_argument", "{to}");
+        let message = &error.error.message;
+        assert!(message.contains(&to), "{message}");
+        assert!(message.contains(&fx.fern), "{message}");
+        assert!(message.contains(&format!("{via} match")), "{message}");
+        assert!(message.contains("bound sending participant"), "{message}");
+        assert!(message.contains("reply address 'alpha'"), "{message}");
+        assert!(stderr(&output).contains("--allow-self"), "{to}");
+    }
+    // Sending refreshes the actor's activity, but a refusal must publish no
+    // mail, archive, receipt, or cursor. Ignore only the activity record/locks.
+    let without_activity = |mut tree: std::collections::BTreeMap<PathBuf, Vec<u8>>| {
+        tree.retain(|path, _| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            !name.ends_with(".lock") && name != "participant.json"
+        });
+        tree
+    };
+    assert_eq!(
+        without_activity(common::tree_snapshot(&s.mail_root)),
+        without_activity(before)
+    );
+
+    let receipt = ok(
+        s,
+        &fx.fern,
+        alpha,
+        &[
+            "send",
+            "--to",
+            "repo:porch",
+            "--allow-self",
+            "--json",
+            "--body",
+            "intentional self-mail",
+        ],
+    );
+    assert_eq!(receipt["resolved"]["id"], fx.fern.as_str());
+    assert_eq!(receipt["resolved"]["via"], "repo");
+    assert_eq!(receipt["envelope"]["from_participant"], fx.fern.as_str());
+    assert_eq!(receipt["envelope"]["to"], fx.fern.as_str());
+    assert!(
+        receipt.get("retargeted").is_none(),
+        "no retarget: {receipt}"
+    );
+    assert_eq!(inbox_count(s, &fx.fern, alpha), 1, "self-mail is readable");
+
+    // A shared reply address does not make a different participant self.
+    let sibling = ok(
+        s,
+        &fx.fern,
+        alpha,
+        &["send", "--to", "Treadle", "--json", "--body", "a colleague"],
+    );
+    assert_eq!(sibling["envelope"]["to"], fx.treadle.as_str());
+    assert_eq!(sibling["envelope"]["from"], "alpha");
 }
 
 #[test]

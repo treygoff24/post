@@ -25,14 +25,13 @@ where it differs.
 - **`lineage:` mail and bare `participant:` mail stay home.** v2 skips them
   on the way out and quarantines any that arrive
   (`unsupported_address_kind`).
-- **Channels cross by default (v2, r6.2; Trey ruling 2026-09-24).** With no
+- **Channels cross by default (v2).** With no
   `channels` key in `bridge/config.json`, a host publishes and imports
   every channel (`{"mode":"all"}`). `{"mode":"allow","allow":[...]}`
   restricts to a list, `deny` excludes names under `mode:"all"`, and an
   explicit `"channels": null` turns channel sync off entirely. A denied
   name is bridged in neither direction, and deny is only real at the
-  publisher (SPEC-v2 section Channel config). The Mac's separate cell bridge
-  still syncs a few channels over ssh. Only v2 relays channels; v1 has
+  publisher (SPEC-v2 section Channel config). Only v2 relays channels; v1 has
   no channel support. Check `bridge/config.json` before assuming a channel is
   shared or private. Channel events of a kind this post does not know cross
   unchanged and read as `[event: <kind>]`.
