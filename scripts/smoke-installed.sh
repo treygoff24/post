@@ -1882,9 +1882,10 @@ legacy_smoke() (
         require_legacy_setup || return 1
         root="$BASE/legacy-mail"
         channel=legacy-channel
-        one=20260901-010101-000001-aaaaaa
-        two=20260901-010101-000002-bbbbbb
-        mail=20260901-010101-cccccc
+        # Keep this cursor fixture independent of the idle-channel archiver.
+        one=20990901-010101-000001-aaaaaa
+        two=20990901-010101-000002-bbbbbb
+        mail=20990901-010101-cccccc
         mkdir -p "$root/legacy-beta/inbox" "$root/channels/$channel/messages" || {
             LEGACY_REASON="could not create cursorless legacy store fixture"
             return 1
@@ -1913,11 +1914,11 @@ legacy_smoke() (
             LEGACY_REASON="could not seed the cursorless legacy member's creation time"
             return 1
         }
-        printf '%s\n' '{"name":"legacy-channel","created":"2026-09-01 01:01:01 +0000","created_by":"legacy-alpha"}' >"$root/channels/$channel/channel.json"
-        printf '%s\n' '{"legacy-alpha":"2026-09-01 01:01:01 +0000","legacy-beta":"2026-09-01 01:01:01 +0000"}' >"$root/channels/$channel/members.json"
-        printf '%s\n---\n%s\n' '{"id":"20260901-010101-000001-aaaaaa","from":"legacy-alpha","channel":"legacy-channel","subject":"","sent":"2026-09-01 01:01:01 +0000"}' 'legacy channel one' >"$root/channels/$channel/messages/$one.msg"
-        printf '%s\n---\n%s\n' '{"id":"20260901-010101-000002-bbbbbb","from":"legacy-alpha","channel":"legacy-channel","subject":"","sent":"2026-09-01 01:01:01 +0000"}' 'legacy channel two' >"$root/channels/$channel/messages/$two.msg"
-        printf '%s\n---\n%s\n' '{"id":"20260901-010101-cccccc","from":"legacy-alpha","to":"legacy-beta","kind":"note","subject":"legacy mail","sent":"2026-09-01 01:01:01 +0000"}' 'legacy mail' >"$root/legacy-beta/inbox/$mail.mail"
+        printf '%s\n' '{"name":"legacy-channel","created":"2099-09-01 01:01:01 +0000","created_by":"legacy-alpha"}' >"$root/channels/$channel/channel.json"
+        printf '%s\n' '{"legacy-alpha":"2099-09-01 01:01:01 +0000","legacy-beta":"2099-09-01 01:01:01 +0000"}' >"$root/channels/$channel/members.json"
+        printf '%s\n---\n%s\n' '{"id":"20990901-010101-000001-aaaaaa","from":"legacy-alpha","channel":"legacy-channel","subject":"","sent":"2099-09-01 01:01:01 +0000"}' 'legacy channel one' >"$root/channels/$channel/messages/$one.msg"
+        printf '%s\n---\n%s\n' '{"id":"20990901-010101-000002-bbbbbb","from":"legacy-alpha","channel":"legacy-channel","subject":"","sent":"2099-09-01 01:01:01 +0000"}' 'legacy channel two' >"$root/channels/$channel/messages/$two.msg"
+        printf '%s\n---\n%s\n' '{"id":"20990901-010101-cccccc","from":"legacy-alpha","to":"legacy-beta","kind":"note","subject":"legacy mail","sent":"2099-09-01 01:01:01 +0000"}' 'legacy mail' >"$root/legacy-beta/inbox/$mail.mail"
         before="$BASE/legacy-before.manifest"
         after="$BASE/legacy-after.manifest"
         store_manifest "$root" >"$before" || {

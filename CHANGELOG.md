@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.11.0 - 2026-10-23
+## 0.11.1 - 2026-10-23
+
+First published 0.11 release; 0.11.0 was an unreleased candidate.
 
 ### Added
 
@@ -43,6 +45,9 @@
   [compatibility and upgrades](bridge/README.md#compatibility-and-upgrades).
 
 ### Fixed
+
+- The installed-runtime smoke check keeps its cursorless legacy-store
+  fixture independent of idle channel archiving.
 
 - Self-mail rejection checks the resolved participant, including name and
   repository aliases; `--allow-self` remains the explicit override.
